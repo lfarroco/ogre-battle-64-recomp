@@ -1,8 +1,15 @@
 # Ogre Battle 64: Person of Lordly Caliber — PC Port Project
 
-Decompilation / static recompilation of the N64 game **Ogre Battle 64: Person of
-Lordly Caliber** (USA, Rev A) to a native PC executable, following the
-**N64Recomp** workflow used by Zelda 64: Recompiled.
+Goal: a native Windows/Linux/macOS **port** of the N64 game **Ogre Battle 64:
+Person of Lordly Caliber** (USA, Rev A) that runs the full game with modern
+enhancements and modding support.
+
+**Scope note:** this is a *PC port* project — NOT a byte-exact ("matching")
+decompilation. We do not reconstruct the original C source or aim for a
+byte-identical ROM. We use **static recompilation** (`N64Recomp`): the ROM's MIPS
+code is automatically translated to C, then compiled natively against the
+`N64ModernRuntime` runtime library. This is the same approach as Zelda 64:
+Recompiled and Majora's Mask / Ocarina of Time PC ports.
 
 **Legal note:** this is a "bring your own ROM" project. No copyrighted ROM data is
 committed to this repository. You must provide a dump of your own cartridge.
@@ -13,11 +20,6 @@ committed to this repository. You must provide a dump of your own cartridge.
 
 A native Windows/Linux/macOS port that runs the full game (menus, world map,
 battles, cutscenes, audio, Controller Pak saves) with a modding framework.
-
-The approach is **static recompilation** (not byte-exact decompilation): the ROM's
-MIPS code is translated to C by `N64Recomp`, then compiled natively against the
-`N64ModernRuntime` runtime library. This does **not** reconstruct readable C source;
-mods are written against the recompiled API.
 
 ## Current status (as of this session)
 
@@ -32,10 +34,12 @@ mods are written against the recompiled API.
 - ✅ ELF built (`make`): `build/ogrebattle64.elf` with relocations
   (`--emit-relocs`) and correct vram/ROM section mapping.
 - ✅ **Full main-segment recompilation succeeds**: 3659 functions recompiled to C
-  (`RecompiledFuncs/`, regenerated with `make recomp`).
+  (`RecompiledFuncs/`, regenerated with `make recomp`), and the generated C
+  **compiles** against the runtime headers.
 - ⬜ Runtime app (window, rendering, input, audio) — **next phase**.
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
-- ⬜ Asset extraction (sprites, text, audio banks) — after first boot.
+- ⬜ Asset extraction (sprites, text, audio) — after first boot.
+
 
 ## Toolchain
 

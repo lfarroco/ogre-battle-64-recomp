@@ -13,3 +13,7 @@ use_absolute_symbols = true
 uses_mips3_float_mode = true
 bss_section_suffix = ".bss"
 functions_per_output_file = 100
+
+# The game's main() is renamed to avoid conflicting with the C entry point.
+[patches]
+renamed = ["main"]
