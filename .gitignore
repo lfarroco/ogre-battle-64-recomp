@@ -3,6 +3,7 @@ assets/
 
 # Generated artifacts
 build/
+build-app/
 RecompiledFuncs/
 *.bin
 *.elf
@@ -14,6 +15,8 @@ tools/venv/
 tools/N64Recomp/
 tools/N64ModernRuntime/
 tools/RecompFrontend/
+# RT64 is a git submodule (git submodule update --init tools/RT64)
+
 
 # OS junk
 .DS_Store

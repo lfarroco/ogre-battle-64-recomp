@@ -49,6 +49,6 @@ build/assets/%.o: assets/%.bin
 	$(OBJCOPY) -I binary -O elf32-tradbigmips -B mips:3000 $< $@
 
 recomp: $(ELF)
-	$(N64RECOMP) $(ROM) $(ELF) config.toml
+	$(N64RECOMP) config.toml
 
 .PHONY: all clean recomp

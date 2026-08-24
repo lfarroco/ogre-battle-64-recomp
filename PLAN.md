@@ -36,7 +36,21 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
 - ✅ **Full main-segment recompilation succeeds**: 3659 functions recompiled to C
   (`RecompiledFuncs/`, regenerated with `make recomp`), and the generated C
   **compiles** against the runtime headers.
-- ⬜ Runtime app (window, rendering, input, audio) — **next phase**.
+- 🚧 **Phase 3 (first boot app) in progress**:
+  - ✅ `app/` CMake project created (ultramodern + librecomp + RT64 + SDL2 +
+    `RecompiledFuncs`); **builds** on macOS (Intel + Metal toolchain).
+  - ✅ RT64 added as submodule (`tools/RT64`); all RT64 contrib submodules
+    initialized.
+  - ✅ Game entry wired: `rom_hash=0xbe6adaa5c3f8f7a9`, entrypoint
+    `0x80070C00`/`recomp_entrypoint`, base overlays + streamed-code stubs.
+  - ✅ Platform callbacks: SDL2 window/input/audio, error box, threads.
+  - ⬜ **Null renderer + stub RSP**: first boot validation (log VI swaps, boot
+    progress). RT64 integration follows once the RSP microcode is recompiled.
+  - ⬜ RSP microcode recompilation (F3DEX/L3DEX/S2DEX/audio) — see
+    `docs/guides/rsp-microcode.md`.
+  - ⬜ libultra/verbatim recomp bridging: OB64's libultra was recompiled verbatim
+    (generic symbol names), so runtime-native services (VI/AI/PI/threads) need
+    wiring. See `docs/guides/app-architecture.md` and `docs/DECISIONS.md`.
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 
