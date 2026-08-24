@@ -5,6 +5,39 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-24 (session 2) — Libultra bridging: name-based replacement + platform decision
+
+### Decision: adopt handoff Option 1 — name OB64's libultra functions in the ELF
+
+The next milestone (see `LIBULTRA-BRIDGING.md`) is to make the runtime's native
+`osXxx_recomp` services replace OB64's verbatim libultra. Mechanism is purely
+name-based in N64Recomp (`reimplemented_funcs`), so the work is building the
+OB64 libultra **address→name table** and adding it to `symbol_addrs.txt`,
+then re-splat → rebuild ELF → re-run `make recomp`.
+
+Rejected for now:
+- **MMIO shim first (handoff option 3)**: only to be used surgically for
+  registers the game still reads after reimplementation.
+- **Address-based N64Recomp config**: viable fallback, but the canonical
+  `symbol_addrs.txt` route also names the disassembly for future debugging.
+- **Skipping the game's libultra entirely (option 4)**: too risky.
+
+### Decision: this milestone is macOS- and Linux-equivalent; switch for the renderer phase
+
+The libultra-bridging work is CPU-side and platform-independent — no reason to
+switch machines for it. The RT64/renderer phase should move to Ubuntu (Vulkan
+primary backend). Documented in `guides/linux-migration.md` with the exact
+macOS-specific code to remove (`app/CMakeLists.txt` APPLE blocks, the
+`__APPLE__` branch in `sdl_platform.cpp::create_window`, the RT64 DXC `libz.dylib`
+symlink, Metal toolchain download).
+
+### Decision: correct the function count
+
+PLAN.md's "3659 functions" is stale; the recompiled output has **807 functions**
+(802 `func_800xxxxx` + `main_recomp`/`recomp_entrypoint`/others).
+
+---
+
 ## 2026-08-24 — Phase 3: first-boot app
 
 ### Decision: static recompilation pipeline (unchanged, restated)

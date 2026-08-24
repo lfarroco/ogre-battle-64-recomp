@@ -33,7 +33,7 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
   mapped at `0x80070C00+`; ~185 KB of code split into `asm/`.
 - ✅ ELF built (`make`): `build/ogrebattle64.elf` with relocations
   (`--emit-relocs`) and correct vram/ROM section mapping.
-- ✅ **Full main-segment recompilation succeeds**: 3659 functions recompiled to C
+- ✅ **Full main-segment recompilation succeeds**: 807 functions recompiled to C
   (`RecompiledFuncs/`, regenerated with `make recomp`), and the generated C
   **compiles** against the runtime headers.
 - 🚧 **Phase 3 (first boot app) in progress**:
@@ -50,7 +50,7 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     `docs/guides/rsp-microcode.md`.
   - ⬜ libultra/verbatim recomp bridging: OB64's libultra was recompiled verbatim
     (generic symbol names), so runtime-native services (VI/AI/PI/threads) need
-    wiring. See `docs/guides/app-architecture.md` and `docs/DECISIONS.md`.
+    wiring. Plan + seed symbol table: `docs/LIBULTRA-BRIDGING.md`.
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 
@@ -71,6 +71,9 @@ cross-function branch handling, overlay-target function lookup) are in
 `n64recomp-ob64.patch`; apply with `git apply` after cloning upstream.
 
 ## Reproduce (macOS)
+
+> Linux (Ubuntu) setup: see `docs/guides/linux-migration.md`. The commands below
+> are the same except `brew install` → `apt install` equivalents (listed there).
 
 ```sh
 # 1. Tools
