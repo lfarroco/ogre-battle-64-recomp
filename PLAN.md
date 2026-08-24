@@ -104,3 +104,27 @@ make recomp                             # generate RecompiledFuncs/*.c
 6. **Phase 5 — assets** (sprites, text, audio; custom extractor)
 7. **Phase 6 — saves, audio, QoL** (Controller Pak, widescreen, controls)
 8. **Phase 7 — modding framework & packaging**
+
+## Phase 3 notes (first boot app)
+
+The app is a CMake project that:
+
+- `add_subdirectory`s `tools/N64ModernRuntime` (runtime libs) and
+  `tools/N64Recomp` (headers).
+- Compiles `RecompiledFuncs/*.c` (with `-I tools/N64Recomp/include`) into a lib.
+- Implements the host callbacks in `recomp::Configuration` (see
+  `librecomp/include/librecomp/game.hpp`):
+  - `renderer_callbacks` (RT64 recommended; Vulkan/D3D12/Metal via RT64)
+  - `rsp_callbacks` (use N64Recomp's `RSPRecomp` for the game's audio/gfx ucode)
+  - `audio_callbacks`, `input_callbacks`, `gfx_callbacks`, `events_callbacks`,
+    `error_handling_callbacks`, `threads_callbacks`
+- Boot sequence: `recomp::select_rom(...)` → `recomp::start(cfg)` →
+  `recomp::start_game(game_id, ...)`, or headless test:
+  load ROM, create `recomp_context`, call `recomp_entrypoint(rdram, &ctx)`.
+- The runtime's `recomp.h` context now carries `cop0_regs[32]`; the runtime
+  provides `cop0_read/write`, `tlb_instruction`, `eret`, `cache_instruction`
+  (no-ops), `osGetCount`/`osGetTime` etc.
+
+Reference implementations to study: `Zelda64Recomp/Zelda64Recomp` (`src/`,
+`us.rev1.toml`) and `N64Recomp/RecompFrontend`.
+
