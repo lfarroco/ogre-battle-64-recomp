@@ -1,0 +1,19 @@
+# ROM and derived assets (never commit copyrighted material)
+assets/
+
+# Generated artifacts
+build/
+RecompiledFuncs/
+*.bin
+*.elf
+*.map
+*.o
+
+# Third-party tooling (see README.md for setup)
+tools/venv/
+tools/N64Recomp/
+tools/N64ModernRuntime/
+tools/RecompFrontend/
+
+# OS junk
+.DS_Store

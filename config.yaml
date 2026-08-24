@@ -1,0 +1,70 @@
+name: Ogre Battle 64 - Person of Lordly Caliber (USA) (Rev A)
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebattle64
+  target_path: assets/ogre64.z64
+  elf_path: build/ogrebattle64.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  # asm_path: asm
+  # src_path: src
+  # build_path: build
+  create_asm_dependencies: True
+
+  ld_script_path: ogrebattle64.ld
+  ld_dependencies: True
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_addrs_path:
+    - symbol_addrs.txt
+  reloc_addrs_path:
+    - reloc_addrs.txt
+
+  extensions_path: tools/splat_ext
+
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: True
+  # hardware_regs: True
+
+segments:
+  - name: header
+    type: header
+    start: 0x0
+
+  - name: ipl3
+    type: bin
+    start: 0x40
+
+  # Boot stub + main code segment. Mapped vram per cart header entry point (0x80070C00).
+  - name: entry
+    type: code
+    start: 0x1000
+    vram: 0x80070C00
+    subsegments:
+      - [0x1000, asm]
+
+  - name: main
+    type: code
+    start: 0x1060
+    vram: 0x80070C60
+    follows_vram: entry
+    bss_size: 0x3AE70
+    subsegments:
+      - [0x1060, asm]
+      - [0x2E570, data]
+      - { type: bss, vram: 0x800AEDB0 }
+
+  # Rest of the ROM is streamed on demand; no fixed vram mapping.
+  - type: bin
+    start: 0x3F1B0
+
+  - [0x2800000]

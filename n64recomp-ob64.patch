@@ -1,0 +1,215 @@
+diff --git a/include/recomp.h b/include/recomp.h
+index 73f3e73..13ea02b 100644
+--- a/include/recomp.h
++++ b/include/recomp.h
+@@ -424,6 +424,8 @@ typedef struct {
+     uint32_t* f_odd;
+     uint32_t status_reg;
+     uint8_t mips3_float_mode;
++    // Cop0 register file (except Status, which is stored in status_reg for float-mode handling).
++    uint32_t cop0_regs[32];
+ } recomp_context;
+ 
+ // Checks if the target is an even float register or that mips3 float mode is enabled
+@@ -436,6 +438,11 @@ extern "C" {
+ 
+ void cop0_status_write(recomp_context* ctx, gpr value);
+ gpr cop0_status_read(recomp_context* ctx);
++gpr cop0_read(recomp_context* ctx, int reg);
++void cop0_write(recomp_context* ctx, int reg, gpr value);
++void tlb_instruction(recomp_context* ctx, int opcode);
++void eret(recomp_context* ctx);
++void cache_instruction(recomp_context* ctx, int op, uint32_t addr);
+ void switch_error(const char* func, uint32_t vram, uint32_t jtbl);
+ void do_break(uint32_t vram);
+ 
+diff --git a/include/recompiler/generator.h b/include/recompiler/generator.h
+index 145bcd0..69a2ff2 100644
+--- a/include/recompiler/generator.h
++++ b/include/recompiler/generator.h
+@@ -3,6 +3,7 @@
+ 
+ #include "recompiler/context.h"
+ #include "operations.h"
++#include <cstdlib>
+ 
+ namespace N64Recomp {
+     struct InstructionContext {
+@@ -53,6 +54,13 @@ namespace N64Recomp {
+         virtual void emit_check_nan(int fpr, bool is_double) const = 0;
+         virtual void emit_cop0_status_read(int reg) const = 0;
+         virtual void emit_cop0_status_write(int reg) const = 0;
++        // Generic cop0 register access. Not supported by the LiveGenerator; abort there.
++        virtual void emit_cop0_read(int reg, int cop0_reg) const { std::abort(); }
++        virtual void emit_cop0_write(int reg, int cop0_reg) const { std::abort(); }
++        // Privileged instructions (TLB operations and exception return).
++        virtual void emit_tlb_instruction(int opcode) const { std::abort(); }
++        virtual void emit_eret() const { std::abort(); }
++        virtual void emit_cache_instruction(int op, int base_reg, int offset) const { std::abort(); }
+         virtual void emit_cop1_cs_read(int reg) const = 0;
+         virtual void emit_cop1_cs_write(int reg) const = 0;
+         virtual void emit_muldiv(InstrId instr_id, int reg1, int reg2) const = 0;
+@@ -90,6 +98,11 @@ namespace N64Recomp {
+         void emit_check_nan(int fpr, bool is_double) const final;
+         void emit_cop0_status_read(int reg) const final;
+         void emit_cop0_status_write(int reg) const final;
++        void emit_cop0_read(int reg, int cop0_reg) const final;
++        void emit_cop0_write(int reg, int cop0_reg) const final;
++        void emit_tlb_instruction(int opcode) const final;
++        void emit_eret() const final;
++        void emit_cache_instruction(int op, int base_reg, int offset) const final;
+         void emit_cop1_cs_read(int reg) const final;
+         void emit_cop1_cs_write(int reg) const final;
+         void emit_muldiv(InstrId instr_id, int reg1, int reg2) const final;
+diff --git a/src/cgenerator.cpp b/src/cgenerator.cpp
+index 94f85c5..7f4e1b1 100644
+--- a/src/cgenerator.cpp
++++ b/src/cgenerator.cpp
+@@ -501,6 +501,30 @@ void N64Recomp::CGenerator::emit_cop0_status_write(int reg) const {
+     fmt::print(output_file, "cop0_status_write(ctx, {});", gpr_to_string(reg));
+ }
+ 
++void N64Recomp::CGenerator::emit_cop0_read(int reg, int cop0_reg) const {
++    fmt::print(output_file, "{} = cop0_read(ctx, {});\n", gpr_to_string(reg), cop0_reg);
++}
++
++void N64Recomp::CGenerator::emit_cop0_write(int reg, int cop0_reg) const {
++    fmt::print(output_file, "cop0_write(ctx, {}, {});\n", cop0_reg, gpr_to_string(reg));
++}
++
++void N64Recomp::CGenerator::emit_tlb_instruction(int opcode) const {
++    fmt::print(output_file, "tlb_instruction(ctx, {});\n", opcode);
++}
++
++void N64Recomp::CGenerator::emit_eret() const {
++    fmt::print(output_file, "eret(ctx);\n");
++}
++
++void N64Recomp::CGenerator::emit_cache_instruction(int op, int base_reg, int offset) const {
++    if (base_reg == 0) {
++        fmt::print(output_file, "cache_instruction(ctx, {}, 0x{:X});\n", op, offset);
++    } else {
++        fmt::print(output_file, "cache_instruction(ctx, {}, ctx->r{} + 0x{:X});\n", op, base_reg, offset);
++    }
++}
++
+ void N64Recomp::CGenerator::emit_cop1_cs_read(int reg) const {
+     fmt::print(output_file, "{} = get_cop1_cs();\n", gpr_to_string(reg));
+ }
+diff --git a/src/recompilation.cpp b/src/recompilation.cpp
+index c228433..ddaf438 100644
+--- a/src/recompilation.cpp
++++ b/src/recompilation.cpp
+@@ -34,6 +34,7 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+     uint32_t section_vram_end = cur_section.ram_addr + cur_section.size;
+     bool in_current_section = target_func_vram >= section_vram_start && target_func_vram < section_vram_end;
+     bool exact_match_found = false;
++    bool found_lookup_candidate = false;
+ 
+     // Use a thread local to prevent reallocation across runs and to allow multi-threading in the future.
+     thread_local std::vector<size_t> matched_funcs{};
+@@ -47,6 +48,10 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+             // Zero-sized symbol handling. unless there's only one matching target.
+             if (target_func.words.empty()) {
+                 if (!N64Recomp::is_manual_patch_symbol(target_func.vram)) {
++                    // Absolute placeholder for a function that lives outside this ELF
++                    // (e.g. streamed/overlay code). Remember it so the call can be
++                    // resolved with a runtime function lookup instead of erroring out.
++                    found_lookup_candidate = true;
+                     continue;
+                 }
+             }
+@@ -84,6 +89,11 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+         // If there were no matches then JAL resolution has failed.
+         // A static can't be created as the target section is unknown.
+         if (matched_funcs.size() == 0) {
++            // If the only matches were absolute placeholders for functions outside
++            // this ELF, resolve the call with a runtime function lookup instead.
++            if (found_lookup_candidate) {
++                return JalResolutionResult::Ambiguous;
++            }
+             return JalResolutionResult::NoMatch;
+         }
+         // If there was an exact match, use it.
+@@ -373,6 +383,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 // generator.emit_branch_close();
+                 return true;
+             }
++            // Same-section non-function target: create a static function and tail-call it.
++            else if (branch_target >= context.sections[func.section_index].ram_addr &&
++                     branch_target < context.sections[func.section_index].ram_addr + context.sections[func.section_index].size) {
++                fmt::print("[Info] Tail call in {} to static function 0x{:08X}\n", func.name, branch_target);
++                if (!print_func_call_by_address(branch_target, true, true)) {
++                    return false;
++                }
++                print_indent();
++                generator.emit_return(context, func_index);
++                return true;
++            }
+ 
+             fmt::print(stderr, "[Warn] Function {} is branching outside of the function (to 0x{:08X})\n", func.name, branch_target);
+         }
+@@ -424,8 +445,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 generator.emit_cop0_status_read(rt);
+                 break;
+             default:
+-                fmt::print(stderr, "Unhandled cop0 register in mfc0: {}\n", (int)reg);
+-                return false;
++                print_indent();
++                generator.emit_cop0_read(rt, (int)reg);
++                break;
+             }
+             break;
+         }
+@@ -438,11 +460,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 generator.emit_cop0_status_write(rt);
+                 break;
+             default:
+-                fmt::print(stderr, "Unhandled cop0 register in mtc0: {}\n", (int)reg);
+-                return false;
++                print_indent();
++                generator.emit_cop0_write(rt, (int)reg);
++                break;
+             }
+             break;
+         }
++    // Privileged instructions: TLB ops and exception return. The runtime treats
++    // the memory space as flat, so these mostly just need to compile and be
++    // semantically safe no-ops.
++    case InstrId::cpu_tlbr:
++    case InstrId::cpu_tlbwi:
++    case InstrId::cpu_tlbwr:
++    case InstrId::cpu_tlbp:
++        print_indent();
++        generator.emit_tlb_instruction((int)instr_id);
++        break;
++    case InstrId::cpu_eret:
++        print_indent();
++        generator.emit_eret();
++        break;
++    case InstrId::cpu_cache:
++        print_indent();
++        generator.emit_cache_instruction((int)instr.GetO32_rt(), rs, (int)instr.Get_immediate());
++        break;
+     // Arithmetic
+     case InstrId::cpu_add:
+     case InstrId::cpu_addu:
+@@ -518,6 +559,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+                 print_indent();
+                 generator.emit_return(context, func_index);
+             }
++            // Branch to a target in the same section that isn't a known function start.
++            // Create a static function at the target and tail-call it. This handles
++            // cross-function jumps caused by mis-detected function boundaries.
++            else if (branch_target >= context.sections[func.section_index].ram_addr &&
++                     branch_target < context.sections[func.section_index].ram_addr + context.sections[func.section_index].size) {
++                fmt::print("[Info] Tail call in {} to static function 0x{:08X}\n", func.name, branch_target);
++                if (!print_func_call_by_address(branch_target, true, true)) {
++                    return false;
++                }
++                print_indent();
++                generator.emit_return(context, func_index);
++            }
+             else {
+                 fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
+                 return false;

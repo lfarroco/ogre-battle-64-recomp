@@ -1,0 +1,102 @@
+# Ogre Battle 64: Person of Lordly Caliber — PC Port Project
+
+Decompilation / static recompilation of the N64 game **Ogre Battle 64: Person of
+Lordly Caliber** (USA, Rev A) to a native PC executable, following the
+**N64Recomp** workflow used by Zelda 64: Recompiled.
+
+**Legal note:** this is a "bring your own ROM" project. No copyrighted ROM data is
+committed to this repository. You must provide a dump of your own cartridge.
+
+---
+
+## Goal
+
+A native Windows/Linux/macOS port that runs the full game (menus, world map,
+battles, cutscenes, audio, Controller Pak saves) with a modding framework.
+
+The approach is **static recompilation** (not byte-exact decompilation): the ROM's
+MIPS code is translated to C by `N64Recomp`, then compiled natively against the
+`N64ModernRuntime` runtime library. This does **not** reconstruct readable C source;
+mods are written against the recompiled API.
+
+## Current status (as of this session)
+
+- ✅ ROM identified: `Ogre Battle 64 - Person of Lordly Caliber (USA) (Rev A)`,
+  40 MB dump, 16-bit byte-swapped (`.n64`). Converted to big-endian `.z64`.
+- ✅ Cart header decoded (official N64 layout): entry point `0x80070C00`,
+  internal name `OgreBattle64`.
+- ✅ Boot stub disassembled: clears BSS `0x800AEDB0..0x800E9C20`, stack at
+  `0x800C6D60`, jumps to `main` at `0x8007F880`.
+- ✅ splat-based disassembly (see `config.yaml`): main code segment ROM `0x1000..`
+  mapped at `0x80070C00+`; ~185 KB of code split into `asm/`.
+- ✅ ELF built (`make`): `build/ogrebattle64.elf` with relocations
+  (`--emit-relocs`) and correct vram/ROM section mapping.
+- ✅ **Full main-segment recompilation succeeds**: 3659 functions recompiled to C
+  (`RecompiledFuncs/`, regenerated with `make recomp`).
+- ⬜ Runtime app (window, rendering, input, audio) — **next phase**.
+- ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
+- ⬜ Asset extraction (sprites, text, audio banks) — after first boot.
+
+## Toolchain
+
+| Tool | Purpose | Location |
+|---|---|---|
+| splat 0.50 (`splat64[mips]`) | ROM splitting / disassembly | `tools/venv` |
+| spimdisasm | MIPS disassembler (used by splat) | via pip |
+| mips-linux-gnu-binutils | assemble `.s` → `.o`, link ELF | Homebrew |
+| N64Recomp (forked) | MIPS → C recompilation | `tools/N64Recomp` |
+| N64ModernRuntime | recompiled game runtime (libultra shim, renderer) | `tools/N64ModernRuntime` |
+| RecompFrontend | app shell (menus/input UI) | `tools/RecompFrontend` |
+
+Our N64Recomp modifications (cop0 register support, TLB/ERET/cache instructions,
+cross-function branch handling, overlay-target function lookup) are in
+`n64recomp-ob64.patch`; apply with `git apply` after cloning upstream.
+
+## Reproduce (macOS)
+
+```sh
+# 1. Tools
+brew install mips-linux-gnu-binutils cmake
+python3 -m venv tools/venv && tools/venv/bin/pip install 'splat64[mips]'
+git clone --recurse-submodules https://github.com/N64Recomp/N64Recomp.git tools/N64Recomp
+git -C tools/N64Recomp apply ../../n64recomp-ob64.patch
+cmake -S tools/N64Recomp -B tools/N64Recomp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build tools/N64Recomp/build --target N64RecompCLI -j4
+
+# 2. ROM: place your big-endian dump at assets/ogre64.z64
+
+# 3. Disassemble + link + recompile
+tools/venv/bin/splat split config.yaml   # regenerate asm/
+make                                    # assemble .s, link ELF
+make recomp                             # generate RecompiledFuncs/*.c
+```
+
+## Key technical findings
+
+- **Byte order**: the dump is 16-bit byte-swapped (`.n64`). Convert to big-endian
+  by swapping adjacent bytes (`assets/ogre64.z64`).
+- **Header layout**: official Nintendo layout — entry point at offset `0x08`
+  (`0x80070C00`), internal name at `0x20` (`OgreBattle64`), country at `0x3E`.
+- **Memory map** (from boot stub + code analysis):
+  - ROM `0x1000` ↔ vram `0x80070C00` (entry segment, `0x60` bytes)
+  - main segment ROM `0x1060` ↔ `0x80070C60`, ending at BSS start `0x800AEDB0`
+  - BSS `0x800AEDB0..0x800E9C20`, stack `0x800C6D60`, `main` at `0x8007F880`
+- **libultra**: the main segment contains libultra (OS kernel, exception handler,
+  TLB code). Its functions use cop0 registers beyond Status; supported via the
+  `cop0_read`/`cop0_write`/`tlb_instruction`/`eret`/`cache_instruction` runtime
+  shims added in the patch.
+- **Streamed code**: functions at `0x8016C900+` and `0x840010BC` are referenced
+  from the main segment but live in streamed/overlay data; calls to them are
+  recompiled as runtime function lookups (`get_function`). Mapping those overlays
+  is a later phase.
+
+## Roadmap
+
+1. **Phase 0 — toolchain & ROM** ✅
+2. **Phase 1 — disassembly & ELF** ✅
+3. **Phase 2 — recompile main segment** ✅
+4. **Phase 3 — first boot** (runtime app: window, renderer, input, libultra shim)
+5. **Phase 4 — overlays & streamed code** (battle engine, cinematics)
+6. **Phase 5 — assets** (sprites, text, audio; custom extractor)
+7. **Phase 6 — saves, audio, QoL** (Controller Pak, widescreen, controls)
+8. **Phase 7 — modding framework & packaging**

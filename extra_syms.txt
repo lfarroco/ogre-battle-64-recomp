@@ -1,0 +1,17 @@
+/* Extra linker symbols for Ogre Battle 64.
+ * libultra sysdata globals per spimdisasm N64LibultraSyms (addresses verified
+ * against the game's own lui/lo references in asm/1060.s). */
+
+leoBootID       = 0x800001A0;
+osTvType        = 0x80000300;
+osRomType       = 0x80000304;
+osRomBase       = 0x80000308;
+osResetType     = 0x8000030C;
+osCicId         = 0x80000310;
+osVersion       = 0x80000314;
+osMemSize       = 0x80000318;
+osAppNMIBuffer  = 0x8000031C;
+
+/* Functions in streamed/overlay code referenced by the main segment. The code
+ * itself is not part of this ELF; define absolute placeholders for now. */
+func_840010BC   = 0x840010BC;

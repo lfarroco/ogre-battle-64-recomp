@@ -1,0 +1,15 @@
+# Config file for Ogre Battle 64 - Person of Lordly Caliber (USA) (Rev A) recompilation.
+# Generated from the splat disassembly (see config.yaml). Entry point 0x80070C00
+# comes from the cart header; main() is at 0x8007F880.
+
+[input]
+entrypoint = 0x80070C00
+# Paths are relative to the location of this config file.
+output_func_path = "RecompiledFuncs"
+elf_path = "build/ogrebattle64.elf"
+rom_file_path = "assets/ogre64.z64"
+relocatable_sections_path = "relocatable_sections.txt"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
