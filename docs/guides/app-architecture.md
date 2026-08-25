@@ -40,7 +40,7 @@ app/
 
 | Callback | Source | Notes |
 |---|---|---|
-| `renderer_callbacks.create_render_context` | `renderer.cpp` | currently a null renderer that logs VI swaps / DL submissions; RT64 integration replaces it |
+| `renderer_callbacks.create_render_context` | `renderer.cpp` | RT64-based renderer (Vulkan on Linux) wrapping `RT64::Application`; parses the game's display lists via RT64's GBI interpreters |
 | `rsp_callbacks.get_rsp_microcode` | `rsp.cpp` | currently a stub ucode that completes tasks without executing microcode |
 | `audio_callbacks` | `sdl_platform.cpp` | SDL audio queue (`queue_samples` / `get_frames_remaining` / `set_frequency`) |
 | `input_callbacks` | `sdl_platform.cpp` | keyboard (N64 mapping) + SDL GameController |

@@ -5,6 +5,71 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-25 (session 5) — RT64 renderer integrated; the boot stalls waiting for a second RSP task
+
+### Decision: replace the null renderer with RT64 (Vulkan on Linux)
+
+The game has been submitting real gfx tasks since session 4, so the null
+renderer has served its purpose. `app/src/renderer.cpp` now wraps
+`RT64::Application` (the current RT64 HLE architecture with `Interpreter` /
+`GBIManager` / `State`) behind ultramodern's `RendererContext`. Wiring copied
+from N64Recomp/RecompFrontend's `rt64_render_context.cpp`: `Application::Core`
+gets RDRAM, DMEM/IMEM slots, DPC registers, and the VI registers straight from
+`ultramodern::renderer::get_vi_regs()`. RT64's render hooks are optional
+(null-checked) and not wired.
+
+Verified on the Intel HD 4400 (Mesa): RT64 sets up Vulkan, presents frames at
+~60 Hz, and the game boots through the renderer unchanged. This also fixed the
+SDL window: it must be created with `SDL_WINDOW_VULKAN` on Linux (and
+`SDL_WINDOW_METAL` on macOS) or `SDL_Vulkan_CreateSurface` fails and RT64
+segfaults during setup.
+
+### Decision: gfx display lists are interpreted by RT64, not recompiled microcode
+
+The runtime routes gfx tasks (`M_GFXTASK`) to the renderer's `send_dl`, never
+through `get_rsp_microcode` — so `RSPRecomp` is **not** needed for the gfx
+ucode. RT64 ships its own GBI interpreters (`src/gbi/`) and parses display
+lists itself via `loadUCodeGBI` + `processDisplayLists`. RSPRecomp remains for
+the **audio** ucode (task type 5) once audio tasks flow.
+
+### Finding: OB64's ucode is "F3DEX fifo 2.08" (short-format opcodes) and RT64 misidentifies it as F3DEX2
+
+Runtime OSTask dump: `ucode=0x8009F540 ucode_data=0x800AC140` →
+ROM `0x2F940`/`0x3C540`; the data block contains
+`"RSP Gfx ucode F3DEX fifo 2.08 ... Yoshitaka Yasumoto 1999 Nintendo"`.
+The game's display lists use the F3DEX **short-format** opcode set
+(`G_SETOTHERMODE_H=0xDE`, `G_SETOTHERMODE_L=0xDF`, `G_RDPFULLSYNC=0xE9`, ...).
+
+RT64's `GBIManager::getGBIForUCode` (XXH3 hash database) matches this ucode to
+`GBIUCode::F3DEX2` (verified in-app: `GBI matched: 7`). F3DEX2 semantics differ
+(`0xDE` = `G_DL`, `0xDF` = `G_ENDDL`), so RT64 misparses OB64's DLs — the first
+(sync) DL "branches" into MIPS code at RDRAM `0xA9EF0`. RT64 has no GBI map for
+the F3DEX-2.08 short set. **Action item**: add/force the correct GBI before
+real DLs flow (see handoff).
+
+### Finding: the boot stalls after the first gfx task — the task-done dispatch has zero callbacks
+
+The whole RSP task pipeline works end-to-end: `osSpTaskStartGo` → `sp_complete`
+(→ `0x800E8BBC`) + `send_dl` + `dp_complete` (→ `0x800E8BF4`) →
+`func_80089200` sends the task-done message to the task's `done_mq`
+(`0x800E9BA8`) → the done pump `func_80089540` consumes and dispatches on the
+message's command type. But the dispatch callback slots (`0x800B9E84/88/8C`)
+are all **zero** at boot, so the first (sync) task's completion does nothing
+and the game waits for a second task that never comes. The game's next boot
+steps (`func_8009DA50` streamed DMA, then streamed funcs `0x800E9CEC`/
+`0x800E9C20`) are never reached. See the handoff for the thread map and the
+investigation path.
+
+### Decision: keep the boot-time diagnostics in the vendored runtime for now
+
+The gitignored runtime carries temporary `[sp]`/`[ev]`/`[mq]` debug prints
+(task submission, event registration, SP/DP completion, targeted queue
+activity). They are cheap, and removing them needs a full librecomp/ultramodern
+rebuild; they are documented in the handoff and should be stripped once the
+stall is fixed.
+
+---
+
 ## 2026-08-25 (session 4) — First RSP task + real VI mode: boot is past the libultra bridge
 
 ### Decision: correct osSendMesg/osJamMesg identification

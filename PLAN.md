@@ -59,10 +59,20 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     for VI/SP events). The game now boots cleanly, **submits its first RSP gfx
     task**, and sets a **real VI mode** (see `docs/LIBULTRA-BRIDGING.md`,
     session 4).
-  - ⬜ Watch the streamed-code ROM DMA (`func_8009DA50`); then RSP microcode
-    recompilation (F3DEX/L3DEX/S2DEX/audio) — see
-    `docs/guides/rsp-microcode.md`.
-  - ⬜ RT64 renderer integration (Linux/Vulkan recommended).
+  - ✅ **RT64 renderer (session 5)**: the null renderer is replaced by a real
+    RT64/Vulkan renderer (`app/src/renderer.cpp`, window created with
+    `SDL_WINDOW_VULKAN`). It initializes, presents frames at ~60 Hz, and the
+    game boots through it (see `docs/HANDOFF-2026-08-25-session5.md`).
+  - ⬜ **Boot stalls after the first gfx task**: the game submits one F3DEX
+    "sync" task that completes correctly, but the task-done dispatch has zero
+    callbacks, so the game waits for a second task that never comes. Find who
+    submits task #2 (request queue `0x800E8B14`); then the game proceeds to
+    `func_8009DA50` (streamed DMA) and the streamed functions `0x800E9CEC`/
+    `0x800E9C20` — Phase 4 (overlay loading) starts there.
+  - ⬜ **Fix RT64's GBI match**: OB64's ucode is "F3DEX fifo 2.08" (short-
+    format opcodes 0xDE/0xDF/0xE9...), which RT64's hash DB misidentifies as
+    F3DEX2 (0xDE=G_DL). Add/force the correct GBI before real display lists
+    flow (see `docs/guides/rsp-microcode.md` + session-5 handoff).
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 

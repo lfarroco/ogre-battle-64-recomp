@@ -85,6 +85,15 @@ target_include_directories(ogrebattle64 PRIVATE
     ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
     ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
     ${OGRE_TOOLS}/N64ModernRuntime/thirdparty
+    # RT64 headers. RT64's own include_directories() only apply inside the RT64
+    # subdirectory, so repeat them here for the app's renderer.cpp.
+    ${OGRE_TOOLS}/RT64/src
+    ${OGRE_TOOLS}/RT64/src/contrib
+    ${OGRE_TOOLS}/RT64/src/contrib/plume
+    ${OGRE_TOOLS}/RT64/src/contrib/imgui
+    ${OGRE_TOOLS}/RT64/src/contrib/hlslpp/include
+    ${OGRE_TOOLS}/RT64/src/contrib/mupen64plus-core/src/api
+    ${OGRE_TOOLS}/RT64/src/contrib/nativefiledialog-extended/src/include
 )
 
 target_link_libraries(ogrebattle64 PRIVATE

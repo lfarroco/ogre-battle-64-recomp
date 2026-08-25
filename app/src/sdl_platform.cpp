@@ -33,8 +33,13 @@ bool init_sdl() {
 }
 
 ultramodern::renderer::WindowHandle create_window(Platform& platform, const char* title) {
-    SDL_Window* window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
-                                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#if defined(__APPLE__)
+    flags |= SDL_WINDOW_METAL;
+#elif defined(__linux__) || defined(__ANDROID__)
+    flags |= SDL_WINDOW_VULKAN;
+#endif
+    SDL_Window* window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
     if (window == nullptr) {
         fprintf(stderr, "[SDL] Failed to create window: %s\n", SDL_GetError());
         return {};
