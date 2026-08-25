@@ -9,10 +9,6 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-if (APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum OS X deployment version")
-endif()
-
 project(ogrebattle64 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
@@ -33,7 +29,8 @@ set(OGRE_TOOLS "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
 
 # --- RT64 renderer -----------------------------------------------------------
 # Static build, expecting an SDL window outside of Windows (same options as
-# Zelda64Recomp). On macOS RT64 selects its Metal backend automatically.
+# Zelda64Recomp). On Linux RT64_SDL_WINDOW_VULKAN creates a Vulkan surface from
+# the SDL window (the primary, most-tested backend path).
 set(RT64_STATIC TRUE)
 set(RT64_SDL_WINDOW_VULKAN TRUE)
 add_compile_definitions(HLSL_CPU)
@@ -49,7 +46,7 @@ target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/RT64/src)
 find_package(SDL2 REQUIRED)
 
 # --- Recompiled game code ----------------------------------------------------
-# The main-segment recompilation output (3659 functions). Compiled as a static
+# The main-segment recompilation output (807 functions). Compiled as a static
 # lib so the app can link it alongside the runtime.
 file(GLOB RECOMP_C_SOURCES   ${CMAKE_CURRENT_SOURCE_DIR}/../RecompiledFuncs/*.c)
 file(GLOB RECOMP_CPP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../RecompiledFuncs/*.cpp)
@@ -98,13 +95,7 @@ target_link_libraries(ogrebattle64 PRIVATE
     SDL2::SDL2
 )
 
-if (APPLE)
-    target_link_libraries(ogrebattle64 PRIVATE
-        "-framework Cocoa"
-        "-framework Metal"
-        "-framework QuartzCore"
-    )
-elseif (UNIX AND NOT APPLE)
+if (UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
     target_link_libraries(ogrebattle64 PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endif()

@@ -41,21 +41,7 @@ ultramodern::renderer::WindowHandle create_window(Platform& platform, const char
     }
     platform.window = window;
 
-#if defined(__APPLE__)
-    // For the Metal backend: hand RT64/ultramodern the SDL window and the
-    // CAMetalLayer SDL creates for it.
-    //
-    // NOTE: SDL_Metal_GetLayer segfaults with Homebrew's sdl2-compat on this
-    // setup, so the view is left null for now. The null renderer doesn't use it;
-    // the RT64 Metal integration will need a working Metal layer (possibly via
-    // SDL3 or a direct CAMetalLayer creation).
-    ultramodern::renderer::WindowHandle handle;
-    handle.window = window;
-    handle.view = nullptr;  // SDL_Metal_GetLayer(window) segfaults w/ sdl2-compat
-    return handle;
-#else
     return window;
-#endif
 }
 
 void shutdown_sdl(Platform& platform) {
