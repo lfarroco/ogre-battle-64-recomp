@@ -17,6 +17,10 @@ and links the renderer (RT64), then boots the game on your ROM.
 # one-time: initialize all third-party submodules
 git submodule update --init --recursive
 
+# apply the SDL >= 2.0.22 compatibility patch to RT64's plume submodule
+# (needed on systems with older SDL2, e.g. Ubuntu 22.04's 2.0.20)
+git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
+
 # regenerate the recompiled code if it has changed (uses the ELF + config.toml)
 make recomp
 

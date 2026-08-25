@@ -1,0 +1,32 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index f1dd503..4586b8b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -15,6 +15,12 @@
+ #include <climits>
+ #include <unordered_map>
+ 
++// SDL_GetWindowSizeInPixels requires SDL >= 2.0.22; SDL_version.h is not pulled
++// in transitively by SDL_vulkan.h. Only include it when the SDL path is active.
++#ifdef PLUME_SDL_VULKAN_ENABLED
++#   include <SDL_version.h>
++#endif
++
+ #if DLSS_ENABLED
+ #   include "render/plume_dlss.h"
+ #endif
+@@ -2464,7 +2470,14 @@ namespace plume {
+         dstWidth = rect.right - rect.left;
+         dstHeight = rect.bottom - rect.top;
+ #   elif defined(PLUME_SDL_VULKAN_ENABLED)
++#       if SDL_VERSION_ATLEAST(2, 0, 22)
+         SDL_GetWindowSizeInPixels(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
++#       else
++        // SDL_GetWindowSizeInPixels requires SDL >= 2.0.22 (Ubuntu 22.04 ships 2.0.20).
++        // Fall back to the logical window size; the swapchain reconciles against the
++        // actual surface size when the window is resized.
++        SDL_GetWindowSize(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
++#       endif
+ #   elif defined(__ANDROID__)
+         dstWidth = ANativeWindow_getWidth(desc.renderWindow);
+         dstHeight = ANativeWindow_getHeight(desc.renderWindow);

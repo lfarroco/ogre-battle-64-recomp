@@ -22,6 +22,10 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 - ROM dumps / extracted assets are **never** committed to this repository.
 - All third-party tools live under `tools/` as git submodules; the app project
   lives under `app/`.
+- Local patches to upstream tools are kept as `*.patch` files in the repo root
+  (`n64recomp-ob64.patch`, `rt64-plume-sdl.patch`) and applied to the submodule /
+  vendored clone — never commit modifications *inside* a submodule (a submodule
+  only records an upstream commit SHA, so such changes are invisible to this repo).
 - Code is written against the `N64ModernRuntime` (ultramodern + librecomp)
   callback interfaces; platform I/O (window, input, audio) is isolated in the
   app so the game code never touches SDL directly.

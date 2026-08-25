@@ -21,6 +21,8 @@ config.yaml            splat config (segments, vram mapping)
 config.toml            N64Recomp config
 Makefile               assemble + link + recompile
 n64recomp-ob64.patch   our N64Recomp modifications (apply to upstream clone)
+rt64-plume-sdl.patch   our RT64 plume patch — SDL >= 2.0.22 guard (apply to the
+                       tools/RT64 submodule on systems with older SDL2, e.g. Ubuntu 22.04)
 PLAN.md                the project plan
 ```
 
@@ -43,6 +45,18 @@ tools/venv/bin/splat split config.yaml && make && make recomp
 
 The ROM must be the USA Rev A dump (40 MB, `.n64` 16-bit byte-swapped or already
 converted `.z64`). `tools/convert_rom.py` converts `.n64` → `.z64`.
+
+The renderer (`tools/RT64`) is a git submodule pinned to an upstream commit and
+needs its own one-time patch on systems with SDL < 2.0.22 (e.g. Ubuntu 22.04
+ships SDL 2.0.20, but `SDL_GetWindowSizeInPixels` requires 2.0.22+):
+
+```sh
+git submodule update --init --recursive
+git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
+```
+
+Re-apply after any `git submodule update` inside `tools/RT64`, which resets the
+submodule and discards the patch.
 
 ## Legal
 

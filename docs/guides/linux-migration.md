@@ -51,6 +51,18 @@ gitignored vendored clones, so they are NOT in the repo — clone them again (or
 copy the tree over). `tools/RT64` **is** a git submodule and comes with the repo
 (`git submodule update --init --recursive`).
 
+After checking out RT64, apply the SDL compatibility patch to its `plume`
+submodule (Ubuntu 22.04 ships SDL 2.0.20; `SDL_GetWindowSizeInPixels` needs
+≥ 2.0.22):
+
+```sh
+git submodule update --init --recursive
+git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
+```
+
+`git submodule update` resets `tools/RT64` and its nested submodules, discarding
+the patch — re-apply it whenever RT64 is re-checked-out.
+
 ## Toolchain mapping (macOS → Ubuntu)
 
 | Tool | macOS (Homebrew) | Ubuntu (apt) |
@@ -164,4 +176,7 @@ cmake --build build-app -j$(nproc)
    `make recomp`; never hand-edit.
 6. The `n64recomp-ob64.patch` applies to a specific upstream N64Recomp commit;
    if upstream has moved, re-derive against the vendored clone's current state.
+7. `git submodule update` (or a fresh `git submodule update --init --recursive`)
+   resets `tools/RT64` and discards the plume SDL patch — re-apply with
+   `git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch`.
 
