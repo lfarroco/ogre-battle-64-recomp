@@ -6,6 +6,7 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 |---|---|
 | [DECISIONS.md](DECISIONS.md) | Living log of technical decisions and their rationale. |
 | [HANDOFF-2026-08-24.md](HANDOFF-2026-08-24.md) | Session handoff: current state, the first-boot SIGBUS, and next steps. |
+| [HANDOFF-2026-08-25.md](HANDOFF-2026-08-25.md) | Session 4 handoff: first RSP task + real VI mode achieved; drainer thread; next steps. |
 | [LIBULTRA-BRIDGING.md](LIBULTRA-BRIDGING.md) | The libultra-bridging plan: findings, identification methodology, seed symbol table, staged steps. |
 | [guides/app-build.md](guides/app-build.md) | How to build and run the PC port app. |
 | [guides/app-architecture.md](guides/app-architecture.md) | App structure, runtime flow, callback responsibilities. |

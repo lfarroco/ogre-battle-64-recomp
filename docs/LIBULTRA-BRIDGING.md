@@ -85,21 +85,88 @@ correct; only the DMA call was wrong.)
 
 Names in `symbol_addrs.txt`; the disassembly (`asm/1060.s`) now carries the
 labels; N64Recomp renames them to `<name>_recomp` and the runtime provides the
-implementations. **Naming the RSP-task family made the remaining verbatim MMIO
-helpers (`osSpGetStatus` 0x800939F0 / `osSpSetStatus` 0x8009A760 /
-`__osAiDeviceBusy` 0x80099BC0) unreachable dead code** — no MMIO shim needed.
+implementations.
 
-### Current boot state (verified on Linux)
+---
 
-- Game boots; no SIGBUS/SEGV. 7 N64 threads start (main `func_8007F8E4`,
-  audio/event `func_80088F08`, RSP threads `func_80089200`/`func_800893C0`/
-  `func_80089358`, game `func_80071EB0`, and one more `func_8008AFE0`).
-- Null renderer logs `send_dummy_workload` + `update_screen` at ~50-60 Hz.
-- The game thread runs its init (calls `osAiSetFrequency`, creates more
-  threads) but has **not** yet hit the streamed-code stubs or submitted RSP
-  tasks in the observed window (~25 s) — it may be waiting on controller init
-  (`osContInit` not yet named) or in a long init. Next session: name the
-  `osCont*` family and watch for the first RSP task + real VI mode.
+## Progress (session 4, 2026-08-25) — first RSP task submitted
+
+**Milestone: the game boots cleanly, initializes controllers/audio, submits its
+first RSP gfx task (`[renderer] send_dl frame=1 type=1`), and sets a real VI
+mode (dummy workloads stop).** All threads run; no crashes in a 25 s window.
+
+### What unblocked the boot
+
+1. **osCont + timer family (batch 4)** — `osContInit` 0x80090470 (it was in the
+   *PFS cluster* at 0x80096B90? **no** — that cluster is the Controller-Pak
+   family: `__osSumcalc` 0x80097140 / `__osIdCheckSum` 0x80097174 / PFS; the
+   real osCont cluster is the SI-touching one at 0x800900C0..0x800906C0):
+   - `osContInit` 0x80090470 (retry-timer + PIF query; called from the game
+     thread via `func_80089C60`)
+   - `osContStartQuery` 0x800901F0, `osContGetQuery` 0x80090270,
+     `osContStartReadData` 0x80090290, `osContGetReadData` 0x80090318
+   - `osGetTime` 0x80094C90, `osSetTime` 0x80094D20, `osSetTimer` 0x80094D40
+     (**not** 0x80094E34 — that is the timer interrupt handler `__osSetTimerIntr`).
+2. **Event registration (batch 5)** — the boot trace showed the game thread
+   blocked on an **audio request** that is answered by the audio thread
+   (`func_80088F08` → `func_800891A0`) only when it receives the **VI retrace
+   message (0x29A)**. The game registered that via its *verbatim* `osViSetEvent`
+   (0x80095560), so the runtime never delivered it. Naming `osViSetEvent`
+   0x80095560 + `osSetEventMesg` 0x80093940 routes event registration through
+   the runtime (`ultramodern/src/events.cpp`).
+3. **osSendMesg correction** — the earlier identification was backwards:
+   - `0x800935A0` does a **front insert** (`first = (first+msgCount-1) % msgCount`)
+     ⇒ it is **`osJamMesg`** (not osSendMesg).
+   - `func_80093810` (36 call sites, the game's primary send, used by the
+     audio/event request system) is the real **`osSendMesg`**. Naming it makes
+     the audio responses go through the runtime's `osSendMesg` (which **wakes
+     blocked threads**), unblocking the game thread's request.
+4. **External-message drainer thread (runtime fix)** — with everything named,
+   the VI event was delivered every frame but only drained when a game thread
+   called `osSendMesg`/`osRecvMesg`. OB64's boot blocks every game thread on a
+   queue fed by the VI event (main thread busy-spins), so nothing drained it.
+   Added a hidden "drainer" game thread (`librecomp/src/recomp.cpp`,
+   `start_external_message_drainer`) that loops
+   `wait_for_external_message` + `check_running_queue`, spawned in
+   `wait_for_game_started` after `on_init_callback`. **Priority 5** (this
+   runtime schedules *higher* numbers first) so it yields to the threads it
+   wakes (game pri 10, audio 120, RSP 100-111, DMA 50).
+5. **`osSpGetStatus` (batch 6 + runtime)** — the game's RSP task threads
+   (`func_80089358`, `func_80089200`) busy-wait on SP_STATUS (0xA4040010) via
+   verbatim `func_800939F0` before each task — *not* dead code as session 3
+   assumed. Added `osSpGetStatus` to N64Recomp's `reimplemented_funcs`
+   (rebuild N64RecompCLI) and `osSpGetStatus_recomp` to the runtime's `sp.cpp`
+   (returns `SP_STATUS_HALTED`; the runtime's RSP is never busy).
+
+### Confirmed table additions (session 4)
+
+| Addr | Name | Basis |
+|---|---|---|
+| 0x80090470 | `osContInit` | retry timer + `__osPackRequestData` + SI DMA + `__osContGetInitData` |
+| 0x800901F0 | `osContStartQuery` | get-access + `__osPackRequestData` + DMA write/read |
+| 0x80090270 | `osContGetQuery` | thin wrapper over `__osContGetInitData` |
+| 0x80090290 | `osContStartReadData` | get-access + `__osPackReadData` + DMA write/read |
+| 0x80090318 | `osContGetReadData` | PIF response parse (errno/button/stick) |
+| 0x80094C90 | `osGetTime` | `__osDisableInt` + `osGetCount` + 64-bit base |
+| 0x80094D20 | `osSetTime` | stores time base |
+| 0x80094D40 | `osSetTimer` | 8-arg ABI matching runtime `osSetTimer_recomp` |
+| 0x80095560 | `osViSetEvent` | stores mq/msg/retrace in `__osViNextContext` |
+| 0x80093940 | `osSetEventMesg` | event table 0x800E8218 + AI immediate-send |
+| 0x800935A0 | `osJamMesg` | **corrected**: front insert |
+| 0x80093810 | `osSendMesg` | **corrected**: back insert, primary send |
+| 0x800939F0 | `osSpGetStatus` | SP_STATUS read, used by RSP task threads |
+
+### Current boot state (session 4, verified on Linux)
+
+- Game boots without crashing for the full observed window (~25 s). 8 threads
+  start (7 game + the runtime drainer id 200). The game thread runs its init
+  (audio requests answered via the VI-retrace/audio-thread cycle).
+- **First RSP gfx task submitted** (`[renderer] send_dl frame=1 type=1`); the
+  game sets a **real VI mode** (dummy workloads stop; the null renderer swaps
+  the game's framebuffers at ~50-60 Hz).
+- The game then proceeds to load streamed code (`func_8009DA50` ROM DMA) — the
+  next watch point before Phase 4 overlay loading.
+
 
 ---
 

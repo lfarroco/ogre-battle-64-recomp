@@ -5,6 +5,57 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-25 (session 4) — First RSP task + real VI mode: boot is past the libultra bridge
+
+### Decision: correct osSendMesg/osJamMesg identification
+
+Session 3 named `0x800935A0 = osSendMesg`, but that function does a **front
+insert** (`mq->first = (first+msgCount-1) % msgCount`), i.e. `osJamMesg`. The
+game's real back-insert `osSendMesg` is `func_80093810` (36 call sites; the
+audio/event request system uses it). Renaming `func_80093810 = osSendMesg`
+makes audio-request responses go through the runtime's `osSendMesg`, which
+**wakes blocked threads** — the missing piece that let the game thread proceed
+past its first audio request.
+
+### Decision: add an external-message drainer thread to the runtime
+
+With VI events being delivered every frame, the boot still deadlocked: the
+runtime only drains its external-message queue when a game thread calls
+`osSendMesg`/`osRecvMesg`, and OB64's boot blocks every game thread on a queue
+fed by the VI retrace event (its main thread busy-spins). Added a hidden
+"drainer" game thread in `librecomp/src/recomp.cpp` (spawned after
+`on_init_callback`) that loops `wait_for_external_message` +
+`check_running_queue`. It must be **lower** priority (5) than the threads it
+wakes, because this runtime schedules **higher** priority numbers first —
+priority 30 starved the game thread (pri 10) in the running queue.
+
+### Decision: name the osCont family, timers, events, and osSpGetStatus
+
+- The PFS (Controller-Pak) cluster at `0x80096B90+` is *not* the osCont family
+  (`__osSumcalc`/`__osIdCheckSum` etc.); the osCont cluster is the SI-touching
+  one at `0x800900C0..0x800906C0`. Named `osContInit`, `osContStartQuery`,
+  `osContGetQuery`, `osContStartReadData`, `osContGetReadData`.
+- Timers: `osGetTime` 0x80094C90, `osSetTime` 0x80094D20, `osSetTimer`
+  0x80094D40 (the handoff's `0x80094E34` is the timer *interrupt handler*, not
+  osSetTimer).
+- Events: `osViSetEvent` 0x80095560 and `osSetEventMesg` 0x80093940 — the game
+  registered its VI-retrace→audio-queue message (0x29A) through its verbatim
+  osViSetEvent, so the runtime never delivered it.
+- `osSpGetStatus` 0x800939F0: the RSP task threads busy-wait on SP_STATUS; not
+  dead code as session 3 assumed. Added to N64Recomp's `reimplemented_funcs`
+  (N64RecompCLI rebuild required) + runtime `osSpGetStatus_recomp` (returns
+  SP_STATUS_HALTED).
+
+### Outcome
+
+The game boots without crashing for the full observed window (~25 s), submits
+its **first RSP gfx task** (`send_dl frame=1 type=1`), and sets a **real VI
+mode** (dummy workloads stop; the null renderer swaps the game's framebuffers
+at ~50-60 Hz). Next watch point: the streamed-code ROM DMA (`func_8009DA50`)
+before Phase 4 overlay loading.
+
+---
+
 ## 2026-08-24 (session 3) — First boot achieved: libultra bridging is working
 
 ### Decision: name-based libultra replacement confirmed and applied (3 batches)

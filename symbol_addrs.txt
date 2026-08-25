@@ -28,7 +28,16 @@ osVirtualToPhysical = 0x80090780;   // type:func
 // Batch 2 (2026-08-24): message queues, audio, and framebuffer swap - needed to
 // get past the first game threads (which block on osRecvMesg/osSendMesg and
 // drive the audio + VI state). Identified from standard libultra patterns.
-osSendMesg = 0x800935A0;            // type:func
+//
+// CORRECTION (2026-08-25): osSendMesg was initially assigned to 0x800935A0,
+// but that function does a FRONT insert (mq->first = (first+msgCount-1) %
+// msgCount) which is osJamMesg. The game's actual back-insert osSendMesg is
+// func_80093810 (36 call sites, used by the audio/event request system). Naming
+// func_80093810 = osSendMesg is what lets the runtime's osSendMesg (which wakes
+// blocked threads) handle the audio-request responses. Both are in
+// N64Recomp::reimplemented_funcs and defined in the runtime.
+osJamMesg = 0x800935A0;             // type:func  (front insert)
+osSendMesg = 0x80093810;            // type:func  (back insert, primary send)
 osRecvMesg = 0x800936E0;            // type:func
 osAiGetLength = 0x8008C410;         // type:func
 osAiGetStatus = 0x8008C420;         // type:func
@@ -47,5 +56,40 @@ osSpTaskStartGo = 0x80093C0C;       // type:func
 osSpTaskYield = 0x80093C40;         // type:func
 osSpTaskYielded = 0x80093C60;       // type:func
 
+// Batch 4 (2026-08-25): osCont (controller) family + timers. The game boots
+// through osContInit (called from the game thread via func_80089C60) and polls
+// controllers from func_8008A3A4/func_8008A42C. Identified from the
+// disassembly: the SI-touching cluster at 0x800900C0..0x800906C0 (the
+// 0x80096B90 cluster is the PFS/Controller-Pak family, NOT osCont*).
+//
+// NOTE: osSetTimer is func_80094D40, not func_80094E34 (that is the timer
+// interrupt handler __osSetTimerIntr). osContInit calls func_80094D40 with the
+// 8-arg OSTimer layout the runtime's osSetTimer_recomp expects (value in
+// a2:a3 hi:lo, interval/mq/msg on the stack).
+osContInit = 0x80090470;            // type:func
+osContStartQuery = 0x800901F0;      // type:func
+osContGetQuery = 0x80090270;        // type:func
+osContStartReadData = 0x80090290;   // type:func
+osContGetReadData = 0x80090318;     // type:func
+osGetTime = 0x80094C90;             // type:func
+osSetTime = 0x80094D20;             // type:func
+osSetTimer = 0x80094D40;            // type:func
 
+// Batch 5 (2026-08-25): event registration. The boot trace shows the game
+// thread (thread 3) blocking in func_8008A1B0 -> func_80089AB0 ->
+// func_80089A30 on an audio request response that never arrives. The audio
+// thread (func_80088F08) is triggered by a 0x29A mesg sent from the **VI
+// retrace event**, which the game registered through its VERBATIM osViSetEvent
+// (func_80095560). Because it was never named, the runtime's VI thread never
+// delivered the retrace event to the game's audio queue, so the request was
+// never processed. Naming osViSetEvent + osSetEventMesg routes event
+// registration through the runtime (ultramodern/src/events.cpp).
+osViSetEvent = 0x80095560;          // type:func
+osSetEventMesg = 0x80093940;        // type:func
+
+// Batch 6 (2026-08-25): SP status. The game's RSP task threads (func_80089358,
+// func_80089200) busy-wait on the SP status register (0xA4040010) before loading
+// each task via a verbatim reader (func_800939F0). Named osSpGetStatus so the
+// runtime's osSpGetStatus_recomp (reports SP halted/idle) replaces the MMIO read.
+osSpGetStatus = 0x800939F0;         // type:func
 

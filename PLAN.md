@@ -51,9 +51,16 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     `symbol_addrs.txt` so the runtime's native `osXxx_recomp` services replace
     OB64's verbatim libultra (see `docs/LIBULTRA-BRIDGING.md`). Also fixed a
     runtime bug in the initial 1MB DMA (sign-extension of the entrypoint).
-  - ⬜ Name the remaining boot-path libultra (`osCont*` family, timers) and get
-    the game to submit its first RSP task + set a real VI mode.
-  - ⬜ RSP microcode recompilation (F3DEX/L3DEX/S2DEX/audio) — see
+  - ✅ **Libultra bridging (batches 4-6, session 4)**: osCont family + timers +
+    event registration (`osViSetEvent`/`osSetEventMesg`) + `osSpGetStatus`
+    named; corrected `osSendMesg`/`osJamMesg` (the game's primary send is
+    `func_80093810` = `osSendMesg`). Added an external-message **drainer
+    thread** to the runtime (blocked game threads otherwise deadlock waiting
+    for VI/SP events). The game now boots cleanly, **submits its first RSP gfx
+    task**, and sets a **real VI mode** (see `docs/LIBULTRA-BRIDGING.md`,
+    session 4).
+  - ⬜ Watch the streamed-code ROM DMA (`func_8009DA50`); then RSP microcode
+    recompilation (F3DEX/L3DEX/S2DEX/audio) — see
     `docs/guides/rsp-microcode.md`.
   - ⬜ RT64 renderer integration (Linux/Vulkan recommended).
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
