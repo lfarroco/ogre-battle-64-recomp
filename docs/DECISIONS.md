@@ -5,6 +5,51 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-25 (session 8) — The post-boot spin was a cooperative-scheduler deadlock; N64Recomp now emits `yield_self` for poll loops
+
+### Finding: Thread 3's `.L80075FB8` spin on `D_800C4C26` starves the drainer (deadlock)
+
+The session-7 "N64 threads 1+3 spin" is Thread 3 (`func_80075BC0`, the system
+loop) waiting in a **pure spin** for the 16-bit word `D_800C4C26` to change
+from `0xFFFF`/`0xFFFD`. The word is set to `0xFFFC` by the boot state-machine
+callback `func_80072398` after 13 invocations. The callback is driven by the
+game's own event chain — Thread 19 (`func_80088F08`) wakes on VI-retrace/AI
+messages (`0x29A`/`0x29D` on `D_800E8B84`), dispatches via `func_800891A0` to
+Thread 4 (`func_8008AFE0`, queue `D_800C4C28`), which calls the callback. The
+VI thread enqueues the messages, but delivery requires the cooperative
+**drainer** (pri 5) to run, and Thread 3's pure spin never yields → the whole
+chain stalls forever. Same class as session 6's `func_80089A10` spin.
+
+### Decision: make N64Recomp emit `yield_self` for poll loops (general fix)
+
+Instead of reimplementing the spinning function natively (session 6's approach,
+impractical for the 1390-byte `func_80075BC0`), N64Recomp's `print_branch` now
+detects **poll loops** — backward conditional branches whose body has no
+function calls and no stores, and contains a load whose base register is
+loop-constant at the load site (cyclic last-write is `lui`, or never written in
+the body) — and emits `yield_self(rdram);` before the loop-back goto.
+`yield_self` (already in the runtime) waits for one external message and checks
+the running queue, so the drainer can deliver the very event the poll awaits.
+
+The heuristic was tuned against the whole codebase: it flags ~17 loops (the
+`D_800C4C26` spin, the PI/DP status polls, overlay game-logic polls) while
+correctly excluding data loops (strlen/list-walk/memcpy) whose load bases are
+written by non-constant ops.
+
+### Outcome
+
+Boot now passes the old spin, runs through the overlay-D data loads, the
+controller path, and the RSP pipeline, and reaches **title-screen display-list
+building** (`func_801A1FCC`/`func_8019FC68`, overlay C). The next crash is
+`func_8019FC68` at `0x8019FFF4`: it stores through `0x803ffa7b +
+entry->[0x34]` where a graphics-object entry in the heap array at `0x803fefa0`
+has a garbage `[0x34]` (varies per run), wrapping the address to unmapped
+RDRAM. The array is allocated + zeroed by `func_801A1A2C`, so the garbage is
+written later — root cause open (see session-8 handoff leads: likely an
+audio-init / record-population step or a wrong splat function boundary for the
+`nonmatching func_8019FC68, 0xF58` region).
+
+
 ## 2026-08-25 (session 7) — Phase 4: streamed overlays are plain linked code (no relocation); A+B+C recompiled and registered
 
 ### Finding: the streamed overlays need no runtime relocation

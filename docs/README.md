@@ -10,6 +10,7 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 | [HANDOFF-2026-08-25-session5.md](HANDOFF-2026-08-25-session5.md) | Session 5 handoff: RT64 renderer integrated; game stalls after its first RSP task; F3DEX 2.08 short-format GBI mismatch. |
 | [HANDOFF-2026-08-25-session6.md](HANDOFF-2026-08-25-session6.md) | Session 6 handoff: the stall was a scheduler busy-spin deadlock; 3 fixes (spin, PI DMA, byte order) unblock boot into the main loop; Phase 4 (streamed overlays) starts. |
 | [HANDOFF-2026-08-25-session7.md](HANDOFF-2026-08-25-session7.md) | Session 7 handoff: Phase 4 begins — overlays are plain linked code (no relocation); streamed overlays A+B+C recompiled and registered; boot passes the old crash and reaches the next overlay's data load, then spins on N64 threads 1+3. |
+| [HANDOFF-2026-08-25-session8.md](HANDOFF-2026-08-25-session8.md) | Session 8 handoff: the post-boot spin was a cooperative-scheduler deadlock; N64Recomp now emits `yield_self` for poll loops; boot reaches the title-screen display-list build (next crash in `func_8019FC68`). |
 | [LIBULTRA-BRIDGING.md](LIBULTRA-BRIDGING.md) | The libultra-bridging plan: findings, identification methodology, seed symbol table, staged steps. |
 | [guides/app-build.md](guides/app-build.md) | How to build and run the PC port app. |
 | [guides/app-architecture.md](guides/app-architecture.md) | App structure, runtime flow, callback responsibilities. |

@@ -105,15 +105,24 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     format opcodes 0xDE/0xDF/0xE9...), which RT64's hash DB misidentifies as
     F3DEX2 (0xDE=G_DL). Add/force the correct GBI before real display lists
     flow (see `docs/guides/rsp-microcode.md` + session-5 handoff).
-- ⬜ Phase 4 next walls (session 7 findings):
-  - **The post-boot spin**: after loading the next streamed data blocks (the
-    `{4-byte size, data}` sequence driven by `func_80089F80` → the header/block
-    reads at ROM 0x213A2E4..0x21C3958 into RAM 0x801BD930, an overlay-D region),
-    N64 threads 1 and 3 busy-spin at ~95% CPU each. Candidates: the overlay D
-    init that should follow, or an audio/state flag that never flips.
-  - **Flaky VI-thread segfault** (`vi_thread_func` +732: reading
-    `next_state->mode->comRegs` with a garbage mode pointer) — likely the
-    known renderer-init flakiness; needs the mode/framebuffer race fixed.
+- ⬜ Phase 4 next walls (session 8 findings):
+  - ✅ **The post-boot spin is FIXED** (session 8): Thread 3's `.L80075FB8`
+    pure spin on `D_800C4C26` starved the cooperative scheduler's drainer, so
+    the VI-retrace events that advance the boot state machine were never
+    delivered (same class as session 6's `func_80089A10`). N64Recomp now emits
+    `yield_self(rdram);` for poll loops (backward call-free store-free branches
+    reading a loop-invariant address), so the game thread yields and the
+    drainer can run. Boot now progresses through the overlay-D loads, the
+    controller path, and the RSP pipeline into **title-screen display-list
+    building** (overlay C `func_801A1FCC` → `func_8019FC68`).
+  - **Next crash: `func_8019FC68` at 0x8019FFF4** — stores through
+    `0x803ffa7b + entry->[0x34]` where a graphics-object record in the heap
+    array at `0x803fefa0` (`D_801B81D0`) has a garbage `[0x34]` (varies per
+    run) → address wraps → SIGSEGV. Array is zeroed at alloc; root cause open
+    (leads in `docs/HANDOFF-2026-08-25-session8.md`).
+  - **Flaky renderer-init segfault** (before any game code; doesn't reproduce
+    under gdb) — likely the known renderer-init flakiness; needs the
+    mode/framebuffer race fixed.
   - **RT64 GBI fix** (still pending) before real display lists.
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.

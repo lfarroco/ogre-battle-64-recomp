@@ -1,5 +1,23 @@
+diff --git a/LiveRecomp/live_generator.cpp b/LiveRecomp/live_generator.cpp
+index 61e1ff5..92d176c 100644
+--- a/LiveRecomp/live_generator.cpp
++++ b/LiveRecomp/live_generator.cpp
+@@ -1933,6 +1933,13 @@ void N64Recomp::LiveGenerator::emit_pause_self() const {
+     sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, sljit_sw(inputs.pause_self));
+ }
+ 
++void N64Recomp::LiveGenerator::emit_yield_self() const {
++    // The live generator isn't used by this project's offline recompilation;
++    // yield_self is only emitted by the C generator for spin-wait loops.
++    // Emit nothing (a spin in live-recompiled code would still be a deadlock
++    // risk, but the live path is not exercised here).
++}
++
+ void N64Recomp::LiveGenerator::emit_trigger_event(uint32_t event_index) const {
+     // Load rdram and ctx into R0 and R1.
+     sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, Registers::rdram, 0, SLJIT_IMM, rdram_offset);
 diff --git a/include/recomp.h b/include/recomp.h
-index 73f3e73..13ea02b 100644
+index 73f3e73..93dee61 100644
 --- a/include/recomp.h
 +++ b/include/recomp.h
 @@ -424,6 +424,8 @@ typedef struct {
@@ -23,8 +41,31 @@ index 73f3e73..13ea02b 100644
  void switch_error(const char* func, uint32_t vram, uint32_t jtbl);
  void do_break(uint32_t vram);
  
+@@ -467,6 +474,7 @@ extern int32_t* section_addresses;
+ void recomp_syscall_handler(uint8_t* rdram, recomp_context* ctx, int32_t instruction_vram);
+ 
+ void pause_self(uint8_t *rdram);
++void yield_self(uint8_t *rdram);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/include/recompiler/context.h b/include/recompiler/context.h
+index e7b4431..9eb5267 100644
+--- a/include/recompiler/context.h
++++ b/include/recompiler/context.h
+@@ -62,6 +62,10 @@ namespace N64Recomp {
+         R_MIPS_HI16,
+         R_MIPS_LO16,
+         R_MIPS_GPREL16,
++        R_MIPS_LITERAL,
++        R_MIPS_GOT16,
++        R_MIPS_PC16,
++        R_MIPS_CALL16,
+     };
+ 
+     struct Reloc {
 diff --git a/include/recompiler/generator.h b/include/recompiler/generator.h
-index 145bcd0..69a2ff2 100644
+index 145bcd0..3a342bc 100644
 --- a/include/recompiler/generator.h
 +++ b/include/recompiler/generator.h
 @@ -3,6 +3,7 @@
@@ -35,7 +76,7 @@ index 145bcd0..69a2ff2 100644
  
  namespace N64Recomp {
      struct InstructionContext {
-@@ -53,6 +54,13 @@ namespace N64Recomp {
+@@ -53,12 +54,22 @@ namespace N64Recomp {
          virtual void emit_check_nan(int fpr, bool is_double) const = 0;
          virtual void emit_cop0_status_read(int reg) const = 0;
          virtual void emit_cop0_status_write(int reg) const = 0;
@@ -49,7 +90,16 @@ index 145bcd0..69a2ff2 100644
          virtual void emit_cop1_cs_read(int reg) const = 0;
          virtual void emit_cop1_cs_write(int reg) const = 0;
          virtual void emit_muldiv(InstrId instr_id, int reg1, int reg2) const = 0;
-@@ -90,6 +98,11 @@ namespace N64Recomp {
+         virtual void emit_syscall(uint32_t instr_vram) const = 0;
+         virtual void emit_do_break(uint32_t instr_vram) const = 0;
+         virtual void emit_pause_self() const = 0;
++        // Yield the current thread once so the cooperative scheduler can run
++        // other (higher priority) threads. Used for spin-wait ("poll") loops.
++        virtual void emit_yield_self() const = 0;
+         virtual void emit_trigger_event(uint32_t event_index) const = 0;
+         virtual void emit_comment(const std::string& comment) const = 0;
+     };
+@@ -90,12 +101,18 @@ namespace N64Recomp {
          void emit_check_nan(int fpr, bool is_double) const final;
          void emit_cop0_status_read(int reg) const final;
          void emit_cop0_status_write(int reg) const final;
@@ -61,8 +111,29 @@ index 145bcd0..69a2ff2 100644
          void emit_cop1_cs_read(int reg) const final;
          void emit_cop1_cs_write(int reg) const final;
          void emit_muldiv(InstrId instr_id, int reg1, int reg2) const final;
+         void emit_syscall(uint32_t instr_vram) const final;
+         void emit_do_break(uint32_t instr_vram) const final;
+         void emit_pause_self() const final;
++        void emit_yield_self() const final;
+         void emit_trigger_event(uint32_t event_index) const final;
+         void emit_comment(const std::string& comment) const final;
+     private:
+diff --git a/include/recompiler/live_recompiler.h b/include/recompiler/live_recompiler.h
+index d155b83..ee80ec8 100644
+--- a/include/recompiler/live_recompiler.h
++++ b/include/recompiler/live_recompiler.h
+@@ -128,6 +128,9 @@ namespace N64Recomp {
+         void emit_syscall(uint32_t instr_vram) const final;
+         void emit_do_break(uint32_t instr_vram) const final;
+         void emit_pause_self() const final;
++        // The live generator is not used for the offline recompilation in this
++        // project; yield_self is only emitted by the C generator.
++        void emit_yield_self() const final;
+         void emit_trigger_event(uint32_t event_index) const final;
+         void emit_comment(const std::string& comment) const final;
+     private:
 diff --git a/src/cgenerator.cpp b/src/cgenerator.cpp
-index 94f85c5..7f4e1b1 100644
+index 94f85c5..a11d353 100644
 --- a/src/cgenerator.cpp
 +++ b/src/cgenerator.cpp
 @@ -501,6 +501,30 @@ void N64Recomp::CGenerator::emit_cop0_status_write(int reg) const {
@@ -96,8 +167,49 @@ index 94f85c5..7f4e1b1 100644
  void N64Recomp::CGenerator::emit_cop1_cs_read(int reg) const {
      fmt::print(output_file, "{} = get_cop1_cs();\n", gpr_to_string(reg));
  }
+@@ -554,6 +578,10 @@ void N64Recomp::CGenerator::emit_pause_self() const {
+     fmt::print(output_file, "pause_self(rdram);\n");
+ }
+ 
++void N64Recomp::CGenerator::emit_yield_self() const {
++    fmt::print(output_file, "yield_self(rdram);\n");
++}
++
+ void N64Recomp::CGenerator::emit_trigger_event(uint32_t event_index) const {
+     fmt::print(output_file, "recomp_trigger_event(rdram, ctx, base_event_index + {});\n", event_index);
+ }
+diff --git a/src/config.cpp b/src/config.cpp
+index 1066aff..c8e03be 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -535,6 +535,10 @@ const std::unordered_map<std::string, N64Recomp::RelocType> reloc_type_name_map
+     { "R_MIPS_HI16", N64Recomp::RelocType::R_MIPS_HI16 },
+     { "R_MIPS_LO16", N64Recomp::RelocType::R_MIPS_LO16 },
+     { "R_MIPS_GPREL16", N64Recomp::RelocType::R_MIPS_GPREL16 },
++    { "R_MIPS_LITERAL", N64Recomp::RelocType::R_MIPS_LITERAL },
++    { "R_MIPS_GOT16", N64Recomp::RelocType::R_MIPS_GOT16 },
++    { "R_MIPS_PC16", N64Recomp::RelocType::R_MIPS_PC16 },
++    { "R_MIPS_CALL16", N64Recomp::RelocType::R_MIPS_CALL16 },
+ };
+ 
+ N64Recomp::RelocType reloc_type_from_name(const std::string& reloc_type_name) {
+diff --git a/src/main.cpp b/src/main.cpp
+index 669c4a1..0d49b44 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -156,6 +156,10 @@ std::vector<std::string> reloc_names {
+     "R_MIPS_HI16",
+     "R_MIPS_LO16",
+     "R_MIPS_GPREL16",
++    "R_MIPS_LITERAL",
++    "R_MIPS_GOT16",
++    "R_MIPS_PC16",
++    "R_MIPS_CALL16",
+ };
+ 
+ void dump_context(const N64Recomp::Context& context, const std::unordered_map<uint16_t, std::vector<N64Recomp::DataSymbol>>& data_syms, const std::filesystem::path& func_path, const std::filesystem::path& data_path) {
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..ddaf438 100644
+index c228433..def7e30 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
 @@ -34,6 +34,7 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
@@ -131,7 +243,145 @@ index c228433..ddaf438 100644
              return JalResolutionResult::NoMatch;
          }
          // If there was an exact match, use it.
-@@ -373,6 +383,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -356,6 +366,137 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+         return true;
+     };
+ 
++    auto is_yield_poll_loop = [&](size_t head_index, size_t body_end, uint32_t branch_target) -> bool {
++        // Returns true if the loop [head_index, body_end) is a spin-wait poll:
++        // no function calls, no stores, and a load whose base register is
++        // loop-constant at the load site (its cyclic last write in the body is
++        // a constant-immediate op such as `lui`, or it is never written in the
++        // body, i.e. a loop-invariant pointer).
++        struct BodyInfo {
++            int dest;         // register written by this instruction, or -1
++            bool const_write; // dest is written by an immediate-only op (e.g. lui)
++            bool is_load;
++            int load_base;    // base register of a load, or -1
++        };
++        std::vector<BodyInfo> body;
++        body.reserve(body_end - head_index);
++
++        for (size_t j = head_index; j < body_end; j++) {
++            const rabbitizer::InstructionCpu& li = instructions[j];
++            InstrId id = li.getUniqueId();
++
++            // Function calls in the loop body -> not a pure poll.
++            if (id == InstrId::cpu_jal || id == InstrId::cpu_jalr) {
++                return false;
++            }
++
++            BodyInfo info{};
++            info.dest = -1;
++            info.const_write = false;
++            info.is_load = false;
++            info.load_base = -1;
++
++            bool is_store = false;
++            switch (id) {
++                case InstrId::cpu_lw: case InstrId::cpu_lwl: case InstrId::cpu_lwr:
++                case InstrId::cpu_lwu: case InstrId::cpu_lh: case InstrId::cpu_lhu:
++                case InstrId::cpu_lb: case InstrId::cpu_lbu: case InstrId::cpu_ld:
++                case InstrId::cpu_ldl: case InstrId::cpu_ldr: case InstrId::cpu_ll:
++                case InstrId::cpu_lld: case InstrId::cpu_lwc1: case InstrId::cpu_ldc1:
++                    info.is_load = true;
++                    info.dest = (int)li.GetO32_rt();
++                    info.load_base = (int)li.GetO32_rs();
++                    break;
++                case InstrId::cpu_sw: case InstrId::cpu_swl: case InstrId::cpu_swr:
++                case InstrId::cpu_sb: case InstrId::cpu_sh: case InstrId::cpu_sd:
++                case InstrId::cpu_sdl: case InstrId::cpu_sdr: case InstrId::cpu_sc:
++                case InstrId::cpu_scd: case InstrId::cpu_swc1: case InstrId::cpu_sdc1:
++                    is_store = true;
++                    break;
++                default:
++                    break;
++            }
++
++            // Stores -> data loop, not a poll.
++            if (is_store) {
++                return false;
++            }
++
++            if (!info.is_load) {
++                // GPR writes: ALU I-type writes rt, R-type writes rd.
++                int dest = -1;
++                bool const_write = false;
++                switch (id) {
++                    case InstrId::cpu_lui: case InstrId::cpu_addiu: case InstrId::cpu_addi:
++                    case InstrId::cpu_ori: case InstrId::cpu_andi: case InstrId::cpu_xori:
++                    case InstrId::cpu_slti: case InstrId::cpu_sltiu:
++                    case InstrId::cpu_daddiu: case InstrId::cpu_daddi:
++                        dest = (int)li.GetO32_rt();
++                        const_write = (id == InstrId::cpu_lui);
++                        break;
++                    case InstrId::cpu_add: case InstrId::cpu_addu:
++                    case InstrId::cpu_sub: case InstrId::cpu_subu:
++                    case InstrId::cpu_and: case InstrId::cpu_or:
++                    case InstrId::cpu_xor: case InstrId::cpu_nor:
++                    case InstrId::cpu_slt: case InstrId::cpu_sltu:
++                    case InstrId::cpu_dadd: case InstrId::cpu_daddu:
++                    case InstrId::cpu_dsub: case InstrId::cpu_dsubu:
++                    case InstrId::cpu_sll: case InstrId::cpu_srl:
++                    case InstrId::cpu_sra: case InstrId::cpu_sllv:
++                    case InstrId::cpu_srlv: case InstrId::cpu_srav:
++                    case InstrId::cpu_dsll: case InstrId::cpu_dsrl:
++                    case InstrId::cpu_dsra: case InstrId::cpu_dsll32:
++                    case InstrId::cpu_dsrl32: case InstrId::cpu_dsra32:
++                    case InstrId::cpu_dsllv: case InstrId::cpu_dsrlv:
++                    case InstrId::cpu_dsrav: case InstrId::cpu_movz:
++                    case InstrId::cpu_movn: case InstrId::cpu_mfhi:
++                    case InstrId::cpu_mflo:
++                        dest = (int)li.GetO32_rd();
++                        break;
++                    default:
++                        break;
++                }
++                if (dest > 0 && dest < 32) {  // ignore $zero (0)
++                    info.dest = dest;
++                    info.const_write = const_write;
++                }
++            } else if (info.dest > 0 && info.dest < 32) {
++                // A load's write is never constant.
++                info.const_write = false;
++            } else {
++                info.dest = -1;
++                info.load_base = -1;
++            }
++            body.push_back(info);
++        }
++
++        // For each load, check whether its base register is loop-constant at
++        // the load site (cyclic last write is constant, or never written).
++        const size_t n = body.size();
++        for (size_t li_idx = 0; li_idx < n; li_idx++) {
++            const BodyInfo& li = body[li_idx];
++            if (!li.is_load || li.load_base < 0) {
++                continue;
++            }
++            bool base_const = true;
++            bool found_write = false;
++            for (size_t k = 1; k <= n; k++) {
++                const BodyInfo& bi = body[(li_idx + n - k) % n];
++                if (bi.dest == li.load_base) {
++                    found_write = true;
++                    base_const = bi.const_write;
++                    break;
++                }
++            }
++            // Never written in the loop body -> loop-invariant base.
++            if (found_write && !base_const) {
++                continue;
++            }
++            return true;
++        }
++        return false;
++    };
++
+     auto print_branch = [&](uint32_t branch_target) {
+         // If the branch target is outside the current function, check if it can be treated as a tail call.
+         if (branch_target < func.vram || branch_target >= func_vram_end) {
+@@ -373,14 +514,57 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  // generator.emit_branch_close();
                  return true;
              }
@@ -149,7 +399,47 @@ index c228433..ddaf438 100644
  
              fmt::print(stderr, "[Warn] Function {} is branching outside of the function (to 0x{:08X})\n", func.name, branch_target);
          }
-@@ -424,8 +445,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+ 
++        // Spin-wait ("poll") loops: a backward conditional branch whose loop
++        // body (from the target back to this branch, including the delay slot)
++        // contains no function calls and no stores, and reads at least one
++        // memory location whose address is loop-invariant. These are the
++        // game's "wait until flag/register changes" loops. Under the runtime's
++        // cooperative scheduler such a loop would spin forever and starve
++        // every other thread (notably the external-message drainer that must
++        // deliver the very event the loop is waiting for), so the generated
++        // code must yield each iteration. This is the same fix as the native
++        // func_80089A10_recomp reimplementation, but applied generically.
++        bool yield_in_poll_loop = false;
++        if (branch_target < instr_vram && branch_target >= func.vram) {
++            // Locate the loop-head instruction (the one at branch_target).
++            size_t head_index = instr_index;
++            while (head_index > 0 && instructions[head_index - 1].getVram() >= branch_target) {
++                head_index--;
++            }
++            if (head_index < instructions.size() && instructions[head_index].getVram() == branch_target) {
++                // Loop body = [head_index, instr_index + 2) (branch + delay slot).
++                const size_t body_end = std::min(instr_index + 2, instructions.size());
++                if (body_end > head_index) {
++                    yield_in_poll_loop = is_yield_poll_loop(head_index, body_end, branch_target);
++                }
++            }
++        }
++
+         if (!process_delay_slot(true)) {
+             return false;
+         }
+ 
++        if (yield_in_poll_loop) {
++            print_indent();
++            print_indent();
++            generator.emit_yield_self();
++        }
++
+         print_indent();
+         print_indent();
+         generator.emit_goto(fmt::format("L_{:08X}", branch_target));
+@@ -424,8 +608,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_read(rt);
                  break;
              default:
@@ -161,7 +451,7 @@ index c228433..ddaf438 100644
              }
              break;
          }
-@@ -438,11 +460,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -438,11 +623,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_write(rt);
                  break;
              default:
@@ -194,7 +484,7 @@ index c228433..ddaf438 100644
      // Arithmetic
      case InstrId::cpu_add:
      case InstrId::cpu_addu:
-@@ -518,6 +559,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -518,6 +722,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  print_indent();
                  generator.emit_return(context, func_index);
              }
@@ -213,3 +503,34 @@ index c228433..ddaf438 100644
              else {
                  fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
                  return false;
+diff --git a/src/symbol_lists.cpp b/src/symbol_lists.cpp
+index 9c8f27d..efcc565 100644
+--- a/src/symbol_lists.cpp
++++ b/src/symbol_lists.cpp
+@@ -28,6 +28,7 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
+     "osSpTaskStartGo",
+     "osSpTaskYield",
+     "osSpTaskYielded",
++    "osSpGetStatus",
+     "__osSpSetPc",
+     // Controller functions
+     "osContInit",
+@@ -64,6 +65,18 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
+     "osPiGetStatus",
+     "osEPiRawStartDma",
+     "osEPiReadIo",
++    // Game code reimplementations (OB64-specific)
++    // func_80089A10: the game busy-spins on the RSP task-done counter until it
++    // reaches zero. The runtime's cooperative scheduler cannot preempt a spinning
++    // thread, so this spin (pri 10) starves the external-message drainer (pri 5)
++    // that must deliver SP/DP completion events to decrement the counter -> boot
++    // deadlock after the first RSP task. Reimplemented as a yielding wait.
++    "func_80089A10",
++    // func_8008BC40: the game's DMA-request starter. The runtime's osCreatePiManager
++    // is an empty stub, so the game's PI globals are never initialized and the
++    // game's DMA never starts -> the streamed-code load deadlocks on its completion
++    // queue. Reimplemented as a synchronous ROM read (see librecomp pi.cpp).
++    "func_8008BC40",
+     // Flash saving functions
+     "osFlashInit",
+     "osFlashReadStatus",
