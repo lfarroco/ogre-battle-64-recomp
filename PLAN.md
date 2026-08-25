@@ -38,19 +38,24 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
   **compiles** against the runtime headers.
 - 🚧 **Phase 3 (first boot app) in progress**:
   - ✅ `app/` CMake project created (ultramodern + librecomp + RT64 + SDL2 +
-    `RecompiledFuncs`); **builds** on macOS (Intel + Metal toolchain).
+    `RecompiledFuncs`); **builds** on Linux (Ubuntu).
   - ✅ RT64 added as submodule (`tools/RT64`); all RT64 contrib submodules
     initialized.
   - ✅ Game entry wired: `rom_hash=0xbe6adaa5c3f8f7a9`, entrypoint
     `0x80070C00`/`recomp_entrypoint`, base overlays + streamed-code stubs.
   - ✅ Platform callbacks: SDL2 window/input/audio, error box, threads.
-  - ⬜ **Null renderer + stub RSP**: first boot validation (log VI swaps, boot
-    progress). RT64 integration follows once the RSP microcode is recompiled.
+  - ✅ **Null renderer + stub RSP**: first boot validation — the game now
+    **boots without crashing** (2026-08-24, session 3): 7 N64 threads start,
+    the VI thread swaps buffers at ~50-60 Hz, and the game runs its init.
+  - ✅ **Libultra bridging (first 3 batches)**: 24 libultra functions named in
+    `symbol_addrs.txt` so the runtime's native `osXxx_recomp` services replace
+    OB64's verbatim libultra (see `docs/LIBULTRA-BRIDGING.md`). Also fixed a
+    runtime bug in the initial 1MB DMA (sign-extension of the entrypoint).
+  - ⬜ Name the remaining boot-path libultra (`osCont*` family, timers) and get
+    the game to submit its first RSP task + set a real VI mode.
   - ⬜ RSP microcode recompilation (F3DEX/L3DEX/S2DEX/audio) — see
     `docs/guides/rsp-microcode.md`.
-  - ⬜ libultra/verbatim recomp bridging: OB64's libultra was recompiled verbatim
-    (generic symbol names), so runtime-native services (VI/AI/PI/threads) need
-    wiring. Plan + seed symbol table: `docs/LIBULTRA-BRIDGING.md`.
+  - ⬜ RT64 renderer integration (Linux/Vulkan recommended).
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 

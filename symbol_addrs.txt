@@ -1,3 +1,51 @@
 // Visit https://github.com/ethteck/splat/wiki/Adding-Symbols for documentation about this file
 entrypoint = 0x80070C00; // type:func
 main = 0x8007F880; // type:func
+
+// OB64 libultra address->name table (see docs/LIBULTRA-BRIDGING.md).
+// Batch 1 (2026-08-24): boot-critical functions, identified from the
+// disassembly (MMIO/cop0 fingerprints, standard libultra call patterns) and
+// verified against N64Recomp's reimplemented_funcs / the N64ModernRuntime
+// osXxx_recomp implementations. Each name must exist in the runtime or the
+// recompiled output won't link.
+
+osInitialize = 0x80098050;          // type:func
+osCreateThread = 0x80094860;        // type:func
+osStartThread = 0x80094A20;         // type:func
+osSetThreadPri = 0x80094950;        // type:func
+osGetThreadPri = 0x80094930;        // type:func
+osCreateMesgQueue = 0x80093570;     // type:func
+osCreateViManager = 0x80095220;     // type:func
+osCreatePiManager = 0x8008B8C0;     // type:func
+osCartRomInit = 0x8008BD30;         // type:func
+osViSetMode = 0x80095820;           // type:func
+osViSetSpecialFeatures = 0x80095610; // type:func
+osDpSetNextBuffer = 0x8009A630;     // type:func
+osGetCount = 0x8009A6E0;            // type:func
+__osSetFpcCsr = 0x8009A710;         // type:func
+osVirtualToPhysical = 0x80090780;   // type:func
+
+// Batch 2 (2026-08-24): message queues, audio, and framebuffer swap - needed to
+// get past the first game threads (which block on osRecvMesg/osSendMesg and
+// drive the audio + VI state). Identified from standard libultra patterns.
+osSendMesg = 0x800935A0;            // type:func
+osRecvMesg = 0x800936E0;            // type:func
+osAiGetLength = 0x8008C410;         // type:func
+osAiGetStatus = 0x8008C420;         // type:func
+osAiSetFrequency = 0x8008C430;      // type:func
+osViSwapBuffer = 0x800957D0;        // type:func
+osViGetCurrentFramebuffer = 0x800951A0; // type:func
+osViGetNextFramebuffer = 0x800951E0;    // type:func
+
+// Batch 3 (2026-08-24): interrupt mask, audio buffer submission, and the RSP
+// task family. Naming these makes the remaining verbatim MMIO helpers
+// (osSpGetStatus/osSpSetStatus/__osAiDeviceBusy) unreachable dead code.
+osSetIntMask = 0x8008B820;          // type:func
+osAiSetNextBuffer = 0x8008C550;     // type:func
+osSpTaskLoad = 0x80093A00;          // type:func
+osSpTaskStartGo = 0x80093C0C;       // type:func
+osSpTaskYield = 0x80093C40;         // type:func
+osSpTaskYielded = 0x80093C60;       // type:func
+
+
+

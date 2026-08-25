@@ -8,7 +8,7 @@ ROM dump (see below).
 
 ## Status
 
-The main code segment (3659 functions) has been fully recompiled to C. The runtime
+The main code segment (807 functions) has been fully recompiled to C. The runtime
 app (rendering, input, audio) is the next milestone. See [PLAN.md](PLAN.md) for the
 full plan, current status, and technical findings.
 

@@ -5,6 +5,59 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-24 (session 3) — First boot achieved: libultra bridging is working
+
+### Decision: name-based libultra replacement confirmed and applied (3 batches)
+
+Applied 24 names to `symbol_addrs.txt` (see `LIBULTRA-BRIDGING.md` "Progress").
+The boot path now runs the runtime's native `osXxx_recomp` services:
+`osInitialize`, `osCreateThread`/`osStartThread`/`osSetThreadPri`/
+`osGetThreadPri`, `osCreateMesgQueue`/`osSendMesg`/`osRecvMesg`,
+`osCreatePiManager`/`osCartRomInit`, `osSetIntMask`,
+`osAiGetLength`/`osAiGetStatus`/`osAiSetFrequency`/`osAiSetNextBuffer`,
+`osSpTaskLoad`/`osSpTaskStartGo`/`osSpTaskYield`/`osSpTaskYielded`,
+`osCreateViManager`/`osViSetMode`/`osViSetSpecialFeatures`/`osViSwapBuffer`/
+`osViGetCurrentFramebuffer`/`osViGetNextFramebuffer`, `osDpSetNextBuffer`,
+`osGetCount`, `__osSetFpcCsr`, `osVirtualToPhysical`.
+
+**Outcome:** the game **boots without crashing** on Linux — 7 N64 threads start,
+the null renderer swaps VI buffers at ~50-60 Hz, and the game runs its init.
+No MMIO shim (handoff option 3) was needed; naming the RSP-task family made the
+remaining verbatim MMIO readers (`osSpGetStatus`, `osSpSetStatus`,
+`__osAiDeviceBusy`, `osSiGetStatus`, `osDpGetStatus`) unreachable dead code.
+
+### Decision: fix the runtime's initial-1MB DMA sign-extension bug
+
+`recomp::init()` passed the entrypoint VRAM address to `do_rom_read` as a
+zero-extended `uint64_t`, but recompiled memory accesses expect sign-extended
+32-bit addresses (the `MEM_B`/`MEM_W` macros subtract `0xFFFFFFFF80000000`).
+The DMA wrote ~4 GiB past rdram, so the game's data section never loaded and a
+later verbatim VI helper null-deref'd. Fixed by sign-extending:
+
+```cpp
+recomp::do_rom_read(rdram, (gpr)(int32_t)entrypoint, 0x10001000, 0x100000);
+```
+
+This is a genuine N64ModernRuntime bug that other projects would hit with a
+high `0x800xxxxx` entrypoint; our fix stays local to the vendored runtime.
+
+### Decision: new analysis tool
+
+Added `tools/libultra_scan.py` — parses `asm/1060.s` and reports, per function:
+MMIO registers, cop0 registers, and direct callees. This replaces the one-off
+manual scans with a reproducible inventory.
+
+### Next session (see `docs/HANDOFF-2026-08-24.md` / `LIBULTRA-BRIDGING.md`)
+
+- Name the `osCont*` family (`osContInit` etc.) — the game may be waiting on
+  controller init; the game thread has not yet hit streamed-code stubs or
+  submitted RSP tasks in the observed window.
+- Watch for the first RSP task and the game's first real `osViSetMode`
+  (the null renderer currently shows the runtime's dummy framebuffers).
+
+---
+
+
 ## 2026-08-24 (session 2) — Libultra bridging: name-based replacement + platform decision
 
 ### Decision: adopt handoff Option 1 — name OB64's libultra functions in the ELF

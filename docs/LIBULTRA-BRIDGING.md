@@ -1,9 +1,8 @@
 # Libultra bridging plan (next milestone)
 
-Status: **planned** (2026-08-24, second session). This document captures the
-findings from the first boot investigation and the concrete plan for the next
-milestone: making the runtime's native `osXxx` services replace OB64's verbatim
-libultra, so the game can boot.
+Status: **in progress** (2026-08-24, third session on Linux). The game now boots
+with the null renderer and the runtime's native services — see "Progress" below.
+This document captures the plan and the identification work.
 
 The previous session's handoff (`HANDOFF-2026-08-24.md`) identified the problem;
 this document turns that into an actionable, staged plan with the seed data we
@@ -13,7 +12,7 @@ already have.
 
 ## TL;DR
 
-- The app builds and boots the runtime, but the game crashes with **SIGBUS** on
+- The app builds and boots the runtime, but the game crashed with **SIGBUS** on
   its first hardware access (`osSiGetStatus` reading `0xA4800018` from the
   rdram mapping at ~580 MiB, beyond the 512 MiB RW region).
 - Root cause: OB64's libultra was recompiled **verbatim** (generic
@@ -22,11 +21,85 @@ already have.
 - The fix (handoff Option 1): **name the libultra functions in the ELF** so
   N64Recomp's `reimplemented_funcs` matching kicks in and the game calls the
   runtime's native services.
-- The core work is **building the OB64 libultra address→name table**. We
-  already identified a seed set (~20 functions) from the disassembly; the rest
-  follow from MMIO/cop0 fingerprinting + reference matching + call-graph
-  closure.
+- **Progress (2026-08-24, session 3):** 24 functions named (3 batches), the
+  runtime's initial-1MB-DMA sign-extension bug fixed, and the game **boots
+  without crashing**: 7 N64 threads start, the VI thread swaps buffers at ~50-60
+  Hz, and the game runs its init (still before the first RSP task in the
+  observed window).
 - **This milestone is platform-independent** — it can be done on macOS or Linux.
+
+---
+
+## Progress (session 3, 2026-08-24)
+
+### Runtime fix: initial 1MB DMA
+
+`recomp::init()` passed the entrypoint VRAM address to `do_rom_read` as a
+**zero-extended** `uint64_t`, but the `MEM_B` macro (and all recompiled memory
+accesses) expects **sign-extended** 32-bit VRAM addresses. The DMA therefore
+wrote 4 GiB past rdram (into unrelated memory) and the game's data section was
+never loaded into rdram, which later caused a bogus null-deref in
+`func_800955C0`. Fix in `tools/N64ModernRuntime/librecomp/src/recomp.cpp`:
+
+```cpp
+recomp::do_rom_read(rdram, (gpr)(int32_t)entrypoint, 0x10001000, 0x100000);
+```
+
+(The IPL3-var writes in `init()` already use `int32_t` constants and were
+correct; only the DMA call was wrong.)
+
+### Confirmed libultra address→name table (applied to `symbol_addrs.txt`)
+
+| Addr | Name | Basis | Session |
+|---|---|---|---|
+| 0x80098050 | `osInitialize` | main's first call; PIF cart-ID read + SR/FPCSR setup | 3 |
+| 0x80094860 | `osCreateThread` | main's 2nd call; OSThread layout init | 3 |
+| 0x80094A20 | `osStartThread` | state 1/8→2, run queue | 3 |
+| 0x80094950 | `osSetThreadPri` | sets thread->pri (0x4), requeues if runnable | 3 |
+| 0x80094930 | `osGetThreadPri` | returns thread->pri (0x4) | 3 |
+| 0x80093570 | `osCreateMesgQueue` | self-ref queue pointers + count + msgBuf | 3 |
+| 0x800935A0 | `osSendMesg` | full-check + append at (first+valid) | 3 |
+| 0x800936E0 | `osRecvMesg` | empty+NOBLOCK check; blocks via __osRunningThread | 3 |
+| 0x8008B8C0 | `osCreatePiManager` | two mesg queues + thread create | 3 |
+| 0x8008BD30 | `osCartRomInit` | OSPiHandle init + PI bus timing | 3 |
+| 0x8008B820 | `__osSetIntMask`/`osSetIntMask` | MI_INTR_MASK + SR + __OSGlobalIntMask | 3 |
+| 0x8008C410 | `osAiGetLength` | reads AI_LEN | 3 |
+| 0x8008C420 | `osAiGetStatus` | reads AI_STATUS | 3 |
+| 0x8008C430 | `osAiSetFrequency` | 0x3F000000/0x4F000000 freq math, AI_DACRATE/BITRATE | 3 |
+| 0x8008C550 | `osAiSetNextBuffer` | __osAiDeviceBusy + osVirtualToPhysical + AI_DRAM_ADDR/LEN | 3 |
+| 0x80093A00 | `osSpTaskLoad` | bcopy + virt_to_phys + SP regs | 3 |
+| 0x80093C0C | `osSpTaskStartGo` | osSpGetStatus + osSpSetStatus | 3 |
+| 0x80093C40 | `osSpTaskYield` | osSpSetStatus | 3 |
+| 0x80093C60 | `osSpTaskYielded` | osSpGetStatus | 3 |
+| 0x80095220 | `osCreateViManager` | mesg queues + viMgrMain thread + event | 3 |
+| 0x80095820 | `osViSetMode` | VI regs 0xA4400004-34, 0x308-byte mode copy | 3 |
+| 0x80095610 | `osViSetSpecialFeatures` | feature-bit AND/ORs | 3 |
+| 0x800957D0 | `osViSwapBuffer` | sets framep (ctx+0x4), state bit 0x10 | 3 |
+| 0x800951A0 | `osViGetCurrentFramebuffer` | reads __osViCurrContext->framep | 3 |
+| 0x800951E0 | `osViGetNextFramebuffer` | reads __osViNextContext->framep | 3 |
+| 0x8009A630 | `osDpSetNextBuffer` | osDpGetStatus wait + DPC writes | 3 |
+| 0x8009A6E0 | `osGetCount` | `mfc0 $9` | 2 |
+| 0x8009A710 | `__osSetFpcCsr` | cfc1/ctc1 $31 | 2 |
+| 0x80090780 | `osVirtualToPhysical` | kseg0/kseg1 mask + range logic | 2 |
+| 0x8007F880 | `main` (renamed `main_recomp`) | — | — |
+
+Names in `symbol_addrs.txt`; the disassembly (`asm/1060.s`) now carries the
+labels; N64Recomp renames them to `<name>_recomp` and the runtime provides the
+implementations. **Naming the RSP-task family made the remaining verbatim MMIO
+helpers (`osSpGetStatus` 0x800939F0 / `osSpSetStatus` 0x8009A760 /
+`__osAiDeviceBusy` 0x80099BC0) unreachable dead code** — no MMIO shim needed.
+
+### Current boot state (verified on Linux)
+
+- Game boots; no SIGBUS/SEGV. 7 N64 threads start (main `func_8007F8E4`,
+  audio/event `func_80088F08`, RSP threads `func_80089200`/`func_800893C0`/
+  `func_80089358`, game `func_80071EB0`, and one more `func_8008AFE0`).
+- Null renderer logs `send_dummy_workload` + `update_screen` at ~50-60 Hz.
+- The game thread runs its init (calls `osAiSetFrequency`, creates more
+  threads) but has **not** yet hit the streamed-code stubs or submitted RSP
+  tasks in the observed window (~25 s) — it may be waiting on controller init
+  (`osContInit` not yet named) or in a long init. Next session: name the
+  `osCont*` family and watch for the first RSP task + real VI mode.
 
 ---
 
@@ -165,31 +238,38 @@ Iterate on failures in this likely order:
 
 ## Seed table (identified this session)
 
-| Addr | Likely function | Basis | Confidence |
-|---|---|---|---|
-| 0x80090140 | `osInvalI/DCache` | `cache 0x19` loop, 0x2000 chunking | high |
-| 0x80090780 | `osVirtualToPhysical` | kseg0/kseg1 mask/add range logic | high |
-| 0x80093060 | `bcopy` | memmove overlap → forward/backward copy | high |
-| 0x80093380 | `bzero` | swl/swr unaligned clear; called first by boot stub | high |
-| 0x800946C0 | SI family (`osContInit`/`__osSiRawStartDma`) | SI_STATUS&3 check + PIF DMA + cache-flush 0x40 | medium |
-| 0x8009A6D0 | cop0 Cause read (`mfc0 $13`) | | high |
-| 0x8009A6E0 | `osGetCount` (`mfc0 $9`) | in reimplemented set | high |
-| 0x8009A6F0 | `__osGetSR`/`osGetSR` (`mfc0 $12`) | | high |
-| 0x8009A700 | `osSetCompare` (`mtc0 $11`) | | high |
-| 0x8009A710 | `__osSetFpcCsr` (`cfc1/ctc1 $31`) | in reimplemented set | high |
-| 0x8009A720 | `__osSetSR` (`mtc0 $12`) | | medium |
-| 0x8009A730 | cop0 $18 (WatchLo) writer | | low |
-| 0x8009A740 | `osSpGetStatus` (SP_STATUS 0xA4040010 & 0x1C) | | high |
-| 0x8009A760 | `osSpSetStatus` (write SP_STATUS) | | high |
-| 0x8009A770 | `__osSpSetPc` (SP_STATUS&1 → SP_PC 0xA4080000) | in reimplemented set | high |
-| 0x8009C350 | `osDpGetStatus` (DPC_STATUS 0xA410000C) | | high |
-| 0x8009C370 | `osSiGetStatus` (SI_STATUS 0xA4800018 & 3) | | high |
-| 0x8009D3A0-3E0 | `fabs.d` / `fabs.s` / `sqrt.d` / `ceil.s` / `floor.s` | FP intrinsics | high |
+> Status update (session 3): the table in the "Progress" section above is the
+> current authoritative confirmed list. This original seed table is kept as the
+> identification record; entries that are now applied to `symbol_addrs.txt` are
+> marked ✔. The remaining entries are candidates for the `osCont*` family and
+> the thread/timer cluster (next session).
 
-Note: `osSiGetStatus`, `osSpGetStatus`, `osSpSetStatus`, `osDpGetStatus` are
-**not** in the reimplemented set — they stay verbatim. That is fine as long as
-nothing calls them; the reimplemented higher-level functions (e.g. `osContInit`,
-`osSpTask*`) bypass them. If game code calls them directly, handle per-case.
+| Addr | Likely function | Basis | Confidence | Status |
+|---|---|---|---|---|
+| 0x80090140 | `osInvalI/DCache` | `cache 0x19` loop, 0x2000 chunking | high | not yet named (dead after osInitialize) |
+| 0x80090780 | `osVirtualToPhysical` | kseg0/kseg1 mask/add range logic | high | ✔ named |
+| 0x80093060 | `bcopy` | memmove overlap → forward/backward copy | high | verbatim (fine) |
+| 0x80093380 | `bzero` | swl/swr unaligned clear; called first by boot stub | high | verbatim (fine) |
+| 0x800946C0 | `__osSiRawStartDma` | SI_STATUS&3 check + PIF DMA + cache-flush 0x40 | medium | not named (dead after osInitialize) |
+| 0x8009A6D0 | cop0 Cause read (`mfc0 $13`) | | high | not named (dead) |
+| 0x8009A6E0 | `osGetCount` (`mfc0 $9`) | in reimplemented set | high | ✔ named |
+| 0x8009A6F0 | `__osGetSR`/`osGetSR` (`mfc0 $12`) | | high | not named (dead) |
+| 0x8009A700 | `osSetCompare` (`mtc0 $11`) | | high | not named (no runtime def; verbatim is fine) |
+| 0x8009A710 | `__osSetFpcCsr` (`cfc1/ctc1 $31`) | in reimplemented set | high | ✔ named |
+| 0x8009A720 | `__osSetSR` (`mtc0 $12`) | | medium | not named (dead) |
+| 0x8009A730 | cop0 $18 (WatchLo) writer | | low | not named (dead) |
+| 0x8009A740 | `osSpGetStatus` (SP_STATUS 0xA4040010 & 0x1C) | | high | dead (RSP task family named) |
+| 0x8009A760 | `osSpSetStatus` (write SP_STATUS) | | high | dead (RSP task family named) |
+| 0x8009A770 | `__osSpSetPc` (SP_STATUS&1 → SP_PC 0xA4080000) | in reimplemented set | high | ✔ named |
+| 0x8009C350 | `osDpGetStatus` (DPC_STATUS 0xA410000C) | | high | dead (osDpSetNextBuffer named) |
+| 0x8009C370 | `osSiGetStatus` (SI_STATUS 0xA4800018 & 3) | | high | dead (osInitialize named) |
+| 0x8009D3A0-3E0 | `fabs.d` / `fabs.s` / `sqrt.d` / `ceil.s` / `floor.s` | FP intrinsics | high | verbatim (fine) |
+
+Note: the verbatim MMIO readers (`osSiGetStatus`, `osSpGetStatus`,
+`osSpSetStatus`, `osDpGetStatus`, `__osAiDeviceBusy`) are now **unreachable**
+because every caller is reimplemented. No MMIO shim was needed so far. If game
+code reaches one directly, handle per-case (name it + add a runtime stub, or add
+a narrow MMIO shim).
 
 ## Other MMIO-touching functions (candidate libultra, from the scan)
 
