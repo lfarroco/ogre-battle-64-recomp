@@ -63,8 +63,54 @@ segments:
       - [0x2E570, data]
       - { type: bss, vram: 0x800AEDB0 }
 
-  # Rest of the ROM is streamed on demand; no fixed vram mapping.
-  - type: bin
+  # Streamed overlay A (boot-resident): ROM 0x3F1B0 -> RAM 0x800E9C20. DMA'd
+  # by func_80071EB0 (func_8009DA50 dev=0x3F1B0 dest=0x800E9C20 size=0x1CD0);
+  # code 0x800E9C20..0x800EB0B0, data 0x800EB0B0..0x800EB8F0.
+  - name: streamedA
+    type: code
     start: 0x3F1B0
+    vram: 0x800E9C20
+    subsegments:
+      - [0x3F1B0, asm]
+      - [0x40640, data]
+
+  # Streamed overlay B (boot-resident): ROM 0x40E80 -> RAM 0x8016AF80. DMA'd by
+  # func_80071EB0 (func_8009DA50 dev=0x40E80 dest=0x8016AF80 size=0x265B0);
+  # code 0x8016AF80..0x80186330, data (DLs, pointer tables, Shift-JIS text)
+  # 0x80186330..0x80191530. Linked for this fixed RAM address (absolute pointers).
+  - name: streamedB
+    type: code
+    start: 0x40E80
+    vram: 0x8016AF80
+    subsegments:
+      - [0x40E80, asm]
+      - [0x5C230, data]
+
+  # Gap: streamed-code segment table + misc data (ROM 0x66E30..0x1CE040).
+  # No real vram; placed at its ROM address so it doesn't occupy RDRAM space.
+  - type: bin
+    start: 0x66E30
+    vram: 0x66E30
+
+  # Streamed overlay C (on-demand): ROM 0x1CE040 -> RAM 0x80197B90. Loaded by
+  # the game's streamed-code loader during the main loop (per the segment table
+  # at ROM 0x387C0; 0x80197B90 is reused by several overlays). Code
+  # 0x80197B90..0x801B8090, data (credits text, DLs, pointer tables)
+  # 0x801B8090..0x801BA550, bss 0x801BA550..0x801BA730.
+  - name: streamedC
+    type: code
+    start: 0x1CE040
+    vram: 0x80197B90
+    bss_size: 0x1E0
+    subsegments:
+      - [0x1CE040, asm]
+      - [0x1EE540, data]
+      - { type: bss, vram: 0x801BA550 }
+
+  # Rest of the ROM is streamed on demand (later overlays + assets); no fixed
+  # vram mapping.
+  - type: bin
+    start: 0x1F0A00
+    vram: 0x1F0A00
 
   - [0x2800000]

@@ -105,19 +105,148 @@ SECTIONS
     main_ROM_END = __romPos;
     main_VRAM_END = .;
 
-    _3F1B0_ROM_START = __romPos;
-    _3F1B0_VRAM = ADDR(._3F1B0);
-    ._3F1B0 : AT(_3F1B0_ROM_START) SUBALIGN(16)
+    streamedA_ROM_START = __romPos;
+    streamedA_VRAM = ADDR(.streamedA);
+    .streamedA 0x800E9C20 : AT(streamedA_ROM_START) SUBALIGN(16)
     {
         FILL(0x00000000);
-        _3F1B0_DATA_START = .;
-        build/assets/3F1B0.o(.data);
-        _3F1B0_DATA_END = .;
-        _3F1B0_DATA_SIZE = ABSOLUTE(_3F1B0_DATA_END - _3F1B0_DATA_START);
+        streamedA_TEXT_START = .;
+        build/asm/3F1B0.o(.text);
+        . = ALIGN(., 16);
+        streamedA_TEXT_END = .;
+        streamedA_TEXT_SIZE = ABSOLUTE(streamedA_TEXT_END - streamedA_TEXT_START);
+        streamedA_DATA_START = .;
+        build/asm/3F1B0.o(.data);
+        build/asm/data/40640.data.o(.data);
+        . = ALIGN(., 16);
+        streamedA_DATA_END = .;
+        streamedA_DATA_SIZE = ABSOLUTE(streamedA_DATA_END - streamedA_DATA_START);
+        streamedA_RODATA_START = .;
+        build/asm/3F1B0.o(.rodata);
+        . = ALIGN(., 16);
+        streamedA_RODATA_END = .;
+        streamedA_RODATA_SIZE = ABSOLUTE(streamedA_RODATA_END - streamedA_RODATA_START);
     }
-    __romPos += SIZEOF(._3F1B0);
-    _3F1B0_ROM_END = __romPos;
-    _3F1B0_VRAM_END = .;
+    streamedA_bss_VRAM = ADDR(.streamedA_bss);
+    .streamedA_bss (NOLOAD) : SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        streamedA_BSS_START = .;
+        build/asm/3F1B0.o(.bss);
+        . = ALIGN(., 16);
+        streamedA_BSS_END = .;
+        streamedA_BSS_SIZE = ABSOLUTE(streamedA_BSS_END - streamedA_BSS_START);
+    }
+    __romPos += SIZEOF(.streamedA);
+    __romPos = ALIGN(__romPos, 16);
+    . = ALIGN(., 16);
+    streamedA_ROM_END = __romPos;
+    streamedA_VRAM_END = .;
+
+    streamedB_ROM_START = __romPos;
+    streamedB_VRAM = ADDR(.streamedB);
+    .streamedB 0x8016AF80 : AT(streamedB_ROM_START) SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        streamedB_TEXT_START = .;
+        build/asm/40E80.o(.text);
+        . = ALIGN(., 16);
+        streamedB_TEXT_END = .;
+        streamedB_TEXT_SIZE = ABSOLUTE(streamedB_TEXT_END - streamedB_TEXT_START);
+        streamedB_DATA_START = .;
+        build/asm/40E80.o(.data);
+        build/asm/data/5C230.data.o(.data);
+        . = ALIGN(., 16);
+        streamedB_DATA_END = .;
+        streamedB_DATA_SIZE = ABSOLUTE(streamedB_DATA_END - streamedB_DATA_START);
+        streamedB_RODATA_START = .;
+        build/asm/40E80.o(.rodata);
+        . = ALIGN(., 16);
+        streamedB_RODATA_END = .;
+        streamedB_RODATA_SIZE = ABSOLUTE(streamedB_RODATA_END - streamedB_RODATA_START);
+    }
+    streamedB_bss_VRAM = ADDR(.streamedB_bss);
+    .streamedB_bss (NOLOAD) : SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        streamedB_BSS_START = .;
+        build/asm/40E80.o(.bss);
+        . = ALIGN(., 16);
+        streamedB_BSS_END = .;
+        streamedB_BSS_SIZE = ABSOLUTE(streamedB_BSS_END - streamedB_BSS_START);
+    }
+    __romPos += SIZEOF(.streamedB);
+    __romPos = ALIGN(__romPos, 16);
+    . = ALIGN(., 16);
+    streamedB_ROM_END = __romPos;
+    streamedB_VRAM_END = .;
+
+    _66E30_ROM_START = __romPos;
+    _66E30_VRAM = ADDR(._66E30);
+    ._66E30 0x66E30 : AT(_66E30_ROM_START) SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        _66E30_DATA_START = .;
+        build/assets/66E30.o(.data);
+        _66E30_DATA_END = .;
+        _66E30_DATA_SIZE = ABSOLUTE(_66E30_DATA_END - _66E30_DATA_START);
+    }
+    __romPos += SIZEOF(._66E30);
+    _66E30_ROM_END = __romPos;
+    _66E30_VRAM_END = .;
+
+    streamedC_ROM_START = __romPos;
+    streamedC_VRAM = ADDR(.streamedC);
+    .streamedC 0x80197B90 : AT(streamedC_ROM_START) SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        streamedC_TEXT_START = .;
+        build/asm/1CE040.o(.text);
+        . = ALIGN(., 16);
+        streamedC_TEXT_END = .;
+        streamedC_TEXT_SIZE = ABSOLUTE(streamedC_TEXT_END - streamedC_TEXT_START);
+        streamedC_DATA_START = .;
+        build/asm/1CE040.o(.data);
+        build/asm/data/1EE540.data.o(.data);
+        . = ALIGN(., 16);
+        streamedC_DATA_END = .;
+        streamedC_DATA_SIZE = ABSOLUTE(streamedC_DATA_END - streamedC_DATA_START);
+        streamedC_RODATA_START = .;
+        build/asm/1CE040.o(.rodata);
+        . = ALIGN(., 16);
+        streamedC_RODATA_END = .;
+        streamedC_RODATA_SIZE = ABSOLUTE(streamedC_RODATA_END - streamedC_RODATA_START);
+    }
+    streamedC_bss_VRAM = ADDR(.streamedC_bss);
+    .streamedC_bss (NOLOAD) : SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        streamedC_BSS_START = .;
+        build/asm/1CE040.o(.bss);
+        build/asm/data/1F0A00.bss.o(.bss);
+        . = ALIGN(., 16);
+        streamedC_BSS_END = .;
+        streamedC_BSS_SIZE = ABSOLUTE(streamedC_BSS_END - streamedC_BSS_START);
+    }
+    __romPos += SIZEOF(.streamedC);
+    __romPos = ALIGN(__romPos, 16);
+    . = ALIGN(., 16);
+    streamedC_ROM_END = __romPos;
+    streamedC_VRAM_END = .;
+
+    _1F0A00_ROM_START = __romPos;
+    _1F0A00_VRAM = ADDR(._1F0A00);
+    ._1F0A00 0x1F0A00 : AT(_1F0A00_ROM_START) SUBALIGN(16)
+    {
+        FILL(0x00000000);
+        _1F0A00_DATA_START = .;
+        build/assets/1F0A00.o(.data);
+        _1F0A00_DATA_END = .;
+        _1F0A00_DATA_SIZE = ABSOLUTE(_1F0A00_DATA_END - _1F0A00_DATA_START);
+    }
+    __romPos += SIZEOF(._1F0A00);
+    _1F0A00_ROM_END = __romPos;
+    _1F0A00_VRAM_END = .;
 
     /DISCARD/ :
     {

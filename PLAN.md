@@ -73,10 +73,48 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     DMA loads into its main loop (streamed functions stubbed). **Next wall:
     streamed-overlay relocation/recompilation = Phase 4.**
     (see `docs/HANDOFF-2026-08-25-session6.md`).
+  - ✅ **Phase 4 started — streamed overlays A+B+C recompiled (session 7)**:
+    - ✅ Determined the overlay format: each streamed overlay is **plain linked
+      MIPS code+data** DMA'd to a **fixed** RAM address; pointers inside are
+      already absolute for that address (no runtime relocation pass). The
+      boot-resident overlays are A (ROM 0x3F1B0 → RAM 0x800E9C20) and B
+      (ROM 0x40E80 → RAM 0x8016AF80); a third, C (ROM 0x1CE040 → RAM
+      0x80197B90), is loaded on-demand by the game's streamed loader (segment
+      table at ROM 0x387C0).
+    - ✅ `config.yaml` now disassembles A/B/C as code segments (+ data at
+      0x40640/0x5C230/0x1EE540); the bin gaps (0x66E30, 0x1F0A00) are pinned to
+      their ROM address so they don't occupy RDRAM VMA space. Overlay C needed
+      `bss_size` + a `.bss` subsegment for its 0x801BA550 tail.
+    - ✅ Recompiled together: 807 → ~1520 recompiled functions. Cross-overlay
+      absolute references (e.g. overlay B taking the address of overlay C's
+      `.L8019EE70`) are fixed by `tools/fix_cross_overlay_labels.sh`, wired into
+      the Makefile so it re-applies after every `splat split`.
+    - ✅ The app registers A+B+C via `load_overlays()` from the GameEntry
+      on_init callback (the runtime's `recomp::init()` now loads only the base
+      sections — a full 1MB load would register the overlays at wrong
+      addresses). **A DMA-hook approach was tried and reverted**: `load_overlays`
+      assumes whole-overlay DMAs, but OB64 streams in 0x200-byte chunks, which
+      produces an inverted bound range.
+    - ✅ Boot now passes the old `func_80075BC0` function-pointer-table crash
+      (the entry is a real recompiled overlay-B function that returns a valid
+      descriptor), and the game runs ~1520 real functions to load the next
+      overlay's data blocks before **spinning on N64 threads 1+3** (≈200% CPU).
+      No stub calls and no `get_function` hard-fail in the whole boot.
+    (see `docs/HANDOFF-2026-08-25-session7.md`).
   - ⬜ **Fix RT64's GBI match**: OB64's ucode is "F3DEX fifo 2.08" (short-
     format opcodes 0xDE/0xDF/0xE9...), which RT64's hash DB misidentifies as
     F3DEX2 (0xDE=G_DL). Add/force the correct GBI before real display lists
     flow (see `docs/guides/rsp-microcode.md` + session-5 handoff).
+- ⬜ Phase 4 next walls (session 7 findings):
+  - **The post-boot spin**: after loading the next streamed data blocks (the
+    `{4-byte size, data}` sequence driven by `func_80089F80` → the header/block
+    reads at ROM 0x213A2E4..0x21C3958 into RAM 0x801BD930, an overlay-D region),
+    N64 threads 1 and 3 busy-spin at ~95% CPU each. Candidates: the overlay D
+    init that should follow, or an audio/state flag that never flips.
+  - **Flaky VI-thread segfault** (`vi_thread_func` +732: reading
+    `next_state->mode->comRegs` with a garbage mode pointer) — likely the
+    known renderer-init flakiness; needs the mode/framebuffer race fixed.
+  - **RT64 GBI fix** (still pending) before real display lists.
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 

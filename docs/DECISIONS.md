@@ -5,6 +5,57 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-25 (session 7) — Phase 4: streamed overlays are plain linked code (no relocation); A+B+C recompiled and registered
+
+### Finding: the streamed overlays need no runtime relocation
+
+The session-6 handoff framed the next wall as "overlay relocation". That was
+wrong. OB64's streamed overlays are **plain linked MIPS code+data** DMA'd to a
+**fixed** RAM address (per the streamed-segment table at ROM `0x387C0`). All
+pointers inside them (function-pointer tables at e.g. ROM `0x65200`, RDP
+display lists, data tables) are absolute addresses already correct for that
+load address. The real problem was that overlay *functions* were log-and-return
+stubs, so the data structures they build at boot (e.g. the descriptor that
+`func_80075BC0` dispatches through) were never created, and the game read raw
+code bytes as function pointers (`0x3C028019` = `lui $v0, 0x8019`).
+
+### Decision: disassemble + recompile the overlays into the same ELF, register them eagerly
+
+- Added `streamedA` (ROM `0x3F1B0` → RAM `0x800E9C20`), `streamedB` (ROM
+  `0x40E80` → RAM `0x8016AF80`), and `streamedC` (ROM `0x1CE040` → RAM
+  `0x80197B90`) as splat `code` segments; bin gaps (`0x66E30`, `0x1F0A00`) are
+  pinned to their ROM address as VMA so they don't collide in RDRAM VMA space.
+- Recompiled the whole ELF together (807 → ~1520 functions). Cross-overlay
+  absolute references (overlay B takes the address of overlay C's
+  `.L8019EE70`) need the label exported globally; `tools/fix_cross_overlay_labels.sh`
+  re-applies that after every `splat split` (wired into the Makefile).
+- The app registers A+B+C via `load_overlays()` from the GameEntry
+  `on_init_callback`; the runtime's `recomp::init()` now loads only the base
+  sections (`entry`+`main`) so overlays aren't registered at the wrong
+  linear-mapped addresses (which would corrupt `section_addresses`, read by the
+  recompiled overlay code through `RELOC_HI16`/`LO16`).
+
+### Decision: a `load_overlays` DMA hook was tried and REVERTED
+
+Hooking `func_8008BC40_recomp` (the game's DMA request, reimplemented as a sync
+ROM read) to call `load_overlays(dev_off, dramAddr, size)` is the "obvious" way
+to register overlays as the game streams them. It fails for OB64 because the
+game streams in **0x200-byte chunks**: `load_overlays` computes a bound range
+from `rom`+`size`, and a chunk-sized range makes `lower_bound > upper_bound`
+(inverted), so the load loop walks off the end of the section table and
+segfaults. Registration therefore happens eagerly at boot instead.
+
+### Outcome
+
+The game now boots through the old `func_80075BC0` function-pointer-table crash
+and runs ~1520 real functions through the whole streamed-overlay load sequence
+before **spinning on N64 threads 1 and 3** after loading the next overlay's data
+blocks into RAM `0x801BD930`. No stub calls, no `get_function` hard-fail.
+Remaining: find that spin (overlay D at ROM `0x1F0A00` → RAM `0x801F7100` is the
+likely next recompilation target), fix the flaky VI-thread segfault, then the
+RT64 GBI fix.
+
+
 ## 2026-08-25 (session 6) — The boot stall was a scheduler busy-spin deadlock; three fixes unblock boot into the main loop
 
 ### Finding: "waits for a second RSP task" was wrong — the game thread busy-spins and starves the drainer

@@ -8,9 +8,9 @@ namespace ogre {
 // Must be called before recomp::start().
 void register_base_overlays();
 
-// Registers log-and-return stubs for streamed/overlay functions referenced by
-// the main segment. Must be called after init_overlays() has run, i.e. from
-// the GameEntry on_init_callback.
-void register_streamed_stubs();
+// Registers the recompiled boot streamed overlays (A/B/C) at their fixed load
+// addresses. Must be called after init_overlays() has run, i.e. from the
+// GameEntry on_init_callback.
+void register_streamed_overlays();
 
 }  // namespace ogre

@@ -31,6 +31,7 @@ clean:
 
 $(ELF): $(OBJS) $(BIN_FILES) $(LDSCRIPT) undefined_syms_auto.txt undefined_funcs_auto.txt
 	@mkdir -p $(dir $@)
+	@bash tools/fix_cross_overlay_labels.sh
 	$(LD) $(LDFLAGS) -T $(LDSCRIPT) -T undefined_syms_auto.txt \
 		-T undefined_funcs_auto.txt -T extra_syms.txt -o $@ $(OBJS) $(BIN_FILES)
 	@echo "==> linked $(ELF)"

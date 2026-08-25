@@ -69,9 +69,9 @@ int main(int argc, char** argv) {
     entry.game_id = std::u8string(ogre::GAME_ID);
     entry.entrypoint_address = ogre::ENTRYPOINT_ADDRESS;
     entry.entrypoint = recomp_entrypoint;
-    // Register streamed-code stubs after init_overlays() clears the function map.
+    // Register streamed overlays A/B/C after init_overlays() clears the map.
     entry.on_init_callback = [](uint8_t* rdram, recomp_context* ctx) {
-        ogre::register_streamed_stubs();
+        ogre::register_streamed_overlays();
     };
     // TODO: determine OB64's save hardware (Controller Pak / EEPROM / Flashram)
     // from the ROM's osPfs/osEeprom/osFlash call sites.
