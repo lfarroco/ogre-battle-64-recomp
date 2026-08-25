@@ -5,6 +5,68 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-25 (session 6) — The boot stall was a scheduler busy-spin deadlock; three fixes unblock boot into the main loop
+
+### Finding: "waits for a second RSP task" was wrong — the game thread busy-spins and starves the drainer
+
+The session-5 conclusion (callback slots at 0x800B9E84 all zero → the sync task's
+completion "does nothing" → the game waits for a second task) was **incorrect** on two
+counts:
+
+- The real callback-slot address is **0x800A9E84** (0x800B9E84 was a dump misrecord, off
+  by 0x10000). The type-4 slot is registered at boot (`func_8008A1B0` →
+  `func_800899D0(func_8008B110)`), and the sync task is **type 0**, which never dispatches
+  to any callback anyway — so "dispatch does nothing" is expected, not a bug.
+- The actual deadlock: after the sync task, the game thread enters `func_80089A10`, a tight
+  `bnez` spin on the task-done counter `D_800E79A4`. The runtime's cooperative scheduler
+  (higher priority numbers first) cannot preempt a spinning thread, so the spin (pri 10)
+  starves the external-message **drainer** (pri 5) that must deliver the SP/DP completion
+  events which eventually decrement the counter.
+
+### Decision: reimplement the spin (`func_80089A10`) as a yielding wait
+
+N64Recomp only emits its `pause_self` yield for *exact self-loops* (`j`/`b` to the
+instruction's own address); this spin branches to the *function start*, so it was compiled
+with no yield. Rather than special-casing the generator, we added `func_80089A10` to
+N64Recomp's `reimplemented_funcs` and implemented `func_80089A10_recomp` in the runtime:
+loop while `MEM_W(0, 0x800E79A4) != 0`, calling `wait_for_external_message` +
+`check_running_queue` each iteration. This lets the game thread itself drain the SP/DP
+completion events and hand off to the higher-priority RSP threads.
+
+### Finding: the game's PI manager is dead, so every DMA deadlocks
+
+`osCreatePiManager_recomp` is an **empty stub**. The game's verbatim `osCreatePiManager`
+(0x8008B8C0) — the only writer of `D_800AA400`/`D_800AA408` — is dead code. The game's
+DMA-request function `func_8008BC40` checks `D_800AA400` and bails when 0, so the blocking
+DMA helpers (`func_80089F80`, `func_8008A0F0`) wait forever on their completion queue; the
+first streamed-code load (`func_8009DA50`) deadlocks.
+
+### Decision: reimplement `func_8008BC40` (DMA request) as a synchronous ROM read
+
+`func_8008BC40_recomp` reads the game's `OSIoMesg` (mq@+4, dram@+8, dev@+0xC, size@+0x10),
+calls `recomp::do_rom_read`, and completes the request via `osSendMesg` so the caller's
+`osRecvMesg` returns immediately. One function fixes all game DMA paths without the PI
+thread. **Important**: the ROM copy must go through `recomp::do_rom_read` (which
+byte-swaps big-endian ROM bytes into host-order RDRAM words via `MEM_B`); a plain `memcpy`
+produces byte-swapped garbage pointers.
+
+### Decision: generic stub for not-yet-loaded streamed functions
+
+`get_function` now returns a logging no-op stub for unknown addresses in the streamed
+ranges (`0x8016A000..0x80200000`, `0x84000000..0x84200000`) instead of hard-failing. This
+lets boot reach the main loop. It is a bring-up measure; Phase 4 will replace the stubs
+with recompiled overlay functions.
+
+### Outcome
+
+The game now boots through the RSP pipeline, controllers, 703 streamed-overlay DMA loads,
+and into its main loop (18 distinct streamed functions called, all stubbed). The next
+crash is an **indirect call through a streamed-overlay function-pointer table that needs
+relocation** (`func_80075BC0` reads `*(u32*)(*(u32*)(0x800E8294))` = `0x3C028019`, a MIPS
+instruction, not a pointer). That is the start of **Phase 4 (overlay loading +
+recompilation)**. See `docs/HANDOFF-2026-08-25-session6.md`.
+
+
 ## 2026-08-25 (session 5) — RT64 renderer integrated; the boot stalls waiting for a second RSP task
 
 ### Decision: replace the null renderer with RT64 (Vulkan on Linux)

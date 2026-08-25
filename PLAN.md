@@ -63,12 +63,16 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     RT64/Vulkan renderer (`app/src/renderer.cpp`, window created with
     `SDL_WINDOW_VULKAN`). It initializes, presents frames at ~60 Hz, and the
     game boots through it (see `docs/HANDOFF-2026-08-25-session5.md`).
-  - ⬜ **Boot stalls after the first gfx task**: the game submits one F3DEX
-    "sync" task that completes correctly, but the task-done dispatch has zero
-    callbacks, so the game waits for a second task that never comes. Find who
-    submits task #2 (request queue `0x800E8B14`); then the game proceeds to
-    `func_8009DA50` (streamed DMA) and the streamed functions `0x800E9CEC`/
-    `0x800E9C20` — Phase 4 (overlay loading) starts there.
+  - ✅ **Boot stall diagnosed & fixed (session 6)**: the "stalls waiting for a
+    second task" was wrong — the game thread busy-spins (`func_80089A10`) and
+    starves the runtime's external-message drainer. Fixed by reimplementing the
+    spin as a yielding wait, reimplementing the game's DMA-request path
+    (`func_8008BC40`, whose PI-manager globals were dead) as a synchronous ROM
+    read, and fixing DMA byte order (must use `recomp::do_rom_read`). The game
+    now boots through the RSP pipeline, controllers, and 700+ streamed-overlay
+    DMA loads into its main loop (streamed functions stubbed). **Next wall:
+    streamed-overlay relocation/recompilation = Phase 4.**
+    (see `docs/HANDOFF-2026-08-25-session6.md`).
   - ⬜ **Fix RT64's GBI match**: OB64's ucode is "F3DEX fifo 2.08" (short-
     format opcodes 0xDE/0xDF/0xE9...), which RT64's hash DB misidentifies as
     F3DEX2 (0xDE=G_DL). Add/force the correct GBI before real display lists
