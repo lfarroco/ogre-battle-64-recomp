@@ -6,6 +6,10 @@ Static recompilation of the N64 game *Ogre Battle 64: Person of Lordly Caliber*
 **This repository contains no copyrighted game data.** You must supply your own
 ROM dump (see below).
 
+## AI Disclaimer
+
+This work in this project was mostly performed by the DeepSeek v4 Flash model.
+
 ## Status
 
 The main code segment (807 functions) has been fully recompiled to C. The runtime
