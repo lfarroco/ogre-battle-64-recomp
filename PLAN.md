@@ -120,6 +120,23 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     array at `0x803fefa0` (`D_801B81D0`) has a garbage `[0x34]` (varies per
     run) → address wraps → SIGSEGV. Array is zeroed at alloc; root cause open
     (leads in `docs/HANDOFF-2026-08-25-session8.md`).
+  - ✅ **The `func_8019FC68` crash is FIXED (session 9)** — root cause was a
+    recompilation bug, not the game: OB64's KMC compiler merges identical
+    epilogues into a separate symbol the preceding function falls through into
+    (e.g. `func_8019ABC4` falls into `func_8019AF0C`), and N64Recomp never ran
+    the shared epilogue, so callee-saved registers and `$sp` were left
+    clobbered. N64Recomp now emits fall-through tail calls
+    (`next_func(rdram, ctx); return;`) when a function's code falls off the end
+    into the next function, and processes its static functions to a fixpoint
+    (registering them by address). See
+    `docs/HANDOFF-2026-08-25-session9.md`.
+  - 🚧 **Boot now reaches real rendering** — after the fix, boot passes the
+    title-screen DL build, runs ~1528 PI DMAs / 64 RSP tasks (including new
+    `type=1` tasks), and RT64 renders frames. **Next wall:** crash in the RT64
+    render thread calling the Intel Haswell Vulkan driver
+    (`libvulkan_intel_hasvk.so`) inside `submitRasterScene` — may be the
+    long-standing flaky renderer race, an RT64 GBI issue, or a driver bug
+    (leads in the session-9 handoff).
   - **Flaky renderer-init segfault** (before any game code; doesn't reproduce
     under gdb) — likely the known renderer-init flakiness; needs the
     mode/framebuffer race fixed.

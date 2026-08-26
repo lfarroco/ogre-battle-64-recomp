@@ -5,7 +5,54 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-25 (session 9) — The `func_8019FC68` DL-build crash was a recompilation bug; N64Recomp now emits fall-through tail calls; boot reaches real rendering
+
+### Finding: KMC shared-epilogue functions lose their register restores
+
+OB64's compiler (KMC) merges identical function epilogues into a separate symbol
+that the preceding function **falls through into**. `func_8019ABC4`'s epilogue
+ends with `lw $ra/$fp/$s7/$s6` at `0x8019AEFC..0x8019AF08` and then falls into
+`func_8019AF0C`, a separately-symbolized shared epilogue that restores
+`$s5..$s0` and `$sp`. N64Recomp treated the fall-through as the end of
+`func_8019ABC4` and never ran the shared epilogue, so the callee-saved
+registers and `$sp` were left clobbered. In the title path,
+`func_8019FC68` (session-8 crash site) captured a heap pointer in `s0`, called
+`func_8019ABC4`, then `free(s0)` — freeing a garbage value (`0x801bc666`) and
+SIGSEGV'ing in `func_800712C4`.
+
+### Decision: emit a fall-through tail call for shared-epilogue chains
+
+`N64Recomp::recompile_function_impl` now, after processing a function's
+instructions, emits `next_func(rdram, ctx); return;` when the function's code can
+fall off the end of its range and the next function starts exactly at
+`func.vram + words*4`. "Can fall off the end" means the last instruction is not
+`jr`/`j`/`syscall`/`break`/`eret` (nor the delay slot of one of those, which
+already emitted a return). Detected 23 genuine cases across all segments.
+
+### Decision: process N64Recomp static functions to a fixpoint and register them by address
+
+Static functions (created for cross-boundary branches) were neither registered in
+`context.functions_by_vram` nor created in an order that guaranteed a static's
+fall-through target (another static) existed before it was recompiled. `main.cpp`
+now registers statics in `functions_by_vram` and processes them in a two-phase
+fixpoint loop (create all known statics, then recompile the batch, repeat until no
+new statics). This fixed `static_16_8019AB84` → `static_16_8019AB94` (a shared
+epilogue chunk), which was otherwise lost. Total fall-through tail calls: 35.
+
+### Outcome
+
+Boot now passes the title-screen DL build (the `func_8019FC68` crash is gone),
+runs ~1528 PI DMAs and 64 RSP tasks (including new `type=1` tasks), and reaches
+real RT64 frame rendering. The next crash is in the **RT64 render thread** calling
+`libvulkan_intel_hasvk.so` (the Intel Haswell Vulkan driver) inside
+`FramebufferRenderer::submitRasterScene` — see
+`docs/HANDOFF-2026-08-25-session9.md` for leads (driver vs. RT64 GBI vs. the
+pre-existing flaky renderer-init race).
+
+
+
 ## 2026-08-25 (session 8) — The post-boot spin was a cooperative-scheduler deadlock; N64Recomp now emits `yield_self` for poll loops
+
 
 ### Finding: Thread 3's `.L80075FB8` spin on `D_800C4C26` starves the drainer (deadlock)
 

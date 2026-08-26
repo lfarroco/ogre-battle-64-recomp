@@ -194,7 +194,7 @@ index 1066aff..c8e03be 100644
  
  N64Recomp::RelocType reloc_type_from_name(const std::string& reloc_type_name) {
 diff --git a/src/main.cpp b/src/main.cpp
-index 669c4a1..0d49b44 100644
+index 669c4a1..0362283 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -156,6 +156,10 @@ std::vector<std::string> reloc_names {
@@ -208,8 +208,120 @@ index 669c4a1..0d49b44 100644
  };
  
  void dump_context(const N64Recomp::Context& context, const std::unordered_map<uint16_t, std::vector<N64Recomp::DataSymbol>>& data_syms, const std::filesystem::path& func_path, const std::filesystem::path& data_path) {
+@@ -811,8 +815,26 @@ int main(int argc, char** argv) {
+         std::vector<uint32_t> section_statics{};
+         section_statics.assign(statics_set.begin(), statics_set.end());
+ 
+-        for (size_t static_func_index = 0; static_func_index < section_statics.size(); static_func_index++) {
+-            uint32_t static_func_addr = section_statics[static_func_index];
++        // Static functions are discovered while recompiling (a branch to a
++        // non-function address creates one), so a single pass cannot guarantee
++        // that a static function's fall-through target (another static, e.g. a
++        // shared epilogue) exists when it is recompiled. Process them in a
++        // fixpoint loop: each iteration first creates Function objects for every
++        // currently-known static address (registering them by address), then
++        // recompiles that batch; any statics discovered during recompilation are
++        // handled by the next iteration.
++        std::unordered_set<uint32_t> created_statics{};
++        std::unordered_map<uint32_t, size_t> static_func_indices{};
++        size_t next_to_recompile = 0;
++        while (next_to_recompile < section_statics.size()) {
++            // Phase 1: create Function objects for all statics up to the current end.
++            size_t batch_end = section_statics.size();
++            for (size_t static_func_index = next_to_recompile; static_func_index < batch_end; static_func_index++) {
++                uint32_t static_func_addr = section_statics[static_func_index];
++                if (created_statics.contains(static_func_addr)) {
++                    continue;
++                }
++                created_statics.insert(static_func_addr);
+ 
+             // Determine the end of this static function
+             uint32_t cur_func_end = static_cast<uint32_t>(section.size + section.ram_addr);
+@@ -852,43 +874,57 @@ int main(int argc, char** argv) {
+                 static_cast<uint16_t>(section_index),
+                 false
+             );
++            // Register the static function by address so other recompilation
++            // passes (tail calls, fall-through into the next function, jal
++            // resolution) can find it. Without this, a function that falls
++            // through into a static epilogue has no way to know it exists.
++            context.functions_by_vram[static_func_addr].push_back(new_func_index);
++            static_func_indices[static_func_addr] = new_func_index;
+             const N64Recomp::Function& new_func = context.functions[new_func_index];
+ 
+             fmt::print(func_header_file,
+                        "void {}(uint8_t* rdram, recomp_context* ctx);\n", new_func.name);
+-
+-            bool result;
+-            size_t prev_num_statics = static_funcs_by_section[new_func.section_index].size();
+-            if (config.single_file_output || config.functions_per_output_file > 1) {
+-                result = N64Recomp::recompile_function(context, new_func_index, current_output_file, static_funcs_by_section, false);
+-                if (!config.single_file_output) {
+-                    cur_file_function_count++;
+-                    if (cur_file_function_count >= config.functions_per_output_file) {
+-                        open_new_output_file();
++            } // end Phase 1 (create)
++
++            // Phase 2: recompile the newly-created statics.
++            for (size_t static_func_index = next_to_recompile; static_func_index < batch_end; static_func_index++) {
++                uint32_t static_func_addr = section_statics[static_func_index];
++                size_t new_func_index = static_func_indices[static_func_addr];
++
++                size_t prev_num_statics = static_funcs_by_section[section_index].size();
++                bool result;
++                if (config.single_file_output || config.functions_per_output_file > 1) {
++                    result = N64Recomp::recompile_function(context, new_func_index, current_output_file, static_funcs_by_section, false);
++                    if (!config.single_file_output) {
++                        cur_file_function_count++;
++                        if (cur_file_function_count >= config.functions_per_output_file) {
++                            open_new_output_file();
++                        }
+                     }
+                 }
+-            }
+-            else {
+-                result = recompile_single_function(context, new_func_index, config.recomp_include, config.output_func_path / (new_func.name + ".c"), static_funcs_by_section);
+-            }
++                else {
++                    result = recompile_single_function(context, new_func_index, config.recomp_include, config.output_func_path / (context.functions[new_func_index].name + ".c"), static_funcs_by_section);
++                }
+ 
+-            // Add any new static functions that were found while recompiling this one.
+-            size_t cur_num_statics = static_funcs_by_section[new_func.section_index].size();
+-            if (cur_num_statics != prev_num_statics) {
+-                for (size_t new_static_index = prev_num_statics; new_static_index < cur_num_statics; new_static_index++) {
+-                    uint32_t new_static_vram = static_funcs_by_section[new_func.section_index][new_static_index];
++                // Add any new static functions that were found while recompiling this one.
++                size_t cur_num_statics = static_funcs_by_section[section_index].size();
++                if (cur_num_statics != prev_num_statics) {
++                    for (size_t new_static_index = prev_num_statics; new_static_index < cur_num_statics; new_static_index++) {
++                        uint32_t new_static_vram = static_funcs_by_section[section_index][new_static_index];
+ 
+-                    if (!statics_set.contains(new_static_vram)) {
+-                        statics_set.emplace(new_static_vram);
+-                        section_statics.push_back(new_static_vram);
++                        if (!statics_set.contains(new_static_vram)) {
++                            statics_set.emplace(new_static_vram);
++                            section_statics.push_back(new_static_vram);
++                        }
+                     }
+                 }
+-            }
+ 
+-            if (result == false) {
+-                fmt::print(stderr, "Error recompiling {}\n", new_func.name);
+-                std::exit(EXIT_FAILURE);
++                if (result == false) {
++                    fmt::print(stderr, "Error recompiling {}\n", context.functions[new_func_index].name);
++                    std::exit(EXIT_FAILURE);
++                }
+             }
++            next_to_recompile = batch_end;
+         }
+     }
+ 
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..def7e30 100644
+index c228433..1a5b2d4 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
 @@ -34,6 +34,7 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
@@ -503,6 +615,62 @@ index c228433..def7e30 100644
              else {
                  fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
                  return false;
+@@ -864,6 +1080,55 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+             // Advance the vram address by the size of one instruction
+             vram += 4;
+         }
++
++        // A function whose code falls off the end of its instruction range into
++        // the next known function must tail-call it. Compilers (e.g. KMC) merge
++        // identical epilogues into a separate symbol that the preceding function
++        // falls into; without this, the callee-saved register restores and stack
++        // cleanup in that epilogue never run and the caller's registers get
++        // clobbered (observed as a later crash in func_8019FC68). Only the last
++        // instruction being something that can fall through matters; returns,
++        // unconditional jumps, syscalls and breaks already end the flow, and if
++        // the last instruction is the delay slot of one of those (the usual
++        // `jr $ra` / `addiu $sp, $sp, N` epilogue) the return was already emitted.
++        if (!instructions.empty()) {
++            const auto& last_instr = instructions.back();
++            InstrId last_id = last_instr.getUniqueId();
++            bool last_ends_flow = last_id == InstrId::cpu_jr || last_id == InstrId::cpu_j ||
++                                  last_id == InstrId::cpu_syscall || last_id == InstrId::cpu_break ||
++                                  last_id == InstrId::cpu_eret;
++            if (!last_ends_flow && instructions.size() >= 2) {
++                // The last instruction may be the delay slot of a flow-ending
++                // instruction (e.g. `jr $ra` + `addiu $sp, $sp, N`).
++                InstrId prev_id = instructions[instructions.size() - 2].getUniqueId();
++                last_ends_flow = prev_id == InstrId::cpu_jr || prev_id == InstrId::cpu_j ||
++                                 prev_id == InstrId::cpu_syscall || prev_id == InstrId::cpu_break ||
++                                 prev_id == InstrId::cpu_eret;
++            }
++            if (!last_ends_flow) {
++                uint32_t func_end_vram = func.vram + func.words.size() * 4;
++                auto next_find = context.functions_by_vram.find(func_end_vram);
++                if (next_find != context.functions_by_vram.end()) {
++                    // Pick the match in the same section (the only one that is
++                    // guaranteed to be loaded alongside this function).
++                    for (size_t next_func_index : next_find->second) {
++                        const auto& next_func = context.functions[next_func_index];
++                        if (next_func.words.empty() || next_func.ignored || next_func.stubbed) {
++                            continue;
++                        }
++                        if (next_func.section_index != func.section_index) {
++                            continue;
++                        }
++                        fmt::print("[Info] Fall-through tail call in {} to {}\n", func.name, next_func.name);
++                        fmt::print(output_file, "    ");
++                        generator.emit_function_call(context, next_func_index);
++                        fmt::print(output_file, "    ");
++                        generator.emit_return(context, func_index);
++                        break;
++                    }
++                }
++            }
++        }
+     }
+ 
+     // Terminate the function
 diff --git a/src/symbol_lists.cpp b/src/symbol_lists.cpp
 index 9c8f27d..efcc565 100644
 --- a/src/symbol_lists.cpp
