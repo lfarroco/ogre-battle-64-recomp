@@ -31,6 +31,21 @@ cmake --build build-app -j
 
 The executable is written to `build-app/ogrebattle64`.
 
+### Build variants
+
+| Variant | Configure command | Renderer |
+|---|---|---|
+| Native + RT64 (default) | `cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release` | RT64 (Vulkan/Metal/D3D12) |
+| Native + null renderer | `cmake -S app -B build-null -DCMAKE_BUILD_TYPE=Release -DOGRE_USE_RT64=OFF` | `null_renderer.cpp` (no GPU, no RT64) |
+| WebAssembly (Emscripten) | `emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release` | null renderer (no RT64) |
+
+The null-renderer variant is useful for bring-up/CI on machines without a
+working GPU driver; the Emscripten variant is the browser port
+(`docs/WEB-PORT.md`) — it needs the Emscripten SDK (`brew install emscripten`),
+is built with `cmake --build build-wasm -j`, and is served per
+`docs/WEB-PORT-DEPLOYMENT.md` (cross-origin isolation headers required for
+pthreads).
+
 ## Running
 
 ```sh

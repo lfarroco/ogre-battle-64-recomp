@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ogre Battle 64 Recompilation</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #14161a; color: #d7dae0; margin: 0; padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  #rom { margin-bottom: 16px; }
+  #rom input { margin-left: 8px; }
+  #status {
+    background: #0c0e11; border: 1px solid #2a2e35; border-radius: 6px;
+    padding: 12px; height: 60vh; overflow-y: auto; white-space: pre-wrap;
+    font-size: 13px; line-height: 1.5;
+  }
+  .muted { color: #6b7280; }
+</style>
+</head>
+<body>
+<h1>Ogre Battle 64: Person of Lordly Caliber — Recompilation (WebAssembly)</h1>
+<p class="muted">
+  Bring-your-own-ROM feasibility build: the recompiled game + N64ModernRuntime
+  running under Emscripten with a <b>null renderer</b> (no graphics yet).
+  Your ROM is read locally by the browser and never leaves this machine.
+</p>
+<div id="rom">
+  <label>Select ROM (big-endian <code>.z64</code> dump):
+    <input type="file" id="rom-input" accept=".z64,.n64,.v64,.bin">
+  </label>
+</div>
+<pre id="status">Initializing...</pre>
+
+<!--
+  Path to the Emscripten build output. Override before this script by setting
+  OGRE_WASM_DIR. Default: the repo build-wasm directory when serving the repo
+  root (see docs/WEB-PORT-DEPLOYMENT.md).
+-->
+<script>
+  var OGRE_WASM_DIR = OGRE_WASM_DIR || "../../build-wasm/";
+  var Module = {
+    onRuntimeInitialized: function () {
+      document.getElementById("status").textContent += "[web] WASM runtime initialized. Select a ROM to begin.\n";
+    },
+    print: function (text) {
+      document.getElementById("status").textContent += "[stdout] " + text + "\n";
+    },
+    printErr: function (text) {
+      document.getElementById("status").textContent += "[stderr] " + text + "\n";
+    }
+  };
+  // Load the emscripten glue (it references Module defined above).
+  document.write('<script src="' + OGRE_WASM_DIR + 'ogrebattle64.js"><\/script>');
+</script>
+<script src="web.js"></script>
+</body>
+</html>

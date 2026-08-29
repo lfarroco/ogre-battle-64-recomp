@@ -12,6 +12,11 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 | [HANDOFF-2026-08-25-session7.md](HANDOFF-2026-08-25-session7.md) | Session 7 handoff: Phase 4 begins — overlays are plain linked code (no relocation); streamed overlays A+B+C recompiled and registered; boot passes the old crash and reaches the next overlay's data load, then spins on N64 threads 1+3. |
 | [HANDOFF-2026-08-25-session8.md](HANDOFF-2026-08-25-session8.md) | Session 8 handoff: the post-boot spin was a cooperative-scheduler deadlock; N64Recomp now emits `yield_self` for poll loops; boot reaches the title-screen display-list build (next crash in `func_8019FC68`). |
 | [HANDOFF-2026-08-25-session9.md](HANDOFF-2026-08-25-session9.md) | Session 9 handoff: the `func_8019FC68` crash was a KMC shared-epilogue recompilation bug; N64Recomp now emits fall-through tail calls (with a static-function fixpoint); boot reaches real RT64 rendering (next crash in the RT64/Vulkan render thread). |
+| [HANDOFF-2026-08-29-session10.md](HANDOFF-2026-08-29-session10.md) | Session 10 handoff: VI-thread crash fixed; GBI question resolved (F3DEX2 auto-detection is correct); stable under Lavapipe. |
+| [HANDOFF-2026-08-29-session11.md](HANDOFF-2026-08-29-session11.md) | Session 11 handoff: WebAssembly port kickoff — RT64 optional, null renderer, web shell; native macOS boot fixed (stale ELF/funcs, missing runtime fixes, osSpGetStatus bridge, broken debug probe). |
+| [WEB-PORT.md](WEB-PORT.md) | The WebAssembly / browser port plan (null renderer first, renderer decision later). |
+| [WEB-PORT-REPORT.md](WEB-PORT-REPORT.md) | Web port implementation report (audit, RT64 deps, Emscripten issues, file changes). |
+| [WEB-PORT-DEPLOYMENT.md](WEB-PORT-DEPLOYMENT.md) | Browser deployment requirements (COOP/COEP headers, local server). |
 | [LIBULTRA-BRIDGING.md](LIBULTRA-BRIDGING.md) | The libultra-bridging plan: findings, identification methodology, seed symbol table, staged steps. |
 | [guides/app-build.md](guides/app-build.md) | How to build and run the PC port app. |
 | [guides/app-architecture.md](guides/app-architecture.md) | App structure, runtime flow, callback responsibilities. |

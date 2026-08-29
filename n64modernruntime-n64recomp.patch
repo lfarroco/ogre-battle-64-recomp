@@ -1,3 +1,162 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 55f10a5..67ab81b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -181,14 +181,23 @@ target_link_libraries(RecompModMerger N64Recomp)
+ project(LiveRecomp)
+ add_library(LiveRecomp)
+ 
+-target_sources(LiveRecomp PRIVATE
+-    ${CMAKE_CURRENT_SOURCE_DIR}/LiveRecomp/live_generator.cpp
+-    ${CMAKE_CURRENT_SOURCE_DIR}/lib/sljit/sljit_src/sljitLir.c
+-)
+-
+-target_include_directories(LiveRecomp PRIVATE
+-    ${CMAKE_CURRENT_SOURCE_DIR}/lib/sljit/sljit_src
+-)
++if (EMSCRIPTEN)
++    # The live recompiler generates native machine code via sljit, which does
++    # not exist on WebAssembly. Use a no-op stub so the runtime's mod system
++    # still compiles (code mods simply fail to load).
++    target_sources(LiveRecomp PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/LiveRecomp/live_generator_wasm.cpp
++    )
++else()
++    target_sources(LiveRecomp PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/LiveRecomp/live_generator.cpp
++        ${CMAKE_CURRENT_SOURCE_DIR}/lib/sljit/sljit_src/sljitLir.c
++    )
++
++    target_include_directories(LiveRecomp PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/lib/sljit/sljit_src
++    )
++endif()
+ 
+ target_link_libraries(LiveRecomp N64Recomp)
+ 
+diff --git a/LiveRecomp/live_generator_wasm.cpp b/LiveRecomp/live_generator_wasm.cpp
+new file mode 100644
+index 0000000..9647d5a
+--- /dev/null
++++ b/LiveRecomp/live_generator_wasm.cpp
+@@ -0,0 +1,117 @@
++// No-op LiveRecomp implementation for WebAssembly builds.
++//
++// The live recompiler generates native machine code via sljit, which cannot
++// run on WebAssembly. This stub provides the same symbols so librecomp's mod
++// system compiles unchanged; loading code mods simply fails
++// (recompile_function_live returns false, so generated handles are never
++// marked good). live_recompiler_init() is a no-op.
++//
++// Only compiled when EMSCRIPTEN is defined (see N64Recomp/CMakeLists.txt).
++
++#include <cstdint>
++#include <cstdio>
++#include <ostream>
++#include <span>
++#include <vector>
++
++#include "recompiler/live_recompiler.h"
++
++// Defined here (instead of the real implementation) so the unique_ptr member
++// in LiveGenerator has a complete type for its destructor.
++namespace N64Recomp {
++    struct LiveGeneratorContext {};
++}
++
++namespace N64Recomp {
++
++void live_recompiler_init() {
++    fprintf(stderr, "[LiveRecomp] the live recompiler is unavailable in this (wasm) build; code mods cannot be loaded.\n");
++}
++
++LiveGenerator::LiveGenerator(size_t num_funcs, const LiveGeneratorInputs& inputs) {
++    (void)num_funcs;
++    (void)inputs;
++}
++
++LiveGenerator::~LiveGenerator() = default;
++
++LiveGeneratorOutput LiveGenerator::finish() {
++    return LiveGeneratorOutput{};
++}
++
++// All emit*/process* methods are no-ops; recompile_function_live() always
++// returns false so no generated code is ever considered good.
++void LiveGenerator::process_binary_op(const BinaryOp& op, const InstructionContext& ctx) const { (void)op; (void)ctx; }
++void LiveGenerator::process_unary_op(const UnaryOp& op, const InstructionContext& ctx) const { (void)op; (void)ctx; }
++void LiveGenerator::process_store_op(const StoreOp& op, const InstructionContext& ctx) const { (void)op; (void)ctx; }
++void LiveGenerator::emit_function_start(const std::string& function_name, size_t func_index) const { (void)function_name; (void)func_index; }
++void LiveGenerator::emit_function_end() const {}
++void LiveGenerator::emit_function_call_lookup(uint32_t addr) const { (void)addr; }
++void LiveGenerator::emit_function_call_by_register(int reg) const { (void)reg; }
++void LiveGenerator::emit_function_call_reference_symbol(const Context& context, uint16_t section_index, size_t symbol_index, uint32_t target_section_offset) const { (void)context; (void)section_index; (void)symbol_index; (void)target_section_offset; }
++void LiveGenerator::emit_function_call(const Context& context, size_t function_index) const { (void)context; (void)function_index; }
++void LiveGenerator::emit_named_function_call(const std::string& function_name) const { (void)function_name; }
++void LiveGenerator::emit_goto(const std::string& target) const { (void)target; }
++void LiveGenerator::emit_label(const std::string& label_name) const { (void)label_name; }
++void LiveGenerator::emit_jtbl_addend_declaration(const JumpTable& jtbl, int reg) const { (void)jtbl; (void)reg; }
++void LiveGenerator::emit_branch_condition(const ConditionalBranchOp& op, const InstructionContext& ctx) const { (void)op; (void)ctx; }
++void LiveGenerator::emit_branch_close() const {}
++void LiveGenerator::emit_switch(const Context& recompiler_context, const JumpTable& jtbl, int reg) const { (void)recompiler_context; (void)jtbl; (void)reg; }
++void LiveGenerator::emit_case(int case_index, const std::string& target_label) const { (void)case_index; (void)target_label; }
++void LiveGenerator::emit_switch_error(uint32_t instr_vram, uint32_t jtbl_vram) const { (void)instr_vram; (void)jtbl_vram; }
++void LiveGenerator::emit_switch_close() const {}
++void LiveGenerator::emit_return(const Context& context, size_t func_index) const { (void)context; (void)func_index; }
++void LiveGenerator::emit_check_fr(int fpr) const { (void)fpr; }
++void LiveGenerator::emit_check_nan(int fpr, bool is_double) const { (void)fpr; (void)is_double; }
++void LiveGenerator::emit_cop0_status_read(int reg) const { (void)reg; }
++void LiveGenerator::emit_cop0_status_write(int reg) const { (void)reg; }
++void LiveGenerator::emit_cop1_cs_read(int reg) const { (void)reg; }
++void LiveGenerator::emit_cop1_cs_write(int reg) const { (void)reg; }
++void LiveGenerator::emit_muldiv(InstrId instr_id, int reg1, int reg2) const { (void)instr_id; (void)reg1; (void)reg2; }
++void LiveGenerator::emit_syscall(uint32_t instr_vram) const { (void)instr_vram; }
++void LiveGenerator::emit_do_break(uint32_t instr_vram) const { (void)instr_vram; }
++void LiveGenerator::emit_pause_self() const {}
++void LiveGenerator::emit_trigger_event(uint32_t event_index) const { (void)event_index; }
++void LiveGenerator::emit_comment(const std::string& comment) const { (void)comment; }
++
++LiveGeneratorOutput::~LiveGeneratorOutput() = default;
++
++size_t LiveGeneratorOutput::num_reference_symbol_jumps() const {
++    return 0;
++}
++
++void LiveGeneratorOutput::set_reference_symbol_jump(size_t jump_index, recomp_func_t* func) {
++    (void)jump_index;
++    (void)func;
++}
++
++ReferenceJumpDetails LiveGeneratorOutput::get_reference_symbol_jump_details(size_t jump_index) {
++    (void)jump_index;
++    return ReferenceJumpDetails{};
++}
++
++void LiveGeneratorOutput::populate_import_symbol_jumps(size_t import_index, recomp_func_t* func) {
++    (void)import_index;
++    (void)func;
++}
++
++bool recompile_function_live(LiveGenerator& generator, const Context& context, size_t function_index, std::ostream& output_file, std::span<std::vector<uint32_t>> static_funcs_out, bool tag_reference_relocs) {
++    (void)generator;
++    (void)context;
++    (void)function_index;
++    (void)output_file;
++    (void)static_funcs_out;
++    (void)tag_reference_relocs;
++    // Live recompilation is unavailable on wasm; report failure so mod code is
++    // never loaded.
++    return false;
++}
++
++ShimFunction::ShimFunction(recomp_func_ext_t* to_shim, uintptr_t value) : code(nullptr), func(nullptr) {
++    (void)to_shim;
++    (void)value;
++}
++
++ShimFunction::~ShimFunction() = default;
++
++}  // namespace N64Recomp
 diff --git a/include/recomp.h b/include/recomp.h
 index 73f3e73..13ea02b 100644
 --- a/include/recomp.h
@@ -96,33 +255,6 @@ index 94f85c5..7f4e1b1 100644
  void N64Recomp::CGenerator::emit_cop1_cs_read(int reg) const {
      fmt::print(output_file, "{} = get_cop1_cs();\n", gpr_to_string(reg));
  }
-diff --git a/src/main.cpp b/src/main.cpp
-index 669c4a1..23248a4 100644
---- a/src/main.cpp
-+++ b/src/main.cpp
-@@ -158,6 +158,13 @@ std::vector<std::string> reloc_names {
-     "R_MIPS_GPREL16",
- };
- 
-+// Maps a relocation type to its emitted name. Relocation types the recompiler
-+// does not know (e.g. R_MIPS_PC16 from GNU as) are emitted as R_MIPS_NONE so
-+// the generated overlay tables stay valid C.
-+static const char* get_reloc_name(size_t reloc_type_index) {
-+    return reloc_type_index < reloc_names.size() ? reloc_names[reloc_type_index].c_str() : "R_MIPS_NONE";
-+}
-+
- void dump_context(const N64Recomp::Context& context, const std::unordered_map<uint16_t, std::vector<N64Recomp::DataSymbol>>& data_syms, const std::filesystem::path& func_path, const std::filesystem::path& data_path) {
-     std::ofstream func_context_file {func_path};
-     std::ofstream data_context_file {data_path};
-@@ -996,7 +1003,7 @@ int main(int argc, char** argv) {
-                                 target_section_offset = reloc.target_section_offset;
-                             }
-                             fmt::print(overlay_file, "    {{ .offset = 0x{:08X}, .target_section_offset = 0x{:08X}, .target_section = {}, .type = {} }}, \n",
--                                reloc.address - section.ram_addr, target_section_offset, reloc.target_section, reloc_names[static_cast<size_t>(reloc.type)] );
-+                                reloc.address - section.ram_addr, target_section_offset, reloc.target_section, get_reloc_name(static_cast<size_t>(reloc.type)) );
-                         }
-                     }
- 
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
 index c228433..ddaf438 100644
 --- a/src/recompilation.cpp

@@ -4,6 +4,8 @@ assets/
 # Generated artifacts
 build/
 build-app/
+build-null/
+build-wasm/
 RecompiledFuncs/
 *.bin
 *.elf

@@ -21,6 +21,17 @@ committed to this repository. You must provide a dump of your own cartridge.
 A native Windows/Linux/macOS port that runs the full game (menus, world map,
 battles, cutscenes, audio, Controller Pak saves) with a modding framework.
 
+## Browser port (WebAssembly)
+
+In addition to the native port, the project is investigating a **WebAssembly /
+browser build** (`docs/WEB-PORT.md`): run the recompiled game + N64ModernRuntime
+under Emscripten with a **null renderer** first (no graphics), then decide
+whether/how to render in the browser (WebGL2 vs WebGPU vs RT64-webgpu). The
+immediate goal is proving the recompilation itself is portable, independent of
+RT64 — which also sidesteps the native GPU-driver problems seen on older
+hardware. RT64 remains the primary native renderer throughout. See
+`docs/WEB-PORT.md`, `docs/WEB-PORT-REPORT.md` and `docs/WEB-PORT-DEPLOYMENT.md`.
+
 ## Current status (as of this session)
 
 - ✅ ROM identified: `Ogre Battle 64 - Person of Lordly Caliber (USA) (Rev A)`,

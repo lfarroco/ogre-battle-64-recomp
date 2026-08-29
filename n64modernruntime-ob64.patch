@@ -4,6 +4,29 @@ diff --git a/N64Recomp b/N64Recomp
 @@ -1 +1 @@
 -Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253
 +Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253-dirty
+diff --git a/librecomp/include/librecomp/mods.hpp b/librecomp/include/librecomp/mods.hpp
+index 37556bd..eefe64b 100644
+--- a/librecomp/include/librecomp/mods.hpp
++++ b/librecomp/include/librecomp/mods.hpp
+@@ -50,12 +50,18 @@ template <>
+ struct std::hash<recomp::mods::HookDefinition>
+ {
+     std::size_t operator()(const recomp::mods::HookDefinition& def) const {
++#if SIZE_MAX == UINT64_MAX
+         // This hash packing only works if the resulting value is 64 bits.
+         static_assert(sizeof(std::size_t) == 8);
+         // Combine the three values into a single 64-bit value.
+         // The lower 2 bits of a function address will always be zero, so pack
+         // the value of at_return into the lowest bit.
+         return (size_t(def.section_rom) << 32) | size_t(def.function_vram) | size_t(def.at_return ? 1 : 0);
++#else
++        // 32-bit targets (e.g. wasm32): code mods are unsupported, so this
++        // hash is never used meaningfully; fall back to the vram alone.
++        return size_t(def.function_vram);
++#endif
+     }
+ };
+ 
 diff --git a/librecomp/include/librecomp/sections.h b/librecomp/include/librecomp/sections.h
 index 0fdb724..3c2f175 100644
 --- a/librecomp/include/librecomp/sections.h
@@ -31,20 +54,48 @@ index 7ad6c21..c755129 100644
  #include "helpers.hpp"
  
  #define MAXCONTROLLERS 4
+diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
+index 0f7de83..6bbe537 100644
+--- a/librecomp/src/mods.cpp
++++ b/librecomp/src/mods.cpp
+@@ -74,6 +74,10 @@ bool get_to_vec(const nlohmann::json& val, std::vector<T2>& out) {
+ // MSVC/GCC/Clang ARM64
+ #elif defined(__ARM_ARCH_ISA_A64)
+ #   define IS_ARM64
++// WebAssembly: code mods are unsupported (no native code generation); keep
++// the file compiling so the mod API surface stays available as inert stubs.
++#elif defined(__EMSCRIPTEN__)
++#   define IS_WASM
+ #else
+ #   error "Unsupported architecture!"
+ #endif
+@@ -585,6 +589,10 @@ void patch_func(recomp_func_t* target_func, recomp::mods::GenericFunction replac
+            write_bytes(&native_func, sizeof(&native_func));
+         }
+     }, replacement_func);
++#elif defined(IS_WASM)
++    // No native code patching on WebAssembly (code mods cannot be loaded).
++    (void)write_bytes;
++    (void)replacement_func;
+ #else
+ #   error "Unsupported architecture"
+ #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..2ba4f86 100644
+index 8c8e5d1..01b8734 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,10 @@
  #include <algorithm>
 +#include <atomic>
  #include <cassert>
  #include <cstdio>
++#if !defined(__EMSCRIPTEN__)
 +#include <execinfo.h>
++#endif
  #include <cstring>
  #include <unordered_map>
  #include <vector>
-@@ -15,6 +17,14 @@
+@@ -15,6 +19,14 @@
  static recomp::overlays::overlay_section_table_data_t sections_info {};
  static recomp::overlays::overlays_by_index_t overlays_info {};
  
@@ -59,7 +110,7 @@ index 8c8e5d1..2ba4f86 100644
  static SectionTableEntry* patch_code_sections = nullptr;
  size_t num_patch_code_sections = 0;
  static std::vector<char> patch_data;
-@@ -363,12 +373,30 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -363,12 +375,32 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
  
  extern "C" recomp_func_t * get_function(int32_t addr) {
      auto func_find = func_map.find(addr);
@@ -67,6 +118,8 @@ index 8c8e5d1..2ba4f86 100644
 -        fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
 -        assert(false);
 -        std::exit(EXIT_FAILURE);
+-    }
+-    return func_find->second;
 +    if (func_find != func_map.end()) {
 +        return func_find->second;
 +    }
@@ -78,10 +131,10 @@ index 8c8e5d1..2ba4f86 100644
 +    if ((a >= 0x8016A000 && a < 0x80400000) || (a >= 0x84000000 && a < 0x84200000)) {
 +        last_streamed_stub_addr.store(a);
 +        return streamed_stub_generic;
-     }
--    return func_find->second;
++    }
 +
 +    fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
++#if !defined(__EMSCRIPTEN__)
 +    // Temporary: dump the host call stack to identify the caller.
 +    void* bt[32];
 +    int n = backtrace(bt, 32);
@@ -90,6 +143,7 @@ index 8c8e5d1..2ba4f86 100644
 +        fprintf(stderr, "  #%d %s\n", i, syms[i]);
 +    }
 +    free(syms);
++#endif
 +    assert(false);
 +    std::exit(EXIT_FAILURE);
  }
@@ -151,44 +205,76 @@ index 43509ba..e3d6648 100644
      // TODO use word copies when possible
  
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
-index ea1c49b..368ebf6 100644
+index ea1c49b..5e35dfe 100644
 --- a/librecomp/src/recomp.cpp
 +++ b/librecomp/src/recomp.cpp
-@@ -19,6 +19,8 @@
- #include "librecomp/overlays.hpp"
- #include "librecomp/game.hpp"
- #include "xxHash/xxh3.h"
-+#include <ultramodern/ultra64.h>
-+#include <ultramodern/ultramodern.hpp>
- #include "ultramodern/ultramodern.hpp"
- #include "ultramodern/error_handling.hpp"
- #include "librecomp/addresses.hpp"
-@@ -457,6 +459,34 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
+@@ -437,19 +437,10 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
+             ctx->f_odd = &ctx->f0.u32h;
+             ctx->mips3_float_mode = false;
+         }
+-
+-        // Remove the FR bit from the changed bits as it's been handled
+-        changed &= ~(uint32_t)StatusReg::FR;
+-    }
+-
+-    // If any other bits were changed, assert false as they're not handled currently
+-    if (changed) {
+-        printf("Unhandled status register bits changed: 0x%08X\n", changed);
+-        assert(false);
+-        exit(EXIT_FAILURE);
+     }
+     
+-    // Update the status register in the context
++    // Update the status register in the context. Other bits (interrupt mask, etc.) are
++    // tracked for reads but have no direct effect in the recompiled environment.
+     ctx->status_reg = new_sr;
+ }
+ 
+@@ -457,6 +448,53 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
      return (gpr)(int32_t)ctx->status_reg;
  }
  
-+// Generic cop0 register file access (registers other than Status, which is
-+// stored in status_reg for float-mode handling). mfc0 sign-extends the 32-bit
-+// cop0 value, matching the MIPS semantics the recompiler relies on.
++// Generic cop0 register access for registers other than Status.
++// Note: the recompiled game's exception/TLB code writes most of these; they're kept
++// in a flat register file. Count maps to the runtime cycle counter.
 +extern "C" gpr cop0_read(recomp_context* ctx, int reg) {
-+    return (gpr)(int32_t)ctx->cop0_regs[reg];
++    switch (reg) {
++    case 9: // Count
++        return (gpr)(int32_t)osGetCount();
++    case 12: // Status
++        return cop0_status_read(ctx);
++    default:
++        return (gpr)(int32_t)ctx->cop0_regs[reg];
++    }
 +}
 +
 +extern "C" void cop0_write(recomp_context* ctx, int reg, gpr value) {
-+    ctx->cop0_regs[reg] = (uint32_t)value;
++    switch (reg) {
++    case 12: // Status
++        cop0_status_write(ctx, value);
++        break;
++    default:
++        ctx->cop0_regs[reg] = (uint32_t)value;
++        break;
++    }
 +}
 +
-+// Privileged instructions. The runtime treats the memory space as flat, so TLB
-+// operations and exception return are semantically safe no-ops.
++// TLB operations. The recompiled environment uses a flat address space, so these
++// are safe no-ops. Kept as separate functions in case TLB emulation is needed later.
 +extern "C" void tlb_instruction(recomp_context* ctx, int opcode) {
 +    (void)ctx;
 +    (void)opcode;
 +}
 +
++// Exception return. In the recompiled environment, exceptions are dispatched by the
++// runtime (or the game's own handler for software exceptions); returning to the
++// interrupted code is handled by the caller. Currently a no-op.
 +extern "C" void eret(recomp_context* ctx) {
 +    (void)ctx;
 +}
 +
++// Cache maintenance operations. The host CPU's cache is managed by the OS, so these
++// are safe no-ops.
 +extern "C" void cache_instruction(recomp_context* ctx, int op, uint32_t addr) {
 +    (void)ctx;
 +    (void)op;
@@ -198,15 +284,7 @@ index ea1c49b..368ebf6 100644
  extern "C" void switch_error(const char* func, uint32_t vram, uint32_t jtbl) {
      printf("Switch-case out of bounds in %s at 0x%08X for jump table at 0x%08X\n", func, vram, jtbl);
      assert(false);
-@@ -474,6 +504,7 @@ std::optional<std::u8string> current_game = std::nullopt;
- std::atomic<GameStatus> game_status = GameStatus::None;
- 
- void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t arg) {
-+    debug_printf("[thread] N64 thread starting @ 0x%08llX sp=0x%08llX\n", (unsigned long long)addr, (unsigned long long)sp);
-     auto find_it = game_roms.find(current_game.value());
-     const recomp::GameEntry& game_entry = find_it->second;
-     
-@@ -495,11 +526,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+@@ -495,11 +533,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
      // Initialize the overlays
      recomp::overlays::init_overlays();
  
@@ -229,7 +307,7 @@ index ea1c49b..368ebf6 100644
  
      // Read in any extra data from patches
      recomp::overlays::read_patch_data(rdram, (gpr)recomp::patch_rdram_start);
-@@ -698,6 +737,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
+@@ -698,6 +744,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
      return mod_context->set_mod_index(mod_game_id, mod_id, index);
  }
  
@@ -296,7 +374,7 @@ index ea1c49b..368ebf6 100644
  bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
      game_status.wait(GameStatus::None);
  
-@@ -717,6 +816,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+@@ -717,6 +823,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                      game_entry.on_init_callback(rdram, context);
                  }
  
@@ -308,6 +386,43 @@ index ea1c49b..368ebf6 100644
                  uint32_t mod_ram_used = 0;
                  if (!game_entry.mod_game_id.empty()) {
                      std::vector<recomp::mods::ModLoadErrorDetails> mod_load_errors;
+@@ -832,7 +943,15 @@ void recomp::start(const recomp::Configuration& cfg) {
+     // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
+     uint8_t* rdram;
+     bool alloc_failed;
+-#ifdef _WIN32
++#ifdef __EMSCRIPTEN__
++    // WebAssembly has no per-page memory protection and no 4 GiB virtual
++    // address space, so allocate the usable rdram region directly. Out-of-range
++    // accesses trap on the wasm heap instead of segfaulting (use -sSAFE_HEAP=1
++    // in debug builds for precise bounds checking).
++    rdram = (uint8_t*)calloc(mem_size, 1);
++    alloc_failed = rdram == nullptr;
++    fprintf(stderr, "[debug] wasm calloc(%zu) -> %p\n", (size_t)mem_size, (void*)rdram);
++#elif defined(_WIN32)
+     rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+     DWORD old_protect = 0;
+     alloc_failed = (rdram == nullptr);
+@@ -847,7 +966,6 @@ void recomp::start(const recomp::Configuration& cfg) {
+     rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
+     if (!alloc_failed) {
+-        // mprotect returns -1 on failure.
+         alloc_failed = (mprotect(rdram, mem_size, PROT_READ | PROT_WRITE) == -1);
+         if (alloc_failed) {
+             munmap(rdram, allocation_size);
+@@ -893,7 +1011,10 @@ void recomp::start(const recomp::Configuration& cfg) {
+     
+     // Free rdram.
+     bool free_failed;
+-#ifdef _WIN32
++#ifdef __EMSCRIPTEN__
++    std::free(rdram);
++    free_failed = false;
++#elif defined(_WIN32)
+     // VirtualFree returns zero on failure.
+     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
+ #else
 diff --git a/librecomp/src/sp.cpp b/librecomp/src/sp.cpp
 index ae0f44f..1addbd7 100644
 --- a/librecomp/src/sp.cpp
@@ -408,6 +523,21 @@ index e0d367e..ff932d0 100644
      ctx->r2 = osJamMesg(rdram, (int32_t)ctx->r4, (OSMesg)ctx->r5, (s32)ctx->r6);
  }
  
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index d60c4ec..77c1df4 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -54,6 +54,10 @@ namespace ultramodern {
+             auto operator<=>(const WindowHandle&) const = default;
+         };
+ // TODO add a native window handle option here (Display/Window for x11 and ANativeWindow for Android) as a compile-time option.
++#elif defined(__EMSCRIPTEN__)
++        // The web build uses the null renderer, which ignores the handle.
++        // Emscripten also defines __linux__, so this branch must come first.
++        using WindowHandle = SDL_Window*;
+ #elif defined(__linux__) || defined(__ANDROID__)
+         using WindowHandle = SDL_Window*;
+ #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
 index 46aea61..310a7c6 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
@@ -606,10 +736,37 @@ index a22f747..0ee4950 100644
              // Swap to the higher priority thread.
              swap_to_thread(PASS_RDRAM next_thread);
 diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
-index 6e3ed18..0e119d8 100644
+index 6e3ed18..ae8498e 100644
 --- a/ultramodern/src/threads.cpp
 +++ b/ultramodern/src/threads.cpp
-@@ -166,11 +166,12 @@ void resume_thread(OSThread* t) {
+@@ -98,7 +98,7 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+     }
+     // SetThreadPriority(GetCurrentThread(), nPriority);
+ }
+-#elif defined(__linux__)
++#elif defined(__linux__) && !defined(__EMSCRIPTEN__)
+ #include <sys/prctl.h>
+ 
+ void ultramodern::set_native_thread_name(const std::string& name) {
+@@ -137,6 +137,17 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+     //         break;
+     // }
+ }
++#elif defined(__EMSCRIPTEN__)
++// Emscripten pthreads: thread naming/priority are not supported; no-ops.
++// (This branch must precede the __APPLE__/__linux__ branches: Emscripten
++// pretends to be a POSIX-like system and may define __linux__.)
++void ultramodern::set_native_thread_name(const std::string& name) {
++    (void)name;
++}
++
++void ultramodern::set_native_thread_priority(ThreadPriority pri) {
++    (void)pri;
++}
+ #elif defined(__APPLE__)
+ void ultramodern::set_native_thread_name(const std::string& name) {
+     if (name.length() > 15) {
+@@ -166,11 +177,12 @@ void resume_thread(OSThread* t) {
  
  void run_next_thread(RDRAM_ARG1) {
      if (ultramodern::thread_queue_empty(PASS_RDRAM ultramodern::running_queue)) {

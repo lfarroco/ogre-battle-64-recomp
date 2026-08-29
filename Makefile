@@ -26,22 +26,28 @@ BIN_FILES  := $(patsubst assets/%.bin,build/assets/%.o,$(wildcard assets/*.bin))
 
 all: $(ELF)
 
+.PHONY: fix-labels
+# Re-applies manual cross-overlay label fixes to splat-generated asm. Must run
+# BEFORE the .s files are assembled (a phony prerequisite of the object rules
+# below), because splat re-split regenerates the unfixed .s files.
+fix-labels:
+	@bash tools/fix_cross_overlay_labels.sh
+
 clean:
 	rm -rf build
 
 $(ELF): $(OBJS) $(BIN_FILES) $(LDSCRIPT) undefined_syms_auto.txt undefined_funcs_auto.txt
 	@mkdir -p $(dir $@)
-	@bash tools/fix_cross_overlay_labels.sh
 	$(LD) $(LDFLAGS) -T $(LDSCRIPT) -T undefined_syms_auto.txt \
 		-T undefined_funcs_auto.txt -T extra_syms.txt -o $@ $(OBJS) $(BIN_FILES)
 	@echo "==> linked $(ELF)"
 	@$(OBJCOPY) --dump-section .entry=$@.entry.bin $@ 2>/dev/null || true
 
-build/asm/%.o: asm/%.s
+build/asm/%.o: asm/%.s fix-labels
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) -o $@ $<
 
-build/asm/data/%.o: asm/data/%.s
+build/asm/data/%.o: asm/data/%.s fix-labels
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) -o $@ $<
 
