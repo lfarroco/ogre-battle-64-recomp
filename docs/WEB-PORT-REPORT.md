@@ -5,7 +5,7 @@
 > progresses.
 
 Date: 2026-08-29
-State: **Phase 2–5 in progress** (RT64 optional, null renderer, web entry)
+State: **Phase 2–10 complete (Milestones 1–5 achieved)**; browser renderer pending
 
 ---
 
@@ -226,3 +226,54 @@ All four verification steps pass:
   waiting for input it never receives (web input is a no-op). Native does not
   show the queue-full behavior; the difference is likely wasm execution-speed
   vs. the fixed 60 Hz VI rate. Investigate with Milestone 5 (real input/audio).
+
+---
+
+## 9. Milestone 5 Results (2026-08-29, session 12)
+
+Real input/audio/save are implemented and verified in headless Chrome
+(playwright, chromium headless shell):
+
+| Area | Implementation | Verified |
+|---|---|---|
+| Input | `app/src/web_platform.cpp` atomics + exported `ogre_input_set()`; JS captures keyboard (slot 0) + gamepads (slots 1–3) in `app/web/web.js` | `ogre_input_debug()` shows pressed bits (A+UP=0x8800, START=0x1000); the game's controller thread polls SI messages at 60 Hz; **`do_send FAILED` queue-full spam is gone (0 occurrences)** |
+| Audio | wasm ring buffer (`queue_samples`/`get_frames_remaining`/`set_frequency`) + AudioWorklet (`app/web/audio-worklet.js`) reading the SharedArrayBuffer directly, resampling game rate → context rate | AudioWorklet connects and initializes; the game sets its rate (32000 Hz) through the callback. The game queues **no samples at the title screen**: it never registers `OS_EVENT_AI` and its audio thread waits on a queue nothing sends to — **verified identical on the native null build** (same event registrations, no audio). Audio will flow when the game advances past the title |
+| Save | IDBFS mounted at the config dir `/ogre` (wasm virtual FS) + periodic `FS.syncfs`; boot falls back to the previously validated stored ROM when no new file is picked | Page reload auto-starts the game from the persisted ROM (`/ogre/ogrebattle64-us-rev1.z64`) |
+
+Build-system changes for M5:
+
+- `app/CMakeLists.txt`: **fixed 1 GiB heap** (`-sINITIAL_MEMORY=1073741824`, no
+  `ALLOW_MEMORY_GROWTH`) so the SharedArrayBuffer handed to the AudioWorklet
+  never moves; `-lidbfs.js` for IDBFS; new exports
+  (`ogre_input_set`, `ogre_input_debug`, `ogre_audio_state_ptr`,
+  `ogre_audio_ring_ptr`, `ogre_audio_frames_available`).
+- `app/web/index.html`: runtime trace filter keeps the chatty
+  `[sch]/[mq]/[ev]/[renderer]/[VI]/[drainer]` debug prints out of the page
+  status (overridable via `window.OGRE_STATUS_FILTER`); controls hint.
+
+Verification run (headless Chrome, ROM = `assets/ogre64.z64`):
+
+```text
+PASS boot reaches display-list submission
+PASS keyboard input reaches wasm (mask=0x8800)
+PASS Start (Enter) bit reaches wasm (mask=0x1000)
+PASS do_send FAILED does not keep growing after boot (0 -> 0)
+PASS controller reports connected
+PASS AudioWorklet connected
+PASS page still responsive after ~35 s
+PASS no page errors
+PASS reload auto-starts from persisted stored ROM (IDBFS)
+(info) game audio flow = 0 at title (native identical; see above)
+```
+
+Notes:
+
+- The game's title screen does not advance on Start/A/B in this state — on the
+  native null build too (single DL, same thread/message pattern). Determining
+  why (likely needs visual feedback from a renderer, or game-flow analysis of
+  the title loop) is the natural next debugging step.
+- The native null build segfaults at process exit (after clean renderer
+  shutdown) — pre-existing, not web-related.
+- Rebuilding the wasm target requires a writable emscripten cache
+  (`EM_CACHE=/tmp/emscripten-cache`; the default under `/usr/local/Cellar` is
+  not writable in the sandboxed environment).

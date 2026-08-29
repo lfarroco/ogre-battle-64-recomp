@@ -1,6 +1,6 @@
 # Ogre Battle 64 — WebAssembly / Browser Port Plan
 
-> Status: **feasibility milestones 1–4 achieved (2026-08-29)** (see `docs/WEB-PORT-REPORT.md` for the
+> Status: **feasibility milestones 1–5 achieved (2026-08-29)** (see `docs/WEB-PORT-REPORT.md` for the
 > current implementation report). This document is the plan; it is updated as
 > milestones land.
 
@@ -664,15 +664,16 @@ app/
 | 2 | Emscripten compilation (no browser graphics) | ✅ `emcmake cmake -S app -B build-wasm` builds `ogrebattle64.js/.wasm` |
 | 3 | Browser runtime boot (load ROM, init, reach game execution) | ✅ verified in headless Chrome: ROM loads, runtime+threads run |
 | 4 | Browser display-list execution (RSP → F3DEX → DL → NullRenderer) | ✅ `[RSP] display list submitted (frame 1, type 1, ucode 0x8009F540, ...)` in the browser; page stable |
-| 5 | Browser input/audio (keyboard, gamepad, audio, save persistence) | pending (no-op callbacks on web for now) |
+| 5 | Browser input/audio/save | ✅ 2026-08-29 (session 12): real keyboard+gamepad input (slot 0 keyboard-first, slots 1–3 gamepads), IDBFS save persistence at `/ogre` (stored-ROM autostart verified), AudioWorklet audio pipeline connected (wasm ring buffer → resampled playback). Game-side audio is 0 at the title screen because the game never registers `OS_EVENT_AI` or queues buffers there — verified identical on the native build; audio will flow once the game advances past the title |
 | 6 | Graphics workload analysis | pending |
 | 7 | Browser renderer prototype (WebGL2 or WebGPU) | pending |
 | 8 | Playable browser build | pending |
 
-> The browser feasibility milestones (1–4) are met with the null renderer —
-> the recompiled game + N64ModernRuntime run in WebAssembly. Next per the plan:
-> Milestone 5 (input/audio), then the workload measurement and the renderer
-> decision (§24).
+> The browser feasibility milestones (1–5) are met: the recompiled game +
+> N64ModernRuntime run in WebAssembly with real input and persistent storage.
+> Milestone 5 also fixed the browser-only `do_send FAILED queue full` spam — with
+> a connected controller the game's VI-driven main loop paces correctly. Next per
+> the plan: the workload measurement and the renderer decision (§24).
 
 ---
 

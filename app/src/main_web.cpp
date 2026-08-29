@@ -72,28 +72,38 @@ void boot_runtime() {
     // --- ROM selection --------------------------------------------------------
     // web.js writes the user-selected ROM here (see app/web/web.js). The ROM
     // never leaves the user's machine; no ROM data is embedded in the build.
+    // On a later page load the previously validated copy persisted under the
+    // config dir (IDBFS-mounted /ogre) can be reused without re-picking a file.
     std::u8string game_id = entry.game_id;
     const char* rom_path = "/rom.z64";
-    OGRE_MILESTONE("ROM", "selecting rom %s", rom_path);
-    auto result = recomp::select_rom(rom_path, game_id);
-    switch (result) {
-        case recomp::RomValidationError::Good:
-            break;
-        case recomp::RomValidationError::IncorrectVersion:
-            OGRE_MILESTONE("ROM", "ROM is a different version of Ogre Battle 64 than expected (need %s)",
-                           ogre::INTERNAL_NAME.data());
-            return;
-        case recomp::RomValidationError::IncorrectRom:
-            OGRE_MILESTONE("ROM", "ROM hash mismatch - this ROM is not supported.");
-            return;
-        case recomp::RomValidationError::NotARom:
-            OGRE_MILESTONE("ROM", "the selected file does not look like an N64 ROM.");
-            return;
-        default:
-            OGRE_MILESTONE("ROM", "failed to open ROM at %s", rom_path);
-            return;
+    const std::filesystem::path stored_rom = recomp::get_config_path() / entry.stored_filename();
+    if (std::filesystem::exists(rom_path)) {
+        OGRE_MILESTONE("ROM", "selecting rom %s", rom_path);
+        auto result = recomp::select_rom(rom_path, game_id);
+        switch (result) {
+            case recomp::RomValidationError::Good:
+                break;
+            case recomp::RomValidationError::IncorrectVersion:
+                OGRE_MILESTONE("ROM", "ROM is a different version of Ogre Battle 64 than expected (need %s)",
+                               ogre::INTERNAL_NAME.data());
+                return;
+            case recomp::RomValidationError::IncorrectRom:
+                OGRE_MILESTONE("ROM", "ROM hash mismatch - this ROM is not supported.");
+                return;
+            case recomp::RomValidationError::NotARom:
+                OGRE_MILESTONE("ROM", "the selected file does not look like an N64 ROM.");
+                return;
+            default:
+                OGRE_MILESTONE("ROM", "failed to open ROM at %s", rom_path);
+                return;
+        }
+        OGRE_MILESTONE("ROM", "rom ok (hash validated)");
+    } else if (std::filesystem::exists(stored_rom)) {
+        OGRE_MILESTONE("ROM", "no new ROM file; using previously validated stored rom");
+    } else {
+        OGRE_MILESTONE("ROM", "no ROM available - select a ROM file on the page to begin.");
+        return;
     }
-    OGRE_MILESTONE("ROM", "rom ok (hash validated)");
 
     // --- runtime configuration --------------------------------------------------
     recomp::Configuration cfg;

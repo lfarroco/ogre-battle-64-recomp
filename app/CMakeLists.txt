@@ -164,20 +164,21 @@ if (NOT EMSCRIPTEN)
 endif()
 
 # --- Emscripten-specific flags ----------------------------------------------
-# pthreads (SharedArrayBuffer), growth to a 2 GiB cap (rdram needs >= 512 MiB),
-# no runtime teardown after main() returns, and exports for the web shell.
+# pthreads (SharedArrayBuffer), a fixed 1 GiB heap (rdram needs >= 512 MiB;
+# fixed — no ALLOW_MEMORY_GROWTH — so the SharedArrayBuffer handed to the
+# AudioWorklet never moves), no runtime teardown after main() returns, the
+# IDBFS filesystem for save persistence, and exports for the web shell.
 # (Compile flags are set globally above; the remaining flags apply at link.)
 if (EMSCRIPTEN)
     target_link_options(ogrebattle64 PRIVATE
         -pthread
         -fexceptions
         "-sPTHREAD_POOL_SIZE=16"
-        "-sALLOW_MEMORY_GROWTH=1"
-        "-sMAXIMUM_MEMORY=2147483648"
-        "-sINITIAL_MEMORY=268435456"
+        "-sINITIAL_MEMORY=1073741824"
         "-sEXIT_RUNTIME=0"
         "-sSTACK_SIZE=1048576"
-        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_main"
-        "-sEXPORTED_RUNTIME_METHODS=FS,ccall,cwrap,UTF8ToString,writeArrayToMemory,HEAPU8"
+        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_main"
+        "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ccall,cwrap,UTF8ToString,writeArrayToMemory,HEAPU8"
+        "-lidbfs.js"
     )
 endif()

@@ -33,6 +33,10 @@
     <input type="file" id="rom-input" accept=".z64,.n64,.v64,.bin">
   </label>
 </div>
+<p class="muted" id="controls">
+  Controls (keyboard): X=A, Z=B, C=Z, Enter=Start, Q=L, E=R, arrows=D-pad,
+  I/K/J/L=C buttons. Gamepads: slots 1-3. Audio starts after you pick a ROM.
+</p>
 <pre id="status">Initializing...</pre>
 
 <!--
@@ -42,15 +46,24 @@
 -->
 <script>
   var OGRE_WASM_DIR = OGRE_WASM_DIR || "../../build-wasm/";
+  // The vendored runtime's scheduler/message-queue/VI/drainer debug traces are
+  // unconditional and extremely chatty; keep them out of the page status so
+  // the milestone log stays readable (they still go to the browser console).
+  // Debugging override: set window.OGRE_STATUS_FILTER before this script runs.
+  var OGRE_STATUS_FILTER = window.OGRE_STATUS_FILTER || /^\[(sch|mq|ev|renderer|VI|drainer)\]/;
   var Module = {
     onRuntimeInitialized: function () {
       document.getElementById("status").textContent += "[web] WASM runtime initialized. Select a ROM to begin.\n";
     },
     print: function (text) {
-      document.getElementById("status").textContent += "[stdout] " + text + "\n";
+      if (!OGRE_STATUS_FILTER.test(text)) {
+        document.getElementById("status").textContent += "[stdout] " + text + "\n";
+      }
     },
     printErr: function (text) {
-      document.getElementById("status").textContent += "[stderr] " + text + "\n";
+      if (!OGRE_STATUS_FILTER.test(text)) {
+        document.getElementById("status").textContent += "[stderr] " + text + "\n";
+      }
     }
   };
   // Load the emscripten glue (it references Module defined above).
