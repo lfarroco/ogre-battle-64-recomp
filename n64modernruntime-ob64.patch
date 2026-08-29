@@ -1,0 +1,625 @@
+diff --git a/N64Recomp b/N64Recomp
+--- a/N64Recomp
++++ b/N64Recomp
+@@ -1 +1 @@
+-Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253
++Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253-dirty
+diff --git a/librecomp/include/librecomp/sections.h b/librecomp/include/librecomp/sections.h
+index 0fdb724..3c2f175 100644
+--- a/librecomp/include/librecomp/sections.h
++++ b/librecomp/include/librecomp/sections.h
+@@ -21,6 +21,10 @@ typedef enum {
+     R_MIPS_HI16,
+     R_MIPS_LO16,
+     R_MIPS_GPREL16,
++    R_MIPS_LITERAL,
++    R_MIPS_GOT16,
++    R_MIPS_PC16,
++    R_MIPS_CALL16,
+ } RelocEntryType;
+ 
+ typedef struct {
+diff --git a/librecomp/src/cont.cpp b/librecomp/src/cont.cpp
+index 7ad6c21..c755129 100644
+--- a/librecomp/src/cont.cpp
++++ b/librecomp/src/cont.cpp
+@@ -1,5 +1,7 @@
+ #include "ultramodern/ultramodern.hpp"
+ 
++#include <cstdio>
++
+ #include "helpers.hpp"
+ 
+ #define MAXCONTROLLERS 4
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index 8c8e5d1..2ba4f86 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -1,6 +1,8 @@
+ #include <algorithm>
++#include <atomic>
+ #include <cassert>
+ #include <cstdio>
++#include <execinfo.h>
+ #include <cstring>
+ #include <unordered_map>
+ #include <vector>
+@@ -15,6 +17,14 @@
+ static recomp::overlays::overlay_section_table_data_t sections_info {};
+ static recomp::overlays::overlays_by_index_t overlays_info {};
+ 
++// Bring-up fallback for calls into streamed overlays that are not yet recompiled
++// (Phase 4). The generic stub logs the requested address and returns.
++static std::atomic<uint32_t> last_streamed_stub_addr { 0 };
++static void streamed_stub_generic(uint8_t* rdram, recomp_context* ctx) {
++    fprintf(stderr, "[overlays] streamed function stub called @ 0x%08X (not yet loaded)\n", last_streamed_stub_addr.load());
++    fflush(stderr);
++}
++
+ static SectionTableEntry* patch_code_sections = nullptr;
+ size_t num_patch_code_sections = 0;
+ static std::vector<char> patch_data;
+@@ -363,12 +373,30 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+ 
+ extern "C" recomp_func_t * get_function(int32_t addr) {
+     auto func_find = func_map.find(addr);
+-    if (func_find == func_map.end()) {
+-        fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+-        assert(false);
+-        std::exit(EXIT_FAILURE);
++    if (func_find != func_map.end()) {
++        return func_find->second;
++    }
++
++    // Bring-up fallback: streamed overlays are loaded into RDRAM by the game's
++    // DMA but are not yet all recompiled/registered (Phase 4). Log and return a
++    // no-op stub so the boot can proceed instead of hard-failing.
++    uint32_t a = (uint32_t)addr;
++    if ((a >= 0x8016A000 && a < 0x80400000) || (a >= 0x84000000 && a < 0x84200000)) {
++        last_streamed_stub_addr.store(a);
++        return streamed_stub_generic;
+     }
+-    return func_find->second;
++
++    fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
++    // Temporary: dump the host call stack to identify the caller.
++    void* bt[32];
++    int n = backtrace(bt, 32);
++    char** syms = backtrace_symbols(bt, n);
++    for (int i = 0; i < n; i++) {
++        fprintf(stderr, "  #%d %s\n", i, syms[i]);
++    }
++    free(syms);
++    assert(false);
++    std::exit(EXIT_FAILURE);
+ }
+ 
+ std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 43509ba..e3d6648 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -61,6 +61,50 @@ extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
+     ;
+ }
+ 
++// func_8008BC40 (OB64 game code): the game's DMA-request starter. On real
++// hardware it queues the OSIoMesg to the PI thread. The runtime's
++// osCreatePiManager is an empty stub, so the game's PI-manager globals
++// (D_800AA400/D_800AA408) are never initialized; the game's own DMA path then
++// bails out and the blocking callers (func_80089F80 / func_8008A0F0) wait
++// forever on their completion queue (the boot's first streamed-code load
++// deadlocks here). Reimplemented as a synchronous ROM read: copy the requested
++// bytes straight from the ROM and complete the OSIoMesg immediately.
++extern "C" void func_8008BC40_recomp(uint8_t* rdram, recomp_context* ctx) {
++    // a0 = PI handle (unused), a1 = OSIoMesg*, a2 = dir (0 = read, 1 = write).
++    uint32_t mesg = (uint32_t)ctx->r5;
++    if (mesg == 0) {
++        ctx->r2 = (gpr)-1;
++        return;
++    }
++
++    // Game's OSIoMesg layout: type@0 (half), pri@2 (byte), mq@4, dramAddr@8,
++    // devAddr@0xC, size@0x10 (all words).
++    uint32_t mq       = MEM_W(0x04, (gpr)(int32_t)mesg);
++    uint32_t dramAddr = MEM_W(0x08, (gpr)(int32_t)mesg);
++    uint32_t devAddr  = MEM_W(0x0C, (gpr)(int32_t)mesg);
++    uint32_t size     = MEM_W(0x10, (gpr)(int32_t)mesg);
++    uint32_t dir      = (uint32_t)ctx->r6;
++
++    printf("[pi] func_8008BC40 dir=%u dram=0x%08X dev=0x%08X size=0x%X mq=0x%08X\n",
++           dir, dramAddr, devAddr, size, mq);
++    fflush(stdout);
++
++    if (dir == 0) {
++        // devAddr is a raw ROM offset (or possibly a full physical address).
++        // Use do_rom_read so the big-endian ROM bytes are byte-swapped into
++        // host-order RDRAM words (MEM_B), matching the recompiled MEM_W access.
++        uint32_t dev_off = (devAddr >= recomp::rom_base) ? (devAddr - recomp::rom_base) : devAddr;
++        recomp::do_rom_read(rdram, (gpr)(int32_t)dramAddr, recomp::rom_base + dev_off, size);
++    } else {
++        fprintf(stderr, "[pi] func_8008BC40: unsupported DMA write dir=%u (dev=0x%08X size=0x%X)\n", dir, devAddr, size);
++    }
++
++    // Complete the request synchronously so the caller's osRecvMesg returns.
++    osSendMesg(rdram, (int32_t)mq, (OSMesg)(int32_t)mesg, OS_MESG_NOBLOCK);
++
++    ctx->r2 = 0;
++}
++
+ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
+     // TODO use word copies when possible
+ 
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index ea1c49b..368ebf6 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -19,6 +19,8 @@
+ #include "librecomp/overlays.hpp"
+ #include "librecomp/game.hpp"
+ #include "xxHash/xxh3.h"
++#include <ultramodern/ultra64.h>
++#include <ultramodern/ultramodern.hpp>
+ #include "ultramodern/ultramodern.hpp"
+ #include "ultramodern/error_handling.hpp"
+ #include "librecomp/addresses.hpp"
+@@ -457,6 +459,34 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
+     return (gpr)(int32_t)ctx->status_reg;
+ }
+ 
++// Generic cop0 register file access (registers other than Status, which is
++// stored in status_reg for float-mode handling). mfc0 sign-extends the 32-bit
++// cop0 value, matching the MIPS semantics the recompiler relies on.
++extern "C" gpr cop0_read(recomp_context* ctx, int reg) {
++    return (gpr)(int32_t)ctx->cop0_regs[reg];
++}
++
++extern "C" void cop0_write(recomp_context* ctx, int reg, gpr value) {
++    ctx->cop0_regs[reg] = (uint32_t)value;
++}
++
++// Privileged instructions. The runtime treats the memory space as flat, so TLB
++// operations and exception return are semantically safe no-ops.
++extern "C" void tlb_instruction(recomp_context* ctx, int opcode) {
++    (void)ctx;
++    (void)opcode;
++}
++
++extern "C" void eret(recomp_context* ctx) {
++    (void)ctx;
++}
++
++extern "C" void cache_instruction(recomp_context* ctx, int op, uint32_t addr) {
++    (void)ctx;
++    (void)op;
++    (void)addr;
++}
++
+ extern "C" void switch_error(const char* func, uint32_t vram, uint32_t jtbl) {
+     printf("Switch-case out of bounds in %s at 0x%08X for jump table at 0x%08X\n", func, vram, jtbl);
+     assert(false);
+@@ -474,6 +504,7 @@ std::optional<std::u8string> current_game = std::nullopt;
+ std::atomic<GameStatus> game_status = GameStatus::None;
+ 
+ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t arg) {
++    debug_printf("[thread] N64 thread starting @ 0x%08llX sp=0x%08llX\n", (unsigned long long)addr, (unsigned long long)sp);
+     auto find_it = game_roms.find(current_game.value());
+     const recomp::GameEntry& game_entry = find_it->second;
+     
+@@ -495,11 +526,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+     // Initialize the overlays
+     recomp::overlays::init_overlays();
+ 
+-    // Load overlays in the first 1MB
+-    load_overlays(0x1000, (int32_t)entrypoint, 1024 * 1024);
++    // Load the base code sections (entry + main). OB64's streamed overlays are
++    // DMA'd by the game itself (func_80071EB0) to fixed RAM addresses
++    // (0x800E9C20, 0x8016AF80) that are NOT the linear entrypoint mapping, so a
++    // full 1MB load would register them at wrong addresses (and corrupt
++    // section_addresses, which the recompiled overlay code reads via
++    // RELOC_HI16/LO16). The app registers them at their real addresses via
++    // load_overlays() from the GameEntry on_init_callback.
++    load_overlays(0x1000, (int32_t)entrypoint, 0x3E1B0);  // entry+main only
+ 
+     // Initial 1MB DMA (rom address 0x1000 = physical address 0x10001000)
+-    recomp::do_rom_read(rdram, entrypoint, 0x10001000, 0x100000);
++    // entrypoint is a 32-bit VRAM address; sign-extend it so the MEM_B macro
++    // (which expects sign-extended registers) addresses rdram correctly.
++    recomp::do_rom_read(rdram, (gpr)(int32_t)entrypoint, 0x10001000, 0x100000);
+ 
+     // Read in any extra data from patches
+     recomp::overlays::read_patch_data(rdram, (gpr)recomp::patch_rdram_start);
+@@ -698,6 +737,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
+     return mod_context->set_mod_index(mod_game_id, mod_id, index);
+ }
+ 
++// -----------------------------------------------------------------------------
++// External-message drainer thread.
++//
++// The runtime delivers hardware events (VI retrace, AI/SP/SI interrupts, timers)
++// to game threads through an "external message" queue that is only drained when a
++// game thread calls osSendMesg/osRecvMesg/osJamMesg. Games whose boot path blocks
++// every game thread on a queue fed by such an event (e.g. Ogre Battle 64's audio
++// thread waiting for the VI-retrace message, with its main thread busy-spinning)
++// deadlock because nothing ever drains the queue.
++//
++// This hidden game thread continuously drains external messages and runs any
++// thread that was woken, so blocked threads make progress regardless of whether
++// the game itself is actively sending/recv'ing.
++// -----------------------------------------------------------------------------
++
++// Entry point for the drainer thread. Registered in the function map at a fixed
++// VRAM address so run_thread_function can dispatch to it; runs forever (like
++// pause_self), so it must be a unique entry not reachable from game code.
++extern "C" void external_message_drainer_entry(uint8_t* rdram, recomp_context* ctx) {
++    printf("[drainer] external-message drainer thread started\n");
++    while (true) {
++        printf("[drainer] T=%llu waiting for external message\n", (unsigned long long)ultramodern::trace_millis());
++        ultramodern::wait_for_external_message(rdram);
++        printf("[drainer] T=%llu got external message, checking running queue\n", (unsigned long long)ultramodern::trace_millis());
++        ultramodern::check_running_queue(rdram);
++        printf("[drainer] T=%llu back from check_running_queue\n", (unsigned long long)ultramodern::trace_millis());
++    }
++}
++
++extern "C" void func_80089A10_recomp(uint8_t* rdram, recomp_context* ctx) {
++    // func_80089A10 (game code): "spin until the RSP task-done counter
++    // (D_800E79A4) reaches zero". The runtime's cooperative scheduler cannot
++    // preempt a busy-spinning game thread, so this spin (thread pri 10) starves
++    // the external-message drainer (pri 5) that must deliver the SP/DP completion
++    // events which eventually decrement the counter -> boot deadlocks after the
++    // first RSP task. Reimplemented as a yielding wait: drain external messages
++    // (SP/DP completions) and hand off to higher-priority task threads.
++    while (MEM_W(0, (gpr)(int32_t)0x800E79A4) != 0) {
++        ultramodern::wait_for_external_message(rdram);
++        ultramodern::check_running_queue(rdram);
++    }
++}
++
++static void start_external_message_drainer(uint8_t* rdram) {
++    // Fixed addresses in the rdram buffer well above anything OB64 uses (game data
++    // ends ~0x8016C900; manual-patch-symbol range starts at 0x8F000000).
++    constexpr uint32_t drainer_entry_vram = 0x8E000000;
++    constexpr uint32_t os_thread_vram = 0x8E001000;
++    constexpr uint32_t stack_top_vram = 0x8E010000;
++
++    recomp::overlays::add_loaded_function(drainer_entry_vram, external_message_drainer_entry);
++    // Priority 5: in this runtime, HIGHER numbers are scheduled first, so the
++    // drainer must be BELOW the threads it wakes (game thread pri 10, audio 120,
++    // RSP 100-111, DMA 50) so it yields to them once they're scheduled, but above
++    // the busy-spinning main thread (pri 0) which never sits in the running queue.
++    osCreateThread(rdram, os_thread_vram, 200, drainer_entry_vram, 0, stack_top_vram, 5);
++    osStartThread(rdram, os_thread_vram);
++    printf("[drainer] spawned external-message drainer thread (id 200)\n");
++}
++
+ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+     game_status.wait(GameStatus::None);
+ 
+@@ -717,6 +816,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+                     game_entry.on_init_callback(rdram, context);
+                 }
+ 
++                // Spawn the external-message drainer so threads blocked on queues fed by
++                // runtime events (VI retrace etc.) can make progress even when no game
++                // thread is actively sending/recv'ing.
++                start_external_message_drainer(rdram);
++
+                 uint32_t mod_ram_used = 0;
+                 if (!game_entry.mod_game_id.empty()) {
+                     std::vector<recomp::mods::ModLoadErrorDetails> mod_load_errors;
+diff --git a/librecomp/src/sp.cpp b/librecomp/src/sp.cpp
+index ae0f44f..1addbd7 100644
+--- a/librecomp/src/sp.cpp
++++ b/librecomp/src/sp.cpp
+@@ -10,8 +10,17 @@ extern "C" void osSpTaskLoad_recomp(uint8_t* rdram, recomp_context* ctx) {
+ bool dump_frame = false;
+ 
+ extern "C" void osSpTaskStartGo_recomp(uint8_t* rdram, recomp_context* ctx) {
+-    //printf("[sp] osSpTaskStartGo(0x%08X)\n", (uint32_t)ctx->r4);
+     OSTask* task = TO_PTR(OSTask, ctx->r4);
++    // The game's OSTask layout has the done-queue/msg past the runtime's
++    // OSTask_s (0x40 bytes). Read them raw for diagnostics.
++    uint32_t task_off = (uint32_t)ctx->r4 & 0x1FFFFFFF;
++    uint32_t done_mq = *reinterpret_cast<uint32_t*>(rdram + task_off + 0x40);
++    uint32_t done_msg = *reinterpret_cast<uint32_t*>(rdram + task_off + 0x44);
++    printf("[sp] T=%llu osSpTaskStartGo task=0x%08X type=%u ucode=0x%08X ucode_data=0x%08X data_ptr=0x%08X done_mq=0x%08X done_msg=0x%08X\n",
++           (unsigned long long)ultramodern::trace_millis(),
++           (uint32_t)ctx->r4, static_cast<unsigned>(task->t.type),
++           static_cast<unsigned>(task->t.ucode), static_cast<unsigned>(task->t.ucode_data),
++           static_cast<unsigned>(task->t.data_ptr), done_mq, done_msg);
+     if (task->t.type == M_GFXTASK) {
+         //printf("[sp] Gfx task: %08X\n", (uint32_t)ctx->r4);
+     } else if (task->t.type == M_AUDTASK) {
+@@ -40,6 +49,14 @@ extern "C" void osSpTaskYield_recomp(uint8_t* rdram, recomp_context* ctx) {
+     // Ignore yield requests (acts as if the task completed before it received the yield request)
+ }
+ 
++// SP status register. The game's RSP task threads poll this (bit 0 = SP_HALTED) in a
++// busy-wait before loading the next task. The runtime's RSP is never busy (tasks are
++// submitted to the app's microcode and complete asynchronously), so report the SP as
++// halted/idle.
++extern "C" void osSpGetStatus_recomp(uint8_t* rdram, recomp_context* ctx) {
++    ctx->r2 = 0x1; // SP_STATUS_HALTED
++}
++
+ extern "C" void osSpTaskYielded_recomp(uint8_t* rdram, recomp_context* ctx) {
+     // Task yield requests are ignored, so always return 0 as tasks will never be yielded
+     ctx->r2 = 0;
+diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
+index e0d367e..ff932d0 100644
+--- a/librecomp/src/ultra_translation.cpp
++++ b/librecomp/src/ultra_translation.cpp
+@@ -1,4 +1,5 @@
+ #include <memory>
++#include <cstdio>
+ #include <ultramodern/ultra64.h>
+ #include <ultramodern/ultramodern.hpp>
+ #include "recomp.h"
+@@ -45,19 +46,51 @@ extern "C" void osGetThreadId_recomp(uint8_t * rdram, recomp_context * ctx) {
+     ctx->r2 = osGetThreadId(rdram, (int32_t)ctx->r4);
+ }
+ 
++// Debug watch list: queues of interest during boot (SP/DP/task-done/request queues).
++// Logged with the calling thread id so the boot flow is traceable.
++static uint32_t current_thread_id(uint8_t* rdram) {
++    PTR(OSThread) t = ultramodern::this_thread();
++    if (t == 0) {
++        return 0;
++    }
++    return TO_PTR(OSThread, t)->id;
++}
++
++static constexpr bool is_watched_queue(uint32_t mq) {
++    return mq == 0x800E8B14 || mq == 0x800E8B4C || mq == 0x800E8BBC || mq == 0x800E8BF4
++        || mq == 0x800E9BA8 || mq == 0x800C6490 || mq == 0x800E8B84
++        || mq == 0x800E7988 || mq == 0x800E9B88;
++}
++
+ extern "C" void osCreateMesgQueue_recomp(uint8_t* rdram, recomp_context* ctx) {
++    printf("[mq] T=%llu osCreateMesgQueue mq=0x%08X buf=0x%08X count=%d (thread %d)\n",
++           (unsigned long long)ultramodern::trace_millis(), (uint32_t)ctx->r4, (uint32_t)ctx->r5, (s32)ctx->r6, current_thread_id(rdram));
+     osCreateMesgQueue(rdram, (int32_t)ctx->r4, (int32_t)ctx->r5, (s32)ctx->r6);
+ }
+ 
+ extern "C" void osRecvMesg_recomp(uint8_t* rdram, recomp_context* ctx) {
++    uint32_t mq = (uint32_t)ctx->r4;
++    if (is_watched_queue(mq)) {
++        printf("[mq] T=%llu osRecvMesg(0x%08X) CALLED flags=%d (thread %d)\n", (unsigned long long)ultramodern::trace_millis(), mq, (int32_t)ctx->r6, current_thread_id(rdram));
++    }
+     ctx->r2 = osRecvMesg(rdram, (int32_t)ctx->r4, (int32_t)ctx->r5, (s32)ctx->r6);
++    if (is_watched_queue(mq)) {
++        printf("[mq] T=%llu osRecvMesg(0x%08X) RETURNED r2=0x%08X (thread %d)\n", (unsigned long long)ultramodern::trace_millis(), mq, (uint32_t)ctx->r2, current_thread_id(rdram));
++    }
+ }
+ 
+ extern "C" void osSendMesg_recomp(uint8_t* rdram, recomp_context* ctx) {
++    uint32_t mq = (uint32_t)ctx->r4;
++    if (is_watched_queue(mq)) {
++        printf("[mq] T=%llu osSendMesg -> 0x%08X msg=0x%08X flags=%d (thread %d)\n", (unsigned long long)ultramodern::trace_millis(), mq, (uint32_t)ctx->r5, (int32_t)ctx->r6, current_thread_id(rdram));
++    }
+     ctx->r2 = osSendMesg(rdram, (int32_t)ctx->r4, (OSMesg)ctx->r5, (s32)ctx->r6);
+ }
+ 
+ extern "C" void osJamMesg_recomp(uint8_t* rdram, recomp_context* ctx) {
++    if (is_watched_queue((uint32_t)ctx->r4)) {
++        printf("[mq] T=%llu osJamMesg -> 0x%08X msg=0x%08X flags=%d (thread %d)\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)ctx->r4, (uint32_t)ctx->r5, (int32_t)ctx->r6, current_thread_id(rdram));
++    }
+     ctx->r2 = osJamMesg(rdram, (int32_t)ctx->r4, (OSMesg)ctx->r5, (s32)ctx->r6);
+ }
+ 
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 46aea61..310a7c6 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -170,11 +170,16 @@ void set_callbacks(
+     const error_handling::callbacks_t& error_handling_callbacks,
+     const threads::callbacks_t& threads_callbacks
+ );
++
++// Debug: monotonic milliseconds since first call, for tracing boot progress.
++inline uint64_t trace_millis() {
++    static const auto t0 = std::chrono::steady_clock::now();
++    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
++}
+ } // namespace ultramodern
+ 
+ #define MIN(a, b) ((a) < (b) ? (a) : (b))
+ 
+ #define debug_printf(...)
+ //#define debug_printf(...) printf(__VA_ARGS__);
+-
+ #endif
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 2f1cfb5..8d56a83 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -54,6 +54,10 @@ struct ViState {
+ #define VI_STATE_BLACK 0x20
+ #define VI_STATE_REPEATLINE 0x40
+ 
++// Defined below (after the events_context struct); forward-declared here so
++// update_vi() can use it as a fallback mode.
++static const OSViMode& dummy_vi_mode();
++
+ static struct {
+     struct {
+         std::thread thread;
+@@ -72,6 +76,9 @@ static struct {
+         void update_vi() {
+             ViState* next_state = get_next_state();
+             const OSViMode* next_mode = next_state->mode;
++            if (next_mode == nullptr) {
++                next_mode = &dummy_vi_mode();
++            }
+             const OSViCommonRegs* common_regs = &next_mode->comRegs;
+             const OSViFieldRegs* field_regs = &next_mode->fldRegs[field];
+             PTR(void) framebuffer = osVirtualToPhysical(next_state->framebuffer);
+@@ -143,6 +150,7 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
+ 
+ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_, OSMesg msg) {
+     std::lock_guard lock{ events_context.message_mutex };
++    printf("[ev] T=%llu osSetEventMesg(event=%u mq=0x%08X msg=0x%08X)\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)event_id, (uint32_t)mq_, (uint32_t)msg);
+ 
+     switch (event_id) {
+         case OS_EVENT_SP:
+@@ -258,12 +266,14 @@ void vi_thread_func() {
+ void sp_complete() {
+     uint8_t* rdram = events_context.rdram;
+     std::lock_guard lock{ events_context.message_mutex };
++    printf("[ev] T=%llu sp_complete -> mq=0x%08X msg=0x%08X\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)events_context.sp.mq, (uint32_t)events_context.sp.msg);
+     ultramodern::enqueue_external_message_src(events_context.sp.mq, events_context.sp.msg, false, ultramodern::EventMessageSource::Sp);
+ }
+ 
+ void dp_complete() {
+     uint8_t* rdram = events_context.rdram;
+     std::lock_guard lock{ events_context.message_mutex };
++    printf("[ev] T=%llu dp_complete -> mq=0x%08X msg=0x%08X\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)events_context.dp.mq, (uint32_t)events_context.dp.msg);
+     ultramodern::enqueue_external_message_src(events_context.dp.mq, events_context.dp.msg, false, ultramodern::EventMessageSource::Dp);
+ }
+ 
+@@ -443,6 +453,10 @@ static const OSViMode dummy_mode = []() {
+     return ret;
+ }();
+ 
++static const OSViMode& dummy_vi_mode() {
++    return dummy_mode;
++}
++
+ void set_dummy_vi(bool odd) {
+     ViState* next_state = events_context.vi.get_next_state();
+     next_state->mode = &dummy_mode;
+@@ -454,6 +468,24 @@ void set_dummy_vi(bool odd) {
+     }
+ }
+ 
++// Translates a raw N64 address passed to the osVi* services into a host
++// pointer to the OSViMode inside rdram, or nullptr if the address does not map
++// into rdram.
++//
++// The whole KSEG0 window (0x80000000..0xA0000000) maps into the port's rdram
++// buffer. Anything outside it (MMIO like 0xA4400010, KSEG1, KSEG2, zero) is not
++// a memory mode struct. OB64's libultra calls its bridged osViSetMode from the
++// VI init path with a leftover register (0xA4400010) because the game's
++// function is really the VI swap-context routine, which ignores its argument on
++// real hardware; TO_PTR would turn that into a host pointer ~4.5 GiB past the
++// start of rdram and crash the VI thread when update_vi() dereferences it.
++static OSViMode *rdram_vi_mode_ptr(uint8_t *rdram, uint32_t mode_addr) {
++    if (mode_addr < 0x80000000u || mode_addr >= 0xA0000000u) {
++        return nullptr;
++    }
++    return reinterpret_cast<OSViMode *>(&rdram[mode_addr - 0x80000000u]);
++}
++
+ extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {
+     std::lock_guard lock{ events_context.message_mutex };
+     events_context.vi.get_next_state()->framebuffer = frameBufPtr;
+@@ -461,8 +493,14 @@ extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {
+ 
+ extern "C" void osViSetMode(RDRAM_ARG PTR(OSViMode) mode_) {
+     std::lock_guard lock{ events_context.message_mutex };
+-    OSViMode* mode = TO_PTR(OSViMode, mode_);
+     ViState* next_state = events_context.vi.get_next_state();
++    // Ignore addresses that don't lie in rdram (see rdram_vi_mode_ptr). The
++    // game's swap-context routine may pass a non-memory value here; on real
++    // hardware the argument is unused, so keep the current mode in that case.
++    OSViMode* mode = rdram_vi_mode_ptr(rdram, (uint32_t)mode_);
++    if (mode == nullptr) {
++        return;
++    }
+     next_state->mode = mode;
+     next_state->control = next_state->mode->comRegs.ctrl;
+ }
+@@ -511,7 +549,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
+ 
+     if ((func & OS_VI_DITHER_FILTER_OFF) != 0) {
+         *control_out &= ~VI_CTRL_DITHER_FILTER_ON;
+-        *control_out |= next_state->mode->comRegs.ctrl & VI_CTRL_ANTIALIAS_MASK;
++        const OSViMode* mode = next_state->mode;
++        if (mode != nullptr) {
++            *control_out |= mode->comRegs.ctrl & VI_CTRL_ANTIALIAS_MASK;
++        }
+     }
+ }
+ 
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index 9944a02..50edd9b 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -94,6 +94,8 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+     if (!block) {
+         // If non-blocking, fail if the queue is full.
+         if (MQ_IS_FULL(mq)) {
++            printf("[ev] do_send FAILED queue=0x%08X msg=0x%08X (full, count=%d/%d)\n",
++                   (uint32_t)mq_, (uint32_t)msg, MQ_GET_COUNT(mq), mq->msgCount);
+             return false;
+         }
+     }
+@@ -118,6 +120,10 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+         TO_PTR(OSMesg, mq->msg)[last] = msg;
+         mq->validCount++;
+     }
++    if (mq_ == 0x800E8BBC || mq_ == 0x800E8BF4 || mq_ == 0x800E9BA8 || mq_ == 0x800E8B14 || mq_ == 0x800E8B4C || mq_ == 0x800C6490
++        || mq_ == 0x800E7988 || mq_ == 0x800E9B88) {
++        printf("[ev] T=%llu do_send OK queue=0x%08X msg=0x%08X count=%d/%d\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq_, (uint32_t)msg, MQ_GET_COUNT(mq), mq->msgCount);
++    }
+ 
+     // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
+     PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
+@@ -138,7 +144,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+     } else {
+         // Otherwise, yield this thread in a loop until the queue is no longer full
+         while (MQ_IS_EMPTY(mq)) {
+-            debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
++            printf("[mq] T=%llu Thread %d BLOCKED on receive from queue 0x%08X\n", (unsigned long long)ultramodern::trace_millis(), TO_PTR(OSThread, ultramodern::this_thread())->id, (uint32_t)mq_);
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
+diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
+index a22f747..0ee4950 100644
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -1,13 +1,14 @@
+ #include "ultramodern/ultramodern.hpp"
++#include <cstdio>
+ 
+ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+-    debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
++    printf("[sch] T=%llu schedule_running_thread(thread %d pri %d)\n", (unsigned long long)ultramodern::trace_millis(), TO_PTR(OSThread, t_)->id, TO_PTR(OSThread, t_)->priority);
+     thread_queue_insert(PASS_RDRAM running_queue, t_);
+     TO_PTR(OSThread, t_)->state = OSThreadState::QUEUED;
+ }
+ 
+ void swap_to_thread(RDRAM_ARG OSThread *to) {
+-    debug_printf("[Scheduling] Thread %d giving execution to thread %d\n", TO_PTR(OSThread, ultramodern::this_thread())->id, to->id);
++    printf("[sch] T=%llu thread %d giving execution to thread %d (pri %d)\n", (unsigned long long)ultramodern::trace_millis(), TO_PTR(OSThread, ultramodern::this_thread())->id, to->id, to->priority);
+     // Insert this thread in the running queue.
+     ultramodern::thread_queue_insert(PASS_RDRAM ultramodern::running_queue, ultramodern::this_thread());
+     TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::QUEUED;
+@@ -22,6 +23,8 @@ void ultramodern::check_running_queue(RDRAM_ARG1) {
+         OSThread* next_thread = TO_PTR(OSThread, ultramodern::thread_queue_peek(PASS_RDRAM running_queue));
+         OSThread* self = TO_PTR(OSThread, ultramodern::this_thread());
+         if (next_thread->priority > self->priority) {
++            printf("[sch] T=%llu check_running_queue: SWAP thread %d (pri %d) -> thread %d (pri %d)\n",
++                   (unsigned long long)ultramodern::trace_millis(), self->id, self->priority, next_thread->id, next_thread->priority);
+             ultramodern::thread_queue_pop(PASS_RDRAM running_queue);
+             // Swap to the higher priority thread.
+             swap_to_thread(PASS_RDRAM next_thread);
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 6e3ed18..0e119d8 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -166,11 +166,12 @@ void resume_thread(OSThread* t) {
+ 
+ void run_next_thread(RDRAM_ARG1) {
+     if (ultramodern::thread_queue_empty(PASS_RDRAM ultramodern::running_queue)) {
++        printf("[sch] T=%llu run_next_thread: running queue EMPTY!\n", (unsigned long long)ultramodern::trace_millis());
+         throw std::runtime_error("No threads left to run!\n");
+     }
+ 
+     OSThread* to_run = TO_PTR(OSThread, ultramodern::thread_queue_pop(PASS_RDRAM ultramodern::running_queue));
+-    debug_printf("[Scheduling] Resuming execution of thread %d\n", to_run->id);
++    printf("[sch] T=%llu run_next_thread: resuming thread %d (pri %d)\n", (unsigned long long)ultramodern::trace_millis(), to_run->id, to_run->priority);
+     to_run->context->running.signal();
+ }
+ 

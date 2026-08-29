@@ -30,21 +30,38 @@ The data block contains `"RSP Gfx ucode F3DEX fifo 2.08 ... Yoshitaka Yasumoto
   `G_RDPPIPESYNC = 0xE7`, `G_ENDDL = 0xD0`/`0xD1`, `G_MTX = 0xB1`,
   `G_VTX = 0xB4`, `G_DL = 0xB6`, `G_TRI1/2 = 0xC7/0xC8`, ...
 
-## GBI selection in RT64 (currently wrong — needs a fix)
+## GBI selection in RT64 (RESOLVED 2026-08-29 — auto-detection is correct)
+
+**Update (session 10): this section's earlier conclusion was wrong.** Dumping the
+game's actual display lists showed they are parsed correctly by RT64's
+auto-detected GBI (`GBIUCode::F3DEX2`):
+
+- First gfx task DL: `DE000000 / 000A9EF0 / E9000000 / 0 / DF000000 / 0` =
+  `G_DL(0xA9EF0); G_RDPFULLSYNC; G_ENDDL` — `0xDE`=G_DL, `0xDF`=ENDDL under
+  RT64's F3DEX2 map.
+- Branch target `0xA9EF0` is standard RDP color/rect setup; later boot DLs
+  branch to real KSEG0 targets (`0x801869E8`).
+
+So `getGBIForUCode` already selects the right interpreter and **no override is
+needed** — the earlier "force F3DEX" experiment (session 9 binary) misparsed the
+DLs (plain F3DEX does not map 0xDE/0xDF) and was removed. The note below is kept
+for history.
+
+<details><summary>Original (superseded) analysis</summary>
 
 RT64's `GBIManager::getGBIForUCode` identifies the GBI by XXH3-hashing the
-ucode text/data against a database. For OB64's F3DEX 2.08 it currently matches
-`GBIUCode::F3DEX2` (value 7), whose opcode semantics differ from the
-short-format set (F3DEX2: `0xDE` = `G_DL`, `0xDF` = `G_ENDDL`, ...). The game's
-DLs are therefore misparsed. Options to fix:
+ucode text/data against a database. For OB64's F3DEX 2.08 it was believed to
+match `GBIUCode::F3DEX2` (value 7), whose opcode semantics were thought to
+differ from the game's display lists. That turned out to be wrong — the game's
+lists use the RT64 F3DEX2 opcode values (`0xDE`=G_DL, `0xDF`=G_ENDDL). Options
+that were considered and are NOT needed:
 
-1. Add an RT64 GBI map for the F3DEX-2.08 short-format opcode set, or
-2. In `app/src/renderer.cpp::send_dl`, override the GBI for OB64's ucode
-   addresses (construct/select the right `GBI` directly instead of relying on
-   `getGBIForUCode`), or
-3. Check RT64's ucode hash DB for a "F3DEX 2.08" entry that should have
-   matched (the DB may have a closer entry that the hash length/rounding
-   missed).
+1. ~~Add an RT64 GBI map for the F3DEX-2.08 short-format opcode set~~ — not needed.
+2. ~~In `app/src/renderer.cpp::send_dl`, override the GBI~~ — tried, wrong; reverted.
+3. ~~Check RT64's ucode hash DB for a "F3DEX 2.08" entry~~ — the existing F3DEX2
+   match is correct.
+
+</details>
 
 ## Audio ucode (still TBD)
 

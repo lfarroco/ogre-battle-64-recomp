@@ -101,10 +101,7 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
       overlay's data blocks before **spinning on N64 threads 1+3** (≈200% CPU).
       No stub calls and no `get_function` hard-fail in the whole boot.
     (see `docs/HANDOFF-2026-08-25-session7.md`).
-  - ⬜ **Fix RT64's GBI match**: OB64's ucode is "F3DEX fifo 2.08" (short-
-    format opcodes 0xDE/0xDF/0xE9...), which RT64's hash DB misidentifies as
-    F3DEX2 (0xDE=G_DL). Add/force the correct GBI before real display lists
-    flow (see `docs/guides/rsp-microcode.md` + session-5 handoff).
+  - ✅ **RT64 GBI question resolved (session 10)**: OB64's DLs are F3DEX2-compatible — the first gfx task DL is `0xDE`=G_DL → `0xA9EF0`, `0xE9`=FULLSYNC, `0xDF`=ENDDL, and RT64's hash-based auto-detection (`getGBIForUCode`) already matches the ucode to `GBIUCode::F3DEX2` (ucode enum 7), which parses them correctly. The session-9 "force F3DEX" override was wrong (plain F3DEX does not map 0xDE/0xDF) and was removed. No RT64 changes needed. (see `docs/HANDOFF-2026-08-29-session10.md`).
 - ⬜ Phase 4 next walls (session 8 findings):
   - ✅ **The post-boot spin is FIXED** (session 8): Thread 3's `.L80075FB8`
     pure spin on `D_800C4C26` starved the cooperative scheduler's drainer, so
@@ -130,17 +127,24 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
     into the next function, and processes its static functions to a fixpoint
     (registering them by address). See
     `docs/HANDOFF-2026-08-25-session9.md`.
-  - 🚧 **Boot now reaches real rendering** — after the fix, boot passes the
-    title-screen DL build, runs ~1528 PI DMAs / 64 RSP tasks (including new
-    `type=1` tasks), and RT64 renders frames. **Next wall:** crash in the RT64
-    render thread calling the Intel Haswell Vulkan driver
-    (`libvulkan_intel_hasvk.so`) inside `submitRasterScene` — may be the
-    long-standing flaky renderer race, an RT64 GBI issue, or a driver bug
-    (leads in the session-9 handoff).
-  - **Flaky renderer-init segfault** (before any game code; doesn't reproduce
-    under gdb) — likely the known renderer-init flakiness; needs the
-    mode/framebuffer race fixed.
-  - **RT64 GBI fix** (still pending) before real display lists.
+  - 🚧 **Boot reaches real rendering; the VI-thread crash is FIXED (session 10)**
+    — boot passes the title-screen DL build, runs ~1528 PI DMAs / 64+ RSP tasks
+    (including new `type=1` tasks), and RT64 renders frames. The long-standing
+    flaky VI-thread segfault (`update_vi()` with a garbage `mode` pointer) is
+    fixed: the game's `osViSetMode` (really the VI swap-context routine) ignores
+    its argument, and one caller passes the MMIO address `0xA4400010`, which the
+    runtime's `TO_PTR` turned into a host pointer ~4.5 GiB past rdram. The
+    runtime now validates the mode pointer (KSEG0 only) and null-guards
+    `update_vi()`/`osViSetSpecialFeatures()`.
+  - ✅ **Verified stable under Lavapipe** (software rasterizer): 1864 RSP gfx
+    tasks submitted and completed, zero crashes. The remaining crash on this dev
+    machine is `submitRasterScene` → `libvulkan_intel_hasvk.so` (Intel Haswell
+    driver, "Haswell Vulkan support is incomplete") — **machine-specific, not a
+    general issue**; occurs with both correct and wrong GBI. Next session should
+    run on a supported GPU (or keep Lavapipe) to validate title-screen rendering.
+  - **Flaky renderer-init segfault** (before any game code) — the VI-thread part
+    is fixed; the `std::bad_optional_access` seen after renderer init under hasvk
+    should be re-tested on a good GPU.
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 

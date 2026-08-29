@@ -276,6 +276,14 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
+
+        // GBI selection note (2026-08-29): OB64's gfx ucode is "RSP Gfx ucode
+        // F3DEX fifo 2.08". RT64's GBI database matches it (by hash) to
+        // GBIUCode::F3DEX2, and that map is correct for the game's display
+        // lists (first boot DL: 0xDE=G_DL -> 0xA9EF0, 0xE9=G_RDPFULLSYNC,
+        // 0xDF=G_ENDDL; later DLs branch to real KSEG0 targets like 0x801869E8).
+        // Do NOT force the plain F3DEX GBI here — it does not map those opcodes
+        // and misparses the DLs.
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFF, 0, true);
     }
 

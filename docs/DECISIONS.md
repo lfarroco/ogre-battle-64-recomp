@@ -5,6 +5,60 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-08-29 (session 10) — The VI-thread segfault was a runtime pointer-translation bug; osViSetMode now validates its argument; the GBI question is resolved (auto-detected F3DEX2 is correct)
+
+### Finding: OB64's `osViSetMode` is really the swap-context routine and ignores its argument; the runtime translated a garbage value into an out-of-bounds pointer
+
+The game's `osViSetMode` at `0x80095820` (bridged to the runtime's native
+`osViSetMode_recomp`) is actually `__osViSwapContext` — it reads
+`__osViNext->mode`/`framep` from its own context and writes the VI hardware
+registers, never using its incoming `$a0`. Its callers pass leftover registers:
+`func_8009AB50` (VI init, called by `osCreateViManager`) passes the MMIO address
+`0xA4400010` (VI_STATUS), and `viMgrMain` passes a leftover message-queue
+pointer. On hardware this is harmless.
+
+The runtime's `osViSetMode` translated that argument with `TO_PTR`, producing a
+host pointer ~4.58 GB past the start of the 512 MiB rdram buffer
+(`rdram[0x124400010]`), stored it as the next VI mode, and the VI thread's
+`update_vi()` dereferenced it (`next_mode->comRegs`) → the long-standing flaky
+SIGSEGV. It reproduced under both the Intel hasvk driver and Lavapipe, so it is
+a general port bug.
+
+### Decision: validate the mode pointer in `osViSetMode`
+
+`ultramodern/src/events.cpp` now translates the mode argument only when it is a
+KSEG0 address (`0x80000000..0xA0000000`), which maps 1:1 into the rdram buffer;
+otherwise it keeps the current mode (matching real hardware, where the argument
+is unused). Also added null-guards in `update_vi()` (fall back to `dummy_mode`)
+and `osViSetSpecialFeatures`. Result: the VI-thread crash is gone; under Lavapipe
+the port boots, submits and completes 1864 RSP gfx tasks, and renders without a
+single crash.
+
+### Finding/Decision: RT64's auto-detected F3DEX2 GBI is correct — remove the session-9 "force F3DEX" experiment
+
+Dumping the game's real display lists settled the open GBI question:
+- First gfx task DL: `DE000000 / 000A9EF0` = G_DL branch, `E9000000` =
+  G_RDPFULLSYNC, `DF000000` = G_ENDDL — exactly RT64's F3DEX2 map
+  (`0xDE`=G_DL, `0xDF`=ENDDL).
+- Branch target `0xA9EF0` is standard RDP color/rect setup (`0xFB..0xF7`,
+  `0xFC`, `0xF5`); later boot DLs branch to real KSEG0 targets (`0x801869E8`).
+
+So `GBIManager::getGBIForUCode` (which matches OB64's ucode hash to
+`GBIUCode::F3DEX2`) is right, and the session-9 "force `gbiCache[F3DEX]`"
+override misparsed the DLs (plain F3DEX does not map `0xDE/0xDF`). The override
+was removed; `renderer.cpp` documents this.
+
+### Outcome
+
+Boot is stable under Lavapipe (software rasterizer). The remaining crash
+(`submitRasterScene` → `libvulkan_intel_hasvk.so`) is specific to this dev
+machine's Intel Haswell GPU (the driver itself warns its Vulkan support is
+incomplete) and is not a general issue; the next session should run on a
+supported GPU. The vendored runtime changes are snapshotted in
+`n64modernruntime-ob64.patch` (new).
+
+
+
 ## 2026-08-25 (session 9) — The `func_8019FC68` DL-build crash was a recompilation bug; N64Recomp now emits fall-through tail calls; boot reaches real rendering
 
 ### Finding: KMC shared-epilogue functions lose their register restores
