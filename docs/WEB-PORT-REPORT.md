@@ -5,7 +5,8 @@
 > progresses.
 
 Date: 2026-08-29
-State: **Phase 2–10 complete (Milestones 1–5 achieved)**; browser renderer pending
+State: **Phase 2–10 complete (Milestones 1–5 achieved)**; Milestone 6 started
+(workload analyzer) and **Milestone 7 prototype achieved (WebGL2 renderer)**
 
 ---
 
@@ -277,3 +278,117 @@ Notes:
 - Rebuilding the wasm target requires a writable emscripten cache
   (`EM_CACHE=/tmp/emscripten-cache`; the default under `/usr/local/Cellar` is
   not writable in the sandboxed environment).
+
+## 10. Milestones 6-7 Results (2026-08-29, session 13)
+
+### Milestone 6 — graphics workload analysis (started)
+
+`app/src/gbi.{hpp,cpp}` implement a dependency-free F3DEX2 display-list walker
+(`walk_dl`, shared by the analyzer and the renderer) plus a workload analyzer
+(`analyze_dl`, `format_summary`). It walks DLs in execution order (G_DL
+push/branch, segment registers, loop protection) and counts commands, geometry
+(G_VTX/TRI1/TRI2/QUAD/TEXRECT/FILLRECT), texture loads (SETTIMG formats,
+LOADTILE/LOADBLOCK/LOADTLUT/SETTILE/SETTILESIZE), unique combiner configs,
+OTHERMODE values and RDP state.
+
+The analyzer runs in both the native null renderer and the web build, exported
+as `ogre_gfx_stats()` (a snapshot string) and mirrored to the web page
+(`#gfxstats` panel). Verified in headless Chrome and natively.
+
+**Real data so far is thin**: the game (on every platform, native and web)
+submits only its boot blanking DL — 32 commands: 5×SET*COLOR, SETPRIMDEPTH,
+SETCONVERT, SETKEYR/GB, 8×SETTILE, 8×SETTILESIZE, 1×SETCOMBINE, ENDDL — and
+then idles at the title (see §11 boot-stall analysis). The per-frame workload
+measurement (plan §15) therefore waits on the boot fix; the analyzer is ready
+to capture it.
+
+### Milestone 7 — WebGL2 renderer prototype (achieved)
+
+`app/src/web_renderer.cpp` implements `RendererContext` with WebGL2 for the
+Emscripten build. Features:
+
+- F3DEX2 DL execution via the shared `gbi::walk_dl` walker: matrices
+  (G_MTX/G_POPMTX, row-vector FixedMatrix), vertices (G_VTX/G_MODIFYVTX),
+  G_TRI1/TRI2/G_QUAD through the full matrix pipeline (modelview × projection,
+  perspective divide, viewport, y-flip), G_TEXRECT/G_TEXRECTFLIP/G_FILLRECT,
+  scissor, blend (standard XLU modes), and the general two-cycle N64 color
+  combiner evaluated in the fragment shader (A−B)×C+D per channel, with the
+  RT64 mux layout.
+- N64 texture decode on G_LOADTILE/G_LOADBLOCK/G_LOADTLUT: RGBA16/32, IA16/8/4,
+  I8/I4, CI8/CI4 + TLUT (RGBA16/IA16), with a GL texture cache. RGBA16 verified
+  end-to-end; the other formats are implemented and unit-testable.
+- Rendering happens on the **browser main thread**: the gfx pthread executes
+  DLs into a command queue (`DrawCmd`/`TexUpload`), and web.js polls the
+  exported `ogre_gfx_flush()` (16 ms interval) which issues the GL calls. This
+  was required because Emscripten's pthread→main-thread GL proxying
+  (`emscripten_webgl_make_context_current` from a worker) failed with
+  INVALID_PARAM in this app (see §12).
+- `ogre_gfx_test_draw()` builds a synthetic DL (fill rect + 2×2 RGBA16 textured
+  rect) to validate the pipeline while the game only submits its boot blanking
+  DL. Verified in headless Chrome: the canvas shows the grey fill and the four
+  texture colors (red/green/blue/white) in the right places, no GL errors.
+
+### 11. Boot-stall analysis (why the game never leaves the title — leads for the next session)
+
+The game never submits per-frame display lists on any platform (native null,
+web; 1 DL in a 100 s native run). Investigation found:
+
+1. **The game's frame producer waits on the VI framebuffer.** `func_8008949C`
+   (the task-manager path, called by `func_800893C0` on thread 17) spins until
+   `osViGetCurrentFramebuffer()` or `osViGetNextFramebuffer()` equals the
+   frame's target framebuffer (task-wrapper `+0xC`). The runtime traces showed
+   `osViSwapBuffer` is **never called** by the game in this build state, so the
+   VI stays on the dummy framebuffer (`0x80700000`) and the match never
+   succeeds (the check bails; the task still gets submitted once via the boot
+   path).
+2. **The task manager is gated by a phase byte.** `func_800893C0` skips the
+   framebuffer wait + task submission when `D_800C4800 & 2` is set. The byte is
+   driven by the VI-retrace handler `func_80088F08`'s countdown, which calls
+   `func_80098030` → `func_8009A770(0)` to advance the phase.
+3. **`func_8009A770` polls SI_STATUS MMIO `0xA4040010` bit 0** and returns
+   phase 0 (rendering) only when that bit is set; otherwise it returns −1 and
+   the countdown repeats. The runtime does not emulate SI_STATUS, so the game
+   can never reach the rendering phase. (The raw read would be an out-of-range
+   rdram access; it appears the read returns 0 in practice without crashing —
+   the phase machine just never advances.)
+4. **The game's threads freeze ~179 ms into a 100 s native run** (`trace_millis`
+   is wall time and stops advancing while the renderer keeps swapping) — a
+   scheduler/threading stall that races (run-to-run variance in how far the
+   boot gets). This is a separate runtime issue from the SI_STATUS gating.
+
+**Next-session candidates**: emulate SI_STATUS bit 0 (set it during controller
+reads / on a timer) so `func_8009A770` returns 0 and the game enters its
+rendering phase; investigate the game-thread freeze at ~180 ms (scheduler
+starvation, session 10's debug-print slowdown, or a deadlock in the drainer).
+
+### 12. Emscripten/WebGL gotchas (session 13)
+
+- **macOS `/tmp` is a symlink to `/private/tmp`**, which breaks emcc's
+  relative-path computation when compiling its GL system library
+  (`system/lib/gl/gl.c`) — the path is off by one and clang cannot find the
+  file. Fix: use a cache directory not under `/tmp`, e.g.
+  `EM_CACHE=/Users/momo/.cache/emscripten-ogre`. (The old `EM_CACHE=/tmp/...`
+  note in earlier sessions must be updated.)
+- **GL calls from pthreads failed** (`emscripten_webgl_make_context_current`
+  returned INVALID_PARAM for a main-thread-created context, even when proxied).
+  Solution: render on the main thread (gfx pthread records commands; JS polls
+  `ogre_gfx_flush()`). No `-sOFFSCREENCANVAS_SUPPORT` needed.
+- **GLSL `#version` must be the first line** of the shader source; raw strings
+  that begin with a newline compile-fail at line 2.
+- **rdram words are stored byte-reversed** (little-endian on the host; the
+  runtime's `MEM_W` is a direct read). All DL/texture reads use a LE read.
+- **F3DEX2 tile indices live in w1 bits 24-26** (not w0) for SETTILE /
+  SETTILESIZE / LOADTILE / LOADBLOCK / LOADTLUT; SETTILE's clamp/mirror fields
+  are 2-bit (`cmt` = w1 bits 18-19, `cms` = w1 bits 8-9) and the mask/shift
+  fields sit at w1 bits 0-17. See RT64 `GBI_RDP::setTile`.
+- **Address resolution must not truncate physical addresses to 24 bits** — the
+  port's rdram is 512 MiB, so addresses above 16 MiB (e.g. a scratch test DL at
+  0x1FE00000) were silently wrapped. Fixed to `& 0x1FFFFFFF`.
+
+### Build note
+
+The web (wasm) build now needs the WebGL flags:
+`-sUSE_WEBGL2=1 -sMAX_WEBGL_VERSION=2` and the exports
+`_ogre_gfx_create_context`, `_ogre_gfx_set_canvas`, `_ogre_gfx_flush`,
+`_ogre_gfx_test_draw`. Rebuild with a writable emscripten cache outside
+`/tmp` (see §12).

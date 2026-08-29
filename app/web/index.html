@@ -24,9 +24,10 @@
 <body>
 <h1>Ogre Battle 64: Person of Lordly Caliber — Recompilation (WebAssembly)</h1>
 <p class="muted">
-  Bring-your-own-ROM feasibility build: the recompiled game + N64ModernRuntime
-  running under Emscripten with a <b>null renderer</b> (no graphics yet).
-  Your ROM is read locally by the browser and never leaves this machine.
+  Bring-your-own-ROM build: the recompiled game + N64ModernRuntime under
+  Emscripten with a <b>WebGL2 renderer prototype</b> (milestone 7) and the
+  null/analyzer path as fallback. Your ROM is read locally by the browser and
+  never leaves this machine.
 </p>
 <div id="rom">
   <label>Select ROM (big-endian <code>.z64</code> dump):
@@ -37,7 +38,17 @@
   Controls (keyboard): X=A, Z=B, C=Z, Enter=Start, Q=L, E=R, arrows=D-pad,
   I/K/J/L=C buttons. Gamepads: slots 1-3. Audio starts after you pick a ROM.
 </p>
+<div id="gfx-wrap" style="margin-bottom:12px;">
+  <canvas id="game-canvas" width="640" height="480"
+          style="width:640px; height:480px; image-rendering:pixelated;
+                 background:#000; border:1px solid #2a2e35; border-radius:6px;"></canvas>
+  <p class="muted" id="gfx-status" style="font-size:12px; margin:4px 0 0;">
+    graphics: waiting for the WebGL2 context (created on ROM pick)
+  </p>
+</div>
 <pre id="status">Initializing...</pre>
+<h2 style="font-size:14px; margin:16px 0 6px;">Graphics workload (milestone 6)</h2>
+<pre id="gfxstats" class="muted" style="white-space:pre-wrap; font-size:12px; line-height:1.5; margin:0 0 16px;">(no display lists submitted yet)</pre>
 
 <!--
   Path to the Emscripten build output. Override before this script by setting

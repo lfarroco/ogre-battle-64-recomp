@@ -665,9 +665,9 @@ app/
 | 3 | Browser runtime boot (load ROM, init, reach game execution) | ✅ verified in headless Chrome: ROM loads, runtime+threads run |
 | 4 | Browser display-list execution (RSP → F3DEX → DL → NullRenderer) | ✅ `[RSP] display list submitted (frame 1, type 1, ucode 0x8009F540, ...)` in the browser; page stable |
 | 5 | Browser input/audio/save | ✅ 2026-08-29 (session 12): real keyboard+gamepad input (slot 0 keyboard-first, slots 1–3 gamepads), IDBFS save persistence at `/ogre` (stored-ROM autostart verified), AudioWorklet audio pipeline connected (wasm ring buffer → resampled playback). Game-side audio is 0 at the title screen because the game never registers `OS_EVENT_AI` or queues buffers there — verified identical on the native build; audio will flow once the game advances past the title |
-| 6 | Graphics workload analysis | pending |
-| 7 | Browser renderer prototype (WebGL2 or WebGPU) | pending |
-| 8 | Playable browser build | pending |
+| 6 | Graphics workload analysis | 🚧 started 2026-08-29 (session 13): F3DEX2 DL analyzer (command histogram, geometry, texture formats, unique combiners/modes) runs in the null renderer + web build (`app/src/gbi.{hpp,cpp}`, exported `ogre_gfx_stats`). Real data is thin while the game is stuck at the title (only the boot blanking DL is submitted on every platform); the full per-frame workload will be measured once the boot stall is fixed |
+| 7 | Browser renderer prototype (WebGL2 or WebGPU) | ✅ 2026-08-29 (session 13): WebGL2 renderer (`app/src/web_renderer.cpp`) — F3DEX2 DL execution, matrix pipeline, fill rect / textured rect / triangles, N64 texture decode (RGBA16 verified; CI8/CI4+TLUT, IA, I implemented), general 2-cycle combiner in GLSL, scissor/blend. Verified in headless Chrome with a synthetic test DL (2x2 RGBA16 texture renders correct colors). Renders on the browser main thread (gfx pthread records commands; JS polls `ogre_gfx_flush`) |
+| 8 | Playable browser build | pending (blocked by the game's boot stall — the game never advances past the title on any platform; see session 13 handoff for the SI_STATUS / game-clock-freeze leads) |
 
 > The browser feasibility milestones (1–5) are met: the recompiled game +
 > N64ModernRuntime run in WebAssembly with real input and persistent storage.

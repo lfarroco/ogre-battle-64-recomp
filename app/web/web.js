@@ -67,6 +67,27 @@
     }
   }
 
+  // --- Graphics workload stats (milestone 6) ----------------------------------
+
+  var gfxStats = document.getElementById("gfxstats");
+  var lastGfxStats = "";
+
+  function pollGfxStats() {
+    if (!moduleReady() || typeof Module._ogre_gfx_stats !== "function") {
+      return;
+    }
+    var ptr = Module._ogre_gfx_stats();
+    if (!ptr) {
+      return;
+    }
+    var text = Module.UTF8ToString(ptr);
+    if (text !== lastGfxStats) {
+      lastGfxStats = text;
+      gfxStats.textContent = text || "(no display lists submitted yet)";
+    }
+  }
+  window.setInterval(pollGfxStats, 1000);
+
   function startBoot() {
     if (bootStarted) {
       return;
@@ -298,6 +319,7 @@
         // If a previously validated ROM is persisted, boot without re-picking.
         if (Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists) {
           log("[web] Stored ROM found - starting the game with the previously loaded ROM.");
+          initWebGL();
           startBoot();
         }
       });
@@ -318,6 +340,39 @@
   window.setInterval(syncStorage, 10000);
   window.addEventListener("beforeunload", syncStorage);
 
+  // --- Graphics: WebGL2 canvas handoff (milestone 7) ---------------------------
+
+  var gfxStatus = document.getElementById("gfx-status");
+
+  function initWebGL() {
+    if (gfxStatus.getAttribute("data-done")) {
+      return;
+    }
+    if (!moduleReady() || typeof Module._ogre_gfx_create_context !== "function") {
+      return;
+    }
+    gfxStatus.setAttribute("data-done", "1");
+    try {
+      var handle = Module._ogre_gfx_create_context(320, 240);
+      if (!handle) {
+        gfxStatus.textContent = "graphics: WebGL2 context creation failed - continuing with analysis only";
+        return;
+      }
+      Module._ogre_gfx_set_canvas(handle, 320, 240);
+      log("[web:gfx] WebGL2 context handed to the renderer (320x240)");
+      // Poll the queued draw commands on the main thread (the gfx pthread only
+      // records them; all GL runs here).
+      if (!window.__ogreGfxFlushStarted) {
+        window.__ogreGfxFlushStarted = true;
+        window.setInterval(function () {
+          Module._ogre_gfx_flush();
+        }, 16);
+      }
+    } catch (e3) {
+      gfxStatus.textContent = "graphics: context handoff failed: " + e3;
+    }
+  }
+
   // --- ROM picker ---------------------------------------------------------------
 
   input.addEventListener("change", function () {
@@ -336,6 +391,7 @@
       Module.FS.writeFile("/rom.z64", bytes);
       log("[web] ROM written to the virtual filesystem. Starting runtime...");
       initAudio();  // inside the user gesture so autoplay is allowed
+      initWebGL();  // inside the user gesture (WebGL2 context creation)
       startBoot();
     }).catch(function (err) {
       log("[web] Failed to read the ROM file: " + err);

@@ -64,6 +64,9 @@ if (OGRE_USE_RT64)
     add_subdirectory(${OGRE_TOOLS}/RT64 ${CMAKE_BINARY_DIR}/RT64)
     target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/RT64/src)
     set(OGRE_RENDERER_SOURCES src/renderer.cpp)
+elseif (EMSCRIPTEN)
+    # Milestone 7: WebGL2 browser renderer (docs/WEB-PORT.md §16 Option A).
+    set(OGRE_RENDERER_SOURCES src/web_renderer.cpp)
 else()
     set(OGRE_RENDERER_SOURCES src/null_renderer.cpp)
 endif()
@@ -103,12 +106,14 @@ target_compile_options(ogrebattle64_recomp PRIVATE
 # Native: SDL-based entry + platform callbacks. Web: no-SDL entry + no-op
 # callbacks; the browser main thread stays responsive while the runtime runs
 # on pthreads (docs/WEB-PORT.md §11-12).
+# gbi.cpp (F3DEX2 DL parser + workload analyzer, plan §15) is shared by both.
 if (EMSCRIPTEN)
     set(OGRE_APP_SOURCES
         src/main_web.cpp
         src/web_platform.cpp
         src/rsp.cpp
         src/overlays.cpp
+        src/gbi.cpp
     )
 else()
     set(OGRE_APP_SOURCES
@@ -116,6 +121,7 @@ else()
         src/sdl_platform.cpp
         src/rsp.cpp
         src/overlays.cpp
+        src/gbi.cpp
     )
 endif()
 
@@ -177,7 +183,10 @@ if (EMSCRIPTEN)
         "-sINITIAL_MEMORY=1073741824"
         "-sEXIT_RUNTIME=0"
         "-sSTACK_SIZE=1048576"
-        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_main"
+        "-sUSE_WEBGL2=1"
+        "-sMAX_WEBGL_VERSION=2"
+        
+        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_main"
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ccall,cwrap,UTF8ToString,writeArrayToMemory,HEAPU8"
         "-lidbfs.js"
     )
