@@ -22,6 +22,7 @@
   var lastMilestoneLen = 0;
   var pollTimer = null;
   var bootStarted = false;
+  var bootStartTime = 0;
   var audioContext = null;
 
   function log(text) {
@@ -93,6 +94,7 @@
       return;
     }
     bootStarted = true;
+    bootStartTime = Date.now();
     Module.ccall("ogre_start_boot", "void", [], []);
     log("[web] Boot thread started. Waiting for milestones...");
     if (pollTimer === null) {
@@ -349,16 +351,23 @@
       return;
     }
     if (!moduleReady() || typeof Module._ogre_gfx_create_context !== "function") {
+      // Runtime/glue not ready yet; keep the "waiting" text (the caller can
+      // retry on the next ROM pick).
       return;
     }
     gfxStatus.setAttribute("data-done", "1");
     try {
       var handle = Module._ogre_gfx_create_context(320, 240);
       if (!handle) {
-        gfxStatus.textContent = "graphics: WebGL2 context creation failed - continuing with analysis only";
+        gfxStatus.textContent =
+          "graphics: WebGL2 context creation FAILED (no WebGL2?) - the renderer cannot start; " +
+          "the workload analyzer keeps running";
+        log("[web:gfx] ERROR: emscripten_webgl_create_context returned 0 (WebGL2 unavailable in this browser?)");
         return;
       }
       Module._ogre_gfx_set_canvas(handle, 320, 240);
+      gfxStatus.textContent =
+        "graphics: WebGL2 context ready (320x240) - renderer takes over once the game submits a display list";
       log("[web:gfx] WebGL2 context handed to the renderer (320x240)");
       // Poll the queued draw commands on the main thread (the gfx pthread only
       // records them; all GL runs here).
@@ -366,12 +375,80 @@
         window.__ogreGfxFlushStarted = true;
         window.setInterval(function () {
           Module._ogre_gfx_flush();
+          updateGfxStatus();
         }, 16);
       }
     } catch (e3) {
       gfxStatus.textContent = "graphics: context handoff failed: " + e3;
+      log("[web:gfx] ERROR: context handoff threw: " + e3);
     }
   }
+
+  // Live #gfx-status line: reflects the actual renderer state instead of
+  // staying on the initial "waiting for the WebGL2 context" text forever.
+  // Derived from existing exports (ogre_gfx_flush returns 1 once the renderer
+  // object exists; #gfxstats carries the workload snapshot).
+  var lastGfxStatusLine = "";
+  var bootStallLogged = false;
+
+  function updateGfxStatus() {
+    if (gfxStatus.getAttribute("data-done") !== "1") {
+      return;  // context not created yet; keep the "waiting" text
+    }
+    var rendererUp = false;
+    try {
+      rendererUp = typeof Module._ogre_gfx_flush === "function" && Module._ogre_gfx_flush() !== 0;
+    } catch (e) {
+      rendererUp = false;
+    }
+    var stats = gfxStats.textContent || "";
+    var tasks = 0, hasDraws = false;
+    var m = /tasks=(\d+)/.exec(stats);
+    if (m) {
+      tasks = parseInt(m[1], 10);
+    }
+    var f = /fillrect=(\d+)/.exec(stats);
+    var t = /texrect=(\d+)/.exec(stats);
+    if (f || t) {
+      hasDraws = (f ? parseInt(f[1], 10) : 0) + (t ? parseInt(t[1], 10) : 0) > 0;
+    }
+    var line;
+    if (!rendererUp) {
+      line = "graphics: WebGL2 context ready (320x240) - renderer not active yet (boot still starting)";
+    } else if (tasks === 0) {
+      line = "graphics: WebGL2 renderer active - waiting for the first display list";
+    } else {
+      line = "graphics: WebGL2 renderer active - " + tasks + (tasks === 1 ? " display list processed" : " display lists processed") +
+             (hasDraws ? "" : " (only the boot blanking DL so far - no pixels drawn yet)");
+    }
+    if (line !== lastGfxStatusLine) {
+      lastGfxStatusLine = line;
+      gfxStatus.textContent = line;
+    }
+  }
+
+  // The game is currently stuck at its boot screen on every platform (it only
+  // ever submits the 32-command boot blanking DL, which has no draw commands),
+  // so the canvas stays black even though the renderer works. Surface that
+  // clearly instead of leaving the page looking broken.
+  function watchBootStall() {
+    window.setInterval(function () {
+      if (bootStallLogged || !bootStartTime || Date.now() - bootStartTime < 15000) {
+        return;
+      }
+      var stats = gfxStats.textContent || "";
+      var m = /tasks=(\d+)/.exec(stats);
+      var tasks = m ? parseInt(m[1], 10) : 0;
+      if (tasks <= 1) {
+        bootStallLogged = true;
+        log("[web:gfx] The game is still at its boot screen (only the boot blanking display list was submitted, " +
+            "no draw commands). This is the known boot-stall that affects every platform - the renderer itself is " +
+            "fine, but the game's VI-retrace message queues deadlock and the boot never advances (see " +
+            "docs/HANDOFF-2026-08-30-session14.md). The screen will stay black until the boot-stall is fixed.");
+      }
+    }, 1000);
+  }
+  watchBootStall();
 
   // --- ROM picker ---------------------------------------------------------------
 
