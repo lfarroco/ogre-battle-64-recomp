@@ -27,6 +27,41 @@ index 37556bd..eefe64b 100644
      }
  };
  
+diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
+index 748558c..7f43491 100644
+--- a/librecomp/include/librecomp/rsp.hpp
++++ b/librecomp/include/librecomp/rsp.hpp
+@@ -94,12 +94,20 @@ static inline void RSP_MEM_H_STORE(uint32_t offset, uint32_t addr, uint32_t val)
+ #define DO_DMA_READ(rd_len) dma_rdram_to_dmem(rdram, dma_mem_address, dma_dram_address, (rd_len))
+ #define DO_DMA_WRITE(wr_len) dma_dmem_to_rdram(rdram, dma_mem_address, dma_dram_address, (wr_len))
+ 
++// Normalize a dram address (physical or KSEG0) to a KSEG0 address for the
++// recompiled MEM_* macros. (The old macro computed offsets as
++// `addr - 0xFFFFFFFF80000000`; the current recomp.h recomp_mem_addr expects a
++// proper KSEG0 gpr and normalizes it itself.)
++static inline gpr to_kseg0(uint32_t addr) {
++    return (gpr)(int32_t)((addr & 0x1FFFFFFF) | 0x80000000);
++}
++
+ static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len) {
+     rd_len += 1; // Read length is inclusive
+     dram_addr &= 0xFFFFF8;
+     assert(dmem_addr + rd_len <= 0x1000);
+     for (uint32_t i = 0; i < rd_len; i++) {
+-        RSP_MEM_B(i, dmem_addr) = MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000));
++        RSP_MEM_B(i, dmem_addr) = MEM_B(0, to_kseg0(dram_addr + i));
+     }
+ }
+ 
+@@ -108,7 +116,7 @@ static inline void dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_
+     dram_addr &= 0xFFFFF8;
+     assert(dmem_addr + wr_len <= 0x1000);
+     for (uint32_t i = 0; i < wr_len; i++) {
+-        MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000)) = RSP_MEM_B(i, dmem_addr);
++        MEM_B(0, to_kseg0(dram_addr + i)) = RSP_MEM_B(i, dmem_addr);
+     }
+ }
+ 
 diff --git a/librecomp/include/librecomp/sections.h b/librecomp/include/librecomp/sections.h
 index 0fdb724..3c2f175 100644
 --- a/librecomp/include/librecomp/sections.h
@@ -54,6 +89,23 @@ index 7ad6c21..c755129 100644
  #include "helpers.hpp"
  
  #define MAXCONTROLLERS 4
+diff --git a/librecomp/src/heap.cpp b/librecomp/src/heap.cpp
+index f84ac71..7b8638b 100644
+--- a/librecomp/src/heap.cpp
++++ b/librecomp/src/heap.cpp
+@@ -35,7 +35,11 @@ void recomp::init_heap(uint8_t* rdram, uint32_t address) {
+ 
+     // Calculate the offset of the heap from the start of rdram and the size of the heap.
+     heap_offset = address - 0x80000000U;
+-    size_t heap_size = recomp::mem_size - heap_offset;
++    // Reserve the last 8 MiB of rdram for the MMIO scratch page (see
++    // recomp.h's recomp_mem_addr: raw KSEG1/MMIO accesses alias there), so the
++    // game's allocator can never hand that region out.
++    constexpr size_t MMIO_SCRATCH_SIZE = 0x800000U;
++    size_t heap_size = recomp::mem_size - heap_offset - MMIO_SCRATCH_SIZE;
+ 
+     printf("Initializing recomp heap at offset 0x%08X with size 0x%08X\n", heap_offset, static_cast<uint32_t>(heap_size));
+ 
 diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
 index 0f7de83..6bbe537 100644
 --- a/librecomp/src/mods.cpp
@@ -150,13 +202,96 @@ index 8c8e5d1..01b8734 100644
  
  std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {
 diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
-index 43509ba..e3d6648 100644
+index 43509ba..bdb940e 100644
 --- a/librecomp/src/pi.cpp
 +++ b/librecomp/src/pi.cpp
-@@ -61,6 +61,50 @@ extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
-     ;
+@@ -39,6 +39,9 @@ extern "C" void __osPiGetAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
+ extern "C" void __osPiRelAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
  }
  
++// Defined below; called by osCreatePiManager_recomp.
++void init_pi_manager(uint8_t* rdram);
++
+ extern "C" void osCartRomInit_recomp(uint8_t* rdram, recomp_context* ctx) {
+     OSPiHandle* handle = TO_PTR(OSPiHandle, recomp::cart_handle);
+     handle->type = 0; // cart
+@@ -58,7 +61,120 @@ extern "C" void osDriveRomInit_recomp(uint8_t * rdram, recomp_context * ctx) {
+ }
+ 
+ extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
+-    ;
++    // The game's own libultra PI manager (osCreatePiManager) is not run (this
++    // stub replaces it), so the game's PI-manager globals — read by the game's
++    // DMA starter func_8008BC40 via func_800998C0 — are never initialized:
++    //   D_800AA400 = __osPiDevMgr (non-zero once the manager exists)
++    //   D_800AA408 = &__osPiDevMgr.queue (the DMA-request queue)
++    // With both zero, the recompiled func_8008BC40 bails out (-1) and DMA
++    // callers (func_80089F80 etc.) block forever on their completion queue
++    // (the boot's audio-path DMA deadlocks here). Initialize them and route
++    // the request queue through the runtime's synchronous DMA handler.
++    init_pi_manager(rdram);
++}
++
++// -----------------------------------------------------------------------------
++// PI-manager emulation for the game's own (non-bridged) DMA path.
++//
++// func_8008BC40 (the game's DMA-request starter) is called both via function
++// pointers (routed to func_8008BC40_recomp, the synchronous ROM read) and
++// directly from game code (e.g. func_80089F80's chunked DMA). The direct calls
++// run the recompiled body, which sends the OSIoMesg to the queue stored in
++// D_800AA408 and relies on D_800AA400 being non-zero. We emulate that queue:
++// do_send() detects sends to it and completes the DMA inline.
++// -----------------------------------------------------------------------------
++
++// Queue address (KSEG0) the game sends DMA requests to. Lives in the reserved
++// MMIO scratch page (see recomp.h recomp_mem_addr), which nothing else uses.
++// Declared as int32 so TO_PTR's sign-extension (PTR() values) works on 64-bit.
++static constexpr int32_t PI_REQUEST_QUEUE = (int32_t)0x9F800000;  // rdram offset 0x1F800000
++static constexpr int32_t PI_MANAGER_STRUCT = (int32_t)0x9F800020; // __osPiDevMgr stand-in
++
++void init_pi_manager(uint8_t* rdram) {
++    // Write the game's PI-manager globals (D_800AA400/D_800AA408).
++    MEM_W(0, (gpr)(int32_t)0x800AA400) = (int32_t)PI_MANAGER_STRUCT;
++    MEM_W(0, (gpr)(int32_t)0x800AA408) = (int32_t)PI_REQUEST_QUEUE;
++
++    // Initialize the request queue struct + buffer in the scratch page.
++    auto* q = TO_PTR(OSMesgQueue, PI_REQUEST_QUEUE);
++    q->blocked_on_recv = NULLPTR;
++    q->blocked_on_send = NULLPTR;
++    q->validCount = 0;
++    q->first = 0;
++    q->msgCount = 8;
++    q->msg = (PTR(OSMesg))(int32_t)(PI_REQUEST_QUEUE + 0x18);
++
++    ultramodern::set_pi_request_queue(PI_REQUEST_QUEUE, [](uint8_t* rdram, uint32_t mesg_addr) {
++        // Game's OSIoMesg layout: type@0 (half), pri@2 (byte), mq@4, dramAddr@8,
++        // devAddr@0xC, size@0x10 (all words).
++        uint32_t mq       = (uint32_t)MEM_W(0x04, (gpr)(int32_t)mesg_addr);
++        uint32_t dramAddr = (uint32_t)MEM_W(0x08, (gpr)(int32_t)mesg_addr);
++        uint32_t devAddr  = (uint32_t)MEM_W(0x0C, (gpr)(int32_t)mesg_addr);
++        uint32_t size     = (uint32_t)MEM_W(0x10, (gpr)(int32_t)mesg_addr);
++
++        OGRE_TRACE("[pi] inline DMA dram=0x%08X dev=0x%08X size=0x%X mq=0x%08X\n",
++                   dramAddr, devAddr, size, mq);
++
++        if (devAddr == 0 || size == 0) {
++            OGRE_TRACE("[pi] inline DMA with zero dev/size; completing anyway\n");
++        } else {
++            uint32_t dev_off = (devAddr >= recomp::rom_base) ? (devAddr - recomp::rom_base) : devAddr;
++            recomp::do_rom_read(rdram, (gpr)(int32_t)dramAddr, recomp::rom_base + dev_off, size);
++        }
++
++        // Complete the request synchronously: wake the caller's completion queue.
++        if (mq != 0) {
++            ultramodern::enqueue_external_message_src(mq, (OSMesg)(int32_t)mesg_addr, false,
++                                                      ultramodern::EventMessageSource::Pi);
++        }
++    });
++
++    printf("[pi] PI manager initialized (queue=0x%08X)\n", PI_REQUEST_QUEUE);
++}
++
++
 +// func_8008BC40 (OB64 game code): the game's DMA-request starter. On real
 +// hardware it queues the OSIoMesg to the PI thread. The runtime's
 +// osCreatePiManager is an empty stub, so the game's PI-manager globals
@@ -199,11 +334,9 @@ index 43509ba..e3d6648 100644
 +    osSendMesg(rdram, (int32_t)mq, (OSMesg)(int32_t)mesg, OS_MESG_NOBLOCK);
 +
 +    ctx->r2 = 0;
-+}
-+
- void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
-     // TODO use word copies when possible
+ }
  
+ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
 index ea1c49b..2f02f0d 100644
 --- a/librecomp/src/recomp.cpp
@@ -462,7 +595,7 @@ index ae0f44f..1f7bbd5 100644
      // Task yield requests are ignored, so always return 0 as tasks will never be yielded
      ctx->r2 = 0;
 diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
-index e0d367e..24517d1 100644
+index e0d367e..308aff8 100644
 --- a/librecomp/src/ultra_translation.cpp
 +++ b/librecomp/src/ultra_translation.cpp
 @@ -1,4 +1,5 @@
@@ -471,7 +604,7 @@ index e0d367e..24517d1 100644
  #include <ultramodern/ultra64.h>
  #include <ultramodern/ultramodern.hpp>
  #include "recomp.h"
-@@ -45,19 +46,51 @@ extern "C" void osGetThreadId_recomp(uint8_t * rdram, recomp_context * ctx) {
+@@ -45,19 +46,54 @@ extern "C" void osGetThreadId_recomp(uint8_t * rdram, recomp_context * ctx) {
      ctx->r2 = osGetThreadId(rdram, (int32_t)ctx->r4);
  }
  
@@ -488,7 +621,10 @@ index e0d367e..24517d1 100644
 +static constexpr bool is_watched_queue(uint32_t mq) {
 +    return mq == 0x800E8B14 || mq == 0x800E8B4C || mq == 0x800E8BBC || mq == 0x800E8BF4
 +        || mq == 0x800E9BA8 || mq == 0x800C6490 || mq == 0x800E8B84
-+        || mq == 0x800E7988 || mq == 0x800E9B88;
++        || mq == 0x800E7988 || mq == 0x800E9B88
++        // Thread 3's audio-path queues (session 15: thread 3 blocks on
++        // 0x800C6C98, so watch who sends to it).
++        || mq == 0x800C6C98 || mq == 0x800C6CA8 || mq == 0x800C4A00 || mq == 0x800E9BF0;
 +}
 +
  extern "C" void osCreateMesgQueue_recomp(uint8_t* rdram, recomp_context* ctx) {
@@ -551,10 +687,10 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..085ccab 100644
+index 46aea61..68ba859 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
-@@ -77,6 +77,13 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
+@@ -77,6 +77,22 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
  void wait_for_external_message(RDRAM_ARG1);
  void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
  
@@ -562,13 +698,22 @@ index 46aea61..085ccab 100644
 +// diagnose boot deadlocks even when every game thread is blocked).
 +void debug_dump_queue_snapshot(RDRAM_ARG1);
 +
++// PI DMA request queue emulation (librecomp/pi.cpp): sends to this queue are
++// completed as synchronous ROM DMAs by the runtime.
++using pi_request_handler_t = void (*)(uint8_t* rdram, uint32_t mesg_addr);
++void set_pi_request_queue(int32_t mq, pi_request_handler_t handler);
++
++// Debug: deliver a synthetic PRENMI (0x29D) to the game's VI-manager queue.
++void debug_send_prnmi();
++void deliver_pending_direct_sends(RDRAM_ARG1);
++
 +// Debug: the last recompiled function a game thread entered (0 if unknown).
 +uint32_t debug_last_func_vram(int tid);
 +
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -170,11 +177,23 @@ void set_callbacks(
+@@ -170,11 +186,26 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -580,12 +725,15 @@ index 46aea61..085ccab 100644
 +}
 +
 +// Whether the chatty runtime debug traces ([ev]/[mq]/[sch]/[drainer]) are
-+// enabled (env OGRE_DEBUG_TRACES=1). Off by default: each printf is expensive
-+// (a JS proxy hop under Emscripten) and can slow the game to a crawl.
++// enabled (env OGRE_DEBUG_TRACES=1, or set_debug_traces_enabled from JS).
++// Off by default: each printf is expensive (a JS proxy hop under Emscripten)
++// and can slow the game to a crawl.
 +bool debug_traces_enabled();
++bool debug_traces_active();
++void set_debug_traces_enabled(bool enabled);
  } // namespace ultramodern
  
-+#define OGRE_TRACE(...) do { if (ultramodern::debug_traces_enabled()) printf(__VA_ARGS__); } while (0)
++#define OGRE_TRACE(...) do { if (ultramodern::debug_traces_active()) printf(__VA_ARGS__); } while (0)
 +
  #define MIN(a, b) ((a) < (b) ? (a) : (b))
  
@@ -827,18 +975,21 @@ index 0000000..c6e1d40
 +    return last_func_vram[tid].load(std::memory_order_relaxed);
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..1ca251f 100644
+index 9944a02..12c25f9 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
-@@ -1,4 +1,7 @@
+@@ -1,5 +1,10 @@
 +#include <array>
 +#include <atomic>
  #include <bitset>
 +#include <cstdlib>
++#include <mutex>
  #include <thread>
++#include <vector>
  
  #include "blockingconcurrentqueue.h"
-@@ -37,10 +40,164 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+ 
+@@ -37,10 +42,225 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -859,6 +1010,59 @@ index 9944a02..1ca251f 100644
 +        return v != nullptr && v[0] == '1';
 +    }();
 +    return enabled;
++}
++
++// JS-settable override for the trace gate (exported as ogre_set_trace_enabled).
++static std::atomic<bool> trace_enabled_override{false};
++
++void ultramodern::set_debug_traces_enabled(bool enabled) {
++    trace_enabled_override.store(enabled, std::memory_order_relaxed);
++}
++
++bool ultramodern::debug_traces_active() {
++    return debug_traces_enabled() || trace_enabled_override.load(std::memory_order_relaxed);
++}
++
++// PI DMA request queue (see librecomp/pi.cpp): sends to this queue are
++// completed synchronously instead of being queued.
++static std::atomic<int32_t> pi_request_queue{0};
++static std::atomic<ultramodern::pi_request_handler_t> pi_request_handler{nullptr};
++
++void ultramodern::set_pi_request_queue(int32_t mq, pi_request_handler_t handler) {
++    pi_request_queue.store(mq, std::memory_order_relaxed);
++    pi_request_handler.store(handler, std::memory_order_relaxed);
++}
++
++// Debug: deliver a synthetic PRENMI (0x29D) to the game's VI-manager queue.
++// The game only advances its boot phase (D_800C4800) when the VI manager
++// receives 0x29D, which fans out the mask-2 flags (D_800E8B12) that the
++// audio/system threads process per frame; the runtime never sends 0x29D
++// otherwise. Exported as ogre_send_prnmi for bring-up testing. Delivered
++// directly (not via the external queue, which can have a large retrace
++// backlog that would delay it).
++// Pending direct sends, delivered by game threads (drainer / dequeue_external_messages)
++// so the queue/scheduler manipulation happens in a game-thread context (the
++// cooperative scheduler is not thread-safe against foreign do_send calls).
++static std::mutex pending_direct_mutex;
++static std::vector<std::pair<int32_t, int32_t>> pending_direct_sends;
++
++void ultramodern::deliver_pending_direct_sends(RDRAM_ARG1) {
++    std::vector<std::pair<int32_t, int32_t>> to_send;
++    {
++        std::lock_guard lock{pending_direct_mutex};
++        pending_direct_sends.swap(to_send);
++    }
++    for (const auto& [mq, msg] : to_send) {
++        printf("[dbg] T=%llu delivering direct send to queue 0x%08X msg=0x%08X\n",
++               (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq, (uint32_t)msg);
++        do_send(PASS_RDRAM (PTR(OSMesgQueue))mq, (OSMesg)msg, false, false);
++    }
++}
++
++void ultramodern::debug_send_prnmi() {
++    printf("[dbg] queueing synthetic PRENMI (0x29D) for VI-manager queue\n");
++    std::lock_guard lock{pending_direct_mutex};
++    pending_direct_sends.emplace_back((int32_t)0x800E8B84, (int32_t)0x29D);
 +}
 +
 +static void set_thread_blocked(RDRAM_ARG ThreadBlockKind kind, uint32_t mq_) {
@@ -895,6 +1099,8 @@ index 9944a02..1ca251f 100644
 +        0x800E8B14, 0x800E8B4C, 0x800E8B84, 0x800E8BBC, 0x800E8BF4,
 +        0x800E8C2C, 0x800E7988, 0x800E9BA8, 0x800C6490, 0x800C4C28,
 +        0x800E9B88, 0x800B9C40,
++        // Thread 3's audio-path queues (session 15).
++        0x800C6C98, 0x800C6CA8, 0x800C4A00, 0x800E9BF0,
 +    };
 +    printf("[snap] T=%llu --- queue snapshot ---\n", (unsigned long long)ultramodern::trace_millis());
 +    for (uint32_t mq_ : watched) {
@@ -905,23 +1111,26 @@ index 9944a02..1ca251f 100644
 +        int32_t cap = mq->msgCount;
 +        int recv_tid = -1;
 +        int send_tid = -1;
-+        if (recv_head != 0) {
++        // Guard the blocked-thread derefs: queue structs can overlap (e.g. the
++        // game's audio queues 0x800C6C98/0x800C6CA8) or hold garbage, and the
++        // head pointer may not be a valid KSEG0 OSThread.
++        if (recv_head >= 0x80000000u && recv_head < 0xA0000000u) {
 +            recv_tid = TO_PTR(OSThread, recv_head)->id;
 +        }
-+        if (send_head != 0) {
++        if (send_head >= 0x80000000u && send_head < 0xA0000000u) {
 +            send_tid = TO_PTR(OSThread, send_head)->id;
 +        }
 +        printf("[snap] mq=0x%08X count=%d/%d recv_wait=t%d send_wait=t%d\n",
 +               mq_, count, cap, recv_tid, send_tid);
 +    }
 +    // Per-thread block state (catches blocks on queues not in the watched list).
-+    static const int known_threads[] = {1, 3, 4, 5, 16, 17, 18, 19, 50, 200};
-+    for (int tid : known_threads) {
++    static const int known_threads[] = {1, 3, 4, 5, 16, 17, 18, 19, 50, 200};    for (int tid : known_threads) {
 +        uint32_t kind = thread_block_kind[tid].load(std::memory_order_relaxed);
 +        if (kind != (uint32_t)ThreadBlockKind::None) {
 +            const char* k = kind == (uint32_t)ThreadBlockKind::Recv ? "recv" : "send";
-+            printf("[snap] thread t%d BLOCKED on %s of queue 0x%08X\n", tid, k,
-+                   thread_block_queue[tid].load(std::memory_order_relaxed));
++            printf("[snap] thread t%d BLOCKED on %s of queue 0x%08X (in func 0x%08X)\n", tid, k,
++                   thread_block_queue[tid].load(std::memory_order_relaxed),
++                   ultramodern::debug_last_func_vram(tid));
 +        } else {
 +            printf("[snap] thread t%d not blocked in mesg (last func 0x%08X)\n", tid,
 +                   ultramodern::debug_last_func_vram(tid));
@@ -981,12 +1190,15 @@ index 9944a02..1ca251f 100644
 +        return *(uint8_t*)(rdram + ((addr ^ 3) - 0xFFFFFFFF80000000));
 +    };
 +    printf("[snap] game: phase(D_800C4800)=0x%02X bootstate(D_800AEF98)=0x%08X spin(D_800C4C26)=0x%04X "
-+           "mask1(D_800E8B10)=0x%04X mask2(D_800E8B12)=0x%04X frameprod(D_800E918D)=0x%02X rspdone(D_800E79A4)=0x%08X\n",
++           "mask1(D_800E8B10)=0x%04X mask2(D_800E8B12)=0x%04X frameprod(D_800E918D)=0x%02X rspdone(D_800E79A4)=0x%08X "
++           "pimgr(D_800AA400)=0x%08X piq(D_800AA408)=0x%08X\n",
 +           snap_b(0x800C4800), snap_w(0x800AEF98), snap_hu(0x800C4C26),
-+           snap_hu(0x800E8B10), snap_hu(0x800E8B12), snap_b(0x800E918D), snap_w(0x800E79A4));
++           snap_hu(0x800E8B10), snap_hu(0x800E8B12), snap_b(0x800E918D), snap_w(0x800E79A4),
++           snap_w(0x800AA400), snap_w(0x800AA408));
 +}
 +
  void dequeue_external_messages(RDRAM_ARG1) {
++    ultramodern::deliver_pending_direct_sends(PASS_RDRAM1);
      QueuedMessage to_send;
      std::vector<QueuedMessage> requeued_messages{};
 -    while (external_messages.try_dequeue(to_send)) {
@@ -1004,7 +1216,23 @@ index 9944a02..1ca251f 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -94,16 +251,23 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -51,6 +271,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+ }
+ 
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
++    ultramodern::deliver_pending_direct_sends(PASS_RDRAM1);
+     QueuedMessage to_send;
+     external_messages.wait_dequeue(to_send);
+     if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+@@ -59,6 +280,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+ }
+ 
+ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
++    ultramodern::deliver_pending_direct_sends(PASS_RDRAM1);
+     QueuedMessage to_send;
+     if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
+         if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+@@ -94,16 +316,37 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
      if (!block) {
          // If non-blocking, fail if the queue is full.
          if (MQ_IS_FULL(mq)) {
@@ -1026,10 +1254,24 @@ index 9944a02..1ca251f 100644
              ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
          }
 +        clear_thread_blocked(PASS_RDRAM1);
++    }
++
++    // The game's own (non-bridged) PI DMA path sends OSIoMesg to the emulated
++    // request queue; complete the DMA synchronously instead of queueing it
++    // (see librecomp/pi.cpp init_pi_manager).
++    {
++        int32_t pi_mq = pi_request_queue.load(std::memory_order_relaxed);
++        if (pi_mq != 0 && mq_ == pi_mq) {
++            ultramodern::pi_request_handler_t handler = pi_request_handler.load(std::memory_order_relaxed);
++            if (handler != nullptr) {
++                handler(rdram, (uint32_t)msg);
++            }
++            return true;
++        }
      }
      
      if (jam) {
-@@ -118,6 +282,10 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,6 +361,15 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -1037,10 +1279,15 @@ index 9944a02..1ca251f 100644
 +        || mq_ == 0x800E7988 || mq_ == 0x800E9B88) {
 +        OGRE_TRACE("[ev] T=%llu do_send OK queue=0x%08X msg=0x%08X count=%d/%d\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq_, (uint32_t)msg, MQ_GET_COUNT(mq), mq->msgCount);
 +    }
++    // Debug: the synthetic PRENMI must reach the VI-manager (0x800E8B84).
++    if ((uint32_t)msg == 0x29D) {
++        printf("[dbg] T=%llu PRENMI 0x29D delivered to queue 0x%08X (count=%d/%d)\n",
++               (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq_, MQ_GET_COUNT(mq), mq->msgCount);
++    }
  
      // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
      PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
-@@ -137,11 +305,13 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +389,13 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full

@@ -167,4 +167,16 @@ const char* ogre_poll_milestones() {
     return ogre::milestones::poll_buffer();
 }
 
+// Enable/disable the runtime's chatty debug traces ([ev]/[mq]/[sch]/[drainer])
+// at runtime (probes call this instead of relying on the OGRE_DEBUG_TRACES env
+// var, which is awkward to set under Emscripten).
+void ogre_set_trace_enabled(int enabled) {
+    ultramodern::set_debug_traces_enabled(enabled != 0);
+}
+
+// Debug: inject a synthetic PRENMI (0x29D) to advance the game's boot phase.
+void ogre_send_prnmi() {
+    ultramodern::debug_send_prnmi();
+}
+
 }  // extern "C"

@@ -162,3 +162,78 @@ Leads for the next session:
 - `docs/WEB-PORT.md` — milestone 8 note updated (see below).
 - Probes in `/tmp/ogre-web-test/`: `probe-full.cjs` (full status capture),
   `probe-vi.cjs`, `probe-gfxstatus.cjs` (older).
+
+---
+
+## Round 2 addendum (same session): audio path unblocked — PI-manager emulation + MMIO/RSP fixes
+
+### What changed since the first write-up
+
+1. **MMIO scratch mapping (recomp.h `recomp_mem_addr`)** — all raw KSEG1/MMIO
+   accesses (`0xA0000000-0xC0000000`: AI `0xA4500000`, SI `0xA4040000`, VI
+   `0xA4400000`, PI `0xA4800000`) now alias into a reserved 8 MiB page at the
+   end of rdram (scratch offset `0x1F800000`, heap shrunk accordingly in
+   `librecomp/src/heap.cpp`). This fixed: (a) the wasm "memory access out of
+   bounds" crashes from raw register reads, (b) the game silently corrupting
+   heap memory with garbage MMIO writes, and (c) made `AI_STATUS` etc. read as
+   zero ("idle"). **Critical detail:** N64 addresses flow through the recompiled
+   code sign-extended to 64 bits, so the mapper must normalize to the low 32
+   bits first (`(uint64_t)(uint32_t)addr`) — the first version (plain
+   `addr - 0x80000000`) broke 64-bit native builds (masked only by wasm's 32-bit
+   truncation).
+2. **RSP DMA address bug (`librecomp/include/librecomp/rsp.hpp`)** —
+   `dma_rdram_to_dmem`/`dma_dmem_to_rdram` built addresses as
+   `(int32_t)(dram_addr + i + 0x80000000)` — a trick for the old macro that the
+   normalized `recomp_mem_addr` breaks. Fixed with `to_kseg0()`; this was the
+   crash during the audio RSP task burst.
+3. **PI-manager emulation (`librecomp/src/pi.cpp` + mesgqueue do_send hook)** —
+   the game's own (non-bridged) DMA path (`func_8008BC40`, called *directly* by
+   `func_80089F80` etc.) reads the PI-manager globals `D_800AA400` (must be
+   non-zero) and `D_800AA408` (the request queue). The runtime's
+   `osCreatePiManager` stub never set them, so the recompiled `func_8008BC40`
+   returned -1 and DMA callers blocked forever on their completion queue —
+   **this was the real 0x800C6C98 stall** (round 1's open question). Now
+   `osCreatePiManager_recomp` initializes the globals and `do_send` detects
+   sends to the emulated request queue and completes each DMA synchronously
+   (ROM copy + completion message to the OSIoMesg's `mq`).
+4. **Snapshot hardening** — the watched-queue loop derefs `blocked_on_recv`
+   heads through `TO_PTR`; overlapping audio queues (`0x800C6C98`/`0x800C6CA8`)
+   put garbage in those fields and crashed the VI-thread snapshot. Guarded with
+   a KSEG0 range check.
+5. **PRNMI injection tooling** — `ogre_send_prnmi()` (exported) delivers a
+   synthetic 0x29D to the VI-manager queue via a mutex-protected pending-send
+   list drained by game threads (foreign-thread direct `do_send` races with the
+   cooperative scheduler).
+
+### Result
+
+The boot now advances dramatically in the browser:
+- The game's audio-path DMAs complete (inline DMA logs, `mq=0x800C6C98`).
+- **77+ audio RSP tasks (type=2)** are submitted (the runtime RSP stub completes
+  them instantly).
+- Thread 3 runs its audio loop (`func_80080EE8`/`0x80080F78`) and waits on its
+  audio queue `0x800E79C8` (registered as a retrace handler, fl=0x3).
+- Thread 4 executes **overlay-C code** (`0x80199EEC` — the title-screen region).
+- Boot state machine reaches `bootstate(D_800AEF98)=0x100`, `spin=0xFFFF`.
+- No crashes in traces-off runs.
+
+### Next wall (round 3 leads)
+
+The game settles into a wait: `D_800C4800` (phase byte) stays 0, only the
+blanking DL is submitted (`tasks=1`), and the **VI-manager (t19) stops draining
+`0x800E8B84`** (the queue fills 8/8; retraces dropped). t19's last function is
+`0x800891A0` (the retrace fan-out) while "not blocked in mesg" — it is stuck
+mid-cycle (or parked waiting on a thread that never blocks). Candidates:
+1. The fan-out walks the retrace-handler list at `0x800E9178`
+   (`[0x800E79C8 fl=3, 0x800E7988 fl=1, 0x800C4C28 fl=3]`); if a node's `next`
+   is garbage the walk loops/spins. The nodes live on the registering threads'
+   stacks — verify none of those functions returned.
+2. Thread 4 in overlay-C code (`0x80199EEC`) may be in an unyielded poll loop
+   (the session-8 `yield_self` heuristic only converted ~17 loops; overlay-C
+   may have more). The audio thread's mask-2 work (`0x800E8B12` fan-out, only
+   fired by the 0x29D path) never runs, so thread 3 never triggers the frame
+   producer (`0x800E8B4C` → t17 → `func_8008949C` → `osViSwapBuffer`).
+3. The external-message backlog with `requeue_vi=true` still starves non-VI
+   messages in the FIFO (PRNMI sits behind the retrace stream); the direct-send
+   mechanism bypasses it, but the VI-manager must be draining for any of this to
+   matter.
