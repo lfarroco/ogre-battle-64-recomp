@@ -138,24 +138,23 @@ hardware. RT64 remains the primary native renderer throughout. See
     into the next function, and processes its static functions to a fixpoint
     (registering them by address). See
     `docs/HANDOFF-2026-08-25-session9.md`.
-  - 🚧 **Boot reaches real rendering; the VI-thread crash is FIXED (session 10)**
-    — boot passes the title-screen DL build, runs ~1528 PI DMAs / 64+ RSP tasks
-    (including new `type=1` tasks), and RT64 renders frames. The long-standing
-    flaky VI-thread segfault (`update_vi()` with a garbage `mode` pointer) is
-    fixed: the game's `osViSetMode` (really the VI swap-context routine) ignores
-    its argument, and one caller passes the MMIO address `0xA4400010`, which the
-    runtime's `TO_PTR` turned into a host pointer ~4.5 GiB past rdram. The
-    runtime now validates the mode pointer (KSEG0 only) and null-guards
-    `update_vi()`/`osViSetSpecialFeatures()`.
-  - ✅ **Verified stable under Lavapipe** (software rasterizer): 1864 RSP gfx
-    tasks submitted and completed, zero crashes. The remaining crash on this dev
-    machine is `submitRasterScene` → `libvulkan_intel_hasvk.so` (Intel Haswell
-    driver, "Haswell Vulkan support is incomplete") — **machine-specific, not a
-    general issue**; occurs with both correct and wrong GBI. Next session should
-    run on a supported GPU (or keep Lavapipe) to validate title-screen rendering.
-  - **Flaky renderer-init segfault** (before any game code) — the VI-thread part
-    is fixed; the `std::bad_optional_access` seen after renderer init under hasvk
-    should be re-tested on a good GPU.
+  - ✅ **Boot-stall root-caused & fixed (session 15)**: the session-14
+    "VI-retrace message-queue deadlock" was a misread — the real cause was a
+    **regression**: the session-8 `yield_self` poll-loop emission was missing
+    from the vendored N64Recomp fork (reset to upstream; patch lost the hunks),
+    so thread 3's spin at `0x80075FB8` starved the cooperative scheduler's
+    drainer. Also fixed: the scheduler threw "No threads left to run" when all
+    game threads blocked (now idles on external messages), `os*Mesg` drained
+    the entire external-message backlog per call (now capped at 32), and the
+    debug traces slowed the headless browser ~100× (now gated behind
+    `OGRE_DEBUG_TRACES=1`). The web build now boots to a **stable, healthy
+    idle state** — no crash, no deadlock, all queues draining at 60 Hz.
+    **Next wall (game behavior):** thread 3 blocks on its own count-1 queue
+    `0x800C6C98` (sender unknown — audio/AI path?), so the frame-producer
+    thread (`func_800893C0` → `func_8008949C` → `osViSwapBuffer`) never runs
+    and the game submits only the boot blanking DL. See
+    `docs/HANDOFF-2026-08-31-session15.md`.
+
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
 

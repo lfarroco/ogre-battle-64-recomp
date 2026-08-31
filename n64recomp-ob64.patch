@@ -1,3 +1,28 @@
+diff --git a/LiveRecomp/live_generator.cpp b/LiveRecomp/live_generator.cpp
+index 61e1ff5..345f134 100644
+--- a/LiveRecomp/live_generator.cpp
++++ b/LiveRecomp/live_generator.cpp
+@@ -1303,7 +1303,7 @@ void N64Recomp::LiveGenerator::process_store_op(const StoreOp& op, const Instruc
+     }
+ }
+ 
+-void N64Recomp::LiveGenerator::emit_function_start(const std::string& function_name, size_t func_index) const {
++void N64Recomp::LiveGenerator::emit_function_start(const std::string& function_name, size_t func_index, uint32_t function_vram) const {
+     context->function_name = function_name;
+     context->func_labels[func_index] = sljit_emit_label(compiler);
+     // sljit_emit_op0(compiler, SLJIT_BREAKPOINT);
+@@ -1933,6 +1933,11 @@ void N64Recomp::LiveGenerator::emit_pause_self() const {
+     sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, sljit_sw(inputs.pause_self));
+ }
+ 
++void N64Recomp::LiveGenerator::emit_yield_self() const {
++    // Not used by this project (the offline C recompiler is the only path);
++    // emit nothing so poll loops remain semantically valid in live code.
++}
++
+ void N64Recomp::LiveGenerator::emit_trigger_event(uint32_t event_index) const {
+     // Load rdram and ctx into R0 and R1.
+     sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, Registers::rdram, 0, SLJIT_IMM, rdram_offset);
 diff --git a/include/recomp.h b/include/recomp.h
 index 73f3e73..13ea02b 100644
 --- a/include/recomp.h
@@ -24,7 +49,7 @@ index 73f3e73..13ea02b 100644
  void do_break(uint32_t vram);
  
 diff --git a/include/recompiler/generator.h b/include/recompiler/generator.h
-index 145bcd0..69a2ff2 100644
+index 145bcd0..3dbcb3e 100644
 --- a/include/recompiler/generator.h
 +++ b/include/recompiler/generator.h
 @@ -3,6 +3,7 @@
@@ -35,7 +60,16 @@ index 145bcd0..69a2ff2 100644
  
  namespace N64Recomp {
      struct InstructionContext {
-@@ -53,6 +54,13 @@ namespace N64Recomp {
+@@ -30,7 +31,7 @@ namespace N64Recomp {
+         virtual void process_binary_op(const BinaryOp& op, const InstructionContext& ctx) const = 0;
+         virtual void process_unary_op(const UnaryOp& op, const InstructionContext& ctx) const = 0;
+         virtual void process_store_op(const StoreOp& op, const InstructionContext& ctx) const = 0;
+-        virtual void emit_function_start(const std::string& function_name, size_t func_index) const = 0;
++        virtual void emit_function_start(const std::string& function_name, size_t func_index, uint32_t function_vram) const = 0;
+         virtual void emit_function_end() const = 0;
+         virtual void emit_function_call_lookup(uint32_t addr) const = 0;
+         virtual void emit_function_call_by_register(int reg) const = 0;
+@@ -53,12 +54,20 @@ namespace N64Recomp {
          virtual void emit_check_nan(int fpr, bool is_double) const = 0;
          virtual void emit_cop0_status_read(int reg) const = 0;
          virtual void emit_cop0_status_write(int reg) const = 0;
@@ -49,7 +83,23 @@ index 145bcd0..69a2ff2 100644
          virtual void emit_cop1_cs_read(int reg) const = 0;
          virtual void emit_cop1_cs_write(int reg) const = 0;
          virtual void emit_muldiv(InstrId instr_id, int reg1, int reg2) const = 0;
-@@ -90,6 +98,11 @@ namespace N64Recomp {
+         virtual void emit_syscall(uint32_t instr_vram) const = 0;
+         virtual void emit_do_break(uint32_t instr_vram) const = 0;
+         virtual void emit_pause_self() const = 0;
++        virtual void emit_yield_self() const = 0;
+         virtual void emit_trigger_event(uint32_t event_index) const = 0;
+         virtual void emit_comment(const std::string& comment) const = 0;
+     };
+@@ -69,7 +78,7 @@ namespace N64Recomp {
+         void process_binary_op(const BinaryOp& op, const InstructionContext& ctx) const final;
+         void process_unary_op(const UnaryOp& op, const InstructionContext& ctx) const final;
+         void process_store_op(const StoreOp& op, const InstructionContext& ctx) const final;
+-        void emit_function_start(const std::string& function_name, size_t func_index) const final;
++        void emit_function_start(const std::string& function_name, size_t func_index, uint32_t function_vram) const final;
+         void emit_function_end() const final;
+         void emit_function_call_lookup(uint32_t addr) const final;
+         void emit_function_call_by_register(int reg) const final;
+@@ -90,12 +99,18 @@ namespace N64Recomp {
          void emit_check_nan(int fpr, bool is_double) const final;
          void emit_cop0_status_read(int reg) const final;
          void emit_cop0_status_write(int reg) const final;
@@ -61,11 +111,59 @@ index 145bcd0..69a2ff2 100644
          void emit_cop1_cs_read(int reg) const final;
          void emit_cop1_cs_write(int reg) const final;
          void emit_muldiv(InstrId instr_id, int reg1, int reg2) const final;
+         void emit_syscall(uint32_t instr_vram) const final;
+         void emit_do_break(uint32_t instr_vram) const final;
+         void emit_pause_self() const final;
++        void emit_yield_self() const final;
+         void emit_trigger_event(uint32_t event_index) const final;
+         void emit_comment(const std::string& comment) const final;
+     private:
+diff --git a/include/recompiler/live_recompiler.h b/include/recompiler/live_recompiler.h
+index d155b83..dd03ba5 100644
+--- a/include/recompiler/live_recompiler.h
++++ b/include/recompiler/live_recompiler.h
+@@ -101,7 +101,7 @@ namespace N64Recomp {
+         void process_binary_op(const BinaryOp& op, const InstructionContext& ctx) const final;
+         void process_unary_op(const UnaryOp& op, const InstructionContext& ctx) const final;
+         void process_store_op(const StoreOp& op, const InstructionContext& ctx) const final;
+-        void emit_function_start(const std::string& function_name, size_t func_index) const final;
++        void emit_function_start(const std::string& function_name, size_t func_index, uint32_t function_vram) const final;
+         void emit_function_end() const final;
+         void emit_function_call_lookup(uint32_t addr) const final;
+         void emit_function_call_by_register(int reg) const final;
+@@ -128,6 +128,7 @@ namespace N64Recomp {
+         void emit_syscall(uint32_t instr_vram) const final;
+         void emit_do_break(uint32_t instr_vram) const final;
+         void emit_pause_self() const final;
++        void emit_yield_self() const final;
+         void emit_trigger_event(uint32_t event_index) const final;
+         void emit_comment(const std::string& comment) const final;
+     private:
 diff --git a/src/cgenerator.cpp b/src/cgenerator.cpp
-index 94f85c5..7f4e1b1 100644
+index 94f85c5..140fc5d 100644
 --- a/src/cgenerator.cpp
 +++ b/src/cgenerator.cpp
-@@ -501,6 +501,30 @@ void N64Recomp::CGenerator::emit_cop0_status_write(int reg) const {
+@@ -392,14 +392,17 @@ void N64Recomp::CGenerator::get_binary_expr_string(BinaryOpType type, const Bina
+     }
+ }
+ 
+-void N64Recomp::CGenerator::emit_function_start(const std::string& function_name, size_t func_index) const {
++void N64Recomp::CGenerator::emit_function_start(const std::string& function_name, size_t func_index, uint32_t function_vram) const {
+     (void)func_index;
+     fmt::print(output_file,
+         "RECOMP_FUNC void {}(uint8_t* rdram, recomp_context* ctx) {{\n"
++        // Record the currently executing function per thread for deadlock
++        // diagnostics (the VI thread's snapshot prints it).
++        "    recomp_trace_func(rdram, 0x{:08X});\n"
+         // these variables shouldn't need to be preserved across function boundaries, so make them local for more efficient output
+         "    uint64_t hi = 0, lo = 0, result = 0;\n"
+         "    int c1cs = 0;\n", // cop1 conditional signal
+-        function_name);
++        function_name, function_vram);
+ }
+ 
+ void N64Recomp::CGenerator::emit_function_end() const {
+@@ -501,6 +504,30 @@ void N64Recomp::CGenerator::emit_cop0_status_write(int reg) const {
      fmt::print(output_file, "cop0_status_write(ctx, {});", gpr_to_string(reg));
  }
  
@@ -96,6 +194,17 @@ index 94f85c5..7f4e1b1 100644
  void N64Recomp::CGenerator::emit_cop1_cs_read(int reg) const {
      fmt::print(output_file, "{} = get_cop1_cs();\n", gpr_to_string(reg));
  }
+@@ -554,6 +581,10 @@ void N64Recomp::CGenerator::emit_pause_self() const {
+     fmt::print(output_file, "pause_self(rdram);\n");
+ }
+ 
++void N64Recomp::CGenerator::emit_yield_self() const {
++    fmt::print(output_file, "yield_self(rdram);\n");
++}
++
+ void N64Recomp::CGenerator::emit_trigger_event(uint32_t event_index) const {
+     fmt::print(output_file, "recomp_trigger_event(rdram, ctx, base_event_index + {});\n", event_index);
+ }
 diff --git a/src/main.cpp b/src/main.cpp
 index 669c4a1..23248a4 100644
 --- a/src/main.cpp
@@ -124,10 +233,17 @@ index 669c4a1..23248a4 100644
                      }
  
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..ddaf438 100644
+index c228433..4234db9 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
-@@ -34,6 +34,7 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+@@ -1,5 +1,6 @@
+ #include <vector>
+ #include <set>
++#include <array>
+ #include <unordered_set>
+ #include <unordered_map>
+ #include <cassert>
+@@ -34,6 +35,7 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
      uint32_t section_vram_end = cur_section.ram_addr + cur_section.size;
      bool in_current_section = target_func_vram >= section_vram_start && target_func_vram < section_vram_end;
      bool exact_match_found = false;
@@ -135,7 +251,7 @@ index c228433..ddaf438 100644
  
      // Use a thread local to prevent reallocation across runs and to allow multi-threading in the future.
      thread_local std::vector<size_t> matched_funcs{};
-@@ -47,6 +48,10 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+@@ -47,6 +49,10 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
              // Zero-sized symbol handling. unless there's only one matching target.
              if (target_func.words.empty()) {
                  if (!N64Recomp::is_manual_patch_symbol(target_func.vram)) {
@@ -146,7 +262,7 @@ index c228433..ddaf438 100644
                      continue;
                  }
              }
-@@ -84,6 +89,11 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+@@ -84,6 +90,11 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
          // If there were no matches then JAL resolution has failed.
          // A static can't be created as the target section is unknown.
          if (matched_funcs.size() == 0) {
@@ -158,7 +274,7 @@ index c228433..ddaf438 100644
              return JalResolutionResult::NoMatch;
          }
          // If there was an exact match, use it.
-@@ -373,6 +383,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -373,6 +384,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  // generator.emit_branch_close();
                  return true;
              }
@@ -176,7 +292,106 @@ index c228433..ddaf438 100644
  
              fmt::print(stderr, "[Warn] Function {} is branching outside of the function (to 0x{:08X})\n", func.name, branch_target);
          }
-@@ -424,8 +445,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -410,6 +432,98 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+ 
+     bool handled = true;
+ 
++    // Detect "poll loops": backward conditional branches whose loop body is a
++    // call-free, store-free spin that reads a memory location at a loop-invariant
++    // address (e.g. `while (flag) ;`). For those, yield_self() is emitted before
++    // the branch so the cooperative scheduler's drainer can deliver external
++    // messages (VI retraces etc.); without it a pure spin starves every other
++    // game thread (see docs/HANDOFF-2026-08-25-session8.md).
++    auto is_yield_poll_loop = [&](uint32_t branch_target) -> bool {
++        // Only backward branches within the current function.
++        if (branch_target >= instr_vram || branch_target < func.vram) {
++            return false;
++        }
++        // Find the loop head instruction index.
++        size_t head_idx = SIZE_MAX;
++        for (size_t i = 0; i < instr_index; i++) {
++            if (instructions[i].getVram() == branch_target) {
++                head_idx = i;
++                break;
++            }
++        }
++        if (head_idx == SIZE_MAX) {
++            return false;
++        }
++
++        auto is_load_id = [](InstrId id) {
++            switch (id) {
++                case InstrId::cpu_lb: case InstrId::cpu_lbu:
++                case InstrId::cpu_lh: case InstrId::cpu_lhu:
++                case InstrId::cpu_lw: case InstrId::cpu_lwu:
++                case InstrId::cpu_ld: case InstrId::cpu_ldl: case InstrId::cpu_ldr:
++                case InstrId::cpu_lwl: case InstrId::cpu_lwr:
++                case InstrId::cpu_lwc1: case InstrId::cpu_ldc1:
++                    return true;
++                default:
++                    return false;
++            }
++        };
++        auto is_store_id = [](InstrId id) {
++            switch (id) {
++                case InstrId::cpu_sb: case InstrId::cpu_sh: case InstrId::cpu_sw:
++                case InstrId::cpu_sd: case InstrId::cpu_swl: case InstrId::cpu_swr:
++                case InstrId::cpu_sdl: case InstrId::cpu_sdr:
++                case InstrId::cpu_swc1: case InstrId::cpu_sdc1:
++                case InstrId::cpu_sc: case InstrId::cpu_scd:
++                    return true;
++                default:
++                    return false;
++            }
++        };
++
++        // Pass 1: any GPR written by a non-constant op anywhere in the body
++        // makes it non-loop-invariant (a load base can't depend on it).
++        std::array<bool, 32> nonconst_written{};
++        for (size_t i = head_idx; i < instr_index; i++) {
++            const auto& li = instructions[i];
++            InstrId id = li.getUniqueId();
++            if (id == InstrId::cpu_jal || id == InstrId::cpu_jalr) {
++                return false;
++            }
++            if (is_store_id(id)) {
++                return false;
++            }
++            if (id != InstrId::cpu_lui) {
++                int rd = (int)li.GetO32_rd();
++                if (rd > 0 && rd < 32) {
++                    nonconst_written[rd] = true;
++                }
++                int rt = (int)li.GetO32_rt();
++                if (rt > 0 && rt < 32 && !is_load_id(id)) {
++                    // Loads write the destination with the loaded value; only
++                    // non-load instructions count as meaningful writes.
++                    nonconst_written[rt] = true;
++                }
++            }
++        }
++
++        // Pass 2: the loop is a poll if any memory read uses a loop-invariant
++        // base register (never written by a non-constant op in the body).
++        bool has_poll_load = false;
++        for (size_t i = head_idx; i < instr_index; i++) {
++            const auto& li = instructions[i];
++            InstrId id = li.getUniqueId();
++            if (is_load_id(id)) {
++                int base = (int)li.GetO32_rs();
++                if (base > 0 && base < 32 && !nonconst_written[base]) {
++                    has_poll_load = true;
++                    break;
++                }
++            }
++        }
++        return has_poll_load;
++    };
++
+     switch (instr_id) {
+     case InstrId::cpu_nop:
+         fmt::print(output_file, "\n");
+@@ -424,8 +538,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_read(rt);
                  break;
              default:
@@ -188,7 +403,7 @@ index c228433..ddaf438 100644
              }
              break;
          }
-@@ -438,11 +460,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -438,11 +553,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_write(rt);
                  break;
              default:
@@ -221,7 +436,7 @@ index c228433..ddaf438 100644
      // Arithmetic
      case InstrId::cpu_add:
      case InstrId::cpu_addu:
-@@ -518,6 +559,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -518,6 +652,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  print_indent();
                  generator.emit_return(context, func_index);
              }
@@ -240,6 +455,26 @@ index c228433..ddaf438 100644
              else {
                  fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
                  return false;
+@@ -720,6 +866,10 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+             }
+         }
+         else {
++            if (is_yield_poll_loop((uint32_t)instr.getBranchVramGeneric())) {
++                print_indent();
++                generator.emit_yield_self();
++            }
+             if (!print_branch((uint32_t)instr.getBranchVramGeneric())) {
+                 return false;
+             }
+@@ -765,7 +915,7 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+     //fmt::print("Recompiling {}\n", func.name);
+     std::vector<rabbitizer::InstructionCpu> instructions;
+ 
+-    generator.emit_function_start(func.name, func_index);
++    generator.emit_function_start(func.name, func_index, func.vram);
+ 
+     if (context.trace_mode) {
+         fmt::print(output_file,
 diff --git a/src/symbol_lists.cpp b/src/symbol_lists.cpp
 index 9c8f27d..04cfc57 100644
 --- a/src/symbol_lists.cpp

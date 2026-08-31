@@ -130,6 +130,16 @@ int main(int argc, char** argv) {
     cfg.error_handling_callbacks = ogre::make_error_handling_callbacks();
     cfg.threads_callbacks = ogre::make_threads_callbacks();
 
+    // Hardware events that the game polls at a fixed cadence (VI retrace, AI)
+    // must not be dropped when the destination queue is momentarily full: the
+    // game's VI manager processes one retrace per wake, and a dropped retrace
+    // stalls the boot's frame state machine. Requeue them so the next drain
+    // retries the delivery instead of losing it.
+    ultramodern::MessageQueueControl mqc;
+    mqc.requeue_vi = true;
+    mqc.requeue_ai = true;
+    ultramodern::set_message_queue_control(mqc);
+
     // --- boot -------------------------------------------------------------------
     // Start the runtime first: it spawns the VI/audio/gfx/threads and the game
     // thread (which waits for the game status). Then start the game from a

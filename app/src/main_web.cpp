@@ -124,6 +124,14 @@ void boot_runtime() {
     cfg.error_handling_callbacks = ogre::make_error_handling_callbacks();
     cfg.threads_callbacks = ogre::make_threads_callbacks();
 
+    // VI retraces and AI events must not be dropped when the destination queue
+    // is momentarily full (see the comment in main.cpp): requeue them so the
+    // next drain retries the delivery.
+    ultramodern::MessageQueueControl mqc;
+    mqc.requeue_vi = true;
+    mqc.requeue_ai = true;
+    ultramodern::set_message_queue_control(mqc);
+
     // --- boot -------------------------------------------------------------------
     // Same structure as the native app: start the runtime first (it spawns the
     // VI/audio/gfx/threads), then start the game from a separate thread after a
