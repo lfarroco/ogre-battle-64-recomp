@@ -288,3 +288,54 @@ machine's `func_80072398` registration (D_800C4C26 == 1/2 path) may be the real
 gate. Running the real audio ucode (RSPRecomp, `docs/guides/rsp-microcode.md`)
 would produce real task output and likely unblock both the crash and the
 0x800C49E8 response naturally.
+
+---
+
+## Addendum (round 4, same session): VI-manager disassembly — 0x29A retrace is the real heartbeat
+
+### What was discovered
+
+Disassembled the VI-manager thread (`func_80088F08`, t19, pri 120) and its
+setup (`func_80088D10`) in the recompiled output (`RecompiledFuncs/funcs_7.c`):
+
+- The game registers **two** event sources to the VI-manager queue `0x800E8B84`:
+  - `osViSetEvent(0x800E8B84, 0x29A, count)` — **VI retrace, sent every vblank**
+    by the hardware VI interrupt.
+  - `osSetEventMesg(OS_EVENT_PRENMI, 0x800E8B84, 0x29D)` — one-shot PRENMI.
+- VI-manager loop (`func_80088F08`):
+  - **0x29A (retrace)**: increments retrace counter `0x800C4BCC`, then
+    `func_800891A0(0x800E8B10)` — **fan-out to mask-1** (walks the handler list
+    at `0x800E9178`, sending the node ptr to each handler whose flags & mask
+    are non-zero). Then, if `D_800C4800 != 0`, does the frame-countdown
+    (`s0 = (lbu 0x800F9190 >> 1) / lw 0x800F9188 - 3`) and, when it hits 0,
+    `D_800C4800 |= 2` + swap work (`func_80098030`, `func_80095780`,
+    `func_80089BE4(1)`).
+  - **0x29D (PRENMI)**: sets `D_800C4800 = 1`, fans out mask-2
+    (`func_800891A0(0x800E8B12)`), calls fnptr at `0x800B39200` if set.
+- `func_800891A0(mask)` is a **generic fan-out**, not a message send: it walks
+  the linked list at `0x800F9178` (reloc 6) and `osSendMesg(mq, node_ptr, 0)`
+  to every node whose `flags & mask != 0`. The snapshot's "retrace handlers
+  @0x800E9178" prints this exact list.
+
+### Conclusion / corrected lead
+
+The 0x29D PRNMI was the wrong lever: on real hardware it only fires on reset
+and its mask-2 fan-out is NOT what drives per-frame work. The per-frame driver
+is the **0x29A retrace** arriving every vblank — the runtime already sends it
+via `events.cpp` `vi_thread_func` (`enqueue_external_message_src(cur_state->mq,
+cur_state->msg, false, Vi)`), which is exactly `0x29A -> 0x800E8B84`. So the
+correct next step is **not** more PRNMI hacking: verify that 0x29A retraces
+actually reach `0x800E8B84` (probe with `ogre_set_trace_enabled(1)` and watch
+the `[vi-debug] retrace -> mq=0x800E8B84` line; check `0x800C4BCC` increments in
+the snapshot) and that mask-1 fan-out (`0x800E8B10`) delivers to the retrace
+handler list at `0x800E9178`. The phase byte `D_800C4800` may advance on its
+own once a handler reacts to mask-1 retraces; `D_800C4C26` (spin) and the
+`func_80072398` boot registration remain the next gates to inspect.
+
+### Commit
+
+- Working-tree change: `PendingDirectSend` gained `{jam, retries_left}` with
+  retry-on-full in `deliver_pending_direct_sends` (PRNMI + audio auto-response
+  use it). Probe with this build (`probe-prnmi20.cjs`) showed the PRNMI still
+  does not advance the phase — consistent with the corrected lead above (0x29D
+  is not the frame driver). Regenerated `n64modernruntime-ob64.patch`.

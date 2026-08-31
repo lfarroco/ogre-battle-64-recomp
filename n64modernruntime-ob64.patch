@@ -975,7 +975,7 @@ index 0000000..c6e1d40
 +    return last_func_vram[tid].load(std::memory_order_relaxed);
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..2501d5c 100644
+index 9944a02..ad70869 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -989,7 +989,7 @@ index 9944a02..2501d5c 100644
  
  #include "blockingconcurrentqueue.h"
  
-@@ -37,10 +42,225 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+@@ -37,10 +42,248 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -1043,26 +1043,49 @@ index 9944a02..2501d5c 100644
 +// Pending direct sends, delivered by game threads (drainer / dequeue_external_messages)
 +// so the queue/scheduler manipulation happens in a game-thread context (the
 +// cooperative scheduler is not thread-safe against foreign do_send calls).
++struct PendingDirectSend {
++    int32_t mq;
++    int32_t msg;
++    bool jam;
++    int retries_left;
++};
 +static std::mutex pending_direct_mutex;
-+static std::vector<std::pair<int32_t, int32_t>> pending_direct_sends;
++static std::vector<PendingDirectSend> pending_direct_sends;
 +
 +void ultramodern::deliver_pending_direct_sends(RDRAM_ARG1) {
-+    std::vector<std::pair<int32_t, int32_t>> to_send;
++    std::vector<PendingDirectSend> to_send;
 +    {
 +        std::lock_guard lock{pending_direct_mutex};
 +        pending_direct_sends.swap(to_send);
 +    }
-+    for (const auto& [mq, msg] : to_send) {
++    std::vector<PendingDirectSend> retry{};
++    for (const auto& pd : to_send) {
 +        printf("[dbg] T=%llu delivering direct send to queue 0x%08X msg=0x%08X\n",
-+               (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq, (uint32_t)msg);
-+        do_send(PASS_RDRAM (PTR(OSMesgQueue))mq, (OSMesg)msg, false, false);
++               (unsigned long long)ultramodern::trace_millis(), (uint32_t)pd.mq, (uint32_t)pd.msg);
++        if (!do_send(PASS_RDRAM (PTR(OSMesgQueue))pd.mq, (OSMesg)pd.msg, pd.jam, false)) {
++            // Queue full: keep the message for a later retry so it is not lost.
++            if (pd.retries_left > 0) {
++                PendingDirectSend r = pd;
++                r.retries_left--;
++                retry.push_back(r);
++            } else {
++                printf("[dbg] giving up direct send to queue 0x%08X msg=0x%08X (queue stayed full)\n",
++                       (uint32_t)pd.mq, (uint32_t)pd.msg);
++            }
++        }
++    }
++    if (!retry.empty()) {
++        std::lock_guard lock{pending_direct_mutex};
++        for (auto& r : retry) {
++            pending_direct_sends.push_back(r);
++        }
 +    }
 +}
 +
 +void ultramodern::debug_send_prnmi() {
 +    printf("[dbg] queueing synthetic PRENMI (0x29D) for VI-manager queue\n");
 +    std::lock_guard lock{pending_direct_mutex};
-+    pending_direct_sends.emplace_back((int32_t)0x800E8B84, (int32_t)0x29D);
++    pending_direct_sends.push_back({(int32_t)0x800E8B84, (int32_t)0x29D, true, 100});
 +}
 +
 +static void set_thread_blocked(RDRAM_ARG ThreadBlockKind kind, uint32_t mq_) {
@@ -1216,7 +1239,7 @@ index 9944a02..2501d5c 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -51,6 +271,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+@@ -51,6 +294,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message(RDRAM_ARG1) {
@@ -1224,7 +1247,7 @@ index 9944a02..2501d5c 100644
      QueuedMessage to_send;
      external_messages.wait_dequeue(to_send);
      if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -59,6 +280,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -59,6 +303,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
@@ -1232,7 +1255,7 @@ index 9944a02..2501d5c 100644
      QueuedMessage to_send;
      if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -94,16 +316,37 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -94,16 +339,37 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
      if (!block) {
          // If non-blocking, fail if the queue is full.
          if (MQ_IS_FULL(mq)) {
@@ -1271,7 +1294,7 @@ index 9944a02..2501d5c 100644
      }
      
      if (jam) {
-@@ -118,6 +361,15 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,6 +384,15 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -1287,7 +1310,7 @@ index 9944a02..2501d5c 100644
  
      // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
      PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
-@@ -137,11 +389,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +412,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -1304,15 +1327,15 @@ index 9944a02..2501d5c 100644
 +            if (mq_ == (PTR(OSMesgQueue))(int32_t)0x800C49E8) {
 +                std::lock_guard lock{pending_direct_mutex};
 +                bool already = false;
-+                for (const auto& [pmq, pmsg] : pending_direct_sends) {
-+                    if (pmq == (int32_t)0x800C49E8) {
++                for (const auto& pd : pending_direct_sends) {
++                    if (pd.mq == (int32_t)0x800C49E8) {
 +                        already = true;
 +                        break;
 +                    }
 +                }
 +                if (!already) {
 +                    printf("[dbg] audio-response queue 0x800C49E8 blocked; queuing dummy response\n");
-+                    pending_direct_sends.emplace_back((int32_t)0x800C49E8, 0);
++                    pending_direct_sends.push_back({(int32_t)0x800C49E8, 0, false, 4});
 +                }
 +            }
              ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
