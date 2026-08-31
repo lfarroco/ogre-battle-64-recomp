@@ -136,8 +136,15 @@ int main(int argc, char** argv) {
     // stalls the boot's frame state machine. Requeue them so the next drain
     // retries the delivery instead of losing it.
     ultramodern::MessageQueueControl mqc;
-    mqc.requeue_vi = true;
-    mqc.requeue_ai = true;
+    // VI retraces are NOT requeued: requeuing a dropped retrace keeps the
+    // external-message backlog alive, which floods the VI-manager's queue so
+    // it never blocks on recv — starving every lower-priority thread parked in
+    // the running queue (the cooperative scheduler only preempts to a strictly
+    // higher priority). On real hardware retraces are paced by the VI
+    // interrupt; dropping a retrace when the queue is momentarily full just
+    // makes the game wait for the next one.
+    mqc.requeue_vi = false;
+    mqc.requeue_ai = false;
     ultramodern::set_message_queue_control(mqc);
 
     // --- boot -------------------------------------------------------------------

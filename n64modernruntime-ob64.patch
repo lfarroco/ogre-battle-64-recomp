@@ -975,7 +975,7 @@ index 0000000..c6e1d40
 +    return last_func_vram[tid].load(std::memory_order_relaxed);
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..12c25f9 100644
+index 9944a02..2501d5c 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -1287,7 +1287,7 @@ index 9944a02..12c25f9 100644
  
      // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
      PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
-@@ -137,11 +389,13 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +389,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -1295,6 +1295,26 @@ index 9944a02..12c25f9 100644
          while (MQ_IS_EMPTY(mq)) {
 -            debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
 +            OGRE_TRACE("[mq] T=%llu Thread %d BLOCKED on receive from queue 0x%08X\n", (unsigned long long)ultramodern::trace_millis(), TO_PTR(OSThread, ultramodern::this_thread())->id, (uint32_t)mq_);
++            // Bring-up emulation: the game's audio driver blocks on 0x800C49E8
++            // waiting for the audio task's buffer to finish playing, which
++            // requires the RSP audio ucode to produce output and the AI DMA to
++            // complete — neither of which is emulated yet. Auto-respond with a
++            // dummy message so the boot can proceed (audio will be silent until
++            // the ucode is recompiled).
++            if (mq_ == (PTR(OSMesgQueue))(int32_t)0x800C49E8) {
++                std::lock_guard lock{pending_direct_mutex};
++                bool already = false;
++                for (const auto& [pmq, pmsg] : pending_direct_sends) {
++                    if (pmq == (int32_t)0x800C49E8) {
++                        already = true;
++                        break;
++                    }
++                }
++                if (!already) {
++                    printf("[dbg] audio-response queue 0x800C49E8 blocked; queuing dummy response\n");
++                    pending_direct_sends.emplace_back((int32_t)0x800C49E8, 0);
++                }
++            }
              ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
              ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
          }

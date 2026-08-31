@@ -237,3 +237,54 @@ mid-cycle (or parked waiting on a thread that never blocks). Candidates:
    messages in the FIFO (PRNMI sits behind the retrace stream); the direct-send
    mechanism bypasses it, but the VI-manager must be draining for any of this to
    matter.
+
+---
+
+## Round 3 addendum (same session): VI-retrace pacing + audio auto-response
+
+### What changed
+
+1. **VI retrace requeue disabled** (`app/src/main.cpp`, `app/src/main_web.cpp`):
+   requeuing dropped retraces kept the external-message backlog alive, which
+   flooded the VI-manager's queue so it never blocked on recv — starving every
+   lower-priority thread parked in the running queue (the cooperative scheduler
+   only preempts to a strictly higher priority). On real hardware retraces are
+   paced by the VI interrupt; dropping a retrace when the queue is full just
+   makes the game wait for the next one.
+2. **Audio-response auto-fix** (`mesgqueue.cpp do_recv`): the game's audio
+   driver blocks on `0x800C49E8` waiting for the audio task's buffer to finish
+   playing, which requires the RSP audio ucode (type-2 task, ucode
+   `0x8009E050`) to produce output and the AI DMA to complete — neither
+   emulated. When a thread blocks on `0x800C49E8`, a dummy response is queued
+   through the pending-direct-sends list so the boot proceeds (audio stays
+   silent until the ucode is recompiled via RSPRecomp).
+3. **Pending-direct-sends + `ogre_send_prnmi`** (`mesgqueue.cpp`): a
+   mutex-protected list of {mq,msg} pairs drained by game threads in
+   `dequeue_external_messages` / `wait_for_external_message`, so a foreign
+   thread (JS export) can inject messages without racing the cooperative
+   scheduler. The synthetic PRENMI (0x29D) uses it.
+
+### Result / verification
+
+- Thread 3 (system/audio scheduler) now reaches its **normal audio loop**
+  (`func_80080EE8` on `0x800E79C8`) — the `0x800C49E8` wait is auto-satisfied.
+- The boot still does NOT advance past the title gate:
+  `bootstate(D_800AEF98)=0x100`, `phase(D_800C4800)=0`, dispatcher callback
+  list empty, frame-producer thread (t17) still waiting on `0x800E8B4C`, and
+  only the boot blanking DL is submitted (`tasks=1`).
+- A racy "memory access out of bounds" still occurs during the audio RSP task
+  burst (kills one worker; the rest continue) — game-side, likely the audio
+  task output processing reading a bad address.
+
+### Next wall (leads)
+
+The phase byte `D_800C4800` is only set to 1 by the VI-manager's 0x29D (PRENMI)
+handler, which also fans out the mask-2 flags (`0x800E8B12`) that drive the
+audio/graphics per-frame work. Synthetic PRNMI delivery works (the message
+reaches `0x800E8B84`) but the phase still doesn't advance — verify the
+VI-manager actually receives it (queue may be full/dropped) and that
+`D_800E9188` (the PRENMI frame-count divisor) is non-zero, or the boot state
+machine's `func_80072398` registration (D_800C4C26 == 1/2 path) may be the real
+gate. Running the real audio ucode (RSPRecomp, `docs/guides/rsp-microcode.md`)
+would produce real task output and likely unblock both the crash and the
+0x800C49E8 response naturally.

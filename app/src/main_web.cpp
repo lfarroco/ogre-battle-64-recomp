@@ -124,12 +124,16 @@ void boot_runtime() {
     cfg.error_handling_callbacks = ogre::make_error_handling_callbacks();
     cfg.threads_callbacks = ogre::make_threads_callbacks();
 
-    // VI retraces and AI events must not be dropped when the destination queue
-    // is momentarily full (see the comment in main.cpp): requeue them so the
-    // next drain retries the delivery.
     ultramodern::MessageQueueControl mqc;
-    mqc.requeue_vi = true;
-    mqc.requeue_ai = true;
+    // VI retraces are NOT requeued: requeuing a dropped retrace keeps the
+    // external-message backlog alive, which floods the VI-manager's queue so
+    // it never blocks on recv — starving every lower-priority thread parked in
+    // the running queue (the cooperative scheduler only preempts to a strictly
+    // higher priority). On real hardware retraces are paced by the VI
+    // interrupt; dropping a retrace when the queue is momentarily full just
+    // makes the game wait for the next one.
+    mqc.requeue_vi = false;
+    mqc.requeue_ai = false;
     ultramodern::set_message_queue_control(mqc);
 
     // --- boot -------------------------------------------------------------------
