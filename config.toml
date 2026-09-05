@@ -13,6 +13,21 @@ use_absolute_symbols = true
 uses_mips3_float_mode = true
 bss_section_suffix = ".bss"
 functions_per_output_file = 100
+# func_8019ABC4's epilogue (s5-s0 restores, sp restore, jr ra) was split by
+# splat into a separate func_8019AF0C symbol (a shared epilogue also tail-called
+# from overlay B, so the symbol must stay). Without this override N64Recomp
+# truncates func_8019ABC4 at 0x348, dropping the restores: every call clobbers
+# the caller's s-regs (session-16 boot death: s1 wild -> OOB store in
+# func_8019FC68). Extend through the 0x20-byte epilogue.
+function_sizes = [
+    { name = "func_8019ABC4", size = 0x368 },
+    # func_8019A1B4 (0x60C) falls through into func_8019A7C0 (0xC4, frameless
+    # shared code) and then func_8019A884 (0x340, shared epilogue): one logical
+    # function split across three symbols. Without this, N64Recomp ends
+    # func_8019A1B4 at the first boundary and every call leaks 0x58 of game
+    # stack (session-16 boot death, second fault).
+    { name = "func_8019A1B4", size = 0xA10 },
+]
 
 # The game's main() is renamed to avoid conflicting with the C entry point.
 [patches]

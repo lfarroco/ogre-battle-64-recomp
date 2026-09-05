@@ -339,3 +339,102 @@ own once a handler reacts to mask-1 retraces; `D_800C4C26` (spin) and the
   use it). Probe with this build (`probe-prnmi20.cjs`) showed the PRNMI still
   does not advance the phase — consistent with the corrected lead above (0x29D
   is not the frame driver). Regenerated `n64modernruntime-ob64.patch`.
+
+## Round 5 addendum (same session): scheduler lost-wakeup root causes + fixes
+
+### VI subsystem: fully decoded (confirms round 4)
+
+- `func_80088F08` (t19) recvs on `0x800E8B84`: `0x29A` = retrace
+  (counter `0x800C4BCC`++, `func_800891A0(mask1 @ 0x800E8B10)` fan-out, then
+  back to recv while `phase == 0` — correct idle behavior), `0x29D` = PRENMI
+  (`phase = 1`, `func_800891A0(mask2 @ 0x800E8B12)` fan-out, reset countdown).
+- `func_800891A0(mask)` sends `osSendMesg(sub_queue, 0x800E8B10, NOBLOCK)` to
+  every subscriber in the `0x800E9178` list whose `flags & mask_halfword != 0`.
+  Observed masks: `mask1 = 0x0001`, `mask2 = 0x0002`. `flags=3` subs match
+  mask1 too (`3 & 1 != 0`); mask2 serves only `flags=3` subs.
+- `func_80089054(node, queue, flags)` registers a subscriber; with
+  `flags & 2` it also immediate-sends, but only when `phase != 0` (never at
+  boot). Five registration sites, flags ∈ {1, 3}.
+- Boot event wiring (observed `[ev] osSetEventMesg`): SP done (`event=4`) ->
+  `0x800E8BBC` msg `0x29B`; DP done (`event=9`) -> `0x800E8BF4` msg `0x29C`;
+  PRENMI (`event=14`) -> manager `0x800E8B84` msg `0x29D`; SI (`event=5`) ->
+  `0x800E9B88` msg `0`.
+- **Phase correction**: `D_800C4800` is RESET-state, not a boot gate. Writers:
+  spawner init (`= 0`), manager `0x29D` path (`= 1`), manager retrace path
+  (`|= 2`, only once already nonzero). It is correctly `0x00` for the entire
+  normal boot. Stop chasing it; `bootstate D_800AEF98` is likewise `0`.
+
+### Scheduler: four real bugs in the vendored runtime, all fixed
+
+All in `tools/N64ModernRuntime/ultramodern/src/` (captured in
+`n64modernruntime-ob64.patch`):
+
+1. **Lost wakeups (ghost threads) — the boot stall.** `run_next_thread_and_wait`
+   parks on the external-message queue when the running queue is empty, but a
+   thread scheduled while parked there leaves only a running-queue entry; if
+   another parker consumes that entry first (pop + signal a channel nobody
+   listens on), the thread sleeps forever. Observed: t5 parked on an empty
+   `0x800E7988`, distributor refilled it to 8/8, t5 never woke (likewise
+   t3/t4/t18). Fix: `wake_blocked_head` (new helper in `mesgqueue.cpp`, used
+   by both do_send and do_recv wakes) pops, schedules, AND pokes the woken
+   thread's semaphore; `run_next_thread_and_wait`'s idle path does a
+   `tryWait` on its own semaphore after each external wait to reap a stranded
+   poke. All scheduler waits re-check conditions, so surplus counts are safe.
+2. **`thread_queue_remove` never advanced its cursor** (re-resolved the head
+   every iteration): removing any non-head element looped forever. Rewritten
+   as a proper link-by-link walk (shared `thread_queue_unlink_locked`
+   helper). Latent (untriggered so far) but would hang a worker.
+3. **`thread_queue_pop` faulted on empty** (`TO_PTR(0)` is out of wasm
+   bounds): a check-then-pop race between threads crashed a worker
+   (`memory access out of bounds`, stack: pop <- check_running_queue). Pop is
+   now null-safe; `run_next_thread`, `run_next_thread_and_wait`,
+   `check_running_queue`, and `wake_blocked_head` are pop-first with NULL
+   handling instead of check-then-act.
+4. **Double-insert list corruption**: parking paths re-insert on every
+   wait-loop iteration, and the new semaphore pokes cause spurious
+   wake/re-park cycles; inserting an already-listed node self-cycles the
+   intrusive list, which later faults a walker (and, with the lock below,
+   froze the whole process). `thread_queue_insert` now unlinks from the
+   target list before linking (idempotent).
+- Supporting changes: a mutex serializing the five `threadqueue.cpp` ops
+  (game threads already raced; host-side accessors added more); validated
+  link walk in the new `[snap] running_queue:` dump (corruption prints
+  garbage, never faults the VI thread).
+- Dead ends recorded so future sessions don't repeat them: (a) a second,
+  host-side external drainer thread — redundant with the game's t200 drainer,
+  removed; (b) parking the idle path on the semaphore instead of the external
+  queue — froze the system (game drainer's swap handoff stops returning),
+  reverted; (c) timed-poll idle path — **timed waits return immediately on
+  Emscripten pthreads** (a 1 ms `wait_dequeue_timed` spun at 3 kHz and never
+  received anything), so only blocking waits are used on external queues.
+
+### Verification (probe `run-node-boot.cjs`, traces on from boot, ~35 s runs)
+
+- `boot9`/`boot10`: 0 worker deaths, 0 total freezes, t19 consumed ~1600
+  retraces each run, distributor `do_send OK` ~1640x to `0x800E7988` with
+  **zero** `do_send FAILED` on flowing queues (was ~4800 FAILED/run),
+  frame-1 RSP display list submitted with `sp_complete` + `dp_complete`.
+- Run-to-run variance remains in which consumers start (e.g. boot10's
+  `0x800E79C8` owner never drains: 1483 FAILED on its full 4/4 while t5 cycled
+  to end-of-run) — game-level gating, not scheduler ghosts.
+
+### Next blockers (game-level producers/consumers, in rough order)
+
+- t17 (frame thread): consumes the one `0x800E8B4C` boot kick, waits
+  `0x800E8BF4` (DP-done) for frame pacing; frame 2 is never submitted, so no
+  second `dp_complete` ever comes. Need t17's post-tick flow and the
+  `0x800E8B4C` re-kick source.
+- t16 parks on `0x800B9C40` (never fed; producer unknown — possibly PI/cart).
+- `0x800E79C8` (cap 4, flags 3) fills and its owner never drains it.
+- t3 stuck in `osSendMesg -> 0x800E7988 flags=1` since early boot despite room
+  and constant draining — mechanism still open (all known wake paths should
+  have released it; suspect stale block-state or a non-mesg park underneath).
+- No controller input in the probe: SI `0x800E9B88` never fires, which parks
+  t5's loop long-term; audio RSP-gfx repetition for frame 2+ untested.
+
+### Commit
+
+- `ultramodern/src/{mesgqueue,threads,threadqueue,scheduling}.cpp` +
+  `ultramodern.hpp`: fixes 1–4 + mutex + `running_queue` snapshot dump.
+  Rebuilt wasm (`EM_CACHE=/tmp/emcc-cache-full cmake --build build-wasm -j 8`,
+  clean) and regenerated `n64modernruntime-ob64.patch` (1783 lines).
