@@ -1058,7 +1058,7 @@ index 0000000..f7c4e16
 +    printf("\n");
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..8d71e5f 100644
+index 9944a02..9252849 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -1072,7 +1072,7 @@ index 9944a02..8d71e5f 100644
  
  #include "blockingconcurrentqueue.h"
  
-@@ -37,10 +42,299 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+@@ -37,10 +42,329 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -1352,6 +1352,36 @@ index 9944a02..8d71e5f 100644
 +        printf(" task16(D_800E917C)=0x%08X taskptr(D_800B9C80)=0x%08X\n",
 +               snap_w(0x800E917C), snap_w(0x800B9C80));
 +    }
++    // Session-17: title-dispatch chain (func_80075BC0 table @0x800AF028,
++    // index hu(*D_800C4BBC+4) clamped <0x1F, recorded at D_800E810E; second
++    // jalr through *(D_800E8294)). Input runs crash in func_8019D67C via
++    // func_8017BA60 <- func_80075BC0 <- func_80071EB0, so capture the
++    // index/pointer state that selected that path.
++    {
++        auto in_rdram = [](uint64_t a) -> bool {
++            return a >= 0x80000000ull && a < 0x80800000ull;
++        };
++        uint32_t statep = snap_w(0x800C4BBC);
++        printf("[snap] titledisp: idx(D_800E810E)=0x%04X statep(D_800C4BBC)=0x%08X",
++               snap_hu(0x800E810E), statep);
++        if (in_rdram((uint64_t)statep + 4)) {
++            printf(" srcidx=hu(*statep+4)=0x%04X", snap_hu((uint64_t)statep + 4));
++        } else {
++            printf(" srcidx=(statep outside rdram)");
++        }
++        uint32_t ind = snap_w(0x800E8294);
++        printf(" ind(D_800E8294)=0x%08X", ind);
++        if (in_rdram(ind)) {
++            printf(" *ind=0x%08X", snap_w(ind));
++        } else {
++            printf(" *ind=(outside rdram)");
++        }
++        printf("\n[snap] titleTab:");
++        for (int i = 0; i < 25; i++) {
++            printf(" %08X", snap_w(0x800AF028 + (uint64_t)i * 4));
++        }
++        printf("\n");
++    }
 +}
 +
  void dequeue_external_messages(RDRAM_ARG1) {
@@ -1373,7 +1403,7 @@ index 9944a02..8d71e5f 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -51,6 +345,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+@@ -51,6 +375,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message(RDRAM_ARG1) {
@@ -1381,7 +1411,7 @@ index 9944a02..8d71e5f 100644
      QueuedMessage to_send;
      external_messages.wait_dequeue(to_send);
      if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -59,6 +354,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -59,6 +384,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
@@ -1389,7 +1419,7 @@ index 9944a02..8d71e5f 100644
      QueuedMessage to_send;
      if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -67,6 +363,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+@@ -67,6 +393,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
      }
  }
  
@@ -1397,7 +1427,7 @@ index 9944a02..8d71e5f 100644
  extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
      OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
      mq->blocked_on_recv = NULLPTR;
-@@ -89,21 +386,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+@@ -89,21 +416,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
      return MQ_GET_COUNT(mq) >= mq->msgCount;
  }
  
@@ -1462,7 +1492,7 @@ index 9944a02..8d71e5f 100644
      }
      
      if (jam) {
-@@ -118,13 +457,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,13 +487,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -1487,7 +1517,7 @@ index 9944a02..8d71e5f 100644
      return true;
  }
  
-@@ -137,11 +482,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +512,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -1522,7 +1552,7 @@ index 9944a02..8d71e5f 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +519,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +549,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.
