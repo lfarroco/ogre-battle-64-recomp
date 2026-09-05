@@ -595,7 +595,7 @@ index ae0f44f..1f7bbd5 100644
      // Task yield requests are ignored, so always return 0 as tasks will never be yielded
      ctx->r2 = 0;
 diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
-index e0d367e..308aff8 100644
+index e0d367e..bd6e8b9 100644
 --- a/librecomp/src/ultra_translation.cpp
 +++ b/librecomp/src/ultra_translation.cpp
 @@ -1,4 +1,5 @@
@@ -604,7 +604,7 @@ index e0d367e..308aff8 100644
  #include <ultramodern/ultra64.h>
  #include <ultramodern/ultramodern.hpp>
  #include "recomp.h"
-@@ -45,19 +46,54 @@ extern "C" void osGetThreadId_recomp(uint8_t * rdram, recomp_context * ctx) {
+@@ -45,19 +46,58 @@ extern "C" void osGetThreadId_recomp(uint8_t * rdram, recomp_context * ctx) {
      ctx->r2 = osGetThreadId(rdram, (int32_t)ctx->r4);
  }
  
@@ -622,6 +622,10 @@ index e0d367e..308aff8 100644
 +    return mq == 0x800E8B14 || mq == 0x800E8B4C || mq == 0x800E8BBC || mq == 0x800E8BF4
 +        || mq == 0x800E9BA8 || mq == 0x800C6490 || mq == 0x800E8B84
 +        || mq == 0x800E7988 || mq == 0x800E9B88
++        // Session 16: t16's task-submit queue (t17 -> 0x800B9C40 -> t16 ->
++        // osSpTaskLoad/StartGo). Previously untraced, hiding half the frame
++        // thread's issue path.
++        || mq == 0x800B9C40
 +        // Thread 3's audio-path queues (session 15: thread 3 blocks on
 +        // 0x800C6C98, so watch who sends to it).
 +        || mq == 0x800C6C98 || mq == 0x800C6CA8 || mq == 0x800C4A00 || mq == 0x800E9BF0;
@@ -748,6 +752,42 @@ index 46aea61..1abfc4d 100644
  //#define debug_printf(...) printf(__VA_ARGS__);
 -
  #endif
+diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
+index 3198be0..864705d 100644
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -1,6 +1,8 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+ #include <cassert>
++#include <cstdint>
++#include <cstdio>
+ 
+ static uint32_t sample_rate = 48000;
+ 
+@@ -26,6 +28,22 @@ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_
+     // Ensure that the byte count is an integer multiple of samples.
+     assert((byte_count & 1) == 0);
+ 
++    // Session 16: the game drives osAiSetNextBuffer with its own buffer/len
++    // while the audio system is still initializing; garbage args used to sail
++    // through here and OOB-read in the app's queue_samples, killing the
++    // calling game thread's worker (fast-run deaths). Validate the range
++    // against the KSEG0 rdram window before touching it. Legit AI buffers are
++    // a few KB (one video frame of stereo int16 at 32 kHz ≈ 4 KB); anything
++    // near/above 256 KB is not audio.
++    constexpr uint32_t kMaxAudioBytes = 0x40000u;
++    uint32_t addr = (uint32_t)(uintptr_t)audio_data_;
++    if (byte_count == 0 || (byte_count & 1) != 0 || byte_count > kMaxAudioBytes ||
++        (addr & 1) != 0 || addr < 0x80000000u || addr >= 0xA0000000u ||
++        byte_count > 0xA0000000u - addr) {
++        printf("[audio] dropping wild AI buffer (addr=0x%08X bytes=0x%X)\n", addr, byte_count);
++        return;
++    }
++
+     // Calculate the number of samples from the number of bytes.
+     uint32_t sample_count = byte_count / sizeof(int16_t);
+ 
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
 index 2f1cfb5..6201858 100644
 --- a/ultramodern/src/events.cpp
@@ -1018,7 +1058,7 @@ index 0000000..f7c4e16
 +    printf("\n");
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..a1b55c9 100644
+index 9944a02..8d71e5f 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -1032,7 +1072,7 @@ index 9944a02..a1b55c9 100644
  
  #include "blockingconcurrentqueue.h"
  
-@@ -37,10 +42,278 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+@@ -37,10 +42,299 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -1291,6 +1331,27 @@ index 9944a02..a1b55c9 100644
 +        }
 +        printf("\n");
 +    }
++    // Session-16: frame-dispatch chain (func_800893C0 kick_next -> 0x800E9BA8
++    // -> func_80089540 dispatch on *(msg+0x54)->halfword). The frame message is
++    // 0x800E7D90 (task descriptor entry 0 at 0x800E7DE0, 10x0x58 array).
++    {
++        auto in_kseg0 = [](uint64_t a) -> bool {
++            return a >= 0x80000000ull && a < 0xA0000000ull;
++        };
++        uint32_t kick = in_kseg0(0x800E7DE0) ? snap_w(0x800E7DE0) : 0;
++        uint32_t dptr = in_kseg0(0x800E7DE4) ? snap_w(0x800E7DE4) : 0;
++        printf("[snap] framedisp: kick=*(0x800E7DE0)=0x%08X dptr=*(0x800E7DE4)=0x%08X",
++               kick, dptr);
++        if (in_kseg0(dptr)) {
++            printf(" key=hu(0x%08X)=0x%04X", dptr, snap_hu(dptr));
++        } else {
++            printf(" key=(dptr outside kseg0)");
++        }
++        printf(" cb84=0x%08X cb88=0x%08X cb8c=0x%08X",
++               snap_w(0x800A9E84), snap_w(0x800A9E88), snap_w(0x800A9E8C));
++        printf(" task16(D_800E917C)=0x%08X taskptr(D_800B9C80)=0x%08X\n",
++               snap_w(0x800E917C), snap_w(0x800B9C80));
++    }
 +}
 +
  void dequeue_external_messages(RDRAM_ARG1) {
@@ -1312,7 +1373,7 @@ index 9944a02..a1b55c9 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -51,6 +324,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+@@ -51,6 +345,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message(RDRAM_ARG1) {
@@ -1320,7 +1381,7 @@ index 9944a02..a1b55c9 100644
      QueuedMessage to_send;
      external_messages.wait_dequeue(to_send);
      if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -59,6 +333,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -59,6 +354,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
@@ -1328,7 +1389,7 @@ index 9944a02..a1b55c9 100644
      QueuedMessage to_send;
      if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -67,6 +342,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+@@ -67,6 +363,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
      }
  }
  
@@ -1336,7 +1397,7 @@ index 9944a02..a1b55c9 100644
  extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
      OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
      mq->blocked_on_recv = NULLPTR;
-@@ -89,21 +365,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+@@ -89,21 +386,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
      return MQ_GET_COUNT(mq) >= mq->msgCount;
  }
  
@@ -1401,7 +1462,7 @@ index 9944a02..a1b55c9 100644
      }
      
      if (jam) {
-@@ -118,13 +436,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,13 +457,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -1426,7 +1487,7 @@ index 9944a02..a1b55c9 100644
      return true;
  }
  
-@@ -137,11 +461,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +482,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -1461,7 +1522,7 @@ index 9944a02..a1b55c9 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +498,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +519,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.
@@ -1474,15 +1535,23 @@ index 9944a02..a1b55c9 100644
      return true;
  }
 diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
-index a22f747..22b80bf 100644
+index a22f747..ee769b3 100644
 --- a/ultramodern/src/scheduling.cpp
 +++ b/ultramodern/src/scheduling.cpp
-@@ -1,13 +1,14 @@
+@@ -1,13 +1,22 @@
  #include "ultramodern/ultramodern.hpp"
 +#include <cstdio>
  
  void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
 -    debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
++    // Session 16: t_ comes from game code (osStartThread arg, wake paths);
++    // validate before touching — insert refuses wild threads anyway, but the
++    // trace/state writes below would fault first.
++    uint64_t ta = (uint64_t)(uint32_t)t_;
++    if (ta < 0x80000000ull || ta >= 0xA0000000ull) {
++        printf("[sch-err] schedule_running_thread: wild thread 0x%08X; ignoring\n", (uint32_t)t_);
++        return;
++    }
 +    OGRE_TRACE("[sch] T=%llu schedule_running_thread(thread %d pri %d)\n", (unsigned long long)ultramodern::trace_millis(), TO_PTR(OSThread, t_)->id, TO_PTR(OSThread, t_)->priority);
      thread_queue_insert(PASS_RDRAM running_queue, t_);
      TO_PTR(OSThread, t_)->state = OSThreadState::QUEUED;
@@ -1494,8 +1563,32 @@ index a22f747..22b80bf 100644
      // Insert this thread in the running queue.
      ultramodern::thread_queue_insert(PASS_RDRAM ultramodern::running_queue, ultramodern::this_thread());
      TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::QUEUED;
-@@ -22,9 +23,19 @@ void ultramodern::check_running_queue(RDRAM_ARG1) {
-         OSThread* next_thread = TO_PTR(OSThread, ultramodern::thread_queue_peek(PASS_RDRAM running_queue));
+@@ -19,12 +28,42 @@ void ultramodern::check_running_queue(RDRAM_ARG1) {
+     // Check if there are any threads in the running queue.
+     if (!thread_queue_empty(PASS_RDRAM running_queue)) {
+         // Check if the highest priority thread in the queue is higher priority than the current thread.
+-        OSThread* next_thread = TO_PTR(OSThread, ultramodern::thread_queue_peek(PASS_RDRAM running_queue));
++        // Session 16: the peeked entry lives in game memory and can be wild
++        // (this exact deref killed workers with OOB reads). Drop-and-retry
++        // instead of faulting; pop already amputates corrupt heads.
++        OSThread* next_thread = nullptr;
++        for (int tries = 0; tries < 8; tries++) {
++            PTR(OSThread) peeked = ultramodern::thread_queue_peek(PASS_RDRAM running_queue);
++            if (peeked == NULLPTR) {
++                return;
++            }
++            uint64_t a = (uint64_t)(uint32_t)peeked;
++            if (a < 0x80000000ull || a >= 0xA0000000ull) {
++                printf("[sch-err] check_running_queue: wild peek 0x%08X; dropping\n", (uint32_t)peeked);
++                ultramodern::thread_queue_pop(PASS_RDRAM running_queue);
++                continue;
++            }
++            next_thread = TO_PTR(OSThread, peeked);
++            break;
++        }
++        if (next_thread == nullptr) {
++            return;
++        }
          OSThread* self = TO_PTR(OSThread, ultramodern::this_thread());
          if (next_thread->priority > self->priority) {
 -            ultramodern::thread_queue_pop(PASS_RDRAM running_queue);
@@ -1517,10 +1610,10 @@ index a22f747..22b80bf 100644
      }
  }
 diff --git a/ultramodern/src/threadqueue.cpp b/ultramodern/src/threadqueue.cpp
-index f9c0fa1..20dbf2f 100644
+index f9c0fa1..e585b82 100644
 --- a/ultramodern/src/threadqueue.cpp
 +++ b/ultramodern/src/threadqueue.cpp
-@@ -1,9 +1,17 @@
+@@ -1,9 +1,29 @@
  #include <cassert>
 +#include <cstdio>
 +#include <mutex>
@@ -1535,21 +1628,45 @@ index f9c0fa1..20dbf2f 100644
 +// under the lock), so no lock-ordering issues.
 +static std::mutex scheduler_queue_mutex;
 +
++// Session 16: the intrusive lists live in GAME memory (OSThread structs are
++// game-allocated) and the game sometimes scribbles them (wild boot-time
++// writes; the running queue then holds a garbage entry and the next
++// check_running_queue/pop dereferences it out of bounds, killing a worker).
++// Every link is validated here: a corrupt link amputates the list at that
++// point (with a loud log) instead of faulting. All legit thread pointers are
++// KSEG0 rdram addresses; anything else is already fatal today.
++static bool thread_ptr_valid(PTR(OSThread) p) {
++    uint64_t a = (uint64_t)(uint32_t)p;
++    return a >= 0x80000000ull && a < 0xA0000000ull;
++}
++
  static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
      if (queue == ultramodern::running_queue) {
          return &running_queue_impl;
-@@ -11,7 +19,31 @@ static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
+@@ -11,11 +31,60 @@ static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
      return TO_PTR(PTR(OSThread), queue);
  }
  
 +// Unlink t_ from the list headed at *head_link (no locking; caller holds
-+// scheduler_queue_mutex). Returns true if it was present.
++// scheduler_queue_mutex). Returns true if it was present. A corrupt link
++// amputates the list (see thread_ptr_valid).
 +static bool thread_queue_unlink_locked(RDRAM_ARG PTR(OSThread)* head_link, PTR(OSThread) t_) {
 +    PTR(OSThread)* link_ptr = head_link;
 +    PTR(OSThread) node = *head_link;
 +    while (node != NULLPTR) {
++        if (!thread_ptr_valid(node)) {
++            printf("[sch-err] corrupt thread link 0x%08X; truncating list\n", (uint32_t)node);
++            *link_ptr = NULLPTR;
++            return false;
++        }
 +        if (node == t_) {
-+            *link_ptr = TO_PTR(OSThread, node)->next;
++            PTR(OSThread) next = TO_PTR(OSThread, node)->next;
++            if (next != NULLPTR && !thread_ptr_valid(next)) {
++                printf("[sch-err] corrupt thread next 0x%08X on t%d; truncating\n",
++                       (uint32_t)next, TO_PTR(OSThread, node)->id);
++                next = NULLPTR;
++            }
++            *link_ptr = next;
 +            TO_PTR(OSThread, node)->queue = NULLPTR;
 +            return true;
 +        }
@@ -1561,6 +1678,11 @@ index f9c0fa1..20dbf2f 100644
 +
  void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) toadd_) {
 +    std::lock_guard<std::mutex> lock{scheduler_queue_mutex};
++    if (!thread_ptr_valid(toadd_)) {
++        printf("[sch-err] refusing to insert wild thread 0x%08X into queue 0x%08X\n",
++               (uint32_t)toadd_, (uint32_t)(uintptr_t)queue_);
++        return;
++    }
 +    // Unlink first: parking paths re-insert on every wait-loop iteration, and
 +    // a spurious wakeup (e.g. a surplus semaphore poke from wake_blocked_head)
 +    // can re-park a thread that is still listed. Inserting a node that is
@@ -1568,15 +1690,30 @@ index f9c0fa1..20dbf2f 100644
 +    // list walker with an out-of-bounds read. Unlink-then-link is idempotent.
 +    thread_queue_unlink_locked(PASS_RDRAM queue_to_ptr(PASS_RDRAM queue_), toadd_);
      PTR(OSThread)* cur = queue_to_ptr(PASS_RDRAM queue_);
-     OSThread* toadd = TO_PTR(OSThread, toadd_); 
+-    OSThread* toadd = TO_PTR(OSThread, toadd_); 
++    OSThread* toadd = TO_PTR(OSThread, toadd_);
      debug_printf("[Thread Queue] Inserting thread %d into queue 0x%08X\n", toadd->id, (uintptr_t)queue_);
-@@ -32,8 +64,17 @@ void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(O
+-    while (*cur && TO_PTR(OSThread, *cur)->priority > toadd->priority) {
++    while (*cur != NULLPTR) {
++        if (!thread_ptr_valid(*cur)) {
++            printf("[sch-err] corrupt thread link 0x%08X in insert walk; truncating\n", (uint32_t)*cur);
++            *cur = NULLPTR;
++            break;
++        }
++        if (TO_PTR(OSThread, *cur)->priority <= toadd->priority) {
++            break;
++        }
+         cur = &TO_PTR(OSThread, *cur)->next;
+     }
+     toadd->next = (*cur);
+@@ -32,36 +101,83 @@ void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(O
  }
  
  PTR(OSThread) ultramodern::thread_queue_pop(RDRAM_ARG PTR(PTR(OSThread)) queue_) {
 +    std::lock_guard<std::mutex> lock{scheduler_queue_mutex};
      PTR(OSThread)* queue = queue_to_ptr(PASS_RDRAM queue_);
      PTR(OSThread) ret = *queue;
+-    *queue = TO_PTR(OSThread, ret)->next;
 +    // Null-safe: check-then-pop sequences across threads can lose the race
 +    // (another thread pops between our empty-check and this pop). The old
 +    // code dereferenced the null head (TO_PTR(0) is out of wasm bounds) and
@@ -1585,13 +1722,28 @@ index f9c0fa1..20dbf2f 100644
 +    if (ret == NULLPTR) {
 +        return NULLPTR;
 +    }
-     *queue = TO_PTR(OSThread, ret)->next;
++    // Session 16: a corrupt head (wild game-memory write) must not propagate:
++    // drop it instead of faulting on it or installing its wild `next`.
++    if (!thread_ptr_valid(ret)) {
++        printf("[sch-err] popping corrupt thread head 0x%08X; dropping\n", (uint32_t)ret);
++        *queue = NULLPTR;
++        return NULLPTR;
++    }
++    PTR(OSThread) next = TO_PTR(OSThread, ret)->next;
++    if (next != NULLPTR && !thread_ptr_valid(next)) {
++        printf("[sch-err] corrupt thread next 0x%08X on popped t%d; truncating\n",
++               (uint32_t)next, TO_PTR(OSThread, ret)->id);
++        next = NULLPTR;
++    }
++    *queue = next;
      TO_PTR(OSThread, ret)->queue = NULLPTR;
      debug_printf("[Thread Queue] Popped thread %d from queue 0x%08X\n", TO_PTR(OSThread, ret)->id, (uintptr_t)queue_);
-@@ -43,25 +84,48 @@ PTR(OSThread) ultramodern::thread_queue_pop(RDRAM_ARG PTR(PTR(OSThread)) queue_)
- bool ultramodern::thread_queue_remove(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_) {
-     debug_printf("[Thread Queue] Removing thread %d from queue 0x%08X\n", TO_PTR(OSThread, t_)->id, (uintptr_t)queue_);
+     return ret;
+ }
  
+ bool ultramodern::thread_queue_remove(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_) {
+-    debug_printf("[Thread Queue] Removing thread %d from queue 0x%08X\n", TO_PTR(OSThread, t_)->id, (uintptr_t)queue_);
+-
 -    PTR(PTR(OSThread)) cur = queue_;
 -    while (cur != NULLPTR) {
 -        PTR(OSThread)* cur_ptr = queue_to_ptr(PASS_RDRAM queue_);
@@ -1600,8 +1752,10 @@ index f9c0fa1..20dbf2f 100644
 -            return true;
 -        }
 -        cur = TO_PTR(OSThread, *cur_ptr)->next;
--    }
--
++    if (thread_ptr_valid(t_)) {
++        debug_printf("[Thread Queue] Removing thread %d from queue 0x%08X\n", TO_PTR(OSThread, t_)->id, (uintptr_t)queue_);
+     }
+ 
 -    return false;
 +    // Walk the intrusive list link-by-link (mirroring thread_queue_insert).
 +    // The old code re-resolved the head on every iteration instead of
