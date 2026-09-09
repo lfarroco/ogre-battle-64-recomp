@@ -691,10 +691,10 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..1abfc4d 100644
+index 46aea61..c640055 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
-@@ -77,6 +77,29 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
+@@ -77,6 +77,34 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
  void wait_for_external_message(RDRAM_ARG1);
  void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
  
@@ -715,6 +715,11 @@ index 46aea61..1abfc4d 100644
 +uint32_t debug_last_func_vram(int tid);
 +// Debug: sample last_func_vram[tid] 100x and print the histogram.
 +void debug_sample_hot_loop(int tid);
++// Debug: dump the allocator-family entry ring (session-18 wedge forensics).
++void debug_dump_alloc_ring(void);
++// Debug: start the allocator transition sampler; dump its ring.
++void debug_alloc_trans_start(void);
++void debug_dump_alloc_trans(void);
 +// Debug: per-thread scheduler-resumption counters (liveness).
 +void debug_note_resume(int tid);
 +uint64_t debug_resume_count(int tid);
@@ -724,7 +729,7 @@ index 46aea61..1abfc4d 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -170,11 +193,26 @@ void set_callbacks(
+@@ -170,11 +198,26 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -986,10 +991,10 @@ index 2f1cfb5..6201858 100644
  
 diff --git a/ultramodern/src/function_trace.cpp b/ultramodern/src/function_trace.cpp
 new file mode 100644
-index 0000000..f7c4e16
+index 0000000..7a7b46d
 --- /dev/null
 +++ b/ultramodern/src/function_trace.cpp
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,175 @@
 +#include <array>
 +#include <atomic>
 +#include <chrono>
@@ -1008,6 +1013,24 @@ index 0000000..f7c4e16
 +
 +static std::array<std::atomic<uint32_t>, 256> last_func_vram{};
 +
++// Session-18: allocator entry ring. recomp_trace_func() sees only the function
++// address (no registers), but the ENTRY SEQUENCE per thread distinguishes a
++// genuine malloc->search call chain from a return-address-smash landing
++// directly in the search. Filtered to the allocator family to bound volume.
++struct AllocEvent {
++    uint32_t tid = 0;
++    uint32_t func = 0;
++    uint64_t tick = 0;
++};
++static std::array<AllocEvent, 128> alloc_ring{};
++static std::atomic<uint64_t> alloc_ring_next{0};
++
++static bool is_alloc_func(uint32_t func_vram) {
++    return func_vram == 0x80070F30 || func_vram == 0x800710DC ||
++           func_vram == 0x80071A3C || func_vram == 0x80071E74 ||
++           func_vram == 0x80071950 || func_vram == 0x800719E8;
++}
++
 +extern "C" void recomp_trace_func(uint8_t *rdram, uint32_t func_vram) {
 +    PTR(OSThread) self = ultramodern::this_thread();
 +    if (self == 0) {
@@ -1018,6 +1041,96 @@ index 0000000..f7c4e16
 +        return;
 +    }
 +    last_func_vram[tid].store(func_vram, std::memory_order_relaxed);
++    if (is_alloc_func(func_vram)) {
++        uint64_t i = alloc_ring_next.fetch_add(1, std::memory_order_relaxed);
++        AllocEvent ev;
++        ev.tid = (uint32_t)tid;
++        ev.func = func_vram;
++        ev.tick = i;
++        alloc_ring[i % alloc_ring.size()] = ev;
++    }
++}
++
++// Newest-first dump of the allocator ring for the snapshot (diagnostics only).
++void ultramodern::debug_dump_alloc_ring(void) {
++    uint64_t next = alloc_ring_next.load(std::memory_order_relaxed);
++    uint64_t n = next < alloc_ring.size() ? next : alloc_ring.size();
++    printf("[snap] alloctrace: last %llu alloc-family entries (tid:func):",
++           (unsigned long long)n);
++    for (uint64_t k = 0; k < n; k++) {
++        uint64_t i = (next - 1 - k) % alloc_ring.size();
++        const AllocEvent &ev = alloc_ring[i];
++        if (k % 8 == 0) {
++            printf("\n[snap] alloctrace: ");
++        }
++        printf(" t%d:%08X", ev.tid, ev.func);
++    }
++    printf("\n");
++}
++
++// Session-18: allocator transition sampler. A dedicated host thread polls
++// last_func_vram[] ~1kHz and records transitions into/out of the allocator
++// family with the predecessor function (the malloc caller). Reads only;
++// game timing is unaffected (atomic loads, sampler sleeps between polls).
++struct AllocTrans {
++    uint32_t tid = 0;
++    uint32_t from = 0;
++    uint32_t to = 0;
++};
++static std::array<AllocTrans, 512> trans_ring{};
++static std::atomic<uint64_t> trans_ring_next{0};
++static std::array<uint32_t, 64> trans_prev{};
++static std::thread trans_sampler_thread{};
++static std::atomic<bool> trans_sampler_started{false};
++
++static void trans_sampler_main(void) {
++    while (true) {
++        for (int tid = 0; tid < 64; tid++) {
++            uint32_t cur = last_func_vram[tid].load(std::memory_order_relaxed);
++            uint32_t prev = trans_prev[tid];
++            if (cur != prev) {
++                trans_prev[tid] = cur;
++                if (is_alloc_func(cur) || is_alloc_func(prev)) {
++                    uint64_t i = trans_ring_next.fetch_add(1, std::memory_order_relaxed);
++                    AllocTrans ev;
++                    ev.tid = (uint32_t)tid;
++                    ev.from = prev;
++                    ev.to = cur;
++                    trans_ring[i % trans_ring.size()] = ev;
++                }
++            }
++        }
++        std::this_thread::sleep_for(std::chrono::microseconds(1000));
++    }
++}
++
++void ultramodern::debug_alloc_trans_start(void) {
++    bool expected = false;
++    if (trans_sampler_started.compare_exchange_strong(expected, true)) {
++        trans_sampler_thread = std::thread{trans_sampler_main};
++        trans_sampler_thread.detach();
++    }
++}
++
++void ultramodern::debug_dump_alloc_trans(void) {
++    debug_alloc_trans_start();
++    uint64_t next = trans_ring_next.load(std::memory_order_relaxed);
++    uint64_t n = next < trans_ring.size() ? next : trans_ring.size();
++    if (n == 0) {
++        printf("[snap] alloctrans: (none)\n");
++        return;
++    }
++    printf("[snap] alloctrans: last %llu transitions into/out of alloc (tid:from->to):",
++           (unsigned long long)n);
++    for (uint64_t k = 0; k < n; k++) {
++        uint64_t i = (next - 1 - k) % trans_ring.size();
++        const AllocTrans &ev = trans_ring[i];
++        if (k % 4 == 0) {
++            printf("\n[snap] alloctrans: ");
++        }
++        printf(" t%d:%08X->%08X", ev.tid, ev.from, ev.to);
++    }
++    printf("\n");
 +}
 +
 +uint32_t ultramodern::debug_last_func_vram(int tid) {
@@ -1058,7 +1171,7 @@ index 0000000..f7c4e16
 +    printf("\n");
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..9252849 100644
+index 9944a02..f869619 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -1072,7 +1185,7 @@ index 9944a02..9252849 100644
  
  #include "blockingconcurrentqueue.h"
  
-@@ -37,10 +42,329 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+@@ -37,10 +42,413 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -1382,6 +1495,90 @@ index 9944a02..9252849 100644
 +        }
 +        printf("\n");
 +    }
++    // Session-18: game-malloc (func_80070F30) bucket table @0x800AEDB8, stride
++    // 12 per bucket. The free list is 2D: func_80071A3C walks node+0x10 while
++    // node+0x18 < minsize, and on a fit jumps to node+0x0C (next column;
++    // func_80071950 unlinks in both dimensions via node+0x08 back-links).
++    // Tap runs wedge in that walk with no pageerror, so detect cycles in the
++    // full 2D graph reachable from the heads (iterative DFS with a visited
++    // set, edge-visit cap so the snapshot itself always terminates). Reads
++    // only; no game semantics changed.
++    {
++        printf("[snap] heapchk: nbuck=hu(0x800AEDE0)=0x%04X fl=hu(0x800AEDE2)=0x%04X\n",
++               snap_hu(0x800AEDE0), snap_hu(0x800AEDE2));
++        for (int b = 0; b < 4; b++) {
++            uint64_t cell = 0x800AEDB8ull + (uint64_t)b * 12;
++            uint32_t head = snap_w(cell);
++            if (head == 0) {
++                continue;
++            }
++            uint32_t stack[64];
++            int nstack = 0;
++            uint32_t visited[256];
++            int nvisited = 0;
++            auto is_visited = [&](uint32_t n) -> bool {
++                for (int k = 0; k < nvisited; k++) {
++                    if (visited[k] == n) {
++                        return true;
++                    }
++                }
++                return false;
++            };
++            auto push = [&](uint32_t n) {
++                if (n >= 0x80000000u && n + 0x1Cu < 0x80800000u && !is_visited(n) && nstack < 64) {
++                    stack[nstack++] = n;
++                }
++            };
++            printf("[snap] heapB%d: head=0x%08X", b, head);
++            push(head);
++            int edges = 0;
++            bool found_cycle = false;
++            uint32_t cycle_node = 0;
++            while (nstack > 0 && edges < 2000 && !found_cycle) {
++                uint32_t node = stack[--nstack];
++                if (is_visited(node)) {
++                    continue;
++                }
++                if (nvisited < 256) {
++                    visited[nvisited++] = node;
++                }
++                uint32_t e10 = snap_w((uint64_t)node + 0x10);
++                uint32_t e0c = snap_w((uint64_t)node + 0x0C);
++                edges += 2;
++                if ((e10 >= 0x80000000u && e10 + 0x1Cu < 0x80800000u && is_visited(e10)) ||
++                    (e0c >= 0x80000000u && e0c + 0x1Cu < 0x80800000u && is_visited(e0c))) {
++                    found_cycle = true;
++                    cycle_node = node;
++                    break;
++                }
++                push(e10);
++                push(e0c);
++            }
++            if (found_cycle) {
++                uint32_t sz = snap_w((uint64_t)cycle_node + 0x18);
++                printf(" CYCLEvia=0x%08X(sz=0x%X) nodes=%d edges=%d", cycle_node, sz, nvisited, edges);
++            } else {
++                printf(" no-cycle nodes=%d edges=%d", nvisited, edges);
++            }
++            printf("\n");
++        }
++    }
++    // Session-18: allocator entry sequence (which thread entered the wedged
++    // search, and via which malloc entry — or via no malloc at all).
++    ultramodern::debug_dump_alloc_ring();
++    // Session-18: allocator transitions with predecessor functions (reveals
++    // the malloc caller on the wedged thread).
++    ultramodern::debug_dump_alloc_trans();
++    // Session-18: steady-audio (func_80080F78) calls a per-buffer callback at
++    // *(0x800B9894); transitions implicate it in the allocator storm. Capture
++    // the pointer + audio-enable flags. Reads only.
++    {
++        uint32_t acb = snap_w(0x800B9894);
++        printf("[snap] audiocb: cb=*(0x800B9894)=0x%08X D_800A9890=0x%08X "
++               "en1=b(0x800B9890)=0x%02X en2=b(0x800B9891)=0x%02X cnt=b(0x800B9892)=0x%02X\n",
++               acb, snap_w(0x800A9890), snap_b(0x800B9890), snap_b(0x800B9891),
++               snap_b(0x800B9892));
++    }
 +}
 +
  void dequeue_external_messages(RDRAM_ARG1) {
@@ -1403,7 +1600,7 @@ index 9944a02..9252849 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -51,6 +375,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+@@ -51,6 +459,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message(RDRAM_ARG1) {
@@ -1411,7 +1608,7 @@ index 9944a02..9252849 100644
      QueuedMessage to_send;
      external_messages.wait_dequeue(to_send);
      if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -59,6 +384,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -59,6 +468,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
@@ -1419,7 +1616,7 @@ index 9944a02..9252849 100644
      QueuedMessage to_send;
      if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -67,6 +393,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+@@ -67,6 +477,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
      }
  }
  
@@ -1427,7 +1624,7 @@ index 9944a02..9252849 100644
  extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
      OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
      mq->blocked_on_recv = NULLPTR;
-@@ -89,21 +416,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+@@ -89,21 +500,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
      return MQ_GET_COUNT(mq) >= mq->msgCount;
  }
  
@@ -1492,7 +1689,7 @@ index 9944a02..9252849 100644
      }
      
      if (jam) {
-@@ -118,13 +487,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,13 +571,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -1517,7 +1714,7 @@ index 9944a02..9252849 100644
      return true;
  }
  
-@@ -137,11 +512,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +596,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -1552,7 +1749,7 @@ index 9944a02..9252849 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +549,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +633,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.
@@ -1833,16 +2030,18 @@ index f9c0fa1..e585b82 100644
 +    printf("\n");
 +}
 diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
-index 6e3ed18..934ace0 100644
+index 6e3ed18..046727b 100644
 --- a/ultramodern/src/threads.cpp
 +++ b/ultramodern/src/threads.cpp
-@@ -1,3 +1,5 @@
+@@ -1,4 +1,7 @@
 +#include <array>
 +#include <atomic>
  #include <cstdio>
++#include <mutex>
  #include <thread>
  #include <cassert>
-@@ -98,7 +100,7 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+ #include <string>
+@@ -98,7 +101,7 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
      }
      // SetThreadPriority(GetCurrentThread(), nPriority);
  }
@@ -1851,7 +2050,7 @@ index 6e3ed18..934ace0 100644
  #include <sys/prctl.h>
  
  void ultramodern::set_native_thread_name(const std::string& name) {
-@@ -137,6 +139,17 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+@@ -137,6 +140,17 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
      //         break;
      // }
  }
@@ -1869,7 +2068,7 @@ index 6e3ed18..934ace0 100644
  #elif defined(__APPLE__)
  void ultramodern::set_native_thread_name(const std::string& name) {
      if (name.length() > 15) {
-@@ -161,23 +174,89 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+@@ -161,23 +175,89 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
  
  void resume_thread(OSThread* t) {
      debug_printf("[Thread] Resuming execution of thread %d\n", t->id);
@@ -1965,3 +2164,24 @@ index 6e3ed18..934ace0 100644
  }
  
  void ultramodern::resume_thread_and_wait(RDRAM_ARG OSThread *t) {
+@@ -283,6 +363,20 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+     }
+ }
+ 
++// Session-18: game-heap allocator serialization (see recomp.h). The game's
++// malloc/free family assumes cooperative scheduling, so a call-free
++// free-list walk is atomic on N64; on preemptive host threads a concurrent
++// unlink/insert can tear an in-flight walk and livelock it. Recursive mutex:
++// malloc calls search/unlink/insert and insert recurses. Holders never block
++// (no syscalls inside the family), so no sleep-while-holding deadlock.
++static std::recursive_mutex ogre_heap_mutex{};
++extern "C" void ogre_heap_lock(void) {
++    ogre_heap_mutex.lock();
++}
++extern "C" void ogre_heap_unlock(void) {
++    ogre_heap_mutex.unlock();
++}
++
+ extern "C" void osDestroyThread(RDRAM_ARG PTR(OSThread) t_) {
+     if (t_ == NULLPTR) {
+         t_ = thread_self;
