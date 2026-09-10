@@ -5,6 +5,41 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-10 (session 20) — The browser renderer now draws the title scene; seven WebGL2-prototype bugs found (viewport, matrix decode, matrix stack, empty rects)
+
+### Finding: the black screen was seven independent renderer bugs, not a game/runtime problem
+
+`app/src/web_renderer.cpp` had never applied the RSP viewport, was decoding
+every `Mtx` with its column pairs swapped, ignored the projection `MUL`, composed
+modelview matrices in the wrong order, read F3DEX2's inverted `G_MTX` PUSH bit
+literally (so the title DL's per-object matrices accumulated into one another),
+hit `push_back(vector.back())` UB once the PUSH path became live, and drew a
+`TEXRECT` that decodes as an inverted/empty rectangle as a full-screen cover.
+Fixing those takes the title DL from 18/24 triangles rejected and a black canvas
+to 0 rejected and a stable ring of twelve character sprites. See
+`docs/HANDOFF-2026-09-10-session20.md` for the evidence and the bisection.
+
+### Decision: match RT64's HLE semantics exactly where they are observable
+
+Each fix was validated against `tools/RT64` rather than guessed:
+`RSP::setViewport` (viewport field indices), `FixedMatrix::toFloat` (the `j ^ 1`
+column swap forced by the runtime's byte-reversed rdram), `RSP::matrixCommon`
+(compose `MUL` as `m * old`, keep one composite view-projection matrix),
+`GBI_F3DEX2::matrix` (`p0(0,8) ^ pushMask`, i.e. the PUSH bit is stored
+inverted - the game's own `0xDA380000`/`0xDA380001` words confirm it), and
+`RDP::fillRect` / `FixedRect::isEmpty` (empty and inverted rectangles draw
+nothing).
+
+### Deliberately not applied: the `G_TEXTURE` `sc`/`tc` scale
+
+RT64 converts vertex texcoords as `(s * sc) / (65536 * 32)` and OB64 submits
+`sc = tc = 0x8000`, so the hardware UVs are half of this renderer's `s/32`.
+Applying it visibly truncates the sprites (the vertical span drops below the
+loaded texture height), so it is left unapplied and recorded as the top open
+question with the per-draw values logged in `[GFX-V]`.
+
+---
+
 ## 2026-08-29 (session 10) — The VI-thread segfault was a runtime pointer-translation bug; osViSetMode now validates its argument; the GBI question is resolved (auto-detected F3DEX2 is correct)
 
 ### Finding: OB64's `osViSetMode` is really the swap-context routine and ignores its argument; the runtime translated a garbage value into an out-of-bounds pointer

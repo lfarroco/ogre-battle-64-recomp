@@ -182,6 +182,14 @@ struct RenderState {
     bool scissor_enabled = false;
     int scissor_x0 = 0, scissor_y0 = 0, scissor_x1 = 0, scissor_y1 = 0;
 
+    // RSP viewport (Vp_t, G_MOVEMEM MV_VIEWPORT). vscale/vtrans are 14.2
+    // fixed-point screen pixels; these hold the already-divided values.
+    // Until the game sends one, transform_vertex() falls back to NDC
+    // passthrough so display lists that never set a viewport still draw.
+    bool viewport_set = false;
+    float view_scale[3] = {1.0f, 1.0f, 1.0f};
+    float view_trans[3] = {0.0f, 0.0f, 0.0f};
+
     // Combiner.
     Combiner combiner;
 
@@ -511,6 +519,7 @@ struct DrawCmd {
     uint64_t tex_key = 0;
     float tex_scale[2] = {1, 1};
     float tex_origin[2] = {0, 0};
+    int tex_sc = 0, tex_tc = 0;   // raw G_TEXTURE scale fields (diagnostics)
     bool blend = false;
     bool scissor_on = false;
     int sx0 = 0, sy0 = 0, sx1 = 0, sy1 = 0;
@@ -700,6 +709,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         g_flush_cmds.store(flushed_cmds_, std::memory_order_relaxed);
 
         for (const DrawCmd& cmd : cmds) {
+            if (vert_logged_ < 6) {
+                ++vert_logged_;
+                char vbuf2[640];
+                int o = 0;
+                for (int i = 0; i < cmd.vertex_count && o < 560; ++i) {
+                    o += snprintf(vbuf2 + o, sizeof(vbuf2) - o, "(%.3f,%.3f u%.2f,%.2f) ",
+                                  cmd.pos[i * 2], cmd.pos[i * 2 + 1],
+                                  cmd.uv[i * 2], cmd.uv[i * 2 + 1]);
+                }
+                OGRE_MILESTONE("GFX-V", "draw %u verts=%d tex=%d scale=(%.4f,%.4f) org=(%.1f,%.1f) sc=%d tc=%d: %s",
+                               vert_logged_, cmd.vertex_count, cmd.textured ? 1 : 0,
+                               cmd.tex_scale[0], cmd.tex_scale[1],
+                               cmd.tex_origin[0], cmd.tex_origin[1],
+                               cmd.tex_sc, cmd.tex_tc, vbuf2);
+            }
             if (draw_logged_ < 6) {
                 ++draw_logged_;
                 const bool found = cmd.textured && gl_textures_.find(cmd.tex_key) != gl_textures_.end();
@@ -898,9 +922,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     float ndc_min_[2] = {1e9f, 1e9f};
     float ndc_max_[2] = {-1e9f, -1e9f};
     bool logged_first_flush_ = false;
-    unsigned tex_logged_ = 0;
-    unsigned tri_reject_logged_ = 0;
+    unsigned tex_logged_ = 0;    unsigned tri_reject_logged_ = 0;
     unsigned draw_logged_ = 0;
+    unsigned vert_logged_ = 0;
+    unsigned txr_logged_ = 0;
     unsigned flushed_cmds_ = 0;
     unsigned flush_count_ = 0;
     unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
@@ -990,6 +1015,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         uint32_t cmd_index = 0;
         uint32_t trace_task = 0;
         bool trace_enabled = false;
+        uint32_t vp_logged = 0;   // G_MOVEMEM viewport diagnostic counter
         // Session-19: outputs of this execution. The DL is walked WITHOUT
         // holding the renderer mutex (so a slow/stalled gfx thread can never
         // starve the browser main thread's flush); the results are published to
@@ -1049,20 +1075,46 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         switch (op) {
             case gbi::OP_MTX: {
-                const uint32_t flags = p0(w0, 0, 8);
+                // F3DEX2 stores the PUSH bit *inverted*: the SDK macro XORs
+                // G_MTX_PUSH into the flags, so a stored 0x00 is
+                // MODELVIEW|MUL|PUSH and a stored 0x01 is MODELVIEW|MUL|NOPUSH.
+                // RT64 does the same (`(*dl)->p0(0, 8) ^ pushMask` in
+                // GBI_F3DEX2::matrix). Reading the bit literally made every
+                // object matrix a no-push MUL, so the title screen's
+                // per-object matrices accumulated into one another (its two
+                // G_POPMTX per object had nothing to pop) and the sprites
+                // drifted progressively off-screen.
+                const uint32_t flags = p0(w0, 0, 8) ^ gbi::MTX_PUSH;
                 const uint32_t addr = resolve_address(ctx->segments, w1);
                 Mat4 m = read_matrix(addr);
-                if (flags & 0x04) {  // G_MTX_PROJECTION
-                    st.projection = m;
+                if (flags & gbi::MTX_PROJECTION) {
+                    // The projection stack is a single composite (RT64 keeps
+                    // one `viewProjMatrix`): LOAD replaces it, MUL multiplies
+                    // the new matrix in *front* of it so the new matrix is
+                    // applied to the vertex first (RT64 RSP::matrixCommon does
+                    // `mul(floatMatrix, viewProjMatrix)`). OB64 loads a
+                    // perspective matrix and then multiplies a second matrix
+                    // onto it, so ignoring MUL left `projection` holding only
+                    // the second matrix.
+                    if (flags & gbi::MTX_LOAD) {
+                        st.projection = m;
+                    } else {
+                        st.projection = mul_mat4(m, st.projection);
+                    }
                 } else {
                     if (flags & gbi::MTX_PUSH) {
-                        st.modelview_stack.push_back(st.modelview_stack.back());
+                        // Copy first: push_back(vector.back()) is UB when the
+                        // push reallocates (the argument reference dangles).
+                        const Mat4 pushed = st.modelview_stack.back();
+                        st.modelview_stack.push_back(pushed);
                     }
                     Mat4& cur = st.modelview_stack.back();
                     if (flags & gbi::MTX_LOAD) {
                         cur = m;
                     } else {
-                        cur = mul_mat4(cur, m);  // row-vector: cur = cur * m
+                        // row-vector: the new matrix applies to the vertex
+                        // first, i.e. M = m * M_old (RT64 does the same).
+                        cur = mul_mat4(m, cur);
                     }
                 }
                 break;
@@ -1315,8 +1367,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 break;
             }
 
-            case gbi::OP_MOVEMEM:
-                break;  // viewport/matrix/light load: handled below via MOVEWORD? no-op for now
+            case gbi::OP_MOVEMEM: {
+                // F3DEX2 G_MOVEMEM: the index is the low byte of w0 (RT64
+                // GBI_F3DEX2::moveMem), w1 is the address of the payload.
+                const uint8_t index = static_cast<uint8_t>(p0(w0, 0, 8));
+                if (index == gbi::MV_VIEWPORT) {
+                    set_viewport(ctx, st, resolve_address(ctx->segments, w1));
+                }
+                break;
+            }
 
             case gbi::OP_MOVEWORD: {
                 const uint8_t type = static_cast<uint8_t>(p0(w0, 16, 8));
@@ -1405,6 +1464,22 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         up.pixels = std::move(pixels);
         ctx->tex.push_back(std::move(up));
 
+        // Diagnostics: remember the decoded texel (0,0) and size of the last
+        // load so the texrect path can report what a dsdx=dtdy=0 rect samples.
+        if (pixels.size() >= 4) {
+            last_tex_rgba_[0] = pixels[0];
+            last_tex_rgba_[1] = pixels[1];
+            last_tex_rgba_[2] = pixels[2];
+            last_tex_rgba_[3] = pixels[3];
+        }
+        last_tex_fmt_ = t.fmt;
+        last_tex_siz_ = t.siz;
+        last_tex_line_ = t.line;
+        last_tex_shifts_ = t.shifts;
+        last_tex_shiftt_ = t.shiftt;
+        last_tex_masks_ = t.masks;
+        last_tex_maskt_ = t.maskt;
+
         // Remember the loaded tile for draws.
         st.active_gl_tex = 0;
         st.active_tex_key = key;
@@ -1453,6 +1528,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             cmd.env[i] = st.env_color[i];
         }
         cmd.textured = textured;
+        cmd.tex_sc = st.tex_sc;
+        cmd.tex_tc = st.tex_tc;
         if (textured) {
             cmd.tex_key = st.active_tex_key;
             cmd.tex_scale[0] = st.active_tex_scale[0];
@@ -1517,14 +1594,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (pos.w <= 0.0f) {
             return false;
         }
-        // Perspective divide + viewport. The default viewport maps the
-        // projection space to the full canvas (y flipped).
+        // Perspective divide + viewport. The RSP maps clip space to screen
+        // space with the Vp_t scale/translate (screen y points down); the GL
+        // framebuffer expects NDC, so the result is converted back.
         const float inv_w = 1.0f / pos.w;
-        const float sx = pos.x * inv_w;   // [-1, 1] (x)
-        const float sy = -pos.y * inv_w;  // flipped: NDC y up
-        // The projection matrix in the game maps to a screen space that the
-        // RSP viewport then converts; with the identity viewport the values
-        // are already in NDC-like units here.
+        float sx, sy;
+        if (st.viewport_set) {
+            const float scr_x = pos.x * inv_w * st.view_scale[0] + st.view_trans[0];
+            const float scr_y = -pos.y * inv_w * st.view_scale[1] + st.view_trans[1];
+            sx = ndc_xf(scr_x);
+            sy = ndc_yf(scr_y);
+        } else {
+            // No viewport seen yet: treat the projection output as NDC.
+            sx = pos.x * inv_w;   // [-1, 1] (x)
+            sy = -pos.y * inv_w;  // flipped: NDC y up
+        }
         out[0] = sx;
         out[1] = sy;
         out[2] = (static_cast<float>(v.s)) / 32.0f;
@@ -1569,6 +1653,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     void draw_fill_rect(ExecCtx* ctx, RenderState& st, int xl, int yl, int xh, int yh) {
+        // The RDP ignores empty/inverted rectangles (RT64 RDP::fillRect and
+        // FixedRect::isEmpty). OB64's title DL contains a TEXRECT with
+        // xl=319,yl=239,xh=0,yh=0 - decoding that span as a quad produced a
+        // full-screen black cover over the whole scene.
+        if (xh < xl || yh < yl) {
+            return;
+        }
         // G_FILLRECT in fill mode outputs the fill color directly (the
         // combiner is bypassed). Approximate by driving the combiner with the
         // fill color as PRIMITIVE: rgb = (PRIM - 0) * 1 + 0.
@@ -1630,11 +1721,31 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         RenderState& st = *ctx->st;
         const int xl = texrect_geom_[0], yl = texrect_geom_[1];
         const int xh = texrect_geom_[2], yh = texrect_geom_[3];
+        if (xh < xl || yh < yl) {
+            return;  // empty rectangle: the RDP draws nothing (see draw_fill_rect)
+        }
         const int16_t s0 = static_cast<int16_t>((ctx->rdp_half1 >> 16) & 0xFFFF);
         const int16_t t0 = static_cast<int16_t>(ctx->rdp_half1 & 0xFFFF);
         const int16_t dsdx = static_cast<int16_t>((ctx->rdp_half2 >> 16) & 0xFFFF);
         const int16_t dtdy = static_cast<int16_t>(ctx->rdp_half2 & 0xFFFF);
 
+        if (txr_logged_ < 3) {
+            ++txr_logged_;
+            OGRE_MILESTONE("GFX-TXR",
+                       "texrect xl=%d yl=%d xh=%d yh=%d s0=%d t0=%d dsdx=%d dtdy=%d flip=%d key=0x%llX "
+                       "omh=0x%06X oml=0x%06X cyc=%d comb[%d,%d,%d,%d] texel0=(%d,%d,%d,%d) "
+                       "fmt=%d siz=%d line=%d sh=%d/%d mask=%d/%d",
+                       xl, yl, xh, yh, s0, t0, dsdx, dtdy,
+                       ctx->pending_texrect_flip ? 1 : 0,
+                       (unsigned long long)st.active_tex_key,
+                       st.othermode_h, st.othermode_l,
+                       static_cast<int>((st.othermode_h >> 20) & 3),
+                       st.combiner.ca[0], st.combiner.cb[0], st.combiner.cc[0], st.combiner.cd[0],
+                       last_tex_rgba_[0], last_tex_rgba_[1], last_tex_rgba_[2], last_tex_rgba_[3],
+                       (int)last_tex_fmt_, (int)last_tex_siz_, (int)last_tex_line_,
+                       (int)last_tex_shifts_, (int)last_tex_shiftt_,
+                       (int)last_tex_masks_, (int)last_tex_maskt_);
+        }
         if (st.active_tex_key == 0) {
             return;
         }
@@ -1685,24 +1796,73 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     // Screen (pixel) -> NDC.
-    float ndc_x(int x) { return 2.0f * static_cast<float>(x) / static_cast<float>(canvas_width_) - 1.0f; }
-    float ndc_y(int y) { return 1.0f - 2.0f * static_cast<float>(y) / static_cast<float>(canvas_height_); }
+    float ndc_xf(float x) const {
+        return 2.0f * x / static_cast<float>(canvas_width_) - 1.0f;
+    }
+    float ndc_yf(float y) const {
+        return 1.0f - 2.0f * y / static_cast<float>(canvas_height_);
+    }
+    float ndc_x(int x) const { return ndc_xf(static_cast<float>(x)); }
+    float ndc_y(int y) const { return ndc_yf(static_cast<float>(y)); }
 
     // ----- matrix helpers ------------------------------------------------------
 
+    // G_MOVEMEM MV_VIEWPORT: reads the RSP viewport (Vp_t) and stores the
+    // resulting screen-space transform. `Vp_t` is
+    //     s16 vscale[4];  // 14.2 fixed, s16 vtrans[4];
+    // and the fields are laid out (y, x, pad, z) as the RSP consumes them:
+    // OB64 submits vscale=[480 640 0 511] for its 320x240 screen, so index 1
+    // (640) is the x scale and index 0 (480) the y scale. This is exactly
+    // RT64's mapping (RSP::setViewport in hle/rt64_rsp.cpp). The renderer never
+    // applied any viewport before, which is why 3D geometry landed in raw clip
+    // space (ndc_x up to 3.25) with most of it off-screen.
+    void set_viewport(ExecCtx* ctx, RenderState& st, uint32_t addr) {
+        int16_t vscale[4], vtrans[4];
+        for (int i = 0; i < 4; ++i) {
+            vscale[i] = static_cast<int16_t>(rd16(rdram_ + addr + i * 2));
+            vtrans[i] = static_cast<int16_t>(rd16(rdram_ + addr + 8 + i * 2));
+        }
+        st.view_scale[0] = static_cast<float>(vscale[1]) / 4.0f;  // x
+        st.view_scale[1] = static_cast<float>(vscale[0]) / 4.0f;  // y
+        st.view_scale[2] = static_cast<float>(vscale[3]) / 4.0f;  // z
+        st.view_trans[0] = static_cast<float>(vtrans[1]) / 4.0f;  // x
+        st.view_trans[1] = static_cast<float>(vtrans[0]) / 4.0f;  // y
+        st.view_trans[2] = static_cast<float>(vtrans[3]) / 4.0f;  // z
+        st.viewport_set = true;
+        if (ctx->trace_task == 2 && ctx->vp_logged < 4) {
+            ctx->vp_logged++;
+            OGRE_MILESTONE("GFX-VP",
+                           "viewport addr=0x%08X vscale=[%d %d %d %d] vtrans=[%d %d %d %d] "
+                           "-> scale=[%.2f %.2f %.2f] trans=[%.2f %.2f %.2f]",
+                           addr, vscale[0], vscale[1], vscale[2], vscale[3],
+                           vtrans[0], vtrans[1], vtrans[2], vtrans[3],
+                           st.view_scale[0], st.view_scale[1], st.view_scale[2],
+                           st.view_trans[0], st.view_trans[1], st.view_trans[2]);
+        }
+    }
+
     Mat4 read_matrix(uint32_t addr) {
-        // N64 `Mtx` layout: 4x4 s16 integer parts followed by 4x4 u16 fraction
-        // parts (64 bytes total). Decoding it as 16 consecutive s16 values (the
-        // previous implementation) only ever read the integer halves, so any
-        // matrix without a non-zero integer part decoded as all zeros - which
-        // is why every 3D triangle was rejected as "behind the camera".
+        // N64 `Mtx` layout: a 4x4 array of s16 integer parts followed by a 4x4
+        // array of u16 fraction parts (64 bytes total), decoded as
+        // int + frac/65536. Two things have bitten this decoder:
+        //
+        //  1. Reading 16 consecutive s16 values only ever read the integer
+        //     halves, so any matrix without a non-zero integer part decoded as
+        //     all zeros (session 19).
+        //  2. The runtime's rdram holds N64 words byte-reversed, so a plain
+        //     16-bit read returns each row's columns in the order 1,0,3,2.
+        //     RT64 compensates with `j ^ 1`
+        //     (FixedMatrix::toFloat in common/rt64_common.cpp); without it
+        //     every matrix here came out transposed in column pairs, which is
+        //     why the composed projection looked nothing like a perspective
+        //     matrix and most triangles were rejected as "behind the camera".
         Mat4 m{};
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
-                const int i = r * 4 + c;
+                const int i = r * 4 + (c ^ 1);
                 const int16_t int_part = static_cast<int16_t>(rd16(rdram_ + addr + i * 2));
                 const uint16_t frac_part = rd16(rdram_ + addr + 32 + i * 2);
-                m.m[i] = static_cast<float>(int_part) + static_cast<float>(frac_part) / 65536.0f;
+                m.m[r * 4 + c] = static_cast<float>(int_part) + static_cast<float>(frac_part) / 65536.0f;
             }
         }
         return m;
@@ -1726,6 +1886,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // the following G_RDPHALF_2).
     int texrect_geom_[4] = {};
     int loaded_tile_uls_ = 0, loaded_tile_ult_ = 0;
+    // Diagnostics for the texrect path (last load only).
+    uint8_t last_tex_rgba_[4] = {0, 0, 0, 0};
+    uint8_t last_tex_fmt_ = 0, last_tex_siz_ = 0;
+    uint16_t last_tex_line_ = 0;
+    uint8_t last_tex_shifts_ = 0, last_tex_shiftt_ = 0;
+    uint8_t last_tex_masks_ = 0, last_tex_maskt_ = 0;
 };
 
 WebGLRenderer* g_active_renderer = nullptr;
