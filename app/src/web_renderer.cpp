@@ -29,7 +29,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -58,6 +60,24 @@ namespace {
 gbi::WorkloadStats g_workload;
 std::mutex g_stats_mutex;
 char g_stats_snapshot[4096];
+
+// Session-19: non-perturbing execution telemetry. The gfx pthread updates these
+// atomics once per display-list command (a few relaxed stores; no I/O), and the
+// browser main thread surfaces them in ogre_gfx_stats() at 1 Hz. This is how a
+// DL walk that stalls is located without the per-command proxied-printf
+// throttling that tracing causes.
+std::atomic<uint64_t> g_exec_cmd{0};      // command index within the current DL
+std::atomic<uint32_t> g_exec_off{0};      // rdram offset of that command
+std::atomic<uint32_t> g_exec_op{0};       // its opcode byte
+std::atomic<uint32_t> g_exec_task{0};     // task number being executed
+std::atomic<uint32_t> g_exec_draws{0};    // DrawCmds queued so far
+std::atomic<uint32_t> g_flush_ok{0};      // flushes that acquired the lock
+std::atomic<uint32_t> g_flush_skip{0};    // flushes skipped because the gfx thread was busy
+std::atomic<uint32_t> g_flush_cmds{0};    // DrawCmds presented to GL
+std::atomic<uint32_t> g_load_seq{0};      // load_tile_texture() calls started
+std::atomic<uint32_t> g_load_done{0};     // ... finished
+std::atomic<uint32_t> g_load_w{0}, g_load_h{0};   // requested texel rect
+std::atomic<uint32_t> g_load_siz{0}, g_load_fmt{0}, g_load_timgw{0}, g_load_addr{0};
 
 void refresh_stats_snapshot() {
     std::string summary = gbi::format_summary(g_workload);
@@ -396,8 +416,10 @@ uniform int u_cycle;  // 1 or 2
 uniform int u_use_tex;
 uniform int u_alpha_from_cvg; // reserved
 
-vec3 src_rgb(int sel) {
-    if (sel == 0) return vec3(0.0);             // COMBINED (cycle 0)
+// `combined` is the previous cycle's result (selector 0, COMBINED). Cycle 0
+// has no previous cycle, so callers pass 0 there.
+vec3 src_rgb(int sel, vec3 combined) {
+    if (sel == 0) return combined;              // COMBINED (previous cycle)
     if (sel == 1 || sel == 2) return texture(u_tex0, v_uv).rgb;  // TEXEL0/1
     if (sel == 3) return u_prim.rgb;
     if (sel == 4) return v_shade.rgb;
@@ -406,8 +428,8 @@ vec3 src_rgb(int sel) {
     if (sel == 8) return vec3(texture(u_tex0, v_uv).a);  // TEXEL0_ALPHA
     return vec3(0.0);
 }
-float src_a(int sel) {
-    if (sel == 0) return 0.0;
+float src_a(int sel, float combined) {
+    if (sel == 0) return combined;              // COMBINED (previous cycle)
     if (sel == 1 || sel == 2) return texture(u_tex0, v_uv).a;
     if (sel == 3) return u_prim.a;
     if (sel == 4) return v_shade.a;
@@ -418,14 +440,14 @@ float src_a(int sel) {
 void main() {
     vec4 texel = texture(u_tex0, v_uv);
     // Cycle 0.
-    vec3 rgb0 = (src_rgb(u_ca0) - src_rgb(u_cb0)) * src_rgb(u_cc0) + src_rgb(u_cd0);
-    float a0 = (src_a(u_aa0) - src_a(u_ab0)) * src_a(u_ac0) + src_a(u_ad0);
+    vec3 rgb0 = (src_rgb(u_ca0, vec3(0.0)) - src_rgb(u_cb0, vec3(0.0))) * src_rgb(u_cc0, vec3(0.0)) + src_rgb(u_cd0, vec3(0.0));
+    float a0 = (src_a(u_aa0, 0.0) - src_a(u_ab0, 0.0)) * src_a(u_ac0, 0.0) + src_a(u_ad0, 0.0);
     vec3 rgb = rgb0;
     float alpha = a0;
     if (u_cycle == 2) {
         // COMBINED inputs in cycle 1 use cycle 0's result.
-        vec3 rgb1 = (src_rgb(u_ca1) - src_rgb(u_cb1)) * src_rgb(u_cc1) + src_rgb(u_cd1);
-        float a1 = (src_a(u_aa1) - src_a(u_ab1)) * src_a(u_ac1) + src_a(u_ad1);
+        vec3 rgb1 = (src_rgb(u_ca1, rgb0) - src_rgb(u_cb1, rgb0)) * src_rgb(u_cc1, rgb0) + src_rgb(u_cd1, rgb0);
+        float a1 = (src_a(u_aa1, a0) - src_a(u_ab1, a0)) * src_a(u_ac1, a0) + src_a(u_ad1, a0);
         rgb = rgb1;
         alpha = a1;
     }
@@ -575,7 +597,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.othermode_l = 0;
         st.othermode_h = 0;
         st.combiner.decode(0, 0);
-        execute_dl(rdram_, kDlOff, st);
+        // execute_dl() records DrawCmds into the execution-local buffer; publish
+        // them under a short try_lock. This hook runs on the browser main
+        // thread, which must never block on the renderer mutex.
+        ExecCtx ctx;
+        execute_dl(rdram_, kDlOff, st, ctx);
+        {
+            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+            if (!lock.owns_lock()) {
+                fprintf(stderr, "[web-renderer] test_draw skipped publish: renderer busy\n");
+                return;
+            }
+            for (DrawCmd& d : ctx.draws) draw_queue_.push_back(std::move(d));
+            for (TexUpload& t : ctx.tex) tex_upload_queue_.push_back(std::move(t));
+        }
         fprintf(stderr, "[web-renderer] test_draw: %u bytes of DL recorded\n", o - kDlOff);
     }
 
@@ -588,9 +623,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
 
+        // Never block the browser main thread on the gfx pthread's mutex: a
+        // contended pthread lock on a browser main thread cannot wait legally
+        // (Atomics.wait is disallowed there) and was observed to freeze the
+        // whole page while the gfx pthread sat inside send_dl(). Skip this
+        // tick instead; the next flush drains the queued work. Skips are
+        // counted (flush_skipped_) and surfaced as a one-off stderr note.
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            g_flush_skip.fetch_add(1, std::memory_order_relaxed);
+            if (flush_skipped_.fetch_add(1) == 0) {
+                fprintf(stderr, "[web-renderer] ogre_gfx_flush: renderer busy (gfx pthread "
+                                "inside send_dl); skipping flush instead of blocking the main thread\n");
+            }
+            return;
+        }
+
         // Texture uploads.
         {
-            std::lock_guard<std::mutex> lock(mutex_);
             for (TexUpload& up : tex_upload_queue_) {
                 GLuint tex = 0;
                 auto it = gl_textures_.find(up.key);
@@ -611,6 +661,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                 up.bilerp ? GL_LINEAR : GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
                                 up.bilerp ? GL_LINEAR : GL_NEAREST);
+                if (tex_logged_ < 6) {
+                    ++tex_logged_;
+                    size_t nz = 0; uint64_t sum = 0;
+                    for (size_t i = 0; i + 3 < up.pixels.size(); i += 4) {
+                        const unsigned v = up.pixels[i] + up.pixels[i + 1] + up.pixels[i + 2];
+                        if (v) { ++nz; sum += v; }
+                    }
+                    OGRE_MILESTONE("GFX-TEX", "tex %u: %dx%d key=0x%llX nonzero=%zu/%zu avgRGB=%llu",
+                                   tex_logged_, up.width, up.height,
+                                   (unsigned long long)up.key, nz, up.pixels.size() / 4,
+                                   (unsigned long long)(nz ? sum / nz : 0));
+                }
             }
             tex_upload_count_ += tex_upload_queue_.size();
             tex_upload_queue_.clear();
@@ -619,7 +681,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // Draws.
         std::vector<DrawCmd> cmds;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
             cmds.swap(draw_queue_);
         }
 
@@ -627,7 +688,34 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glBindVertexArray(vao_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
 
+        if (!logged_first_flush_ && !cmds.empty()) {
+            logged_first_flush_ = true;
+            OGRE_MILESTONE("GFX-FLUSH", "first non-empty main-thread flush: %u draw cmds, %u textures uploaded",
+                           static_cast<unsigned>(cmds.size()),
+                           static_cast<unsigned>(tex_upload_count_));
+        }
+        flushed_cmds_ += static_cast<unsigned>(cmds.size());
+        ++flush_count_;
+        g_flush_ok.store(flush_count_, std::memory_order_relaxed);
+        g_flush_cmds.store(flushed_cmds_, std::memory_order_relaxed);
+
         for (const DrawCmd& cmd : cmds) {
+            if (draw_logged_ < 6) {
+                ++draw_logged_;
+                const bool found = cmd.textured && gl_textures_.find(cmd.tex_key) != gl_textures_.end();
+                OGRE_MILESTONE("GFX-CMD",
+                               "draw %u: verts=%d textured=%d tex_found=%d cycle=%d "
+                               "c0=[%d,%d,%d,%d] a0=[%d,%d,%d,%d] prim=[%.2f,%.2f,%.2f,%.2f] env=[%.2f,%.2f,%.2f,%.2f] "
+                               "blend=%d scissor=%d(%d,%d,%d,%d) p0=(%.2f,%.2f) uv0=(%.3f,%.3f)",
+                               draw_logged_, cmd.vertex_count, cmd.textured ? 1 : 0, found ? 1 : 0, cmd.cycle,
+                               cmd.ca[0], cmd.cb[0], cmd.cc[0], cmd.cd[0],
+                               cmd.aa[0], cmd.ab[0], cmd.ac[0], cmd.ad[0],
+                               cmd.prim[0], cmd.prim[1], cmd.prim[2], cmd.prim[3],
+                               cmd.env[0], cmd.env[1], cmd.env[2], cmd.env[3],
+                               cmd.blend ? 1 : 0, cmd.scissor_on ? 1 : 0,
+                               cmd.sx0, cmd.sy0, cmd.sx1, cmd.sy1,
+                               cmd.pos[0], cmd.pos[1], cmd.uv[0], cmd.uv[1]);
+            }
             // Combiner uniforms.
             auto seti = [this](const char* name, int v) {
                 glUniform1i(glGetUniformLocation(program_, name), v);
@@ -693,11 +781,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     void send_dl(const OSTask* task) override {
-        std::lock_guard<std::mutex> lock(mutex_);
         ++task_count_;
 
         // Workload analysis (plan §15) continues to run in the browser even
-        // with the WebGL renderer active, feeding ogre_gfx_stats().
+        // with the WebGL renderer active, feeding ogre_gfx_stats(). It walks
+        // the whole display list, so it runs OUTSIDE mutex_: holding the lock
+        // across it would stall the browser main thread's ogre_gfx_flush()
+        // for the entire analysis (blocking a browser main thread on a
+        // pthread mutex is illegal and freezes the page).
+        const auto analyze_t0 = std::chrono::steady_clock::now();
         if (rdram_ != nullptr) {
             gbi::analyze_dl(rdram_, task->t.data_ptr & 0x3FFFFFF, task->t.data_size, g_workload);
             refresh_stats_snapshot();
@@ -705,21 +797,56 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 OGRE_MILESTONE("GFX-WORKLOAD", "%s", g_stats_snapshot);
             }
         }
+        const auto analyze_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - analyze_t0).count();
 
+        const auto exec_t0 = std::chrono::steady_clock::now();
         RenderState st;
         st.othermode_l = 0;
         st.othermode_h = 0;
         st.combiner.decode(0, 0);
 
         // The DL executes on the gfx pthread and only records draw commands;
-        // the browser main thread issues the GL in ogre_gfx_flush().
-        execute_dl(rdram_, task->t.data_ptr & 0x3FFFFFF, st);
+        // the browser main thread issues the GL in ogre_gfx_flush(). Crucially
+        // this runs WITHOUT holding mutex_: a slow (or stalled) DL walk must
+        // never block the browser main thread's flush, and locking mutex_ here
+        // is also what used to self-deadlock via queue_triangles.
+        ExecCtx ctx;
+        execute_dl(rdram_, task->t.data_ptr & 0x3FFFFFF, st, ctx);
+
+        const auto exec_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - exec_t0).count();
+
+        // Publish the recorded commands under a short lock.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (DrawCmd& d : ctx.draws) {
+                if (draw_queue_.size() >= 16384) {
+                    break;
+                }
+                draw_queue_.push_back(std::move(d));
+                ++draws_recorded_;
+            }
+            for (TexUpload& t : ctx.tex) {
+                tex_upload_queue_.push_back(std::move(t));
+            }
+            g_exec_draws.store(draws_recorded_, std::memory_order_relaxed);
+        }
 
         if (task_count_ <= 16 || (task_count_ % 300) == 0) {
             const unsigned tc = task_count_.load();
             OGRE_MILESTONE("RSP", "display list submitted (frame %u, type %u, ucode 0x%08X)",
                            tc, static_cast<unsigned>(task->t.type),
                            static_cast<unsigned>(task->t.ucode));
+        }
+        // Session-19 diagnostics: what the WebGL path did with this DL.
+        if (task_count_ <= 8 || (task_count_ % 120) == 0) {
+            OGRE_MILESTONE("GFX-DRAW",
+                           "task %u: cmds=%u queued=%u rejected=%u ndc_x=[%.2f,%.2f] ndc_y=[%.2f,%.2f] gl_ready=%d skipped=%u flushed=%u/%u analyze=%lldms exec=%lldms",
+                           task_count_.load(), last_dl_cmds_, draws_recorded_.load(), tris_rejected_,
+                           ndc_min_[0], ndc_max_[0], ndc_min_[1], ndc_max_[1],
+                           gl_ready_ ? 1 : 0, flush_skipped_.load(), flushed_cmds_, flush_count_,
+                           (long long)analyze_ms, (long long)exec_ms);
         }
     }
 
@@ -762,6 +889,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     GLuint program_ = 0;
     GLuint vao_ = 0, vbo_ = 0;
     std::atomic<unsigned> task_count_{0};
+    std::atomic<unsigned> flush_skipped_{0};
+    // Diagnostics for the DL -> GL path (session 19): how many DrawCmds were
+    // queued, how many triangles were dropped by the transform, and the NDC
+    // extent of everything queued (nothing is visible outside [-1, 1]).
+    std::atomic<unsigned> draws_recorded_{0};
+    unsigned tris_rejected_ = 0;
+    float ndc_min_[2] = {1e9f, 1e9f};
+    float ndc_max_[2] = {-1e9f, -1e9f};
+    bool logged_first_flush_ = false;
+    unsigned tex_logged_ = 0;
+    unsigned tri_reject_logged_ = 0;
+    unsigned draw_logged_ = 0;
+    unsigned flushed_cmds_ = 0;
+    unsigned flush_count_ = 0;
+    unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
     std::mutex mutex_;
 
     // Command queues: written by the gfx pthread (execute_dl), drained by the
@@ -842,18 +984,62 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         uint32_t rdp_half1 = 0, rdp_half2 = 0;
         bool pending_texrect = false;
         bool pending_texrect_flip = false;
+        // Session-19: progress trace. Every kTraceEvery commands the executor
+        // logs the command it is about to run, so a DL that never finishes
+        // still leaves the offending command in the status log.
+        uint32_t cmd_index = 0;
+        uint32_t trace_task = 0;
+        bool trace_enabled = false;
+        // Session-19: outputs of this execution. The DL is walked WITHOUT
+        // holding the renderer mutex (so a slow/stalled gfx thread can never
+        // starve the browser main thread's flush); the results are published to
+        // the shared queues under a short lock afterwards.
+        std::vector<DrawCmd> draws;
+        std::vector<TexUpload> tex;
     };
 
-    void execute_dl(uint8_t* rdram, uint32_t dl_offset, RenderState& st) {
-        ExecCtx ctx;
+    void execute_dl(uint8_t* rdram, uint32_t dl_offset, RenderState& st, ExecCtx& ctx) {
         ctx.self = this;
         ctx.st = &st;
+        ctx.trace_task = task_count_.load();
+        // Per-command tracing is opt-in (OGRE_TRACE_DL=1): every trace line is a
+        // proxied stderr write from the gfx pthread, which throttles the DL walk
+        // to a crawl and makes a healthy DL look like a hang.
+        static const bool trace_dl_env = [] {
+            const char* v = getenv("OGRE_TRACE_DL");
+            return v != nullptr && v[0] == '1';
+        }();
+        ctx.trace_enabled = trace_dl_env && ctx.trace_task >= 2 && ctx.trace_task <= 3;
+        if (ctx.trace_enabled) {
+            OGRE_MILESTONE("GFX-EXEC", "task %u: begin DL @0x%05X", ctx.trace_task, dl_offset);
+        }
 
         auto visitor = [](void* user, const gbi::DlCommand& c) {
-            static_cast<ExecCtx*>(user)->self->exec_command(static_cast<ExecCtx*>(user), c);
+            ExecCtx* ctx = static_cast<ExecCtx*>(user);
+            const uint32_t idx = ctx->cmd_index;
+            const bool trace = ctx->trace_enabled && idx < 1400;
+            g_exec_task.store(ctx->trace_task, std::memory_order_relaxed);
+            g_exec_cmd.store(idx, std::memory_order_relaxed);
+            g_exec_off.store(c.offset, std::memory_order_relaxed);
+            g_exec_op.store(c.op, std::memory_order_relaxed);
+            if (trace) {
+                // Only the "before" line for every command: the last line
+                // printed is therefore the command the executor hung on.
+                OGRE_MILESTONE("GFX-EXEC", "cmd %u @0x%05X op=0x%02X w0=0x%08X w1=0x%08X",
+                               idx, c.offset, c.op, c.w0, c.w1);
+            }
+            ctx->cmd_index++;
+            ctx->self->exec_command(ctx, c);
+            if (trace && (idx % 64) == 63) {
+                OGRE_MILESTONE("GFX-EXEC", "  ^ returned through cmd %u", idx);
+            }
         };
 
         gbi::walk_dl(rdram, dl_offset, visitor, &ctx);
+        last_dl_cmds_ = ctx.cmd_index;
+        if (ctx.trace_enabled) {
+            OGRE_MILESTONE("GFX-EXEC", "task %u: end DL, %u commands", ctx.trace_task, ctx.cmd_index);
+        }
     }
 
     void exec_command(ExecCtx* ctx, const gbi::DlCommand& c) {
@@ -930,17 +1116,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
 
             case gbi::OP_TRI1:
-                draw_tri(st, p0(w0, 17, 7), p0(w0, 9, 7), p0(w0, 1, 7));
+                draw_tri(ctx, st, p0(w0, 17, 7), p0(w0, 9, 7), p0(w0, 1, 7));
                 break;
 
             case gbi::OP_TRI2:
-                draw_tri(st, p0(w0, 17, 7), p0(w0, 9, 7), p0(w0, 1, 7));
-                draw_tri(st, p0(w1, 17, 7), p0(w1, 9, 7), p0(w1, 1, 7));
+                draw_tri(ctx, st, p0(w0, 17, 7), p0(w0, 9, 7), p0(w0, 1, 7));
+                draw_tri(ctx, st, p0(w1, 17, 7), p0(w1, 9, 7), p0(w1, 1, 7));
                 break;
 
             case gbi::OP_QUAD:
-                draw_tri(st, p0(w0, 17, 7), p0(w0, 9, 7), p0(w0, 1, 7));
-                draw_tri(st, p0(w1, 17, 7), p0(w1, 9, 7), p0(w1, 1, 7));
+                draw_tri(ctx, st, p0(w0, 17, 7), p0(w0, 9, 7), p0(w0, 1, 7));
+                draw_tri(ctx, st, p0(w1, 17, 7), p0(w1, 9, 7), p0(w1, 1, 7));
                 break;
 
             case gbi::OP_FILLRECT: {
@@ -948,7 +1134,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const int yl = static_cast<int>(p0(w0, 0, 12)) >> 2;
                 const int xh = static_cast<int>(p0(w1, 12, 12)) >> 2;
                 const int yh = static_cast<int>(p0(w1, 0, 12)) >> 2;
-                draw_fill_rect(st, xl, yl, xh, yh);
+                draw_fill_rect(ctx, st, xl, yl, xh, yh);
                 break;
             }
 
@@ -1033,7 +1219,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint16_t ult = static_cast<uint16_t>(p0(w0, 0, 12));
                 const uint16_t lrs = static_cast<uint16_t>(p0(w1, 12, 12));
                 const uint16_t lrt = static_cast<uint16_t>(p0(w1, 0, 12));
-                load_tile_texture(st, tile, uls, ult, lrs, lrt, false);
+                load_tile_texture(ctx, st, tile, uls, ult, lrs, lrt, false);
                 break;
             }
 
@@ -1043,7 +1229,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint16_t ult = static_cast<uint16_t>(p0(w0, 0, 12));
                 const uint16_t lrs = static_cast<uint16_t>(p0(w1, 12, 12));
                 const uint16_t lrt = static_cast<uint16_t>(p0(w1, 0, 12));  // height-1
-                load_tile_texture(st, tile, uls, ult, lrs, lrt, true);
+                load_tile_texture(ctx, st, tile, uls, ult, lrs, lrt, true);
                 break;
             }
 
@@ -1103,26 +1289,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
 
             case gbi::OP_SETPRIMCOLOR: {
-                st.prim_color[3] = (p0(w1, 0, 8)) / 255.0f;
-                st.prim_color[0] = (p0(w1, 8, 8)) / 255.0f;
-                st.prim_color[1] = (p0(w1, 16, 8)) / 255.0f;
-                st.prim_color[2] = (p0(w1, 24, 8)) / 255.0f;
+                // G_SET*COLOR packs (R<<24)|(G<<16)|(B<<8)|A.
+                st.prim_color[3] = (p0(w1, 0, 8)) / 255.0f;   // A
+                st.prim_color[0] = (p0(w1, 24, 8)) / 255.0f;  // R
+                st.prim_color[1] = (p0(w1, 16, 8)) / 255.0f;  // G
+                st.prim_color[2] = (p0(w1, 8, 8)) / 255.0f;   // B
                 break;
             }
 
             case gbi::OP_SETENVCOLOR: {
-                st.env_color[3] = (p0(w1, 0, 8)) / 255.0f;
-                st.env_color[0] = (p0(w1, 8, 8)) / 255.0f;
-                st.env_color[1] = (p0(w1, 16, 8)) / 255.0f;
-                st.env_color[2] = (p0(w1, 24, 8)) / 255.0f;
+                // G_SET*COLOR packs (R<<24)|(G<<16)|(B<<8)|A.
+                st.env_color[3] = (p0(w1, 0, 8)) / 255.0f;   // A
+                st.env_color[0] = (p0(w1, 24, 8)) / 255.0f;  // R
+                st.env_color[1] = (p0(w1, 16, 8)) / 255.0f;  // G
+                st.env_color[2] = (p0(w1, 8, 8)) / 255.0f;   // B
                 break;
             }
 
             case gbi::OP_SETFILLCOLOR: {
-                st.fill_color[3] = (p0(w1, 0, 8)) / 255.0f;
-                st.fill_color[0] = (p0(w1, 8, 8)) / 255.0f;
-                st.fill_color[1] = (p0(w1, 16, 8)) / 255.0f;
-                st.fill_color[2] = (p0(w1, 24, 8)) / 255.0f;
+                // G_SET*COLOR packs (R<<24)|(G<<16)|(B<<8)|A.
+                st.fill_color[3] = (p0(w1, 0, 8)) / 255.0f;   // A
+                st.fill_color[0] = (p0(w1, 24, 8)) / 255.0f;  // R
+                st.fill_color[1] = (p0(w1, 16, 8)) / 255.0f;  // G
+                st.fill_color[2] = (p0(w1, 8, 8)) / 255.0f;   // B
                 break;
             }
 
@@ -1134,7 +1323,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 if (type == gbi::MW_SEGMENT) {
                     const uint8_t seg = static_cast<uint8_t>(p0(w0, 2, 4));
                     if (seg < 16) {
-                        ctx->segments[seg] = w1;
+                        // The RSP keeps only the base's high byte; segmented
+                        // addresses then resolve as (base << 24) | offset.
+                        // Storing the full base here made every segmented
+                        // matrix/vertex address resolve to garbage.
+                        ctx->segments[seg] = w1 >> 24;
                     }
                 }
                 break;
@@ -1168,8 +1361,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // ----- texture helpers ----------------------------------------------------
 
     // Decodes the region loaded by LOADTILE/LOADBLOCK and (re)uploads it.
-    void load_tile_texture(RenderState& st, int tile, uint16_t uls, uint16_t ult, uint16_t lrs,
-                           uint16_t lrt, bool is_block) {
+    void load_tile_texture(ExecCtx* ctx, RenderState& st, int tile, uint16_t uls, uint16_t ult,
+                           uint16_t lrs, uint16_t lrt, bool is_block) {
         const TileState& t = st.tiles[tile];
 
         // Texel rect of the load (RDP coords are 10.2 fixed; >>2 -> texels).
@@ -1187,11 +1380,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
 
+        g_load_seq.fetch_add(1, std::memory_order_relaxed);
+        g_load_w.store(static_cast<uint32_t>(w), std::memory_order_relaxed);
+        g_load_h.store(static_cast<uint32_t>(h), std::memory_order_relaxed);
+        g_load_siz.store(t.siz, std::memory_order_relaxed);
+        g_load_fmt.store(t.fmt, std::memory_order_relaxed);
+        g_load_timgw.store(st.timg_width, std::memory_order_relaxed);
+        g_load_addr.store(st.timg_address, std::memory_order_relaxed);
         std::vector<uint8_t> pixels;
         decode_texture_rect(rdram_, st.timg_address, t.fmt, t.siz, st.timg_width, x0, y0, w, h,
                             st.tlut, st.tlut_valid, t.palette, pixels);
+        g_load_done.fetch_add(1, std::memory_order_relaxed);
 
         // Queue the upload; the main thread creates/updates the GL texture.
+        // Execution-local (published under a short lock by the caller).
         uint64_t key = make_texture_key(st, tile, uls, ult, lrs, lrt, is_block);
         TexUpload up;
         up.key = key;
@@ -1201,10 +1403,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         up.clamp_t = (t.cmt != 0) || (t.maskt == 0);
         up.bilerp = ((st.othermode_h >> 12) & 3) == 2;  // G_TF_BILERP
         up.pixels = std::move(pixels);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            tex_upload_queue_.push_back(std::move(up));
-        }
+        ctx->tex.push_back(std::move(up));
 
         // Remember the loaded tile for draws.
         st.active_gl_tex = 0;
@@ -1277,7 +1476,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     // Queues one triangle list (NDC pos + uv + shade per vertex).
-    void queue_triangles(DrawCmd& cmd, const float* data, int count) {
+    void queue_triangles(ExecCtx* ctx, DrawCmd& cmd, const float* data, int count) {
         cmd.vertex_count = count;
         for (int i = 0; i < count; ++i) {
             cmd.pos[i * 2 + 0] = data[i * 8 + 0];
@@ -1288,12 +1487,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             cmd.shade[i * 4 + 1] = data[i * 8 + 5];
             cmd.shade[i * 4 + 2] = data[i * 8 + 6];
             cmd.shade[i * 4 + 3] = data[i * 8 + 7];
-        }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (draw_queue_.size() < 16384) {
-                draw_queue_.push_back(cmd);
+            // Track the NDC extent of everything queued so far: if the game's
+            // geometry lands outside [-1, 1] nothing is visible even though the
+            // draw commands exist.
+            for (int k = 0; k < 2; ++k) {
+                const float v = data[i * 8 + k];
+                if (v < ndc_min_[k]) ndc_min_[k] = v;
+                if (v > ndc_max_[k]) ndc_max_[k] = v;
             }
+        }
+        // Execution-local: published to draw_queue_ by the caller under a short
+        // lock. Never lock the renderer mutex here - it was held across the
+        // whole DL walk before, which both self-deadlocked (mutex_ is not
+        // recursive) and starved the browser main thread's flush.
+        if (ctx->draws.size() < 16384) {
+            ctx->draws.push_back(cmd);
         }
     }
 
@@ -1328,23 +1536,39 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         return true;
     }
 
-    void draw_tri(RenderState& st, int i0, int i1, int i2) {
+    void draw_tri(ExecCtx* ctx, RenderState& st, int i0, int i1, int i2) {
         if (i0 >= kMaxVertices || i1 >= kMaxVertices || i2 >= kMaxVertices) {
+            ++tris_rejected_;
             return;
         }
         const RawVertex* v[3] = {&st.vertices[i0], &st.vertices[i1], &st.vertices[i2]};
         float data[3 * 8];
         for (int i = 0; i < 3; ++i) {
             if (!transform_vertex(st, *v[i], data + i * 8)) {
+                if (tri_reject_logged_ < 2) {
+                    ++tri_reject_logged_;
+                    const Mat4& mv = st.modelview_stack.back();
+                    OGRE_MILESTONE("GFX-REJ",
+                                   "rejected tri v=(%d,%d,%d) mv=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] "
+                                   "proj=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f]",
+                                   v[i]->x, v[i]->y, v[i]->z,
+                                   mv.m[0], mv.m[1], mv.m[2], mv.m[3], mv.m[4], mv.m[5], mv.m[6], mv.m[7],
+                                   mv.m[8], mv.m[9], mv.m[10], mv.m[11], mv.m[12], mv.m[13], mv.m[14], mv.m[15],
+                                   st.projection.m[0], st.projection.m[1], st.projection.m[2], st.projection.m[3],
+                                   st.projection.m[4], st.projection.m[5], st.projection.m[6], st.projection.m[7],
+                                   st.projection.m[8], st.projection.m[9], st.projection.m[10], st.projection.m[11],
+                                   st.projection.m[12], st.projection.m[13], st.projection.m[14], st.projection.m[15]);
+                }
+                ++tris_rejected_;
                 return;  // back-facing / clipped
             }
         }
         DrawCmd cmd;
         record_state(cmd, st, st.texture_on && st.active_tex_key != 0);
-        queue_triangles(cmd, data, 3);
+        queue_triangles(ctx, cmd, data, 3);
     }
 
-    void draw_fill_rect(RenderState& st, int xl, int yl, int xh, int yh) {
+    void draw_fill_rect(ExecCtx* ctx, RenderState& st, int xl, int yl, int xh, int yh) {
         // G_FILLRECT in fill mode outputs the fill color directly (the
         // combiner is bypassed). Approximate by driving the combiner with the
         // fill color as PRIMITIVE: rgb = (PRIM - 0) * 1 + 0.
@@ -1393,7 +1617,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.combiner.ad[1] = 0;
 
         record_state(cmd, st, false);
-        queue_triangles(cmd, data, 6);
+        queue_triangles(ctx, cmd, data, 6);
 
         st.prim_color[0] = saved_prim[0];
         st.prim_color[1] = saved_prim[1];
@@ -1457,7 +1681,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         DrawCmd cmd;
         record_state(cmd, st, true);
-        queue_triangles(cmd, data, 6);
+        queue_triangles(ctx, cmd, data, 6);
     }
 
     // Screen (pixel) -> NDC.
@@ -1467,12 +1691,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // ----- matrix helpers ------------------------------------------------------
 
     Mat4 read_matrix(uint32_t addr) {
-        // N64 FixedMatrix: 4x4 of s16 16.16 fixed-point, row-major.
+        // N64 `Mtx` layout: 4x4 s16 integer parts followed by 4x4 u16 fraction
+        // parts (64 bytes total). Decoding it as 16 consecutive s16 values (the
+        // previous implementation) only ever read the integer halves, so any
+        // matrix without a non-zero integer part decoded as all zeros - which
+        // is why every 3D triangle was rejected as "behind the camera".
         Mat4 m{};
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
-                const uint16_t raw = rd16(rdram_ + addr + (r * 4 + c) * 2);
-                m.m[r * 4 + c] = static_cast<int16_t>(raw) / 65536.0f;
+                const int i = r * 4 + c;
+                const int16_t int_part = static_cast<int16_t>(rd16(rdram_ + addr + i * 2));
+                const uint16_t frac_part = rd16(rdram_ + addr + 32 + i * 2);
+                m.m[i] = static_cast<float>(int_part) + static_cast<float>(frac_part) / 65536.0f;
             }
         }
         return m;
@@ -1568,8 +1798,31 @@ void ogre_gfx_set_canvas(int handle, int width, int height) {
 
 // Returns the accumulated graphics-workload summary (milestone 6).
 const char* ogre_gfx_stats() {
-    std::lock_guard<std::mutex> lock(ogre::g_stats_mutex);
-    return ogre::g_stats_snapshot;
+    static char buf[8192];
+    {
+        std::lock_guard<std::mutex> lock(ogre::g_stats_mutex);
+        snprintf(buf, sizeof(buf),
+                 "%s\nexec: task=%u cmd=%llu @0x%05X op=0x%02X draws=%u flush_ok=%u flush_skip=%u flushed_cmds=%u"
+                 "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X",
+                 ogre::g_stats_snapshot,
+                 ogre::g_exec_task.load(std::memory_order_relaxed),
+                 (unsigned long long)ogre::g_exec_cmd.load(std::memory_order_relaxed),
+                 ogre::g_exec_off.load(std::memory_order_relaxed),
+                 ogre::g_exec_op.load(std::memory_order_relaxed),
+                 ogre::g_exec_draws.load(std::memory_order_relaxed),
+                 ogre::g_flush_ok.load(std::memory_order_relaxed),
+                 ogre::g_flush_skip.load(std::memory_order_relaxed),
+                 ogre::g_flush_cmds.load(std::memory_order_relaxed),
+                 ogre::g_load_seq.load(std::memory_order_relaxed),
+                 ogre::g_load_done.load(std::memory_order_relaxed),
+                 ogre::g_load_w.load(std::memory_order_relaxed),
+                 ogre::g_load_h.load(std::memory_order_relaxed),
+                 ogre::g_load_fmt.load(std::memory_order_relaxed),
+                 ogre::g_load_siz.load(std::memory_order_relaxed),
+                 ogre::g_load_timgw.load(std::memory_order_relaxed),
+                 ogre::g_load_addr.load(std::memory_order_relaxed));
+    }
+    return buf;
 }
 
 // Drains the queued draw/texture commands and issues the GL calls. Called

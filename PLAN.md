@@ -154,6 +154,31 @@ hardware. RT64 remains the primary native renderer throughout. See
     thread (`func_800893C0` → `func_8008949C` → `osViSwapBuffer`) never runs
     and the game submits only the boot blanking DL. See
     `docs/HANDOFF-2026-08-31-session15.md`.
+  - ✅ **First real game frame rendered in the browser (session 19)**: the
+    WebGL2 renderer prototype was the only thing blocking rendering. Four bugs
+    fixed in `app/src/web_renderer.cpp`: (1) `ogre_gfx_flush()` blocked the
+    browser **main thread** on the renderer mutex while `send_dl()` held it for
+    the whole DL analysis/execution — a contended pthread mutex cannot be waited
+    on by a browser main thread, and this hard-froze the page the moment the
+    title path advanced; (2) `queue_triangles()` re-locked that non-recursive
+    mutex (already held by `send_dl`) and self-deadlocked on the first real draw
+    command, permanently holding the lock; fixed structurally by recording into
+    an execution-local buffer and publishing under a short lock; (3)
+    `read_matrix()` decoded the N64 `Mtx` as 16 consecutive `s16` instead of
+    4x4 `s16` integer parts + 4x4 `u16` fraction parts, so most matrices were
+    all-zero and **every 3D triangle was rejected**; (4) segment registers stored
+    the full base instead of its high byte. Also fixed R/B swap in
+    `G_SET*COLOR` and the shader's `COMBINED` combiner input. Result: the title
+    DL executes, its draws reach GL, the canvas shows real (brown/orange) game
+    content, and the game submits frames continuously. **Project-model
+    correction:** the sessions 16–18 "cb88 NULL frame-2 wall" is a red herring
+    (that is the boot blanking task; steady-state frame tasks use key 4 →
+    `cb84 = osViSwapBuffer`, enqueued by `func_80073AE4`, gated on
+    `D_800E810C`), and the "heap-walk wedge" was a downstream symptom of the
+    frozen main thread + deadlocked mutex. **Next:** implement
+    `G_MOVEMEM MV_VIEWPORT` (still a no-op, so 3D geometry is partly
+    off-screen), then regenerate the combiner mux tables from RT64's
+    `rt64_color_combiner.h`. See `docs/HANDOFF-2026-09-10-session19.md`.
 
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
