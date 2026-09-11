@@ -167,6 +167,63 @@ basis, `timg_width` as the row stride). See the open questions.
         <- segment 15 + 0 = 0x001BE4E0 (the game's G_MOVEWORD base); was 0x0F000000
   ```
 
+## Evidence for the idle trajectory (a stalled boot, session 21)
+
+`stats.cjs --secs 45` landed on the idle trajectory (1 display list) and the
+runtime's `[snap]` dump captured the state. The session-15 reading ("thread 3
+blocks on its own count-1 queue `0x800C6C98`, sender unknown") does **not**
+match this boot - those four queues have a capacity of zero and nobody waiting
+on them, so they are not the wall:
+
+```
+[snap] mq=0x800C6C98 count=0/0 recv_wait=t-1 send_wait=t-1     <- msgCount 0
+[snap] mq=0x800C6CA8 count=0/0 recv_wait=t-1 send_wait=t-1
+[snap] mq=0x800C4A00 count=0/0 recv_wait=t-1 send_wait=t-1
+[snap] mq=0x800E9BF0 count=0/0 recv_wait=t-1 send_wait=t-1
+[snap] thread t1  not blocked in mesg (last func 0x80099740)
+[snap] thread t3  not blocked in mesg (last func 0x800901C0)
+[snap] thread t4  BLOCKED on recv of queue 0x800C4C28 (in func 0x80089054)
+[snap] thread t5  BLOCKED on recv of queue 0x800E9BA8 (in func 0x80089540)
+[snap] thread t16 BLOCKED on recv of queue 0x800B9C40 (in func 0x80089358)
+[snap] thread t17 BLOCKED on recv of queue 0x800E8B4C (in func 0x800901C0)
+[snap] thread t18 BLOCKED on recv of queue 0x800E8B14 (in func 0x80089200)
+[snap] thread t19 BLOCKED on recv of queue 0x800E8B84 (in func 0x800891A0)
+[snap] retrace handlers @0x800E9178: [0]mq=0x800C4C28 fl=0x3
+[snap] game: ... frameprod(D_800E918D)=0x03 rspdone(D_800E79A4)=0x00000000
+      retrace(D_800C4BCC)=0x00000044
+[snap] framedisp: kick=*(0x800E7DE0)=0x800E9BA8 dptr=*(0x800E7DE4)=0x800B9C84
+      key=hu(0x800B9C84)=0x0008 cb84=0x8008B110 cb88=0x00000000
+      task16(D_800E917C)=0x00000000 taskptr(D_800B9C80)=0x800E7D90
+[snap] titledisp: idx(D_800E810E)=0x0000 statep(D_800C4BBC)=0x00000000 srcidx=...
+      ind(D_800E8294)=0x00000000 *ind=(outside rdram)
+[snap] titleTab: 00000000 x25   (all zero)
+```
+
+Reading:
+
+- `func_80089054` is **`osSetEventMesg`** (it stores `(mq, msg, type)` into the
+  OSEvent array at `D_800E9178` and calls `osSendMesg` when `type & 2` and the
+  phase byte `D_800C4800` is set) - which is why the snapshot prints that array
+  as the "retrace handlers". t4 registered retrace events and is waiting on
+  them; the runtime delivers retraces at 59.2/s, so t4 is not the problem.
+- The display chain is `kick=*(0x800E7DE0)=0x800E9BA8` -> t5 (blocked in
+  `func_80089540`), and `dptr=*(0x800E7DE4)=0x800B9C84` with `key=0x0008` ->
+  `cb84=0x8008B110`. Session 19 saw the *steady-state* frame key as 4 with
+  `cb84 = osViSwapBuffer`; this boot is on **key 8**, a different callback, and
+  `rspdone(D_800E79A4)=0`.
+- t16 is blocked inside the frame-producer family (`func_80089358`), i.e. the
+  thread that should drive `func_800893C0 -> func_8008949C -> osViSwapBuffer`
+  never gets its message.
+- `titleTab` is all zeros and `titledisp`'s `idx`/`statep` are zero: the
+  title-display state machine has no data at all.
+
+So the next question is concrete: **who sends to `0x800E9BA8` (t5) and
+`0x800B9C40` (t16), and why is it never sent?** Session 19 identified
+`func_80073AE4` as the frame-display "kick" gated on `D_800E810C`; the
+`[snap]` "framedisp" line was added for exactly this hunt (see
+`ultramodern/src/mesgqueue.cpp`), so a stalled boot's snapshot is the fastest
+way in.
+
 ## Open questions (ordered)
 
 1. **The idle trajectory (the real wall now).** Once a boot is running, frames
