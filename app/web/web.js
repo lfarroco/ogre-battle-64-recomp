@@ -25,9 +25,21 @@
   var bootStartTime = 0;
   var audioContext = null;
 
-  function log(text) {
-    status.textContent += text + "\n";
+  // The status log is owned by index.html, which keeps it in a bounded string
+  // and renders it on a 200 ms timer (appending to textContent directly is O(n)
+  // per line on the main thread, and the wasm threads' printf is proxied onto
+  // that same thread). Fall back to the old behaviour if it is missing.
+  function appendStatus(text) {
+    if (typeof window.ogreStatusAppend === "function") {
+      window.ogreStatusAppend(text);
+      return;
+    }
+    status.textContent += text;
     status.scrollTop = status.scrollHeight;
+  }
+
+  function log(text) {
+    appendStatus(text + "\n");
   }
 
   function moduleReady() {
@@ -62,9 +74,8 @@
     }
     var text = Module.UTF8ToString(ptr);
     if (text.length > lastMilestoneLen) {
-      status.textContent += text.slice(lastMilestoneLen);
+      appendStatus(text.slice(lastMilestoneLen));
       lastMilestoneLen = text.length;
-      status.scrollTop = status.scrollHeight;
     }
   }
 

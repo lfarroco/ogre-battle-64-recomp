@@ -62,18 +62,47 @@
   // the milestone log stays readable (they still go to the browser console).
   // Debugging override: set window.OGRE_STATUS_FILTER before this script runs.
   var OGRE_STATUS_FILTER = window.OGRE_STATUS_FILTER || /^\[(sch|mq|ev|renderer|VI|drainer)\]/;
+  // The status log is bounded and rendered on a timer. Appending straight to
+  // `status.textContent` is O(n) per line on the browser main thread, and every
+  // wasm thread's printf/printErr is proxied onto that thread - so an unbounded
+  // log (hundreds of KB within a minute, mostly [snap]/[rsp] lines) throttles
+  // the emulator itself. Keep the text in a string, cap it, and touch the DOM
+  // at most five times a second.
+  var OGRE_STATUS_CAP = window.OGRE_STATUS_CAP || 24000;
+  var ogreStatusLog = "";
+  var ogreStatusDirty = false;
+  var ogreStatusEl = null;
+  window.ogreStatusAppend = function (text) {
+    ogreStatusLog += text;
+    ogreStatusDirty = true;
+    if (ogreStatusLog.length > OGRE_STATUS_CAP * 2) {
+      ogreStatusLog = ogreStatusLog.slice(-OGRE_STATUS_CAP);
+    }
+  };
+  setInterval(function () {
+    if (!ogreStatusDirty) {
+      return;
+    }
+    ogreStatusDirty = false;
+    if (ogreStatusEl === null) {
+      ogreStatusEl = document.getElementById("status");
+    }
+    ogreStatusEl.textContent =
+      ogreStatusLog.length > OGRE_STATUS_CAP ? ogreStatusLog.slice(-OGRE_STATUS_CAP) : ogreStatusLog;
+    ogreStatusEl.scrollTop = ogreStatusEl.scrollHeight;
+  }, 200);
   var Module = {
     onRuntimeInitialized: function () {
-      document.getElementById("status").textContent += "[web] WASM runtime initialized. Select a ROM to begin.\n";
+      window.ogreStatusAppend("[web] WASM runtime initialized. Select a ROM to begin.\n");
     },
     print: function (text) {
       if (!OGRE_STATUS_FILTER.test(text)) {
-        document.getElementById("status").textContent += "[stdout] " + text + "\n";
+        window.ogreStatusAppend("[stdout] " + text + "\n");
       }
     },
     printErr: function (text) {
       if (!OGRE_STATUS_FILTER.test(text)) {
-        document.getElementById("status").textContent += "[stderr] " + text + "\n";
+        window.ogreStatusAppend("[stderr] " + text + "\n");
       }
     }
   };

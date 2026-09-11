@@ -857,11 +857,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             g_exec_draws.store(draws_recorded_, std::memory_order_relaxed);
         }
 
-        if (task_count_ <= 16 || (task_count_ % 300) == 0) {
+        // Every 8th frame carries a gfx-thread timestamp: the inter-frame delta
+        // shows directly whether the game is pacing itself or blocked.
+        if (task_count_ <= 16 || (task_count_ % 8) == 0) {
             const unsigned tc = task_count_.load();
-            OGRE_MILESTONE("RSP", "display list submitted (frame %u, type %u, ucode 0x%08X)",
-                           tc, static_cast<unsigned>(task->t.type),
-                           static_cast<unsigned>(task->t.ucode));
+            OGRE_MILESTONE("RSP", "display list submitted (frame %u, t=%.0fms, type %u, ucode 0x%08X, draws=%u)",
+                           tc, emscripten_get_now(), static_cast<unsigned>(task->t.type),
+                           static_cast<unsigned>(task->t.ucode),
+                           static_cast<unsigned>(ctx.draws.size()));
         }
         // Session-19 diagnostics: what the WebGL path did with this DL.
         if (task_count_ <= 8 || (task_count_ % 120) == 0) {

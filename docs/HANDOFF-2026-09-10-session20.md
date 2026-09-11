@@ -90,6 +90,41 @@ triangles=UV gradient) -> **screen fully green**, i.e. the texrect covered
 everything. `probe-shots.cjs` takes a series of canvas screenshots so an
 animating scene can be judged without relying on one capture moment.
 
+## Follow-up (same session): the intro *is* animating, and the page log was throttling it
+
+With the title frame confirmed against the real intro (twelve soldier sprites,
+then a cube falls, the soldiers attack it and it becomes the N64 logo), the next
+question was whether the scene advances. It does, but far below real time:
+
+- A 90 s capture produced **five distinct frames** - the soldiers move, then
+  `draws` drops from 24 to 12 as the scene changes - i.e. the intro progresses
+  to the next beat, just very slowly.
+- Timestamping `[RSP] display list submitted` (`t=` is `emscripten_get_now()` on
+  the gfx thread) showed **~330 ms/frame early, degrading to ~1.6 s/frame**.
+  `probe-vi.cjs` measured **29.4 VI retraces/s** (target 60) and **3.5 gfx
+  frames/s**.
+- Around frame 36 the task stream stops and the executor telemetry shows a
+  runaway walk (`cmd=3999999 @0x0FE835F0 op=0x00`, 24 M commands analysed), i.e.
+  a corrupt `data_ptr` on whatever task comes next. That is the current end of
+  the intro in the browser.
+
+**Root cause found for part of the slowdown: the page log was unbounded.**
+`index.html`'s `print`/`printErr` and `web.js`'s `log()` did
+`status.textContent += line`. That is an O(n) DOM write *per line* on the
+browser main thread - and every wasm thread's `printf` is proxied onto that same
+thread - so the status element grew to 124 KB within a minute and every append
+copied all of it, stalling the threads that were trying to print. `[snap]`
+queue dumps and `[rsp]` task lines dominate that traffic.
+
+Fixed by moving the log into a bounded JS string (`OGRE_STATUS_CAP = 24000`)
+rendered on a 200 ms timer, shared by `index.html` (module `print`/`printErr`)
+and `web.js` (`ogreStatusAppend`). Measured effect: frames 3->16 went from
+4 977 ms to 2 464 ms, and the frame 24->32 gap from 12 730 ms to 5 721 ms -
+roughly 2x - with the rendered frame byte-identical (same screenshot SHA-256).
+The remaining slowness is not the page log; the next suspects are the VI thread's
+retrace pacing (29/s instead of 60/s), the multi-KB `[snap]` dump every 90 VI
+loop iterations, and the game's own recompiled CPU cost.
+
 ## Open questions (ordered, with the data needed to settle each)
 
 1. **`G_TEXTURE` scale (`sc`/`tc`) is not applied.** OB64 submits
@@ -158,6 +193,11 @@ do).
 
 ## Files changed (tracked)
 
-- `app/src/web_renderer.cpp` - all of the above.
+- `app/src/web_renderer.cpp` - the seven renderer fixes, the capped per-draw
+  telemetry, and the `t=` timestamp on the frame-submission milestone.
+- `app/web/index.html` - bounded status log (`ogreStatusAppend`, 200 ms render
+  timer, `OGRE_STATUS_CAP`).
+- `app/web/web.js` - `log()`/`pollMilestones()` append through the bounded log.
 - `docs/HANDOFF-2026-09-10-session20.md` - this file.
+- `docs/DECISIONS.md` - session-20 entry.
 - `tools/RT64` - pre-existing submodule pointer change, not touched this session.
