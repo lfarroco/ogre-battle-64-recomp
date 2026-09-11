@@ -138,25 +138,126 @@ struct TileState {
     uint16_t uls, ult, lrs, lrt;
 };
 
-// Decoded 2-cycle combiner mux (see rt64_color_combiner.h).
+// RDP cycle types (OTHERMODE_H bits 20-21).
+constexpr uint32_t kCyc1 = 0, kCyc2 = 1, kCycCopy = 2, kCycFill = 3;
+
+// Combiner input selectors. The numeric values deliberately equal RT64's
+// ColorCombiner::ColorInput / AlphaInput enum values
+// (tools/RT64/src/shared/rt64_color_combiner.h) so the GLSL switch in
+// kFragmentShaderSrc and the log names below cannot drift from the reference.
+enum ColorSel {
+    CSEL_COMBINED = 0, CSEL_TEXEL0, CSEL_TEXEL1, CSEL_PRIMITIVE, CSEL_SHADE,
+    CSEL_ENVIRONMENT, CSEL_KEY_CENTER, CSEL_KEY_SCALE, CSEL_COMBINED_ALPHA,
+    CSEL_TEXEL0_ALPHA, CSEL_TEXEL1_ALPHA, CSEL_PRIMITIVE_ALPHA, CSEL_SHADE_ALPHA,
+    CSEL_ENV_ALPHA, CSEL_LOD_FRACTION, CSEL_PRIM_LOD_FRAC, CSEL_NOISE, CSEL_K4,
+    CSEL_K5, CSEL_ONE, CSEL_ZERO
+};
+enum AlphaSel {
+    ASEL_COMBINED = 0, ASEL_TEXEL0, ASEL_TEXEL1, ASEL_PRIMITIVE, ASEL_SHADE,
+    ASEL_ENVIRONMENT, ASEL_LOD_FRACTION, ASEL_PRIM_LOD_FRAC, ASEL_ONE, ASEL_ZERO
+};
+
+const char* const kColorSelNames[] = {
+    "COMBINED", "TEXEL0", "TEXEL1", "PRIM", "SHADE", "ENV", "KEY_CENTER",
+    "KEY_SCALE", "COMBINED_A", "TEXEL0_A", "TEXEL1_A", "PRIM_A", "SHADE_A",
+    "ENV_A", "LOD_FRAC", "PRIM_LOD", "NOISE", "K4", "K5", "ONE", "ZERO"
+};
+const char* const kAlphaSelNames[] = {
+    "COMBINED", "TEXEL0", "TEXEL1", "PRIM", "SHADE", "ENV", "LOD_FRAC",
+    "PRIM_LOD", "ONE", "ZERO"
+};
+inline const char* color_sel_name(int s) {
+    return (s >= 0 && s <= CSEL_ZERO) ? kColorSelNames[s] : "?";
+}
+inline const char* alpha_sel_name(int s) {
+    return (s >= 0 && s <= ASEL_ZERO) ? kAlphaSelNames[s] : "?";
+}
+
+// RT64 ColorCombiner::colorInputA/B/C/D and alphaInputABD/C: what a selector
+// means depends on WHICH of A/B/C/D consumes it. Decoding selectors
+// position-independently (the session-19 approximation) is wrong for the top
+// of every field: color selector 6 is ONE for A and D, KEY_CENTER for B and
+// KEY_SCALE for C, and selectors >= 8 name alpha-ish sources that only C
+// understands.
+constexpr int cs_a(int i) {
+    return i <= 5 ? i : (i == 6 ? CSEL_ONE : (i == 7 ? CSEL_NOISE : CSEL_ZERO));
+}
+constexpr int cs_b(int i) {
+    return i <= 5 ? i : (i == 6 ? CSEL_KEY_CENTER : (i == 7 ? CSEL_K4 : CSEL_ZERO));
+}
+constexpr int cs_c(int i) {
+    return i <= 5 ? i
+         : i == 6 ? CSEL_KEY_SCALE
+         : i == 7 ? CSEL_COMBINED_ALPHA
+         : i == 8 ? CSEL_TEXEL0_ALPHA
+         : i == 9 ? CSEL_TEXEL1_ALPHA
+         : i == 10 ? CSEL_PRIMITIVE_ALPHA
+         : i == 11 ? CSEL_SHADE_ALPHA
+         : i == 12 ? CSEL_ENV_ALPHA
+         : i == 13 ? CSEL_LOD_FRACTION
+         : i == 14 ? CSEL_PRIM_LOD_FRAC
+         : i == 15 ? CSEL_K5
+         : CSEL_ZERO;   // RT64 colorInputC default: indexes 16-31 are unused
+}
+constexpr int cs_d(int i) { return i <= 5 ? i : (i == 6 ? CSEL_ONE : CSEL_ZERO); }
+constexpr int as_abd(int i) { return i <= 5 ? i : (i == 6 ? ASEL_ONE : ASEL_ZERO); }
+constexpr int as_c(int i) { return i <= 5 ? i : (i == 6 ? ASEL_PRIM_LOD_FRAC : ASEL_ZERO); }
+
+// Decoded 2-cycle combiner mux (RT64 ColorCombiner). `ra`-`rd` keep the raw
+// bitfields for diagnostics; `ca`-`ad` hold the decoded CSEL_/ASEL_ selectors.
 struct Combiner {
-    int ca[2], cb[2], cc[2], cd[2];   // color inputs (0-8)
-    int aa[2], ab[2], ac[2], ad[2];   // alpha inputs (0-7)
+    int ra[2] = {}, rb[2] = {}, rc[2] = {}, rd[2] = {};
+    int ca[2] = {}, cb[2] = {}, cc[2] = {}, cd[2] = {};   // CSEL_*
+    int aa[2] = {}, ab[2] = {}, ac[2] = {}, ad[2] = {};   // ASEL_*
+    uint32_t L = 0, H = 0;   // raw G_SETCOMBINE words (diagnostics)
     bool valid = false;
 
+    // Bit layout per RT64 ColorCombiner::parseColorInputA..D and
+    // parseAlphaInputA..D (tools/RT64/src/shared/rt64_color_combiner.h).
     void decode(uint32_t L, uint32_t H) {
         for (int cyc = 0; cyc < 2; cyc++) {
-            ca[cyc] = cyc ? (L >> 5) & 0xF : (L >> 20) & 0xF;
-            cb[cyc] = cyc ? (H >> 24) & 0xF : (H >> 28) & 0xF;
-            cc[cyc] = cyc ? (L >> 0) & 0x1F : (L >> 15) & 0x1F;
-            cd[cyc] = cyc ? (H >> 6) & 0x7 : (H >> 15) & 0x7;
-            aa[cyc] = cyc ? (H >> 21) & 0x7 : (L >> 12) & 0x7;
-            ab[cyc] = cyc ? (H >> 3) & 0x7 : (H >> 12) & 0x7;
-            ac[cyc] = cyc ? (H >> 18) & 0x7 : (L >> 9) & 0x7;
-            ad[cyc] = cyc ? (H >> 0) & 0x7 : (H >> 9) & 0x7;
+            const bool sc = cyc == 1;   // second cycle
+            ra[cyc] = sc ? (L >> 5) & 0xF : (L >> 20) & 0xF;
+            rb[cyc] = sc ? (H >> 24) & 0xF : (H >> 28) & 0xF;
+            rc[cyc] = sc ? (L >> 0) & 0x1F : (L >> 15) & 0x1F;
+            rd[cyc] = sc ? (H >> 6) & 0x7 : (H >> 15) & 0x7;
+            ca[cyc] = cs_a(ra[cyc]);
+            cb[cyc] = cs_b(rb[cyc]);
+            cc[cyc] = cs_c(rc[cyc]);
+            cd[cyc] = cs_d(rd[cyc]);
+            const int a_a = sc ? (H >> 21) & 0x7 : (L >> 12) & 0x7;
+            const int a_b = sc ? (H >> 3) & 0x7 : (H >> 12) & 0x7;
+            const int a_c = sc ? (H >> 18) & 0x7 : (L >> 9) & 0x7;
+            // Alpha D reads H in both cycles (RT64 parseAlphaInputD); reading
+            // L for the first cycle made alpha D mirror alpha C.
+            const int a_d = sc ? (H >> 0) & 0x7 : (H >> 9) & 0x7;
+            aa[cyc] = as_abd(a_a);
+            ab[cyc] = as_abd(a_b);
+            ac[cyc] = as_c(a_c);
+            ad[cyc] = as_abd(a_d);
         }
+        this->L = L;
+        this->H = H;
         valid = true;
     }
+};
+
+// Renders one combiner cycle as its N64 expression, so a [GFX-CMD] line can be
+// compared directly against the RDP reference or the game's own DL words.
+inline void format_combiner(const Combiner& cb, int cyc, char* out, size_t n) {
+    snprintf(out, n, "rgb=(%s-%s)*%s+%s a=(%s-%s)*%s+%s raw=[%d %d %d %d]",
+             color_sel_name(cb.ca[cyc]), color_sel_name(cb.cb[cyc]),
+             color_sel_name(cb.cc[cyc]), color_sel_name(cb.cd[cyc]),
+             alpha_sel_name(cb.aa[cyc]), alpha_sel_name(cb.ab[cyc]),
+             alpha_sel_name(cb.ac[cyc]), alpha_sel_name(cb.ad[cyc]),
+             cb.ra[cyc], cb.rb[cyc], cb.rc[cyc], cb.rd[cyc]);
+}
+
+// One texture image loaded into a tile by G_LOADTILE/G_LOADBLOCK.
+struct LoadedImage {
+    uint64_t key = 0;                 // GL texture-cache key; 0 = nothing loaded
+    int width = 0, height = 0;        // loaded rect size in texels
+    int origin_s = 0, origin_t = 0;   // tile uls/ult in texels (UV origin)
 };
 
 // Rendering state carried across a display list.
@@ -205,11 +306,19 @@ struct RenderState {
     uint16_t tlut[256]{};
     bool tlut_valid = false;
 
-    // Active GL texture for the current draw (set by texture_for_tile()).
-    GLuint active_gl_tex = 0;
-    uint64_t active_tex_key = 0;  // key of the tile loaded by LOADTILE/LOADBLOCK
-    float active_tex_scale[2] = {1, 1};   // uv = (s/32 - uls) / width ... see draw
-    int active_tex_width = 0, active_tex_height = 0;
+    // Which image each tile last received (diagnostics: OB64 loads every one of
+    // its images into tile 7, while G_TEXTURE selects tile 0).
+    LoadedImage tile_image[kMaxTiles];
+
+    // The two images a draw can sample. The RDP samples *TMEM*, not tiles: OB64
+    // gives all eight tiles tmem=0, so a LOADTILE/LOADBLOCK overwrites the same
+    // TMEM region whatever tile index it names, and G_TEXTURE's tile index
+    // (0 for every title draw) is not what selects the image. The game loads a
+    // pair per object - an I8 alpha mask, then the RGBA16 colour image - and its
+    // combiner takes colour from TEXEL1 and alpha from TEXEL0, i.e.
+    //   TEXEL1 = most recent load, TEXEL0 = the load before it.
+    // [0] = the previous load, [1] = the most recent one.
+    LoadedImage recent_loads[2];
 };
 
 // Reads a 32-bit word from rdram with the runtime's byte-reversed storage.
@@ -226,18 +335,10 @@ inline uint32_t p0(uint32_t w, uint8_t pos, uint8_t bits) {
     return (w >> pos) & ((1u << bits) - 1);
 }
 
-uint32_t resolve_address(const uint32_t* segments, uint32_t addr) {
-    // KSEG0/KSEG1 map 1:1 into the 512 MiB rdram region.
-    if ((addr & 0xFF000000u) == 0x80000000u || (addr & 0xFF000000u) == 0xA0000000u) {
-        return addr & 0x1FFFFFFFu;
-    }
-    const uint8_t seg = static_cast<uint8_t>(addr >> 24);
-    if (seg >= 1 && seg <= 15 && segments[seg] != 0) {
-        return (segments[seg] << 24) | (addr & 0x00FFFFFFu);
-    }
-    // Physical address: use it directly (the port's rdram is 512 MiB, so
-    // addresses may exceed the N64's 8 MiB physical window).
-    return addr & 0x1FFFFFFFu;
+// The executor and the DL walker share one resolver (gbi.hpp) so a G_DL
+// target cannot mean two different addresses.
+inline uint32_t resolve_address(const uint32_t* segments, uint32_t addr) {
+    return gbi::resolve_address(segments, addr);
 }
 
 // ============================================================================
@@ -393,73 +494,131 @@ const char* kVertexShaderSrc = R"GLSL(#version 300 es
 layout(location = 0) in vec2 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec4 a_color;
-out vec2 v_uv;
+out vec2 v_uv0;           // TEXEL0's tile
+out vec2 v_uv1;           // TEXEL1's tile
 out vec4 v_shade;
-uniform vec2 u_uv_scale;   // (1/tex_w, 1/tex_h)
-uniform vec2 u_uv_origin;  // (uls, ult)
+uniform vec2 u_uv_scale;   // tile 0: (1/tex_w, 1/tex_h)
+uniform vec2 u_uv_origin;  // tile 0: (uls, ult)
+uniform vec2 u_uv_scale1;  // tile 1
+uniform vec2 u_uv_origin1;
 void main() {
     gl_Position = vec4(a_pos, 0.0, 1.0);
-    v_uv = (a_uv - u_uv_origin) * u_uv_scale;
+    v_uv0 = (a_uv - u_uv_origin) * u_uv_scale;
+    v_uv1 = (a_uv - u_uv_origin1) * u_uv_scale1;
     v_shade = a_color;
 }
 )GLSL";
 
-// Evaluates the general two-cycle N64 color combiner:
-//   rgb   = clamp((A-B)*C + D)   per channel
-//   alpha = clamp((Aa-Ba)*Ca + Da)
-// with the RDP input selectors decoded per rt64_color_combiner.h.
+// Evaluates the RDP color combiner the way RT64 does (ColorCombiner::run /
+// runCycle in shared/rt64_color_combiner.h):
+//   rgb   = wrap_clamp((A - B) * C + D)   per channel
+//   alpha = wrap_clamp((Aa - Ba) * Ca + Da)
+// The selector uniforms hold the CSEL_/ASEL_ enums decoded on the gfx thread.
+// Which uniform pair is evaluated depends on the cycle type: a 1-cycle draw
+// evaluates the SECOND mux (RT64 run() -> runCycle(..., 1, false, ...) - the
+// hardware ignores the first mux then), a 2-cycle draw evaluates mux 0 then
+// mux 1, and in the second cycle the TEXEL0/TEXEL1 values are swapped and the
+// COMBINED inputs are wrapped instead of clamped.
 const char* kFragmentShaderSrc = R"GLSL(#version 300 es
 precision mediump float;
-in vec2 v_uv;
+in vec2 v_uv0;
+in vec2 v_uv1;
 in vec4 v_shade;
 out vec4 fragColor;
 uniform sampler2D u_tex0;
+uniform sampler2D u_tex1;
 uniform vec4 u_prim;
 uniform vec4 u_env;
 uniform int u_ca0, u_cb0, u_cc0, u_cd0;
 uniform int u_aa0, u_ab0, u_ac0, u_ad0;
 uniform int u_ca1, u_cb1, u_cc1, u_cd1;
 uniform int u_aa1, u_ab1, u_ac1, u_ad1;
-uniform int u_cycle;  // 1 or 2
+uniform int u_cycle;   // 0 = COPY (texel0 passthrough), 1 or 2 = combiner cycles
 uniform int u_use_tex;
-uniform int u_alpha_from_cvg; // reserved
 
-// `combined` is the previous cycle's result (selector 0, COMBINED). Cycle 0
-// has no previous cycle, so callers pass 0 there.
-vec3 src_rgb(int sel, vec3 combined) {
-    if (sel == 0) return combined;              // COMBINED (previous cycle)
-    if (sel == 1 || sel == 2) return texture(u_tex0, v_uv).rgb;  // TEXEL0/1
-    if (sel == 3) return u_prim.rgb;
-    if (sel == 4) return v_shade.rgb;
-    if (sel == 5) return u_env.rgb;
-    if (sel == 6) return vec3(1.0);
-    if (sel == 8) return vec3(texture(u_tex0, v_uv).a);  // TEXEL0_ALPHA
-    return vec3(0.0);
+// The texel a TEXEL0/TEXEL1 selector samples in the cycle being evaluated.
+// In the second cycle of a 2-cycle combiner the RDP swaps the two texel values
+// (RT64 fromColorInput: secondCycle ? texVal1 : texVal0). Each unit carries its
+// own UV transform, from its tile's uls/ult and loaded size.
+vec4 tex_val(int sel, bool second) {
+    bool use1 = (sel == 2) != second;
+    return use1 ? texture(u_tex1, v_uv1) : texture(u_tex0, v_uv0);
 }
-float src_a(int sel, float combined) {
-    if (sel == 0) return combined;              // COMBINED (previous cycle)
-    if (sel == 1 || sel == 2) return texture(u_tex0, v_uv).a;
-    if (sel == 3) return u_prim.a;
-    if (sel == 4) return v_shade.a;
-    if (sel == 5) return u_env.a;
-    if (sel == 6) return 1.0;
-    return 0.0;
+
+// RT64 ColorCombiner::fromColorInput, sel = CSEL_*.
+vec4 color_input(int sel, bool second, vec4 combined) {
+    if (sel == 0) return combined;                              // COMBINED
+    if (sel == 1 || sel == 2) return tex_val(sel, second);      // TEXEL0 / TEXEL1
+    if (sel == 3) return u_prim;                                // PRIMITIVE
+    if (sel == 4) return v_shade;                               // SHADE
+    if (sel == 5) return u_env;                                 // ENVIRONMENT
+    if (sel == 6 || sel == 7) return vec4(0.0);                 // KEY_CENTER/KEY_SCALE
+    if (sel == 8) return vec4(combined.a);                      // COMBINED_ALPHA
+    if (sel == 9) return vec4(tex_val(1, second).a);            // TEXEL0_ALPHA
+    if (sel == 10) return vec4(tex_val(2, second).a);           // TEXEL1_ALPHA
+    if (sel == 11) return vec4(u_prim.a);                       // PRIMITIVE_ALPHA
+    if (sel == 12) return vec4(v_shade.a);                      // SHADE_ALPHA
+    if (sel == 13) return vec4(u_env.a);                        // ENV_ALPHA
+    if (sel == 14 || sel == 15) return vec4(0.0);               // LOD_FRACTION / PRIM_LOD_FRAC
+    if (sel >= 16 && sel <= 18) return vec4(0.0);               // NOISE / K4 / K5
+    if (sel == 19) return vec4(1.0);                            // ONE
+    return vec4(0.0);                                           // ZERO
 }
+
+// RT64 ColorCombiner::fromAlphaInput, sel = ASEL_*.
+float alpha_input(int sel, bool second, float combined) {
+    if (sel == 0) return combined;                              // COMBINED
+    if (sel == 1) return tex_val(1, second).a;                  // TEXEL0
+    if (sel == 2) return tex_val(2, second).a;                  // TEXEL1
+    if (sel == 3) return u_prim.a;                              // PRIMITIVE
+    if (sel == 4) return v_shade.a;                             // SHADE
+    if (sel == 5) return u_env.a;                               // ENVIRONMENT
+    if (sel == 6 || sel == 7) return 0.0;                       // LOD_FRACTION / PRIM_LOD_FRAC
+    if (sel == 8) return 1.0;                                   // ONE
+    return 0.0;                                                 // ZERO
+}
+
+// RT64 wrap / wrapInputC / wrapInputABD / wrapClamp: the second cycle wraps
+// its COMBINED inputs into range before clamping them.
+void wrap_input(inout float i, float lo, float hi) {
+    float range = hi - lo;
+    if (lo >= i) i += range;
+    if (i >= hi) i -= range;
+}
+void wrap_c(inout float i) { wrap_input(i, -1.0 - 1.0 / 255.0, 1.0 + 1.0 / 255.0); }
+void wrap_abd(inout float i) { wrap_input(i, -0.5 - 1.0 / 255.0, 1.5 + 1.0 / 255.0); }
+void wrap_clamp(inout float i) { wrap_abd(i); i = clamp(i, 0.0, 1.0); }
+
 void main() {
-    vec4 texel = texture(u_tex0, v_uv);
-    // Cycle 0.
-    vec3 rgb0 = (src_rgb(u_ca0, vec3(0.0)) - src_rgb(u_cb0, vec3(0.0))) * src_rgb(u_cc0, vec3(0.0)) + src_rgb(u_cd0, vec3(0.0));
-    float a0 = (src_a(u_aa0, 0.0) - src_a(u_ab0, 0.0)) * src_a(u_ac0, 0.0) + src_a(u_ad0, 0.0);
-    vec3 rgb = rgb0;
-    float alpha = a0;
-    if (u_cycle == 2) {
-        // COMBINED inputs in cycle 1 use cycle 0's result.
-        vec3 rgb1 = (src_rgb(u_ca1, rgb0) - src_rgb(u_cb1, rgb0)) * src_rgb(u_cc1, rgb0) + src_rgb(u_cd1, rgb0);
-        float a1 = (src_a(u_aa1, a0) - src_a(u_ab1, a0)) * src_a(u_ac1, a0) + src_a(u_ad1, a0);
-        rgb = rgb1;
-        alpha = a1;
+    if (u_cycle == 0) {
+        // G_CYC_COPY bypasses the combiner and writes TEXEL0 straight through
+        // (RT64 ColorCombiner::run).
+        fragColor = tex_val(1, false);
+        return;
     }
-    fragColor = vec4(clamp(rgb, 0.0, 1.0), clamp(alpha, 0.0, 1.0));
+
+    // Slot 0 is the first mux the hardware evaluates: mux 0 for a 2-cycle
+    // draw, mux 1 for a 1-cycle draw (see record_state).
+    vec4 c = vec4(0.0, 0.0, 0.0, 0.0);
+    c.rgb = (color_input(u_ca0, false, c).rgb - color_input(u_cb0, false, c).rgb) *
+                color_input(u_cc0, false, c).rgb + color_input(u_cd0, false, c).rgb;
+    c.a = (alpha_input(u_aa0, false, c.a) - alpha_input(u_ab0, false, c.a)) *
+              alpha_input(u_ac0, false, c.a) + alpha_input(u_ad0, false, c.a);
+
+    if (u_cycle == 2) {
+        // RT64: wrapInputC when the cycle's color C input is COMBINED (CSEL 0),
+        // wrapInputABD otherwise; alpha uses A_COMBINED (ASEL 0).
+        if (u_cc1 == 0) { wrap_c(c.r); wrap_c(c.g); wrap_c(c.b); }
+        else { wrap_abd(c.r); wrap_abd(c.g); wrap_abd(c.b); }
+        if (u_ac1 == 0) wrap_c(c.a); else wrap_abd(c.a);
+        c.rgb = (color_input(u_ca1, true, c).rgb - color_input(u_cb1, true, c).rgb) *
+                    color_input(u_cc1, true, c).rgb + color_input(u_cd1, true, c).rgb;
+        c.a = (alpha_input(u_aa1, true, c.a) - alpha_input(u_ab1, true, c.a)) *
+                  alpha_input(u_ac1, true, c.a) + alpha_input(u_ad1, true, c.a);
+    }
+
+    wrap_clamp(c.r); wrap_clamp(c.g); wrap_clamp(c.b); wrap_clamp(c.a);
+    fragColor = c;
 }
 )GLSL";
 
@@ -496,6 +655,7 @@ GLuint compile_shader(GLenum type, const char* src) {
 struct TexUpload {
     uint64_t key;
     int width = 0, height = 0;
+    int tile = 0;   // RDP tile the image was loaded into (diagnostics)
     bool clamp_s = true, clamp_t = true;
     bool bilerp = false;
     std::vector<uint8_t> pixels;
@@ -513,12 +673,19 @@ struct DrawCmd {
     int ca[2] = {}, cb[2] = {}, cc[2] = {}, cd[2] = {};
     int aa[2] = {}, ab[2] = {}, ac[2] = {}, ad[2] = {};
     int cycle = 1;
+    // Raw RDP state for the diagnostics (the numeric mux fields alone cannot
+    // be checked against the game's own DL words without them).
+    uint32_t othermode_h = 0, othermode_l = 0;
+    uint32_t comb_L = 0, comb_H = 0;
     float prim[4] = {1, 1, 1, 1};
     float env[4] = {1, 1, 1, 1};
     bool textured = false;
-    uint64_t tex_key = 0;
+    uint64_t tex_key = 0;    // TEXEL0's tile image
+    uint64_t tex_key1 = 0;   // TEXEL1's tile image
     float tex_scale[2] = {1, 1};
     float tex_origin[2] = {0, 0};
+    float tex_scale1[2] = {1, 1};
+    float tex_origin1[2] = {0, 0};
     int tex_sc = 0, tex_tc = 0;   // raw G_TEXTURE scale fields (diagnostics)
     bool blend = false;
     bool scissor_on = false;
@@ -677,8 +844,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                         const unsigned v = up.pixels[i] + up.pixels[i + 1] + up.pixels[i + 2];
                         if (v) { ++nz; sum += v; }
                     }
-                    OGRE_MILESTONE("GFX-TEX", "tex %u: %dx%d key=0x%llX nonzero=%zu/%zu avgRGB=%llu",
-                                   tex_logged_, up.width, up.height,
+                    OGRE_MILESTONE("GFX-TEX",
+                                   "tex %u: %dx%d tile=%d key=0x%llX nonzero=%zu/%zu avgRGB=%llu",
+                                   tex_logged_, up.width, up.height, up.tile,
                                    (unsigned long long)up.key, nz, up.pixels.size() / 4,
                                    (unsigned long long)(nz ? sum / nz : 0));
                 }
@@ -727,13 +895,31 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (draw_logged_ < 6) {
                 ++draw_logged_;
                 const bool found = cmd.textured && gl_textures_.find(cmd.tex_key) != gl_textures_.end();
+                // The mux the hardware actually evaluates (see record_state),
+                // as an N64 expression so it can be checked at a glance.
+                char mux0[256], mux1[256];
+                snprintf(mux0, sizeof(mux0), "rgb=(%s-%s)*%s+%s a=(%s-%s)*%s+%s",
+                         color_sel_name(cmd.ca[0]), color_sel_name(cmd.cb[0]),
+                         color_sel_name(cmd.cc[0]), color_sel_name(cmd.cd[0]),
+                         alpha_sel_name(cmd.aa[0]), alpha_sel_name(cmd.ab[0]),
+                         alpha_sel_name(cmd.ac[0]), alpha_sel_name(cmd.ad[0]));
+                if (cmd.cycle == 2) {
+                    snprintf(mux1, sizeof(mux1), "rgb=(%s-%s)*%s+%s a=(%s-%s)*%s+%s",
+                             color_sel_name(cmd.ca[1]), color_sel_name(cmd.cb[1]),
+                             color_sel_name(cmd.cc[1]), color_sel_name(cmd.cd[1]),
+                             alpha_sel_name(cmd.aa[1]), alpha_sel_name(cmd.ab[1]),
+                             alpha_sel_name(cmd.ac[1]), alpha_sel_name(cmd.ad[1]));
+                } else {
+                    snprintf(mux1, sizeof(mux1), "-");
+                }
                 OGRE_MILESTONE("GFX-CMD",
-                               "draw %u: verts=%d textured=%d tex_found=%d cycle=%d "
-                               "c0=[%d,%d,%d,%d] a0=[%d,%d,%d,%d] prim=[%.2f,%.2f,%.2f,%.2f] env=[%.2f,%.2f,%.2f,%.2f] "
+                               "draw %u: verts=%d textured=%d tex_found=%d cyc=%d omh=0x%06X oml=0x%08X "
+                               "cmb=0x%08X%08X mux0=[%s] mux1=[%s] prim=[%.2f,%.2f,%.2f,%.2f] env=[%.2f,%.2f,%.2f,%.2f] "
                                "blend=%d scissor=%d(%d,%d,%d,%d) p0=(%.2f,%.2f) uv0=(%.3f,%.3f)",
                                draw_logged_, cmd.vertex_count, cmd.textured ? 1 : 0, found ? 1 : 0, cmd.cycle,
-                               cmd.ca[0], cmd.cb[0], cmd.cc[0], cmd.cd[0],
-                               cmd.aa[0], cmd.ab[0], cmd.ac[0], cmd.ad[0],
+                               cmd.othermode_h, cmd.othermode_l,
+                               cmd.comb_L, cmd.comb_H,
+                               mux0, mux1,
                                cmd.prim[0], cmd.prim[1], cmd.prim[2], cmd.prim[3],
                                cmd.env[0], cmd.env[1], cmd.env[2], cmd.env[3],
                                cmd.blend ? 1 : 0, cmd.scissor_on ? 1 : 0,
@@ -754,16 +940,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             glUniform4fv(glGetUniformLocation(program_, "u_env"), 1, cmd.env);
 
             if (cmd.textured) {
-                GLuint tex = 0;
-                auto it = gl_textures_.find(cmd.tex_key);
-                if (it != gl_textures_.end()) {
-                    tex = it->second;
-                }
+                // TEXEL0's and TEXEL1's tile images are separate GL textures,
+                // each with its own UV transform (the title sprites take their
+                // colour from tile 1 and their alpha mask from tile 0).
+                auto lookup = [this](uint64_t key) -> GLuint {
+                    auto it = gl_textures_.find(key);
+                    return (key != 0 && it != gl_textures_.end()) ? it->second : white_tex_;
+                };
                 glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, tex);
+                glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key));
                 glUniform1i(glGetUniformLocation(program_, "u_tex0"), 0);
                 glUniform2f(glGetUniformLocation(program_, "u_uv_scale"), cmd.tex_scale[0], cmd.tex_scale[1]);
                 glUniform2f(glGetUniformLocation(program_, "u_uv_origin"), cmd.tex_origin[0], cmd.tex_origin[1]);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key1));
+                glUniform1i(glGetUniformLocation(program_, "u_tex1"), 1);
+                glUniform2f(glGetUniformLocation(program_, "u_uv_scale1"), cmd.tex_scale1[0], cmd.tex_scale1[1]);
+                glUniform2f(glGetUniformLocation(program_, "u_uv_origin1"), cmd.tex_origin1[0], cmd.tex_origin1[1]);
+                glActiveTexture(GL_TEXTURE0);
             }
 
             // Scissor.
@@ -836,6 +1030,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // never block the browser main thread's flush, and locking mutex_ here
         // is also what used to self-deadlock via queue_triangles.
         ExecCtx ctx;
+        last_task_data_ptr_ = task->t.data_ptr;
         execute_dl(rdram_, task->t.data_ptr & 0x3FFFFFF, st, ctx);
 
         const auto exec_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -866,6 +1061,33 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            static_cast<unsigned>(task->t.ucode),
                            static_cast<unsigned>(ctx.draws.size()));
         }
+        // Session-21: task-stream telemetry. A corrupt entry pointer is only
+        // visible if the raw task fields are logged next to the walk results,
+        // so every task in the suspicious window gets a line.
+        const unsigned tc_now = task_count_.load();
+        const bool task_logged = tc_now <= 8 || (tc_now >= 30 && tc_now <= 48) ||
+                                 (tc_now % 50) == 0;
+        if (task_logged) {
+            char words[128];
+            int o = 0;
+            const uint32_t walked = task->t.data_ptr & 0x3FFFFFF;  // what execute_dl got
+            for (int i = 0; i < 4 && o < 100; ++i) {
+                if (walked + (i + 1) * 8 > gbi::kRdramSize) {
+                    break;
+                }
+                const uint8_t* p = rdram_ + walked + i * 8;
+                o += snprintf(words + o, sizeof(words) - o, "%08X %08X  ", rd32(p), rd32(p + 4));
+            }
+            OGRE_MILESTONE("GFX-TASK",
+                           "task %u: type=%u ucode=0x%08X data_ptr=0x%08X (&0x3FFFFFF=0x%07X, "
+                           "&0x1FFFFFFF=0x%07X) size=%u cmds=%u draws=%u words[@0x%07X]=%s",
+                           tc_now, (unsigned)task->t.type, (unsigned)task->t.ucode,
+                           (unsigned)task->t.data_ptr, (unsigned)walked,
+                           (unsigned)(task->t.data_ptr & 0x1FFFFFFF),
+                           (unsigned)task->t.data_size, last_dl_cmds_,
+                           (unsigned)ctx.draws.size(), walked, words);
+        }
+
         // Session-19 diagnostics: what the WebGL path did with this DL.
         if (task_count_ <= 8 || (task_count_ % 120) == 0) {
             OGRE_MILESTONE("GFX-DRAW",
@@ -915,6 +1137,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     bool gl_ready_ = false;
     GLuint program_ = 0;
     GLuint vao_ = 0, vbo_ = 0;
+    GLuint white_tex_ = 0;   // 1x1 RGBA white, bound for unloaded texture units
     std::atomic<unsigned> task_count_{0};
     std::atomic<unsigned> flush_skipped_{0};
     // Diagnostics for the DL -> GL path (session 19): how many DrawCmds were
@@ -929,9 +1152,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned draw_logged_ = 0;
     unsigned vert_logged_ = 0;
     unsigned txr_logged_ = 0;
+    unsigned tex_state_logged_ = 0;
     unsigned flushed_cmds_ = 0;
     unsigned flush_count_ = 0;
     unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
+    uint32_t last_task_data_ptr_ = 0;  // raw t.data_ptr of the last task
+    unsigned runaway_logged_ = 0;
     std::mutex mutex_;
 
     // Command queues: written by the gfx pthread (execute_dl), drained by the
@@ -992,6 +1218,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glEnableVertexAttribArray(2);
         glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(4 * sizeof(float)));
 
+        // 1x1 white fallback: a tile that was never loaded must sample white,
+        // because TEXEL0/TEXEL1 are often only one of the two in use.
+        {
+            const uint8_t white[4] = {255, 255, 255, 255};
+            glGenTextures(1, &white_tex_);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, white_tex_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+
         glViewport(0, 0, canvas_width_, canvas_height_);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
@@ -1025,6 +1265,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // the shared queues under a short lock afterwards.
         std::vector<DrawCmd> draws;
         std::vector<TexUpload> tex;
+        // Session-21: a runaway DL walk (budget exhausted far from any real
+        // display list) is diagnosed from the first commands walked and the
+        // last ones before the budget ran out. The head shows whether the
+        // entry pointer itself was bad; the tail shows the bogus branch.
+        static constexpr uint32_t kHeadMax = 8, kTailMax = 24;
+        gbi::DlCommand head[kHeadMax];
+        gbi::DlCommand tail[kTailMax];
+        uint32_t tail_count = 0;
+        // Session-21: the first command whose offset escapes the low rdram
+        // window (0x02000000) is where a bogus G_DL landed; the ring above then
+        // holds the commands immediately before the jump.
+        bool escape_logged = false;
     };
 
     void execute_dl(uint8_t* rdram, uint32_t dl_offset, RenderState& st, ExecCtx& ctx) {
@@ -1057,6 +1309,32 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 OGRE_MILESTONE("GFX-EXEC", "cmd %u @0x%05X op=0x%02X w0=0x%08X w1=0x%08X",
                                idx, c.offset, c.op, c.w0, c.w1);
             }
+            // A walk that steps outside the low 32 MiB of rdram has followed a
+            // corrupt G_DL target: report the command that did it (the ring
+            // below still holds the 24 commands before this one).
+            if (!ctx->escape_logged && c.offset > 0x02000000u) {
+                ctx->escape_logged = true;
+                char eb[96];
+                OGRE_MILESTONE("GFX-ESCAPE",
+                               "task %u: walk escaped to @0x%07X op=0x%02X w0=0x%08X w1=0x%08X "
+                               "(cmd %u); previous commands:",
+                               ctx->trace_task, c.offset, c.op, c.w0, c.w1, idx);
+                for (uint32_t k = 0; k < ctx->tail_count; ++k) {
+                    const gbi::DlCommand& p = ctx->tail[k];
+                    snprintf(eb, sizeof(eb), "@0x%07X op=0x%02X w0=0x%08X w1=0x%08X",
+                             p.offset, p.op, p.w0, p.w1);
+                    OGRE_MILESTONE("GFX-ESCAPE", "  prev[%u] %s", k, eb);
+                }
+            }
+            if (idx < ExecCtx::kHeadMax) {
+                ctx->head[idx] = c;
+            }
+            if (ctx->tail_count < ExecCtx::kTailMax) {
+                ctx->tail[ctx->tail_count++] = c;
+            } else {
+                memmove(ctx->tail, ctx->tail + 1, sizeof(gbi::DlCommand) * (ExecCtx::kTailMax - 1));
+                ctx->tail[ExecCtx::kTailMax - 1] = c;
+            }
             ctx->cmd_index++;
             ctx->self->exec_command(ctx, c);
             if (trace && (idx % 64) == 63) {
@@ -1066,6 +1344,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         gbi::walk_dl(rdram, dl_offset, visitor, &ctx);
         last_dl_cmds_ = ctx.cmd_index;
+        // A walk that never finds G_ENDDL is a runaway: the renderer's input
+        // is garbage, and both the analyzer and the executor are burning their
+        // 4M-command budget on it. Print the head and tail once so the bogus
+        // entry pointer / branch target is visible.
+        if (ctx.cmd_index > 20000 && runaway_logged_ < 3) {
+            ++runaway_logged_;
+            auto fmt_cmd = [](char* buf, size_t n, const gbi::DlCommand& c) {
+                snprintf(buf, n, "@0x%07X op=0x%02X w0=0x%08X w1=0x%08X", c.offset, c.op, c.w0, c.w1);
+            };
+            char b[96];
+            OGRE_MILESTONE("GFX-RUNAWAY",
+                           "task %u: DL entry @0x%07X walked %u commands with no G_ENDDL (data_ptr=0x%08X)",
+                           ctx.trace_task, dl_offset, ctx.cmd_index, last_task_data_ptr_);
+            for (uint32_t i = 0; i < ExecCtx::kHeadMax && i < ctx.cmd_index; ++i) {
+                fmt_cmd(b, sizeof(b), ctx.head[i]);
+                OGRE_MILESTONE("GFX-RUNAWAY", "  head[%u] %s", i, b);
+            }
+            for (uint32_t i = 0; i < ctx.tail_count; ++i) {
+                const uint32_t idx = ctx.cmd_index - ctx.tail_count + i;
+                fmt_cmd(b, sizeof(b), ctx.tail[i]);
+                OGRE_MILESTONE("GFX-RUNAWAY", "  tail[%u] %s", idx, b);
+            }
+        }
         if (ctx.trace_enabled) {
             OGRE_MILESTONE("GFX-EXEC", "task %u: end DL, %u commands", ctx.trace_task, ctx.cmd_index);
         }
@@ -1143,6 +1444,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 st.tex_sc = static_cast<int16_t>(p0(w1, 16, 16));
                 st.tex_tc = static_cast<int16_t>(p0(w1, 0, 16));
                 st.texture_on = p0(w0, 1, 7) != 0;
+                if (tex_state_logged_ < 8) {
+                    ++tex_state_logged_;
+                    OGRE_MILESTONE("GFX-TXSTATE",
+                                   "G_TEXTURE: tile=%d on=%d level=%u sc=%d tc=%d "
+                                   "(TEXEL0=tile %d, TEXEL1=tile %d)",
+                                   st.active_tile, st.texture_on ? 1 : 0,
+                                   static_cast<unsigned>(p0(w0, 3, 3)), st.tex_sc, st.tex_tc,
+                                   st.active_tile & (kMaxTiles - 1), (st.active_tile + 1) & (kMaxTiles - 1));
+                }
                 break;
             }
 
@@ -1318,19 +1628,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
 
             case gbi::OP_SETOTHERMODE_H: {
+                // G_SETOTHERMODE_H: w0 bits 7-0 = field length-1, bits 15-8 =
+                // (32 - shift - length). The data word is ALREADY shifted into
+                // place (the SDK macro emits `val << sft`), so only the target
+                // field is cleared. Masking and shifting `w1` a second time
+                // (what this renderer did) drops every bit of the field and
+                // leaves OTHERMODE_H at zero - no dithering, no filtering, no
+                // perspective correction, and always G_CYC_1CYCLE.
+                // RT64 RSP::setOtherModeH does `(H & ~mask) | data`.
                 const uint32_t size = p0(w0, 0, 8) + 1;
-                const uint32_t off = std::max(0, static_cast<int>(32 - p0(w0, 8, 8) - size));
-                const uint32_t mask = (size >= 32) ? 0xFFFFFFFFu : ((1u << size) - 1);
-                st.othermode_h = (st.othermode_h & ~(mask << off)) | ((w1 & mask) << off);
+                const uint32_t off = static_cast<uint32_t>(
+                    std::max(0, static_cast<int>(32 - p0(w0, 8, 8) - size)));
+                const uint32_t mask = (size >= 32) ? 0xFFFFFFFFu : (((1u << size) - 1) << off);
+                st.othermode_h = (st.othermode_h & ~mask) | w1;
                 break;
             }
 
             case gbi::OP_SETOTHERMODE_L: {
                 const uint32_t size = p0(w0, 0, 8) + 1;
-                const uint32_t off = std::max(0, static_cast<int>(32 - p0(w0, 8, 8) - size));
-                const uint32_t mask = (size >= 32) ? 0xFFFFFFFFu : ((1u << size) - 1);
-                st.othermode_l = (st.othermode_l & ~(mask << off)) & 0xFFFFFF |
-                                 ((w1 & mask) << off) & 0xFFFFFF;
+                const uint32_t off = static_cast<uint32_t>(
+                    std::max(0, static_cast<int>(32 - p0(w0, 8, 8) - size)));
+                const uint32_t mask = (size >= 32) ? 0xFFFFFFFFu : (((1u << size) - 1) << off);
+                st.othermode_l = ((st.othermode_l & ~mask) | w1) & 0xFFFFFF;
                 break;
             }
 
@@ -1381,17 +1700,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
 
             case gbi::OP_MOVEWORD: {
-                const uint8_t type = static_cast<uint8_t>(p0(w0, 16, 8));
-                if (type == gbi::MW_SEGMENT) {
-                    const uint8_t seg = static_cast<uint8_t>(p0(w0, 2, 4));
-                    if (seg < 16) {
-                        // The RSP keeps only the base's high byte; segmented
-                        // addresses then resolve as (base << 24) | offset.
-                        // Storing the full base here made every segmented
-                        // matrix/vertex address resolve to garbage.
-                        ctx->segments[seg] = w1 >> 24;
-                    }
-                }
+                // The RSP keeps only the segment base's high byte; segmented
+                // addresses then resolve as (base << 24) | offset. Storing the
+                // full base made every segmented matrix/vertex address resolve
+                // to garbage.
+                gbi::set_segment_from_moveword(ctx->segments, w0, w1);
                 break;
             }
 
@@ -1418,6 +1731,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             default:
                 break;  // handled by the walker or irrelevant for rendering
         }
+    }
+
+    // True when either texel unit a draw can sample holds an image.
+    static bool texture_available(const RenderState& st) {
+        return st.recent_loads[0].key != 0 || st.recent_loads[1].key != 0;
     }
 
     // ----- texture helpers ----------------------------------------------------
@@ -1461,6 +1779,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         up.key = key;
         up.width = w;
         up.height = h;
+        up.tile = tile;
         up.clamp_s = (t.cms != 0) || (t.masks == 0);
         up.clamp_t = (t.cmt != 0) || (t.maskt == 0);
         up.bilerp = ((st.othermode_h >> 12) & 3) == 2;  // G_TF_BILERP
@@ -1483,15 +1802,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         last_tex_masks_ = t.masks;
         last_tex_maskt_ = t.maskt;
 
-        // Remember the loaded tile for draws.
-        st.active_gl_tex = 0;
-        st.active_tex_key = key;
-        st.active_tex_width = w;
-        st.active_tex_height = h;
-        st.active_tex_scale[0] = 1.0f / static_cast<float>(w);
-        st.active_tex_scale[1] = 1.0f / static_cast<float>(h);
-        loaded_tile_uls_ = x0;
-        loaded_tile_ult_ = y0;
+        LoadedImage img;
+        img.key = key;
+        img.width = w;
+        img.height = h;
+        img.origin_s = x0;
+        img.origin_t = y0;
+        st.tile_image[tile & (kMaxTiles - 1)] = img;
+        // TMEM model: this image becomes TEXEL1 and pushes the previous one
+        // down to TEXEL0 (see recent_loads above).
+        st.recent_loads[0] = st.recent_loads[1];
+        st.recent_loads[1] = img;
     }
 
     uint64_t make_texture_key(const RenderState& st, int tile, uint16_t uls, uint16_t ult,
@@ -1515,17 +1836,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // Fills the render-state fields of a DrawCmd from the current RDP state.
     void record_state(DrawCmd& cmd, RenderState& st, bool textured) {
         const Combiner& cb = st.combiner;
+        // Which mux the hardware evaluates first. RT64 ColorCombiner::run()
+        // calls runCycle(inputs, twoCycle ? 0 : 1, twoCycle, ...): a 1-cycle
+        // draw evaluates the SECOND mux (with COMBINED = 0), a 2-cycle draw
+        // evaluates mux 0 and then mux 1. Slot 0 is always the first mux.
+        const uint32_t cyc_type = (st.othermode_h >> 20) & 3;
+        const int mux = (cyc_type == kCyc2) ? 0 : 1;
         for (int i = 0; i < 2; ++i) {
-            cmd.ca[i] = cb.ca[i];
-            cmd.cb[i] = cb.cb[i];
-            cmd.cc[i] = cb.cc[i];
-            cmd.cd[i] = cb.cd[i];
-            cmd.aa[i] = cb.aa[i];
-            cmd.ab[i] = cb.ab[i];
-            cmd.ac[i] = cb.ac[i];
-            cmd.ad[i] = cb.ad[i];
+            const int src = (i == 0) ? mux : 1;
+            cmd.ca[i] = cb.ca[src];
+            cmd.cb[i] = cb.cb[src];
+            cmd.cc[i] = cb.cc[src];
+            cmd.cd[i] = cb.cd[src];
+            cmd.aa[i] = cb.aa[src];
+            cmd.ab[i] = cb.ab[src];
+            cmd.ac[i] = cb.ac[src];
+            cmd.ad[i] = cb.ad[src];
         }
-        cmd.cycle = ((st.othermode_h >> 20) & 3) == 1 ? 2 : 1;
+        // COPY mode bypasses the combiner (shader u_cycle == 0).
+        cmd.cycle = (cyc_type == kCycCopy) ? 0 : ((cyc_type == kCyc2) ? 2 : 1);
+        cmd.othermode_h = st.othermode_h;
+        cmd.othermode_l = st.othermode_l;
+        cmd.comb_L = cb.L;
+        cmd.comb_H = cb.H;
         for (int i = 0; i < 4; ++i) {
             cmd.prim[i] = st.prim_color[i];
             cmd.env[i] = st.env_color[i];
@@ -1534,11 +1867,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         cmd.tex_sc = st.tex_sc;
         cmd.tex_tc = st.tex_tc;
         if (textured) {
-            cmd.tex_key = st.active_tex_key;
-            cmd.tex_scale[0] = st.active_tex_scale[0];
-            cmd.tex_scale[1] = st.active_tex_scale[1];
-            cmd.tex_origin[0] = static_cast<float>(loaded_tile_uls_);
-            cmd.tex_origin[1] = static_cast<float>(loaded_tile_ult_);
+            // TEXEL0 = the previous load, TEXEL1 = the most recent (see
+            // recent_loads in RenderState).
+            const LoadedImage& i0 = st.recent_loads[0];
+            const LoadedImage& i1 = st.recent_loads[1];
+            cmd.tex_key = i0.key;
+            cmd.tex_key1 = i1.key;
+            cmd.tex_scale[0] = i0.width ? 1.0f / static_cast<float>(i0.width) : 1.0f;
+            cmd.tex_scale[1] = i0.height ? 1.0f / static_cast<float>(i0.height) : 1.0f;
+            cmd.tex_origin[0] = static_cast<float>(i0.origin_s);
+            cmd.tex_origin[1] = static_cast<float>(i0.origin_t);
+            cmd.tex_scale1[0] = i1.width ? 1.0f / static_cast<float>(i1.width) : 1.0f;
+            cmd.tex_scale1[1] = i1.height ? 1.0f / static_cast<float>(i1.height) : 1.0f;
+            cmd.tex_origin1[0] = static_cast<float>(i1.origin_s);
+            cmd.tex_origin1[1] = static_cast<float>(i1.origin_t);
         }
         cmd.scissor_on = st.scissor_enabled;
         if (st.scissor_enabled) {
@@ -1547,9 +1889,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             cmd.sx1 = st.scissor_x1;
             cmd.sy1 = st.scissor_y1;
         }
-        const int cyc_type = (st.othermode_h >> 20) & 3;
         const uint32_t blend = st.othermode_l & 0xFFF;
-        const bool copy_or_fill = (cyc_type == 2 || cyc_type == 3);
+        const bool copy_or_fill = (cyc_type == kCycCopy || cyc_type == kCycFill);
         const uint32_t m2a = (blend >> 6) & 7;
         const uint32_t m2b = (blend >> 9) & 7;
         cmd.blend = !copy_or_fill && (m2a == 2 && (m2b == 3 || m2b == 1));
@@ -1651,7 +1992,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         }
         DrawCmd cmd;
-        record_state(cmd, st, st.texture_on && st.active_tex_key != 0);
+        record_state(cmd, st, st.texture_on && texture_available(st));
         queue_triangles(ctx, cmd, data, 3);
     }
 
@@ -1693,22 +2034,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.prim_color[2] = c[2];
         st.prim_color[3] = c[3];
         st.combiner.decode(0, 0);
-        st.combiner.ca[0] = 3;  // PRIMITIVE
-        st.combiner.cb[0] = 0;  // ZERO
-        st.combiner.cc[0] = 6;  // ONE
-        st.combiner.cd[0] = 0;  // ZERO
-        st.combiner.aa[0] = 3;  // PRIMITIVE alpha
-        st.combiner.ab[0] = 0;
-        st.combiner.ac[0] = 6;
-        st.combiner.ad[0] = 0;
-        st.combiner.ca[1] = 3;
-        st.combiner.cb[1] = 0;
-        st.combiner.cc[1] = 6;
-        st.combiner.cd[1] = 0;
-        st.combiner.aa[1] = 3;
-        st.combiner.ab[1] = 0;
-        st.combiner.ac[1] = 6;
-        st.combiner.ad[1] = 0;
+        for (int i = 0; i < 2; ++i) {
+            st.combiner.ca[i] = CSEL_PRIMITIVE;
+            st.combiner.cb[i] = CSEL_ZERO;
+            st.combiner.cc[i] = CSEL_ONE;
+            st.combiner.cd[i] = CSEL_ZERO;
+            st.combiner.aa[i] = ASEL_PRIMITIVE;
+            st.combiner.ab[i] = ASEL_ZERO;
+            st.combiner.ac[i] = ASEL_ONE;
+            st.combiner.ad[i] = ASEL_ZERO;
+        }
 
         record_state(cmd, st, false);
         queue_triangles(ctx, cmd, data, 6);
@@ -1734,22 +2069,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         if (txr_logged_ < 3) {
             ++txr_logged_;
+            char muxbuf[256];
+            format_combiner(st.combiner, ((st.othermode_h >> 20) & 3) == kCyc2 ? 0 : 1,
+                            muxbuf, sizeof(muxbuf));
             OGRE_MILESTONE("GFX-TXR",
                        "texrect xl=%d yl=%d xh=%d yh=%d s0=%d t0=%d dsdx=%d dtdy=%d flip=%d key=0x%llX "
-                       "omh=0x%06X oml=0x%06X cyc=%d comb[%d,%d,%d,%d] texel0=(%d,%d,%d,%d) "
+                       "omh=0x%06X oml=0x%06X cyc=%d mux0=[%s] texel0=(%d,%d,%d,%d) "
                        "fmt=%d siz=%d line=%d sh=%d/%d mask=%d/%d",
                        xl, yl, xh, yh, s0, t0, dsdx, dtdy,
                        ctx->pending_texrect_flip ? 1 : 0,
-                       (unsigned long long)st.active_tex_key,
+                       (unsigned long long)st.recent_loads[1].key,
                        st.othermode_h, st.othermode_l,
                        static_cast<int>((st.othermode_h >> 20) & 3),
-                       st.combiner.ca[0], st.combiner.cb[0], st.combiner.cc[0], st.combiner.cd[0],
+                       muxbuf,
                        last_tex_rgba_[0], last_tex_rgba_[1], last_tex_rgba_[2], last_tex_rgba_[3],
                        (int)last_tex_fmt_, (int)last_tex_siz_, (int)last_tex_line_,
                        (int)last_tex_shifts_, (int)last_tex_shiftt_,
                        (int)last_tex_masks_, (int)last_tex_maskt_);
         }
-        if (st.active_tex_key == 0) {
+        if (!texture_available(st)) {
             return;
         }
 
@@ -1888,7 +2226,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // Geometry cache for the pending texrect (set by G_TEXRECT, consumed at
     // the following G_RDPHALF_2).
     int texrect_geom_[4] = {};
-    int loaded_tile_uls_ = 0, loaded_tile_ult_ = 0;
     // Diagnostics for the texrect path (last load only).
     uint8_t last_tex_rgba_[4] = {0, 0, 0, 0};
     uint8_t last_tex_fmt_ = 0, last_tex_siz_ = 0;

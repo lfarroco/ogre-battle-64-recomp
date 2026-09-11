@@ -17,7 +17,6 @@ namespace ogre::gbi {
 namespace {
 
 // rdram allocation in this project is 512 MiB (docs/WEB-PORT-REPORT.md §1.5).
-constexpr uint32_t kRdramSize = 0x20000000;
 
 // rdram stores 32-bit words byte-reversed (the runtime's MEM_W macro is a
 // direct *(int32_t*) read, so memory is little-endian on little-endian hosts
@@ -85,17 +84,10 @@ void walk_dl(uint8_t* rdram, uint32_t dl_offset, DlVisitor visitor, void* user) 
                 return;
             }
 
-            auto resolve_address = [this](uint32_t addr) -> uint32_t {
-                // KSEG0/KSEG1 map 1:1 into the 512 MiB rdram region.
-                if ((addr & 0xFF000000u) == 0x80000000u || (addr & 0xFF000000u) == 0xA0000000u) {
-                    return addr & 0x1FFFFFFFu;
-                }
-                const uint8_t seg = static_cast<uint8_t>(addr >> 24);
-                if (seg >= 1 && seg <= 15 && segments[seg] != 0) {
-                    return (segments[seg] << 24) | (addr & 0x00FFFFFFu);
-                }
-                // Physical address (e.g. 0x000A9EF0).
-                return addr & 0x1FFFFFFFu;
+            // Shared with the executor (gbi.hpp) so both views of the walk
+            // resolve every address identically.
+            auto resolve = [this](uint32_t addr) -> uint32_t {
+                return gbi::resolve_address(segments, addr);
             };
 
             for (;;) {
@@ -119,9 +111,18 @@ void walk_dl(uint8_t* rdram, uint32_t dl_offset, DlVisitor visitor, void* user) 
                     return;
                 }
 
+                // G_MOVEWORD G_MW_SEGMENT: without this the walker's segment
+                // registers stayed zero, so a G_DL to a segmented address was
+                // followed as if it were physical.
+                if (op == OP_MOVEWORD) {
+                    set_segment_from_moveword(segments, w0, w1);
+                    offset += 8;
+                    continue;
+                }
+
                 if (op == OP_DL) {
                     const bool push = ((w0 >> 16) & 1) == DL_PUSH;
-                    const uint32_t target = resolve_address(w1);
+                    const uint32_t target = resolve(w1);
                     if (target + 8 > kRdramSize) {
                         return;
                     }

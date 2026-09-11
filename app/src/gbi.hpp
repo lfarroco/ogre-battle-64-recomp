@@ -26,6 +26,35 @@
 
 namespace ogre::gbi {
 
+// The port's RDRAM window (512 MiB - see recomp::mem_size); addresses are
+// resolved into it with a 29-bit mask.
+constexpr uint32_t kRdramSize = 0x20000000;
+
+// Resolves an N64 address into the port's 512 MiB rdram window:
+//
+//     segments[(addr >> 24) & 0x0F] + (addr & 0x00FFFFFF)
+//
+// exactly as RT64's RSP::fromSegmented does (the segment index is only 4 bits,
+// and the segment register holds the *full* base address, so the base is added
+// to the offset - not OR'd in at the top). KSEG0/KSEG1 work through the same
+// rule because segment 0 is normally zero; the final mask folds the result into
+// the port's window.
+//
+// OB64 depends on this: its display lists mix KSEG0 pointers with segmented
+// ones - e.g. `DE000000 0E000000` (segment 14 + 0) and `FD180000 0F000000`
+// (segment 15 + 0), where the game has loaded segment 15 with 0x001BE4E0 and
+// segment 14 with 0x001CAB20. Resolving those as "physical" sent the DL walker
+// to 0x0E000000 (zeroed memory, 4M commands of G_NOOP - the session-20
+// "runaway walk") and the texture decoder to 0x0F000000 (garbage texels).
+//
+// The DL walker and the DL executor MUST use the same function: they are two
+// views of one walk (the walker picks the next command, the executor decodes
+// it), so a resolution difference makes a G_DL target mean two addresses.
+inline uint32_t resolve_address(const uint32_t* segments, uint32_t addr) {
+    const uint32_t base = segments[(addr >> 24) & 0x0Fu];
+    return (base + (addr & 0x00FFFFFFu)) & 0x1FFFFFFFu;
+}
+
 // F3DEX2 opcode constants (RT64 rt64_gbi_f3dex2.h + rt64_f3d_defines.h).
 // RSP-side commands:
 constexpr uint8_t OP_VTX = 0x01;            // G_VTX
@@ -105,6 +134,17 @@ constexpr uint8_t MW_MATRIX = 0x00;
 constexpr uint8_t MW_NUMLIGHT = 0x02;
 constexpr uint8_t MW_CLIP = 0x04;
 constexpr uint8_t MW_SEGMENT = 0x06;
+// G_MW_SEGMENT (`gsSPSegment(seg, base)` = 0xDB060000 | (seg << 2), base)
+// loads a *full* base address for the segment (RT64 RSP::setSegment).
+inline void set_segment_from_moveword(uint32_t* segments, uint32_t w0, uint32_t w1) {
+    if (static_cast<uint8_t>((w0 >> 16) & 0xFF) != MW_SEGMENT) {
+        return;
+    }
+    const uint8_t seg = static_cast<uint8_t>((w0 >> 2) & 0xF);
+    if (seg < 16) {
+        segments[seg] = w1;
+    }
+}
 constexpr uint8_t MW_FOG = 0x08;
 constexpr uint8_t MW_LIGHTCOL = 0x0A;
 constexpr uint8_t MW_PERSPNORM = 0x0E;
