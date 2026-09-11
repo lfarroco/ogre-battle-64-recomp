@@ -153,7 +153,11 @@ uncommittable as the ROM.
 | `progress.cjs` | ~39 display lists in 75 s with no bad walk (session 20 escaped at ~31); `--min-tasks 35` (session 20 escaped at ~31) is the current bar |
 | `shots.cjs` | canvas byte-identical across frames 1.5 s apart (deterministic frame) |
 | `fps.cjs` | 2.5–3.5 gfx frames/s |
-| `vi.cjs` | 29.4 retrace/s (target 60), 3.5 gfx frames/s |
+| `vi.cjs` | 59.2 retrace/s (target 60), **0.25 buffer swaps/s** - the VI thread is fine, the game thread is standing still |
+
+`fps.cjs`/`vi.cjs` both need a boot that leaves the idle trajectory (session
+21: `fps.cjs` missed on 4/4 attempts, `vi.cjs` still measured the rates because
+they are host-side).
 
 Session-20 baseline, for comparison: `nonBlack≈6 100`, `colorful≈5 000` (the
 sprite combiner was being evaluated with the wrong cycle type then).

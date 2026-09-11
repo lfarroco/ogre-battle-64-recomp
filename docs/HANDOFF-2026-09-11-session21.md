@@ -169,13 +169,30 @@ basis, `timg_width` as the row stride). See the open questions.
 
 ## Open questions (ordered)
 
-1. **Pacing / the idle trajectory.** Frames arrive ~50-250 ms apart once
-   running (`(RSP) display list submitted` deltas), but roughly half of all
-   boots stall at 1-8 display lists and never advance; and a boot that renders
-   can still stop at ~13. Session 20 measured 29.4 VI retraces/s (target 60) and
-   ~3.5 gfx frames/s. `app/web/web.js`'s `watchBootStall()` message was still
-   blaming session 14's "VI-retrace message queue deadlock"; it now says what
-   actually happens (the idle trajectory) and points at this handoff.
+1. **The idle trajectory (the real wall now).** Once a boot is running, frames
+   arrive ~50-250 ms apart (`[RSP] display list submitted` deltas), but most
+   boots never get there: of six `progress.cjs` boots, two stayed at 1-9
+   display lists, two reached 19, two 35-39, and `fps.cjs` hit the idle
+   trajectory on 4/4 attempts. Session 20 blamed the *pacing*; the measurements
+   this session say otherwise:
+
+   | `vi.cjs` (4 s window) | value |
+   |---|---|
+   | retrace/s | **59.2** (target 60 - fixed, was 29.4) |
+   | swap/s | 0.25 (the game's buffer swaps: it is not producing frames) |
+   | `[snap]` lines/s | 274 (`tailLen` 191 059 after 4 s) |
+
+   So the VI thread is fine and the game thread is the one standing still -
+   which is the *original* session-15 finding (thread 3 blocked on its own
+   count-1 queue `0x800C6C98`, sender unknown), not a renderer problem. Note
+   the `[snap]` queue dump (`ultramodern/src/mesgqueue.cpp`, called every 90 VI
+   iterations from `events.cpp`) is ~10 multi-line dumps/s of proxied printf
+   **while the game runs**; it is the live telemetry for this exact bug, so
+   either gate it behind an env var like the other traces or make it
+   stall-triggered (dump only when the swap counter stops advancing) - it is
+   vendored code, so that change belongs in `n64modernruntime-ob64.patch`.
+   `app/web/web.js`'s `watchBootStall()` message was still blaming session 14's
+   "VI-retrace message queue deadlock"; it now describes the idle trajectory.
 2. **`G_TEXTURE` scale + UV basis.** `sc = tc = 0x8000`, so RT64's conversion
    `(s * sc) / (65536 * 32)` = `s/64` halves this renderer's `s/32`; the vertex
    UVs observed for the title sprites (`u` up to 66 texels) are > 1.0 under
