@@ -7,6 +7,7 @@
   "scripts": {
     "serve": "python3 server.py",
     "boot": "node probes/boot.cjs",
+    "progress": "node probes/progress.cjs",
     "shots": "node probes/shots.cjs",
     "fps": "node probes/fps.cjs",
     "vi": "node probes/vi.cjs",

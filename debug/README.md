@@ -24,6 +24,7 @@ cd debug && npm install
 
 # 4. run a probe
 node debug/probes/boot.cjs --attempts 10 --secs 45
+node debug/probes/progress.cjs --attempts 6 --secs 75   # how far the intro gets
 ```
 
 | Path | Purpose |
@@ -32,6 +33,5 @@ node debug/probes/boot.cjs --attempts 10 --secs 45
 | `lib/harness.cjs` | shared boot / retry / sampling / pixel / output helpers |
 | `probes/*.cjs` | the probes (see the guide's table) |
 | `out/` | captured artifacts (gitignored — never commit screenshots) |
-
 Requirements: Node ≥ 18, `npm install` here, `build-wasm/` built, and your own
 ROM at `assets/ogre64.z64` (or `--rom` / `OGRE_ROM`). The ROM is never committed.

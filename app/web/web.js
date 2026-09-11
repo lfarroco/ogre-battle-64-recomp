@@ -433,10 +433,12 @@
     }
   }
 
-  // The game is currently stuck at its boot screen on every platform (it only
-  // ever submits the 32-command boot blanking DL, which has no draw commands),
+  // Roughly half of all boots land on the "idle trajectory": the game submits
+  // only the 32-command boot blanking DL and never builds its own display list,
   // so the canvas stays black even though the renderer works. Surface that
-  // clearly instead of leaving the page looking broken.
+  // instead of leaving the page looking broken, and say what it is - the old
+  // message blamed a session-14 "VI-retrace deadlock" that later sessions
+  // disproved (the renderer draws the title scene whenever the game advances).
   function watchBootStall() {
     window.setInterval(function () {
       if (bootStallLogged || !bootStartTime || Date.now() - bootStartTime < 15000) {
@@ -447,10 +449,10 @@
       var tasks = m ? parseInt(m[1], 10) : 0;
       if (tasks <= 1) {
         bootStallLogged = true;
-        log("[web:gfx] The game is still at its boot screen (only the boot blanking display list was submitted, " +
-            "no draw commands). This is the known boot-stall that affects every platform - the renderer itself is " +
-            "fine, but the game's VI-retrace message queues deadlock and the boot never advances (see " +
-            "docs/HANDOFF-2026-08-30-session14.md). The screen will stay black until the boot-stall is fixed.");
+        log("[web:gfx] Only the boot blanking display list has been submitted after 15s, so the canvas will stay " +
+            "black. This is the known idle trajectory: about half of all boots stall before the game builds its " +
+            "first real display list. It is a game/runtime pacing issue, not a renderer problem - reload to get a " +
+            "different trajectory (the probes retry for this reason). See docs/HANDOFF-2026-09-11-session21.md.");
       }
     }, 1000);
   }

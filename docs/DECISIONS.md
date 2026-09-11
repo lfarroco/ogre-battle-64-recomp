@@ -5,6 +5,81 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-11 (session 21) — `G_SETOTHERMODE_H/L` never applied anything; the combiner is now evaluated the way RT64 does
+
+### Finding: the othermode decode double-shifted its data, so OTHERMODE_H stayed 0
+
+`G_SETOTHERMODE_H`/`_L` carry the field's **already shifted** data word (the SDK
+macro emits `val << sft`), and the RSP only clears the target field:
+`H = (H & ~(((1 << len) - 1) << sft)) | w1` (RT64 `RSP::setOtherModeH`). The
+renderer instead computed `((w1 & mask) << off)`, i.e. it masked the data down
+to `len` bits *and* shifted it again, which zeroed every bit of every field. The
+observable consequence: `OTHERMODE_H` was always 0, so **every draw was
+`G_CYC_1CYCLE`** with no dithering, no texture filtering and no perspective
+correction, whatever the game asked for.
+
+With the decode fixed, OB64's title sprites report
+`omh=0x182CF0` = `G_CYC_2CYCLE` + `G_TF_BILERP` + `G_TP_PERSP` +
+`G_AD_DISABLE` + `G_CD_DISABLE`, `oml=0x00184240`. The same fix is what made the
+combiner's mux question answerable (below): the sprites *are* a two-cycle
+combiner, so the second-cycle path is exercised on every title frame.
+
+### Decision: evaluate the combiner exactly as `rt64_color_combiner.h` does
+
+The session-19 selector decode was position-independent and therefore wrong for
+the top of every mux field (color selector 6 is `ONE` for A/D, `KEY_CENTER` for
+B, `KEY_SCALE` for C; `8..15` are C-only alpha-ish sources; alpha D reads `H` in
+both cycles, not `L` in the first). The renderer now mirrors RT64's
+`parseColorInput*`/`parseAlphaInput*` bit fields, `colorInputA/B/C/D`,
+`alphaInputABD/C` and `runCycle` field for field, including:
+
+- **which mux a cycle type evaluates** — 1-cycle evaluates the *second* mux
+  (`run()` calls `runCycle(inputs, twoCycle ? 0 : 1, twoCycle, ...)`), 2-cycle
+  evaluates mux 0 then mux 1, and `G_CYC_COPY` bypasses the combiner entirely
+  (`texel0` passthrough);
+- the **TEXEL0/TEXEL1 value swap** in the second cycle of a two-cycle combiner;
+- the **wrap** rules for the second cycle's `COMBINED` inputs
+  (`wrapInputC`/`wrapInputABD`, then `wrapClamp`) rather than a plain clamp.
+
+Evidence that this matters for OB64: the sprite combiner is the single ROM word
+`0xFCFFFFFF 0xFFFD7238` (file offset `0x1EE828`), which decodes to
+`cycle0 = rgb TEXEL1, alpha TEXEL0` and `cycle1 = COMBINED` — i.e. a real
+two-cycle combiner whose colour comes from the second texture tile and whose
+alpha mask comes from the first. All of it is now visible in the `[GFX-CMD]` log
+as an N64 expression per cycle.
+
+### Finding: OB64 loads every image into tile 7 while `G_TEXTURE` selects tile 0
+
+`[GFX-TEX]` (tile index added this session) shows every `G_LOADTILE`/`G_LOADBLOCK`
+targeting **tile 7**, while the game's `G_TEXTURE` names **tile 0**
+(`D7000002 80008000`). That is not a decode bug (RT64 decodes both the same way);
+all eight tiles in OB64's state block are programmed identically with `tmem = 0`,
+so the tile index does not select the image — the *load order* does. The RDP
+samples TMEM, and the pair of loads per object (an I8 alpha mask, then the
+RGBA16 colour image) overwrite the same TMEM region.
+
+### Decision: model the two texel units as the last two loads
+
+A draw needs two images (the combiner takes colour from TEXEL1 and alpha from
+TEXEL0), so `RenderState` keeps `recent_loads[2]`: `[1]` = most recent load,
+`[0]` = the one before it, with its own UV transform (loaded size + `uls/ult`
+origin). The shader gets `v_uv0`/`v_uv1` and two sampler units, and an unloaded
+unit binds a 1x1 white fallback instead of texture 0. This replaces "the last
+loaded texture is the only texture", which silently sampled the colour image for
+TEXEL0 as well. (A real TMEM model — per-tile tmem address, line and the tile's
+`uls/lrt` rect as the UV basis — is the principled replacement; see the handoff.)
+
+### Decision: the walker and the executor share one address resolver, and the walker tracks segments
+
+`gbi::walk_dl` picked the next command while `WebGLRenderer::exec_command`
+decoded it, but each had its own copy of `resolve_address` and only the executor
+applied `G_MOVEWORD G_MW_SEGMENT`. The walker's segment registers therefore
+stayed zero, so a `G_DL` to a segmented address was followed as if it were
+physical — the walker and the executor could disagree about where the walk *is*.
+Both now call `gbi::resolve_address` and `gbi::set_segment_from_moveword`.
+
+---
+
 ## 2026-09-11 — the `/tmp` browser probes are consolidated into `debug/`
 
 ### Decision: keep the probe harness in the repo, not in `/tmp`

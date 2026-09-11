@@ -47,6 +47,7 @@ nginx and other hosts.
 
 ```sh
 node debug/probes/boot.cjs --attempts 10 --secs 45   # render check + pixel counts
+node debug/probes/progress.cjs --attempts 6 --secs 75 # how far the intro gets
 node debug/probes/shots.cjs --shots 8 --gap 1200     # timed screenshot series
 node debug/probes/fps.cjs --window 10                # gfx frames/s
 node debug/probes/vi.cjs --window 4000               # VI retrace/swap rate
@@ -56,17 +57,19 @@ node debug/probes/logmode.cjs                        # page-log contract smoke t
 node debug/probes/testdraw.cjs                       # synthetic-draw GL isolation
 ```
 
-`npm run boot|shots|fps|vi|stats|diag|logmode|testdraw` and `npm run serve` work
-from inside `debug/`.
+`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw` and
+`npm run serve` work from inside `debug/`.
 
 | Probe | Measures | Exit 0 means |
 |---|---|---|
 | `boot.cjs` | boot → real display list → canvas pixels (non-black, colorful, top colours) | the game rendered |
+| `progress.cjs` | highest `tasks=` reached over a full time budget, plus any `GFX-ESCAPE`/`GFX-RUNAWAY` bad-walk line | the intro reached `--min-tasks` on some boot with no bad walk |
 | `shots.cjs` | canvas PNG series + per-frame pixel counts | a series was captured |
 | `fps.cjs` | `tasks=` delta over a window | a rate was measured |
 | `vi.cjs` | `[vi-debug] retrace/swap`, `[snap]`, tasks/s | a rate was measured |
 | `stats.cjs` | full `#gfxstats` / `#gfx-status` / milestone dump | (always; read the files) |
 | `diag.cjs` | main-thread heartbeat + `Module.print` rate + wedge forensics | (always; read the files) |
+| `progress.cjs` | `tasks=` high-water mark, `GFX-ESCAPE`/`GFX-RUNAWAY` | (see its own row above) |
 | `logmode.cjs` | default one-line status vs `?log`, `ogreLog` API | the page-log contract holds |
 | `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas | the synthetic draw rendered |
 
@@ -141,15 +144,28 @@ Artifacts go to `debug/out/` (gitignored) as `<name>-<suffix>`:
 Never commit `debug/out/` contents: screenshots of a copyrighted game are as
 uncommittable as the ROM.
 
-## Baseline (session 20)
+## Baseline (session 21)
 
 | Measurement | Value |
 |---|---|
-| `boot.cjs` | `RENDERED`, ring of twelve sprites, 0/24 triangles rejected, `nonBlack≈6 100`, `colorful≈5 000` |
+| `boot.cjs` | `RENDERED`, ring of twelve sprites, 0/24 triangles rejected, `nonBlack≈7 990`, `colorful≈5 850` |
 | black canvas (the idle trajectory) | `nonBlack≈32`, `colorful=0` |
+| `progress.cjs` | ~39 display lists in 75 s with no bad walk (session 20 escaped at ~31); `--min-tasks 35` (session 20 escaped at ~31) is the current bar |
 | `shots.cjs` | canvas byte-identical across frames 1.5 s apart (deterministic frame) |
 | `fps.cjs` | 2.5–3.5 gfx frames/s |
 | `vi.cjs` | 29.4 retrace/s (target 60), 3.5 gfx frames/s |
+
+Session-20 baseline, for comparison: `nonBlack≈6 100`, `colorful≈5 000` (the
+sprite combiner was being evaluated with the wrong cycle type then).
+
+### Which probe to reach for
+
+- **Did it render?** `boot.cjs` (stops at the first rendered frame).
+- **How far does it get?** `progress.cjs` — `boot.cjs` stops early, and
+  `stats.cjs` boots **once** (it is a counter dump, not an attempt loop), so a
+  low `tasks=` there can just be the idle trajectory.
+- **What is the renderer's state?** `stats.cjs` + `ogreLog` (`[GFX-TASK]`,
+  `[GFX-CMD]`, `[GFX-ESCAPE]`).
 
 ## Adding a probe
 

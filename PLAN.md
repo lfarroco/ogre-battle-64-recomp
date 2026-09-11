@@ -179,6 +179,30 @@ hardware. RT64 remains the primary native renderer throughout. See
     `G_MOVEMEM MV_VIEWPORT` (still a no-op, so 3D geometry is partly
     off-screen), then regenerate the combiner mux tables from RT64's
     `rt64_color_combiner.h`. See `docs/HANDOFF-2026-09-10-session19.md`.
+  - ✅ **The title scene renders in the browser (session 20)**: seven
+    `app/src/web_renderer.cpp` bugs (viewport no-op, `Mtx` column-pair swap,
+    ignored projection `MUL`, wrong modelview `MUL` order, F3DEX2's inverted
+    `G_MTX` PUSH bit, `push_back(vector.back())` UB, empty/inverted rectangles
+    drawn as full-screen covers) took the first title DL from 18/24 triangles
+    rejected and a black canvas to 0 rejected and a stable ring of twelve
+    sprite soldiers. The on-page console was also replaced by a bounded
+    `window.ogreLog` ring buffer (per-line DOM writes were throttling the
+    emulator). See `docs/HANDOFF-2026-09-10-session20.md`.
+  - ✅ **The intro's frame-31 "runaway walk" is fixed (session 21)**: OB64's
+    display lists mix KSEG0 and **segmented** addresses, and the renderer
+    resolved a segment as `(base_high_byte << 24) | offset` instead of RT64's
+    `segment_base + offset`, so `DE000000 0E000000` (segment 14) sent the DL
+    walker to zeroed rdram (4 M `G_NOOP`s) and `FD180000 0F000000` (segment 15)
+    sent the texture decoder to garbage. `G_SETOTHERMODE_H/L` also never applied
+    its data word (so every draw was `G_CYC_1CYCLE`), alpha's D selector read the
+    wrong word, the DL walker ignored `G_MW_SEGMENT`, and the combiner was
+    evaluated with position-independent selectors. With all of that fixed the
+    title scene reaches ~39 display lists per 75 s (session 20 escaped at ~31)
+    with the correct `G_CYC_2CYCLE` + bilerp + perspective state and a two-unit
+    texture abstraction (colour from TEXEL1, alpha mask from TEXEL0). Next:
+    pacing (half of all boots still stall at 1-8 display lists; ~3 gfx frames/s),
+    the blend/render-mode decode, and a real TMEM/tile UV model. See
+    `docs/HANDOFF-2026-09-11-session21.md`.
 
 - ⬜ Streamed/overlay code segments (battle engine, cinematics) — after first boot.
 - ⬜ Asset extraction (sprites, text, audio) — after first boot.
