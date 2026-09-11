@@ -159,6 +159,7 @@ struct TileState {
     // standard gDPLoadTextureBlock idiom), so the load rect is 16 wide and the
     // sampled image is 32 wide.
     uint32_t image_address = 0;       // source image address from the last load
+    int image_stride = 0;             // source row stride in bytes (SETTIMG)
     bool image_source_valid = false;
     LoadedImage image;                // decoded image (filled lazily at draw time)
     bool image_valid = false;         // `image` matches the current rect/format
@@ -460,6 +461,13 @@ struct RenderState {
     struct PendingLoad {
         uint32_t address = 0;
         int load_tile = -1;
+        // The source image's row stride is the SETTIMG width converted with the
+        // *image's* format: RT64 `loadTileOperation` uses
+        // `bytesPerRow = width << siz >> 1`. It is not the tile's `line`, which
+        // is the TMEM stride the RDP writes with (OB64's mask: 16 bytes/row of
+        // 8-bit texels, sampled as 32 4-bit texels - `line` is 2 words = 16
+        // bytes there, so the two agree, but they need not).
+        int stride = 0;
         bool valid = false;
     } pending_load;
 };
@@ -1046,8 +1054,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (rdram_ == nullptr) {
             return;
         }
-        constexpr uint32_t kDlOff = 0x1FE00000;   // scratch DL area (unused)
-        constexpr uint32_t kTexOff = 0x1FE01000;  // 2x2 RGBA16 texture
+        // Scratch memory must stay inside the low 32 MiB *and* below the point
+        // where resolve_address() starts reading the top nibble as a segment
+        // index (RT64 fromSegmented). At 0x1FE00000 the texture address resolved
+        // through segment 15 (base 0) to 0x00E01000 - zeroed memory - so the
+        // synthetic rect drew black. 12 MiB is above the N64's 8 MiB expansion
+        // and inside segment 0.
+        constexpr uint32_t kDlOff = 0x00C00000;   // scratch DL area (unused)
+        constexpr uint32_t kTexOff = 0x00C01000;  // 2x2 RGBA16 texture
 
         auto put32 = [this](uint32_t off, uint32_t v) {
             // rdram stores words byte-reversed (runtime MEM_W convention).
@@ -1076,8 +1090,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         put32(o, 0xF2000000); put32(o + 4, 0x4004); o += 8;
         // G_LOADTILE tile 0
         put32(o, 0xF4000000); put32(o + 4, 0x4004); o += 8;
-        // G_SETCOMBINE TEX0*SHADE (rgb A=1,B=0,C=4,D=0; alpha Aa=1)
-        put32(o, 0xFC121000); put32(o + 4, 0x00000000); o += 8;
+        // G_SETCOMBINE, 1-cycle: rgb = (TEXEL0 - 0) * SHADE + 0, the SDK's
+        // G_CC_TEXEL0. A 1-cycle draw evaluates the SECOND mux (RT64
+        // ColorCombiner::run), so the fields that matter are ca1 (L bits 5-8) =
+        // 1 (TEXEL0), cb1 (H bits 24-27) = 8 (ZERO), cc1 (L bits 0-4) = 4
+        // (SHADE), cd1 (H bits 6-8) = 0 (COMBINED). Note color selector C has no
+        // ONE - 15 is K5, which the shader returns as 0, and the word used
+        // before (0xFC121000) selected C = ZERO. Either one draws the rect
+        // black, so the probe "passed" while proving nothing.
+        put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
         // G_TEXRECT (0,0)-(63,47), tile 0; RDPHALF_1 s=0,t=0; RDPHALF_2 dsdx=1,dtdy=1
         put32(o, 0xE4000000); put32(o + 4, (63 << 2) << 12 | (47 << 2)); o += 8;
         put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
@@ -2244,21 +2265,35 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // (16 bytes/row of 8-bit texels, declared as a 4-bit 32x34 tile) must be
     // decoded as 32 4-bit texels per row, not 16 8-bit ones.
     void note_tile_load(RenderState& st, int tile) {
+        const int stride = static_cast<int>(st.timg_width) << st.timg_siz >> 1;
         st.pending_load.address = st.timg_address;
+        st.pending_load.stride = stride;
         st.pending_load.load_tile = tile;
         st.pending_load.valid = true;
+        // Also attach the image to the load tile itself. The SDK idiom loads
+        // into G_TX_LOADTILE (7) and then re-configures the render tile, but a
+        // display list may load straight into the tile it samples (the
+        // synthetic test_draw does), and then no later G_SETTILE claims it.
+        set_tile_image(st, tile, st.timg_address, stride);
     }
 
-    // Claims the pending load for `tile` (called from G_SETTILE).
+    // Claims the pending load for `tile` (called from G_SETTILE): the render
+    // tile the texture-load idiom configures after the load is the one that
+    // samples the image.
     static void claim_tile_load(RenderState& st, int tile) {
         if (!st.pending_load.valid || tile == st.pending_load.load_tile) {
             return;
         }
+        set_tile_image(st, tile, st.pending_load.address, st.pending_load.stride);
+        st.pending_load.valid = false;
+    }
+
+    static void set_tile_image(RenderState& st, int tile, uint32_t address, int stride) {
         TileState& t = st.tiles[tile & (kMaxTiles - 1)];
-        t.image_address = st.pending_load.address;
+        t.image_address = address;
+        t.image_stride = stride;
         t.image_source_valid = true;
         t.image_valid = false;   // the sampled rect is not known until G_SETTILESIZE
-        st.pending_load.valid = false;
     }
 
     // Decodes (and uploads, once per key) the image a tile samples, using the
@@ -2278,7 +2313,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             t.image_valid = false;
             return;
         }
-        const int row_bytes = static_cast<int>(t.line) * 8;
+        const int row_bytes = t.image_stride;
         if (row_bytes <= 0) {
             t.image_valid = false;
             return;
@@ -2566,16 +2601,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 return;  // back-facing / clipped
             }
         }
-        // A textured draw samples TMEM through its render tiles, so decode the
-        // two images now (lazily, once per key) and use their rects as the UV
-        // basis.
-        if (st.texture_on) {
-            ensure_tile_image(ctx, st, st.active_tile);
-            ensure_tile_image(ctx, st, st.active_tile + 1);
-        }
+        // A draw samples TMEM through its render tiles, so decode the two
+        // images now (lazily, once per key) and use their rects as the UV basis.
+        // This is not gated on G_TEXTURE's `on` field: whether a texel unit is
+        // read at all is decided by the combiner's selectors (RT64
+        // ColorCombiner::usesTexture), and an unused unit is simply never
+        // sampled by the shader.
+        ensure_tile_image(ctx, st, st.active_tile);
+        ensure_tile_image(ctx, st, st.active_tile + 1);
         DrawCmd cmd;
-        record_state(cmd, st, st.texture_on && texture_available(st));
-        if (st.texture_on) {
+        record_state(cmd, st, texture_available(st));
+        if (texture_available(st)) {
             dump_tex_state(ctx, st, "tri");
         }
         queue_triangles(ctx, cmd, data, 3);
@@ -2654,6 +2690,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         if (txr_logged_ < 3) {
             ++txr_logged_;
+            ensure_tile_image(ctx, st, st.active_tile);
+            ensure_tile_image(ctx, st, st.active_tile + 1);
             char muxbuf[256];
             format_combiner(st.combiner, ((st.othermode_h >> 20) & 3) == kCyc2 ? 0 : 1,
                             muxbuf, sizeof(muxbuf));
@@ -2672,6 +2710,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                        (int)last_tex_shifts_, (int)last_tex_shiftt_,
                        (int)last_tex_masks_, (int)last_tex_maskt_);
         }
+        // Decode the two tile images first: texture_available() reads the
+        // result, and a rect that samples a tile loaded straight into it (the
+        // synthetic test_draw) has no other place to pick the image up.
+        ensure_tile_image(ctx, st, st.active_tile);
+        ensure_tile_image(ctx, st, st.active_tile + 1);
         if (!texture_available(st)) {
             return;
         }
@@ -2716,12 +2759,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             data[i * 8 + 7] = 1;
         }
 
-        if (st.texture_on) {
-            ensure_tile_image(ctx, st, st.active_tile);
-            ensure_tile_image(ctx, st, st.active_tile + 1);
-        }
         DrawCmd cmd;
-        record_state(cmd, st, st.texture_on && texture_available(st));
+        record_state(cmd, st, texture_available(st));
         queue_triangles(ctx, cmd, data, 6);
     }
 

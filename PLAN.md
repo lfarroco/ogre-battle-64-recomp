@@ -205,8 +205,11 @@ hardware. RT64 remains the primary native renderer throughout. See
     format with `line * 8` as the stride. Verified by two new probes:
     `textures.cjs` (dump the decoded images and their `colour x mask`
     composites) and `spritecheck.cjs` (render one sprite and compare it with
-    that composite) - they now match. `boot.cjs`: 21 680 non-black / 16 492
-    colorful, twelve readable characters. Next: the idle trajectory (unchanged -
+    that composite) - they now match. `boot.cjs`: 21 680 non-black / 17 764
+    colorful, twelve readable characters. `testdraw.cjs` was also repaired: its
+    scratch address resolved through a segment to zeroed memory and its combiner
+    word evaluated to 0, so the isolation probe had been drawing black; it now
+    shows the synthetic 2x2 texture's four quadrants. Next: the idle trajectory (unchanged -
     ~half of all boots never build a real display list), a reference frame to
     compare against, and the remaining combiner inputs
     (`NOISE`/`K4`/`K5`/`LOD_FRACTION`/keys). See

@@ -18,7 +18,7 @@ proxy.
 
 | | session-21 baseline | now |
 |---|---|---|
-| `boot.cjs` default boot | 7 988 non-black / 5 852 colorful, slivers | **21 680 / 16 492**, twelve readable characters |
+| `boot.cjs` default boot | 7 988 non-black / 5 852 colorful, slivers | **21 680 / 17 400**, twelve readable characters |
 | sprite quad | 39x23 px (x/y swapped) | 23x39 px, matches the 20x34 sprite sheet |
 | `TEXEL0` (alpha mask) | 16x34 I8 | **32x34 I4** (the sampling tile's format) |
 | `TEXEL1` (colour) | 20x34 RGBA16 | 20x34 RGBA16 (unchanged) |
@@ -138,15 +138,18 @@ instead produced a thin silhouette that did not match the character at all.
 
 `RenderState` now tracks a *pending load* (set by `LOADTILE`/`LOADBLOCK`,
 claimed by the next `SETTILE` that names a different tile) and each tile carries
-the source address plus a lazily decoded image. `ensure_tile_image()` decodes
-the tile's rect at the tile's format with `line * 8` as the row stride — the
-same three inputs RT64 uses (`RDPTile` + `GPUTile`) — and one upload is queued
-per key per display list (a sprite's two triangles share it). The old
-`recent_loads[2]` "last two loads are TEXEL0/TEXEL1" model is gone.
+the source address, the source row stride and a lazily decoded image.
+`ensure_tile_image()` decodes the tile's rect at the tile's format, and one
+upload is queued per key per display list (a sprite's two triangles share it).
+The old `recent_loads[2]` "last two loads are TEXEL0/TEXEL1" model is gone.
 
-`decode_texture_rect` now takes an explicit `row_bytes`; the previous
-`width * bytes_per_texel` was only accidentally right when the load's format
-matched the tile's.
+The row stride comes from the **SETTIMG** state captured at load time, not from
+the tile: RT64 `loadTileOperation` uses `bytesPerRow = width << siz >> 1`, and
+`line` is the *TMEM* stride the load writes with — usually the same bytes here
+(OB64's mask: `line = 2` words = 16 bytes, SETTIMG stride = 16 << 1 >> 1 = 16)
+but not the same value in general. `decode_texture_rect` now takes an explicit
+`row_bytes`; the previous `width * bytes_per_texel` was only accidentally right
+when the load's format matched the tile's.
 
 ## How the sprite path was actually verified
 
@@ -185,12 +188,35 @@ Careful: a milestone line is capped at 511 bytes (`milestones.hpp`'s
 `char line[512]`), so `[GFX-CMD]`'s trailing fields (scissor, `p0`, `uv0`) were
 being silently truncated. Put new diagnostics in a short line of their own.
 
+## The synthetic GL probe had been drawing black
+
+`debug/probes/testdraw.cjs` existed to answer "is the WebGL path alive at all",
+but its hand-built display list wrote its scratch DL and texture at
+`0x1FE00000`, and `resolve_address()` (RT64's `fromSegmented`) reads the top
+nibble of an address as a **segment index** — so the texture address resolved
+through segment 15 (base 0) to `0x00E01000`, zeroed memory. Its combiner word
+was also `G_CC` A=COMBINED/C=ZERO, which evaluates to 0. The probe therefore
+"passed" while drawing a black rectangle.
+
+Scratch memory moved to `0x00C00000` (inside segment 0, above the N64's 8 MiB,
+below the 32 MiB walk-escape threshold) and the combiner is now the SDK's
+`G_CC_TEXEL0` (`rgb = (TEXEL0 - 0) * SHADE + 0`). `testdraw.cjs` now reports
+`nonBlack=12312 colorful=10237` with the four quadrants of the synthetic 2x2
+RGBA16 texture (`#0f0`, `#f00`, `#00f`, `#fff`), i.e. it really does exercise
+the texture decode and the texrect path.
+
+Careful with color selector C: it has no `ONE` (`15` is `K5`, which the shader
+returns as 0) — the only way to write "TEXEL0 only" is `A=TEXEL0, C=SHADE` with
+a white shade.
+
 ## Verified
 
 - `spritecheck.cjs`: rendered sprite matches its `colour × mask` composite.
 - `textures.cjs`: mask `32x34 t0 f4s0`, colour `20x34 t1 f0s2`, and the six
   title combiners/logs agree with the ROM words (`cmb=0xFCFFFFFFFFFD7238`).
-- `boot.cjs`: `RENDERED` 21 680 non-black / 16 492 colorful, twelve characters.
+- `boot.cjs`: `RENDERED` 21 680 non-black / 17 764 colorful, twelve characters.
+- `testdraw.cjs`: `nonBlack=12312 colorful=10237`, the synthetic texture's four
+  quadrants (`#0f0`, `#f00`, `#00f`, `#fff`).
 - `logmode.cjs`, `stats.cjs`, `progress.cjs`: see the result files under
   `debug/out/` (`s23-logmode`, `s23-stat`, `s23-progress`, `s23-final`).
 
@@ -239,7 +265,8 @@ JS-only changes (`app/web/`) need no rebuild; a renderer change needs
   replication, `n64h()`/`n64b()` vertex decode, `G_TEXTURE` scale,
   tile-based image model (`pending_load`, `TileState::image`,
   `ensure_tile_image`, `decode_texture_rect(row_bytes)`), `[GFX-TDSTATE]`,
-  `ogre_gfx_debug_tex`/`_count`/`ogre_gfx_debug_flags`.
+  `ogre_gfx_debug_tex`/`_count`/`ogre_gfx_debug_flags`, and the `test_draw`
+  scratch-address/combiner fixes.
 - `app/CMakeLists.txt` — export the three new debug entry points.
 - `debug/probes/textures.cjs` (new), `debug/probes/spritecheck.cjs` (new).
 - `debug/package.json`, `debug/README.md`, `docs/guides/web-probes.md` — the

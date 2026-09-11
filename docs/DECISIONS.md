@@ -90,7 +90,28 @@ the images correctly but decoded them wrongly.
 
 `decode_texture_rect()` now takes an explicit `row_bytes`; the old
 `width * bytes_per_texel` was only accidentally right when the load's format
-matched the tile's.
+matched the tile's. The stride itself comes from the **SETTIMG** state at load
+time (`bytesPerRow = width << siz >> 1`, RT64 `loadTileOperation`), not from the
+tile's `line`: `line` is the TMEM stride the load writes with, which is the same
+number here (`line = 2` words = 16 bytes vs `16 << 1 >> 1` = 16) but is a
+different quantity.
+
+### Finding: the synthetic `test_draw` probe had been drawing black
+
+`test_draw` wrote its scratch display list and texture at `0x1FE00000`, and
+`resolve_address()` (RT64 `fromSegmented`) reads the top nibble of an address as
+a *segment index* — so the texture address resolved through segment 15 (base 0)
+to `0x00E01000`, zeroed memory. Its combiner word also set the cycle-1 C
+selector to ZERO, which evaluates to 0. The probe reported "rendered" while
+drawing a black rectangle, so it proved nothing about the texture path.
+
+Scratch memory moved to `0x00C00000` (segment 0, above the N64's 8 MiB, below
+the 32 MiB walk-escape threshold) and the combiner is now the SDK's
+`G_CC_TEXEL0` (`rgb = (TEXEL0 - 0) * SHADE + 0`). `testdraw.cjs` now shows the
+four quadrants of the synthetic 2x2 RGBA16 texture, so it is a real isolation
+test again. Note that color selector C has no `ONE` (`15` is `K5`, which the
+shader returns as 0); "TEXEL0 only" has to be `A=TEXEL0, C=SHADE` with a white
+shade.
 
 ### Decision: verify a sprite by rendering one and comparing it with its textures
 
