@@ -55,9 +55,11 @@ node debug/probes/stats.cjs                          # dump renderer counters
 node debug/probes/diag.cjs                           # hang characterisation
 node debug/probes/logmode.cjs                        # page-log contract smoke test
 node debug/probes/testdraw.cjs                       # synthetic-draw GL isolation
+node debug/probes/textures.cjs --attempts 3 --secs 60 # decoded tile images
+node debug/probes/spritecheck.cjs --out sprite        # one sprite vs its textures
 ```
 
-`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw` and
+`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|textures|spritecheck` and
 `npm run serve` work from inside `debug/`.
 
 | Probe | Measures | Exit 0 means |
@@ -72,6 +74,8 @@ node debug/probes/testdraw.cjs                       # synthetic-draw GL isolati
 | `progress.cjs` | `tasks=` high-water mark, `GFX-ESCAPE`/`GFX-RUNAWAY` | (see its own row above) |
 | `logmode.cjs` | default one-line status vs `?log`, `ogreLog` API | the page-log contract holds |
 | `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas | the synthetic draw rendered |
+| `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
+| `spritecheck.cjs` | one rendered sprite vs that composite, side by side | the rendered sprite matches its textures |
 
 ### Reading the pixel counts
 

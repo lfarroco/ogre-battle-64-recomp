@@ -5,6 +5,112 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-11 (session 23) — the title sprites are decoded the way the RDP samples them
+
+### Finding: every vertex field was read with the wrong byte order
+
+The runtime stores each N64 32-bit word byte-reversed and compensates with
+`MEM_W` (native load), `MEM_H` (`^ 2`) and `MEM_B` (`^ 3`) in
+`N64Recomp/include/recomp.h`. So the 16-bit field at logical offset `o` lives at
+`o ^ 2`, and a direct `rd16(p + o)` returns the *other* half of the word.
+`read_matrix()` has always applied that compensation through its `c ^ 1` column
+index; `OP_VTX` did not, so every `Vtx` was decoded as
+`(y, x) (flag, z) (t, s) (a, b, g, r)` instead of `(x, y) (z, flag) (s, t)
+(r, g, b, a)`.
+
+That single mistake transposed the sprite quads (39x23 where the sheet is
+20x34) *and* their texture coordinates, which is why the title sprites looked
+like scrambled slivers while the ring they form still looked like a ring. It had
+survived five sessions of renderer work because a near-symmetric composition
+hides a transpose.
+
+### Decision: one `n64h()`/`n64b()` helper pair, used with named N64 offsets
+
+`gbi.hpp`'s `rd16()` reads a halfword out of the byte-reversed buffer; the new
+`n64h(p, off)`/`n64b(p, off)` in `web_renderer.cpp` apply the `^ 2`/`^ 3` rule.
+`OP_VTX` now reads `n64h(p, 0/2/4/6/8/10)` and `n64b(p, 12..15)` — the N64 `Vtx`
+layout as written — so a future field addition cannot reintroduce the transpose
+silently.
+
+### Decision: apply `G_TEXTURE`'s scale, and only to vertices
+
+RT64 `RSP::setVertexCommon` computes `tc = (s * sc) / (65536 * 32)` with `sc`
+zero-extended from the 16-bit field; OB64's title sprites use `0x8000` (0.5), so
+the renderer was sampling twice the texture it should have. `RenderState` now
+carries `tex_scale_s`/`tex_scale_t` and `transform_vertex` applies them.
+Rectangles deliberately do **not** apply the scale: RT64's `RDP::drawRect` uses
+`uls/32` and `lrs/32` straight. The field must also be read *unsigned* (the
+session-21 code cast it to `int16_t`, turning `0x8000` into `-32768`).
+
+### Finding: I8/I4 texels must carry their intensity into alpha
+
+RT64's `I8ToFloat4`/`I4ToFloat4` return `i` for all four channels. The decoder
+set alpha to 255 for I formats, so a mask sampled as `TEXEL0_ALPHA` was
+constant `alpha = 1` and did nothing. Fixed, and `RGBA16` now uses RT64's
+`(c << 3) | (c >> 2)` replication rather than `c * 255 / 31` so the two
+renderers agree bit for bit.
+
+### Decision: port `rt64_blender.h`, do not guess the blend from `oml`
+
+The blend was approximated from `othermode_l & 0xFFF` with a two-entry
+heuristic that read the wrong bits, so OB64's title sprites
+(`oml = 0x00184240`, `FORCE_BL` set, `M1 = FRAMEBUFFER_COLOR`, `B1 =
+ONE_MINUS_A`) were drawn with blending **disabled** and the alpha mask thrown
+away.
+
+`Blender` now mirrors RT64: `OtherMode::blenderInputs` (L bits 16–31, packed
+`P1 P0 A1 A0 M1 M0 B1 B0`), `checkEmulationRequirements` (including both
+approximations), `usesAlphaBlend`, and a field-for-field port of
+`run`/`runCycle` into the fragment shader. GL blending is enabled exactly when
+`usesAlphaBlend` is true, with `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` — RT64 uses
+dual-source blending with the factor in the secondary output, which is the same
+thing here because the primary output's alpha carries that value and the canvas
+has no alpha channel.
+
+The title render mode decodes to the classic two-cycle XLU:
+`b0=[P=CC M=CC A=CC_A B=ONE]`, `b1=[P=CC M=FB A=CC_A B=1MA]`.
+
+### Decision: decode a tile's image from the *render tile*, not from the load
+
+The RDP samples TMEM through the render tile, whose `fmt`/`siz`/`line` need not
+match the load's. OB64's mask is the proof: it loads 16 bytes/row with 8-bit
+addressing (the standard `gDPLoadTextureBlock` idiom) and then declares the
+render tile as **I4**, making the sampled image 32x34, not 16x34 (each byte is
+two 4-bit texels). Decoding the load's rect with the load's format produced a
+thin silhouette that did not match the character at all.
+
+`RenderState` now keeps a *pending load* (set by `G_LOADTILE`/`G_LOADBLOCK`,
+claimed by the next `G_SETTILE` that names a different tile) and each
+`TileState` carries the source address and a lazily decoded image.
+`ensure_tile_image()` decodes the tile's rect at the tile's format with
+`line * 8` as the row stride — the same three inputs RT64 uses (`RDPTile` +
+`GPUTile`) — and queues one upload per key per display list. This replaces the
+`recent_loads[2]` "the last two loads are TEXEL0/TEXEL1" model, which paired
+the images correctly but decoded them wrongly.
+
+`decode_texture_rect()` now takes an explicit `row_bytes`; the old
+`width * bytes_per_texel` was only accidentally right when the load's format
+matched the tile's.
+
+### Decision: verify a sprite by rendering one and comparing it with its textures
+
+Screenshots were actively misleading here (a 20x37 character at 1:1, through a
+2x canvas and a JPEG re-encode, reads as noise). Two probes were added instead:
+
+- `debug/probes/textures.cjs` dumps the last 24 decoded images (a frame's
+  `mask, colour` pairs) as RGB and alpha views, plus the `colour × mask`
+  composite of each pair.
+- `debug/probes/spritecheck.cjs` sets `ogre_gfx_debug_flags(2)` so the renderer
+  draws only the first sprite, reads the canvas back, and writes the rendered
+  crop beside that composite. Matching means the whole path
+  (vertex → decode → combiner → blender → GL) is right.
+
+Two debug entry points exist for this and only this: `ogre_gfx_debug_tex(i,
+&w, &h, &tile, &fmt, &siz)` and `ogre_gfx_debug_flags(bits)` (`1` = ignore
+alpha blending, `2` = draw only the first sprite).
+
+---
+
 ## 2026-09-11 (session 22) — game audio is muted by default
 
 ### Decision: silence the output, keep the ring draining

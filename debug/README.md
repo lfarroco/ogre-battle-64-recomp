@@ -31,6 +31,8 @@ node debug/probes/progress.cjs --attempts 6 --secs 75   # how far the intro gets
 |---|---|
 | `server.py` | threaded static server on `:8931` with the COOP/COEP headers |
 | `lib/harness.cjs` | shared boot / retry / sampling / pixel / output helpers |
+| `probes/textures.cjs` | dump the decoded tile images + `colour x mask` composites |
+| `probes/spritecheck.cjs` | render one sprite and compare it with its textures |
 | `probes/*.cjs` | the probes (see the guide's table) |
 | `out/` | captured artifacts (gitignored — never commit screenshots) |
 Requirements: Node ≥ 18, `npm install` here, `build-wasm/` built, and your own

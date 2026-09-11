@@ -188,6 +188,29 @@ hardware. RT64 remains the primary native renderer throughout. See
     sprite soldiers. The on-page console was also replaced by a bounded
     `window.ogreLog` ring buffer (per-line DOM writes were throttling the
     emulator). See `docs/HANDOFF-2026-09-10-session20.md`.
+  - ✅ **The title sprites are decoded the way the RDP samples them (session 23)**:
+    five decode bugs kept the title scene looking like scrambled slivers. Every
+    `Vtx` field was read at its *logical* offset out of the runtime's
+    byte-reversed rdram (the accessor rule is `off ^ 2` for halfwords), so the
+    renderer actually decoded `(y,x) (flag,z) (t,s) (a,b,g,r)` - the sprite
+    quads were transposed and their texture coordinates with them. `G_TEXTURE`'s
+    scale (`sc = 0x8000` -> `s/64`, not `s/32`) was ignored; I8/I4 texels did not
+    carry their intensity into alpha, so the `TEXEL0_ALPHA` mask was constantly
+    1; the blend was guessed from `othermode_l & 0xFFF` with a heuristic that
+    read the wrong bits (OB64's sprites are a two-cycle `FORCE_BL` XLU, so
+    blending was off); and the texture was decoded with the *load*'s
+    format/rect instead of the *render tile*'s (OB64 loads its 32x34 I4 mask as
+    16 bytes/row of 8-bit texels). `Blender` now mirrors `rt64_blender.h` field
+    for field and `ensure_tile_image()` decodes each tile's rect at the tile's
+    format with `line * 8` as the stride. Verified by two new probes:
+    `textures.cjs` (dump the decoded images and their `colour x mask`
+    composites) and `spritecheck.cjs` (render one sprite and compare it with
+    that composite) - they now match. `boot.cjs`: 21 680 non-black / 16 492
+    colorful, twelve readable characters. Next: the idle trajectory (unchanged -
+    ~half of all boots never build a real display list), a reference frame to
+    compare against, and the remaining combiner inputs
+    (`NOISE`/`K4`/`K5`/`LOD_FRACTION`/keys). See
+    `docs/HANDOFF-2026-09-11-session23.md`.
   - ✅ **Game audio is muted by default (session 22)**: the audio microcode is
     not emulated (the RSP audio task is only auto-completed), so what the game
     hands the AI interface is garbage and playing it is a wall of screeching.

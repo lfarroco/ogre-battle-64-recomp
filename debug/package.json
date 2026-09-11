@@ -14,7 +14,9 @@
     "stats": "node probes/stats.cjs",
     "diag": "node probes/diag.cjs",
     "logmode": "node probes/logmode.cjs",
-    "testdraw": "node probes/testdraw.cjs"
+    "testdraw": "node probes/testdraw.cjs",
+    "textures": "node probes/textures.cjs",
+    "spritecheck": "node probes/spritecheck.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"
