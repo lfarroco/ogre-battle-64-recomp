@@ -20,5 +20,14 @@ tools/RecompFrontend/
 # RT64 is a git submodule (git submodule update --init tools/RT64)
 
 
+# Browser probe tooling (debug/): dependencies and captured artifacts
+node_modules/
+debug/out/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+
 # OS junk
 .DS_Store

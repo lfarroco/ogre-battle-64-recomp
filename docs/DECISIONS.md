@@ -5,6 +5,43 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-11 — the `/tmp` browser probes are consolidated into `debug/`
+
+### Decision: keep the probe harness in the repo, not in `/tmp`
+
+Every browser session so far drove the wasm build with one-off Playwright
+scripts under `/tmp/ogre-probe` (18 files, ~1 200 lines), each hard-coding the
+Playwright install at `/Users/momo/dev/fatos/node_modules/playwright`, the ROM
+path, and the `:8931` URL. They were never committed, and loss had already
+started: session 16's `server.py` was gone from disk while its process was still
+serving `:8931`, and the base `probe.cjs` that `probe-delay.cjs` documents itself
+as extending no longer existed.
+
+The reusable part is the harness, not the individual scripts: the boot-retry
+rule, the page contract (`#rom-input`, `#gfxstats`, `#gfx-status`,
+`#game-canvas`, `#status`, `window.ogreLog`), and the measurement methods. So
+`debug/` now holds a shared `lib/harness.cjs`, eight curated probes (`boot`,
+`shots`, `fps`, `vi`, `stats`, `diag`, `logmode`, `testdraw`), the reconstructed
+COOP/COEP `server.py`, and a Playwright `package.json`. Paths and budgets come
+from flags (`--url`, `--rom`, `--out`, `--out-dir`, `--attempts`, `--secs`) or
+`OGRE_URL`/`OGRE_ROM`/`OGRE_OUT`; artifacts go to the gitignored `debug/out/`.
+See `docs/guides/web-probes.md`.
+
+### Decision: the "idle trajectory" retry lives in the harness, not in each probe
+
+Roughly one in two boots stalls at ~3 display lists (`tasks=1` in `#gfxstats`)
+instead of submitting the game's display list (`tasks>=2`). `attemptLoop()`
+re-runs the whole boot until a real list arrives; a probe without it reports a
+false negative about half the time. That rule, plus reading `window.ogreLog`
+instead of the DOM, is the main reason the probes belong in the repo rather than
+in a session's shell history.
+
+The one-off investigation scripts (the freeze/locate/tap variants) are not
+carried over; their findings are in the session handoffs. Rebuild them from the
+harness if those bugs recur.
+
+---
+
 ## 2026-09-10 (session 20) — The browser renderer now draws the title scene; seven WebGL2-prototype bugs found (viewport, matrix decode, matrix stack, empty rects)
 
 ### Finding: the black screen was seven independent renderer bugs, not a game/runtime problem

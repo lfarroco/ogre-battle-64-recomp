@@ -1,0 +1,24 @@
+{
+  "name": "ogre-battle-64-debug",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Headless-browser probes for the Ogre Battle 64 WebAssembly build",
+  "type": "commonjs",
+  "scripts": {
+    "serve": "python3 server.py",
+    "boot": "node probes/boot.cjs",
+    "shots": "node probes/shots.cjs",
+    "fps": "node probes/fps.cjs",
+    "vi": "node probes/vi.cjs",
+    "stats": "node probes/stats.cjs",
+    "diag": "node probes/diag.cjs",
+    "logmode": "node probes/logmode.cjs",
+    "testdraw": "node probes/testdraw.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

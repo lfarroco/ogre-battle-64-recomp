@@ -21,6 +21,7 @@ full plan, current status, and technical findings.
 ```
 assets/                your ROM (gitignored; big-endian .z64 expected)
 asm/                   splat-generated disassembly
+debug/                 headless-browser probes for the wasm build (see debug/README.md)
 config.yaml            splat config (segments, vram mapping)
 config.toml            N64Recomp config
 Makefile               assemble + link + recompile

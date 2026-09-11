@@ -22,6 +22,7 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 | [guides/app-architecture.md](guides/app-architecture.md) | App structure, runtime flow, callback responsibilities. |
 | [guides/rsp-microcode.md](guides/rsp-microcode.md) | RSP microcode research and recompilation notes. |
 | [guides/linux-migration.md](guides/linux-migration.md) | Moving the dev environment to Ubuntu: prerequisites and macOS-specific code to remove. |
+| [guides/web-probes.md](guides/web-probes.md) | Headless-browser probes (`debug/`): serving the wasm build, running the probes, the page contract. |
 | [PLAN.md](../PLAN.md) | The high-level project plan and roadmap. |
 
 ## Conventions
@@ -29,6 +30,9 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 - ROM dumps / extracted assets are **never** committed to this repository.
 - All third-party tools live under `tools/` as git submodules; the app project
   lives under `app/`.
+- Our own debugging/verification tooling lives under `debug/` (the headless
+  browser probes); it is not part of the app build. See
+  [guides/web-probes.md](guides/web-probes.md).
 - Local patches to upstream tools are kept as `*.patch` files in the repo root
   (`n64recomp-ob64.patch`, `rt64-plume-sdl.patch`) and applied to the submodule /
   vendored clone — never commit modifications *inside* a submodule (a submodule
