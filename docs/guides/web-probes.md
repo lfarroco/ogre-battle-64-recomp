@@ -125,6 +125,12 @@ probe (and `logmode.cjs` is there to catch it).
   page does no per-line DOM work (session 20: that was throttling the emulator).
 - Optional wasm exports: `Module._ogre_set_trace_enabled(0|1)` (`vi.cjs`),
   `Module._ogre_gfx_test_draw()` (`testdraw.cjs`).
+- `window.ogreAudio` — `enabled()` / `setEnabled(bool)`. **Game audio is muted
+  by default** (the audio microcode is not emulated, so the samples screech);
+  the worklet still drains the ring so the game sees the same backpressure.
+  `?audio` on the URL starts unmuted. A default boot logs
+  `game audio MUTED - add ?audio to the URL to hear it`, which is what a probe
+  should assert if it ever needs to care.
 
 ## Output
 

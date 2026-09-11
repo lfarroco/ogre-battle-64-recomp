@@ -18,6 +18,13 @@
 // The worklet is the only consumer and advances `tail` itself (by whole
 // frames) so the producer can detect a full ring. Underruns output silence
 // and snap the read position to the newest data.
+//
+// MUTED BY DEFAULT: the page sends `muted: true` unless it was loaded with
+// ?audio. A muted worklet still runs the whole drain path (same `tail`
+// bookkeeping, same underrun behaviour) and only zeroes the samples it writes
+// to the output - the game's audio thread must keep seeing identical
+// backpressure, and the samples themselves are not real audio yet (the RSP
+// audio microcode is not emulated, so they screech).
 
 class OgreAudioProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -27,6 +34,7 @@ class OgreAudioProcessor extends AudioWorkletProcessor {
     this.mask = 0;
     this.readPos = 0;  // absolute float frame position (head/tail space)
     this.ready = false;
+    this.muted = true;  // silence unless the page asks for audio (?audio)
     this.port.onmessage = (event) => {
       const d = event.data;
       if (d && d.type === "init") {
@@ -34,7 +42,10 @@ class OgreAudioProcessor extends AudioWorkletProcessor {
         this.ring = new Int16Array(d.sab, d.ringPtr / 2, d.ringFrames * 2);
         this.mask = d.ringFrames - 1;
         this.readPos = 0;
+        this.muted = d.muted !== false;
         this.ready = true;
+      } else if (d && d.type === "mute") {
+        this.muted = d.muted !== false;
       }
     };
   }
@@ -94,6 +105,14 @@ class OgreAudioProcessor extends AudioWorkletProcessor {
     if (consumedFrames >= 1) {
       // Free the consumed frames for the producer (whole frames only).
       Atomics.add(state, 1, Math.floor(consumedFrames));
+    }
+
+    if (this.muted) {
+      // Drain, don't play. Doing it here (rather than skipping the loop above)
+      // keeps the tail/readPos bookkeeping - and therefore the game's view of
+      // the ring - byte-for-byte identical to the unmuted path.
+      left.fill(0);
+      right.fill(0);
     }
 
     return true;

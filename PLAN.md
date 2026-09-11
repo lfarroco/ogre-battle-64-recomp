@@ -188,6 +188,13 @@ hardware. RT64 remains the primary native renderer throughout. See
     sprite soldiers. The on-page console was also replaced by a bounded
     `window.ogreLog` ring buffer (per-line DOM writes were throttling the
     emulator). See `docs/HANDOFF-2026-09-10-session20.md`.
+  - ✅ **Game audio is muted by default (session 22)**: the audio microcode is
+    not emulated (the RSP audio task is only auto-completed), so what the game
+    hands the AI interface is garbage and playing it is a wall of screeching.
+    The AudioWorklet is still created and still drains the ring (the game's
+    `get_frames_remaining()` backpressure is load-bearing), only the output is
+    silenced. `?audio` on the URL, or `window.ogreAudio.setEnabled(true)`,
+    unmutes it for audio work. See `docs/HANDOFF-2026-09-11-session22.md`.
   - ✅ **The intro's frame-31 "runaway walk" is fixed (session 21)**: OB64's
     display lists mix KSEG0 and **segmented** addresses, and the renderer
     resolved a segment as `(base_high_byte << 24) | offset` instead of RT64's

@@ -43,7 +43,9 @@
 </div>
 <p class="muted" id="controls">
   Controls (keyboard): X=A, Z=B, C=Z, Enter=Start, Q=L, E=R, arrows=D-pad,
-  I/K/J/L=C buttons. Gamepads: slots 1-3. Audio starts after you pick a ROM.
+  I/K/J/L=C buttons. Gamepads: slots 1-3. Game audio is <b>muted</b> (the audio
+  microcode is not emulated yet, so the samples screech) — add <code>?audio</code>
+  to the URL to hear it, and <code>?log</code> for the full console.
 </p>
 <div id="gfx-wrap" style="margin-bottom:12px;">
   <canvas id="game-canvas" width="640" height="480"

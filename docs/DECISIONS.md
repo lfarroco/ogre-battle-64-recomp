@@ -5,6 +5,51 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-11 (session 22) — game audio is muted by default
+
+### Decision: silence the output, keep the ring draining
+
+The audio microcode is not emulated (the RSP audio task is only auto-completed),
+so the samples the game hands to the AI are not real audio: playing them is a
+wall of screeching. The page therefore **does not play game audio unless it is
+asked to**.
+
+Two things had to stay exactly as they were, because the audio path is
+load-bearing for the game's flow (session 15 had to unblock it to get the boot
+moving):
+
+- the **AudioWorklet is still created, connected and draining** the ring buffer,
+  so the game's `get_frames_remaining()` sees identical backpressure;
+- the ring bookkeeping in the worklet (`tail`, `readPos`, the underrun snap) runs
+  unchanged - a muted worklet only zeroes the samples it writes to the output.
+
+Silencing at the *page* layer rather than in the app/runtime means no wasm
+rebuild, no change to the game's view of the host, and no risk of re-breaking
+the boot path that the audio plumbing feeds.
+
+### How to enable it
+
+`?audio` on the page URL (also `?audio=1`), or at runtime:
+
+```js
+window.ogreAudio.enabled()        // false by default
+window.ogreAudio.setEnabled(true) // unmute (screeches until the audio ucode runs)
+```
+
+The page logs the state on connect (`game audio MUTED - add ?audio to the URL to
+hear it`) and still logs when the game starts queueing samples
+(`game is queueing audio (N frames buffered, muted)`), so a silent page is
+distinguishable from a stalled audio path.
+
+### Why this is a deferral, not a fix
+
+Making audio real is Phase 6 work with two independent halves: run the game's
+audio microcode (RSPRecomp/`rsp_callbacks` instead of the auto-response that
+satisfies the task), and only then is `queue_audio_samples()` fed actual PCM.
+The switch above is exactly what that work needs: unmute and listen.
+
+---
+
 ## 2026-09-11 (session 21) — `G_SETOTHERMODE_H/L` never applied anything; the combiner is now evaluated the way RT64 does
 
 ### Finding: the othermode decode double-shifted its data, so OTHERMODE_H stayed 0

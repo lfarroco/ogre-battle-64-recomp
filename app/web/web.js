@@ -25,6 +25,32 @@
   var bootStartTime = 0;
   var audioContext = null;
 
+  // --- Audio switch -------------------------------------------------------------
+  //
+  // Game audio is MUTED by default. The audio microcode is not emulated yet (the
+  // RSP audio task is auto-completed, so whatever the game hands the AI is not
+  // real audio), and playing it is a wall of screeching. The AudioWorklet is
+  // still created and still drains the ring buffer, so the game sees exactly
+  // the same backpressure as before - only the samples written to the output
+  // are silenced. Add ?audio to the URL (or call
+  // window.ogreAudio.setEnabled(true) at runtime) to hear it while working on
+  // the audio path.
+  function urlFlag(name) {
+    var m = new RegExp("(^|[?&])" + name + "(=([^&]*))?(&|$)").exec(window.location.search);
+    if (!m) {
+      return null;
+    }
+    var v = m[3];
+    if (v === undefined || v === "" || v === "1" || v === "true" || v === "on") {
+      return true;
+    }
+    if (v === "0" || v === "false" || v === "off") {
+      return false;
+    }
+    return true;
+  }
+  var audioEnabled = urlFlag("audio") === true;
+
   // The log lives in window.ogreLog (index.html), which is a bounded ring buffer
   // and does not touch the DOM unless ?log was passed. Never append to the page
   // per line: the wasm threads' printf is proxied onto the main thread, so
@@ -277,17 +303,33 @@
         sab: Module.HEAPU8.buffer,
         statePtr: statePtr,
         ringPtr: ringPtr,
-        ringFrames: 32768  // kAudioRingFrames in app/src/web_platform.cpp
+        ringFrames: 32768,  // kAudioRingFrames in app/src/web_platform.cpp
+        muted: !audioEnabled
       });
       node.connect(audioContext.destination);
+      // The worklet keeps draining the ring even while muted, so the game's
+      // audio thread sees the same producer/consumer backpressure either way.
+      window.ogreAudio = {
+        enabled: function () { return audioEnabled; },
+        setEnabled: function (on) {
+          audioEnabled = !!on;
+          node.port.postMessage({ type: "mute", muted: !audioEnabled });
+          log("[web:audio] " + (audioEnabled ? "unmuted (game audio will play - it screeches until the audio microcode is emulated)"
+                                             : "muted"));
+        }
+      };
       audioContext.resume().then(function () {
-        log("[web:audio] AudioWorklet connected (" + audioContext.sampleRate + " Hz context, state " + audioContext.state + ")");
-        // Report once audio actually starts flowing.
+        log("[web:audio] AudioWorklet connected (" + audioContext.sampleRate + " Hz context, state " +
+            audioContext.state + "), game audio " +
+            (audioEnabled ? "ENABLED (?audio)" : "MUTED - add ?audio to the URL to hear it"));
+        // Report once the game actually starts queueing samples, so a silent
+        // page is distinguishable from a stalled audio path.
         var audioWatch = window.setInterval(function () {
           if (typeof Module._ogre_audio_frames_available === "function") {
             var frames = Module._ogre_audio_frames_available();
             if (frames > 0) {
-              log("[web:audio] game audio is flowing (" + frames + " frames buffered)");
+              log("[web:audio] game is queueing audio (" + frames + " frames buffered" +
+                  (audioEnabled ? "" : ", muted") + ")");
               window.clearInterval(audioWatch);
             }
           }
