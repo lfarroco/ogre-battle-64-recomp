@@ -108,7 +108,7 @@ question was whether the scene advances. It does, but far below real time:
   a corrupt `data_ptr` on whatever task comes next. That is the current end of
   the intro in the browser.
 
-**Root cause found for part of the slowdown: the page log was unbounded.**
+**Root cause found for part of the slowdown: the page log was rendered per line.**
 `index.html`'s `print`/`printErr` and `web.js`'s `log()` did
 `status.textContent += line`. That is an O(n) DOM write *per line* on the
 browser main thread - and every wasm thread's `printf` is proxied onto that same
@@ -116,14 +116,44 @@ thread - so the status element grew to 124 KB within a minute and every append
 copied all of it, stalling the threads that were trying to print. `[snap]`
 queue dumps and `[rsp]` task lines dominate that traffic.
 
-Fixed by moving the log into a bounded JS string (`OGRE_STATUS_CAP = 24000`)
-rendered on a 200 ms timer, shared by `index.html` (module `print`/`printErr`)
-and `web.js` (`ogreStatusAppend`). Measured effect: frames 3->16 went from
-4 977 ms to 2 464 ms, and the frame 24->32 gap from 12 730 ms to 5 721 ms -
-roughly 2x - with the rendered frame byte-identical (same screenshot SHA-256).
-The remaining slowness is not the page log; the next suspects are the VI thread's
-retrace pacing (29/s instead of 60/s), the multi-KB `[snap]` dump every 90 VI
-loop iterations, and the game's own recompiled CPU cost.
+**The on-page console is now gone entirely.** Lines go into a bounded ring
+buffer (20 000 lines) exposed as `window.ogreLog`, so the page does no per-line
+DOM work at all:
+
+```js
+ogreLog.tail(200)        // last 200 lines
+ogreLog.text()           // everything retained (cached; rebuilt only on append)
+ogreLog.find(/GFX-/)     // matching lines
+ogreLog.contains("...")  // cheap membership test (no string build)
+ogreLog.save()           // download a .log file
+ogreLog.clear()
+ogreLog.show(true)       // mirror onto the page; also enabled by a ?log URL flag
+```
+
+`#status` is now a single line (the most recent entry, refreshed on a 200 ms
+timer), so the page still shows boot progress at ~5 tiny DOM writes per second;
+`?log` turns it back into the full scrolling console for debugging. Every probe
+in `/tmp/ogre-probe` now reads `window.ogreLog` instead of `#status`.
+
+Measured effect, using the frame-submission timestamps (frames 3->16 span and
+frame 24->32 span, each on an advanced trajectory):
+
+| page log | 3->16 | 24->32 |
+|---|---|---|
+| unbounded `textContent +=` | 4 977 ms | 12 730 ms |
+| capped string, 200 ms render | 2 464 ms | 5 721 ms |
+| none (`ogreLog` only) | 3 114 ms | 5 507 ms |
+
+So the unbounded console cost roughly 2x, and removing it altogether lands in the
+same range as bounding it - the run-to-run variance (boot trajectory) dominates
+the rest. `probe-fps.cjs` measures **2.5-3.5 gfx frames/s** either way: the log
+was a real contributor, not the whole story.
+
+**Remaining pacing suspects (not the page):** the VI thread delivers retraces at
+**29.4/s instead of 60/s**; it runs a multi-KB `[snap]` queue-snapshot dump every
+90 loop iterations; and the game's own recompiled-CPU cost per frame has not been
+measured. The game renders ~10x slower than the retrace rate, so its frame loop
+is the next thing to profile.
 
 ## Open questions (ordered, with the data needed to settle each)
 
@@ -185,19 +215,25 @@ EM_CACHE=/Users/momo/.cache/emscripten-ogre cmake --build build-wasm -j 8
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8931/app/web/index.html
 node /tmp/ogre-probe/probe-final.cjs 10 45 /tmp/ogre-probe/run   # one capture
 node /tmp/ogre-probe/probe-shots.cjs /tmp/ogre-probe/ts 8 45 5 1500  # time series
+node /tmp/ogre-probe/probe-fps.cjs 10 12 /tmp/ogre-probe/fps       # frame rate
+node /tmp/ogre-probe/probe-vi.cjs 8 4000                           # retrace rate
 ```
 
+The wasm build also serves `index.html`/`web.js` directly, so JS-only changes
+need no rebuild - just a page reload. In the browser, inspect the runtime log
+with `ogreLog.tail(200)` / `ogreLog.find(/GFX-/)`, or open `index.html?log`.
+
 **Trajectory bifurcation is still real:** roughly one in two boots stays on the
-idle trajectory; probes must retry (`probe-final.cjs` and `probe-shots.cjs` both
-do).
+idle trajectory (it stalls at ~3 display lists); probes must retry on an
+advanced trajectory, not just on "a real DL appeared".
 
 ## Files changed (tracked)
 
 - `app/src/web_renderer.cpp` - the seven renderer fixes, the capped per-draw
   telemetry, and the `t=` timestamp on the frame-submission milestone.
-- `app/web/index.html` - bounded status log (`ogreStatusAppend`, 200 ms render
-  timer, `OGRE_STATUS_CAP`).
-- `app/web/web.js` - `log()`/`pollMilestones()` append through the bounded log.
+- `app/web/index.html` - `window.ogreLog` ring buffer replacing the on-page
+  console; `#status` reduced to one line, full console behind `?log`.
+- `app/web/web.js` - `log()`/`pollMilestones()` append to `window.ogreLog`.
 - `docs/HANDOFF-2026-09-10-session20.md` - this file.
 - `docs/DECISIONS.md` - session-20 entry.
 - `tools/RT64` - pre-existing submodule pointer change, not touched this session.

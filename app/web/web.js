@@ -25,21 +25,16 @@
   var bootStartTime = 0;
   var audioContext = null;
 
-  // The status log is owned by index.html, which keeps it in a bounded string
-  // and renders it on a 200 ms timer (appending to textContent directly is O(n)
-  // per line on the main thread, and the wasm threads' printf is proxied onto
-  // that same thread). Fall back to the old behaviour if it is missing.
-  function appendStatus(text) {
-    if (typeof window.ogreStatusAppend === "function") {
-      window.ogreStatusAppend(text);
+  // The log lives in window.ogreLog (index.html), which is a bounded ring buffer
+  // and does not touch the DOM unless ?log was passed. Never append to the page
+  // per line: the wasm threads' printf is proxied onto the main thread, so
+  // per-line DOM writes throttle the emulator.
+  function log(text) {
+    if (window.ogreLog && typeof window.ogreLog.append === "function") {
+      window.ogreLog.append(text);
       return;
     }
-    status.textContent += text;
-    status.scrollTop = status.scrollHeight;
-  }
-
-  function log(text) {
-    appendStatus(text + "\n");
+    status.textContent += text + "\n";
   }
 
   function moduleReady() {
@@ -74,7 +69,7 @@
     }
     var text = Module.UTF8ToString(ptr);
     if (text.length > lastMilestoneLen) {
-      appendStatus(text.slice(lastMilestoneLen));
+      log(text.slice(lastMilestoneLen));
       lastMilestoneLen = text.length;
     }
   }

@@ -13,9 +13,16 @@
   h1 { font-size: 20px; margin: 0 0 16px; }
   #rom { margin-bottom: 16px; }
   #rom input { margin-left: 8px; }
+  /* One line only: the full log lives in window.ogreLog (see below). Rendering
+     it on the page costs DOM work on the browser main thread, which is also
+     where every wasm thread's printf is proxied - see the note in the script. */
   #status {
     background: #0c0e11; border: 1px solid #2a2e35; border-radius: 6px;
-    padding: 12px; height: 60vh; overflow-y: auto; white-space: pre-wrap;
+    padding: 6px 12px; font-size: 12px; white-space: pre; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #status.log-mode {
+    height: 60vh; overflow-y: auto; white-space: pre-wrap; padding: 12px;
     font-size: 13px; line-height: 1.5;
   }
   .muted { color: #6b7280; }
@@ -47,6 +54,12 @@
   </p>
 </div>
 <pre id="status">Initializing...</pre>
+<p class="muted" style="font-size:12px; margin:6px 0 0;">
+  Full log is kept in memory, not on the page:
+  <code>ogreLog.tail(200)</code>, <code>ogreLog.text()</code>,
+  <code>ogreLog.find(/GFX-/)</code>, <code>ogreLog.save()</code>,
+  <code>ogreLog.clear()</code>. Append <code>?log</code> to the URL to show it here.
+</p>
 <h2 style="font-size:14px; margin:16px 0 6px;">Graphics workload (milestone 6)</h2>
 <pre id="gfxstats" class="muted" style="white-space:pre-wrap; font-size:12px; line-height:1.5; margin:0 0 16px;">(no display lists submitted yet)</pre>
 
@@ -58,51 +71,162 @@
 <script>
   var OGRE_WASM_DIR = OGRE_WASM_DIR || "../../build-wasm/";
   // The vendored runtime's scheduler/message-queue/VI/drainer debug traces are
-  // unconditional and extremely chatty; keep them out of the page status so
-  // the milestone log stays readable (they still go to the browser console).
-  // Debugging override: set window.OGRE_STATUS_FILTER before this script runs.
+  // unconditional and extremely chatty; keep them out of the log by default so
+  // it stays useful. Debugging override: set window.OGRE_STATUS_FILTER before
+  // this script runs.
   var OGRE_STATUS_FILTER = window.OGRE_STATUS_FILTER || /^\[(sch|mq|ev|renderer|VI|drainer)\]/;
-  // The status log is bounded and rendered on a timer. Appending straight to
-  // `status.textContent` is O(n) per line on the browser main thread, and every
-  // wasm thread's printf/printErr is proxied onto that thread - so an unbounded
-  // log (hundreds of KB within a minute, mostly [snap]/[rsp] lines) throttles
-  // the emulator itself. Keep the text in a string, cap it, and touch the DOM
-  // at most five times a second.
-  var OGRE_STATUS_CAP = window.OGRE_STATUS_CAP || 24000;
-  var ogreStatusLog = "";
-  var ogreStatusDirty = false;
-  var ogreStatusEl = null;
-  window.ogreStatusAppend = function (text) {
-    ogreStatusLog += text;
-    ogreStatusDirty = true;
-    if (ogreStatusLog.length > OGRE_STATUS_CAP * 2) {
-      ogreStatusLog = ogreStatusLog.slice(-OGRE_STATUS_CAP);
+
+  // The log is NOT rendered on the page by default. Every line ultimately comes
+  // from a wasm thread's printf, and Emscripten proxies those writes onto the
+  // browser main thread, so any per-line DOM work (`status.textContent += ...`,
+  // which is O(n) in the log length) directly throttles the emulator. Measured
+  // on this build: a 124 KB status element halved the game's frame rate.
+  //
+  // Instead the lines go into a bounded ring buffer exposed as window.ogreLog.
+  // Inspect it on demand from the devtools console:
+  //     ogreLog.tail(200)        last 200 lines
+  //     ogreLog.text()           everything currently retained
+  //     ogreLog.find(/GFX-/)     lines matching a regex
+  //     ogreLog.save()           download a .log file
+  //     ogreLog.clear()
+  // Add ?log to the URL (or ogreLog.show(true)) to mirror it onto the page.
+  window.ogreLog = (function () {
+    var CAP = window.OGRE_LOG_CAP || 20000;  // lines retained
+    var lines = new Array(CAP);
+    var count = 0;
+    var next = 0;
+    var listeners = [];
+    // text() is polled (by the probes and by anyone inspecting the log), so the
+    // joined string is cached and only rebuilt when a line is appended.
+    var version = 0;
+    var cachedVersion = -1;
+    var cachedText = "";
+
+    function at(i) {
+      return lines[(next - count + CAP + i) % CAP];
     }
-  };
+    function slice(from, n) {
+      var out = new Array(n);
+      for (var i = 0; i < n; i++) {
+        out[i] = at(from + i);
+      }
+      return out.join("\n");
+    }
+    return {
+      cap: CAP,
+      append: function (text) {
+        if (typeof text !== "string") {
+          text = String(text);
+        }
+        var parts = text.split("\n");
+        for (var i = 0; i < parts.length; i++) {
+          // Emscripten's print callbacks already include the trailing newline.
+          if (i === parts.length - 1 && parts[i] === "") {
+            break;
+          }
+          lines[next] = parts[i];
+          next = (next + 1) % CAP;
+          if (count < CAP) {
+            count++;
+          }
+        }
+        version++;
+        for (var j = 0; j < listeners.length; j++) {
+          listeners[j](parts);
+        }
+      },
+      length: function () { return count; },
+      version: function () { return version; },
+      text: function () {
+        if (cachedVersion !== version) {
+          cachedText = count ? slice(0, count) : "";
+          cachedVersion = version;
+        }
+        return cachedText;
+      },
+      contains: function (needle) {
+        for (var i = 0; i < count; i++) {
+          if (at(i).indexOf(needle) !== -1) {
+            return true;
+          }
+        }
+        return false;
+      },
+      tail: function (n) {
+        n = Math.min(n || 200, count);
+        return n > 0 ? slice(count - n, n) : "";
+      },
+      head: function (n) {
+        n = Math.min(n || 200, count);
+        return n > 0 ? slice(0, n) : "";
+      },
+      find: function (pattern) {
+        var rx = (pattern instanceof RegExp) ? pattern : new RegExp(pattern);
+        var out = [];
+        for (var i = 0; i < count; i++) {
+          var line = at(i);
+          if (rx.test(line)) {
+            out.push(line);
+          }
+        }
+        return out;
+      },
+      clear: function () {
+        count = 0;
+        next = 0;
+      },
+      save: function (filename) {
+        var blob = new Blob([this.text()], { type: "text/plain" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename || "ogre.log";
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      },
+      // Mirror the log onto #status. Off by default; ?log turns it on.
+      show: function (enabled) {
+        showLog = !!enabled;
+        statusEl.classList.toggle("log-mode", showLog);
+        statusDirty = true;
+      },
+      onLine: function (fn) { listeners.push(fn); },
+    };
+  })();
+
+  var showLog = /(^|[?&])log($|[=&])/.test(window.location.search);
+  var statusEl = document.getElementById("status");
+  var statusDirty = false;
+  window.ogreLog.onLine(function () { statusDirty = true; });
+  if (showLog) {
+    statusEl.classList.add("log-mode");
+  }
+  // The only DOM work: at most 5 times a second, rendering one line (default)
+  // or the retained tail (?log).
   setInterval(function () {
-    if (!ogreStatusDirty) {
+    if (!statusDirty) {
       return;
     }
-    ogreStatusDirty = false;
-    if (ogreStatusEl === null) {
-      ogreStatusEl = document.getElementById("status");
+    statusDirty = false;
+    if (showLog) {
+      statusEl.textContent = window.ogreLog.tail(400);
+      statusEl.scrollTop = statusEl.scrollHeight;
+    } else {
+      statusEl.textContent = window.ogreLog.tail(1) || "Initializing...";
     }
-    ogreStatusEl.textContent =
-      ogreStatusLog.length > OGRE_STATUS_CAP ? ogreStatusLog.slice(-OGRE_STATUS_CAP) : ogreStatusLog;
-    ogreStatusEl.scrollTop = ogreStatusEl.scrollHeight;
   }, 200);
+
   var Module = {
     onRuntimeInitialized: function () {
-      window.ogreStatusAppend("[web] WASM runtime initialized. Select a ROM to begin.\n");
+      window.ogreLog.append("[web] WASM runtime initialized. Select a ROM to begin.");
     },
     print: function (text) {
       if (!OGRE_STATUS_FILTER.test(text)) {
-        window.ogreStatusAppend("[stdout] " + text + "\n");
+        window.ogreLog.append("[stdout] " + text);
       }
     },
     printErr: function (text) {
       if (!OGRE_STATUS_FILTER.test(text)) {
-        window.ogreStatusAppend("[stderr] " + text + "\n");
+        window.ogreLog.append("[stderr] " + text);
       }
     }
   };
