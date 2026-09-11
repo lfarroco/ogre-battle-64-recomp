@@ -38,6 +38,17 @@ Applying it visibly truncates the sprites (the vertical span drops below the
 loaded texture height), so it is left unapplied and recorded as the top open
 question with the per-draw values logged in `[GFX-V]`.
 
+### Decision: no per-line DOM logging; the runtime log lives on `window.ogreLog`
+
+The page used to append every `printf` line to `#status` with
+`textContent += line`. Emscripten proxies wasm-thread output onto the browser
+main thread, so that O(n) write per line blocked the printing threads and cost
+roughly 2x of the frame rate once the log passed 100 KB. Lines now go into a
+bounded ring buffer exposed as `window.ogreLog`
+(`tail`/`text`/`find`/`contains`/`save`/`clear`/`show`), `#status` renders one
+line on a 200 ms timer, and `?log` restores the full console for debugging. Keep
+the page free of per-line DOM work whenever wasm threads can print.
+
 ---
 
 ## 2026-08-29 (session 10) — The VI-thread segfault was a runtime pointer-translation bug; osViSetMode now validates its argument; the GBI question is resolved (auto-detected F3DEX2 is correct)
