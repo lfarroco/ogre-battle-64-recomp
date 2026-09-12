@@ -47,6 +47,9 @@ int main(int argc, char** argv) {
     if (!ogre::init_sdl()) {
         return EXIT_FAILURE;
     }
+    // OGRE_TAP_MS / OGRE_EXIT_AFTER_MS make a run self-driving and bounded (see
+    // sdl_platform.hpp); both are off unless set.
+    ogre::configure_automation(ogre::g_platform);
 
     fprintf(stderr, "[boot] create_window...\n");
     auto window_handle = ogre::create_window(ogre::g_platform, "Ogre Battle 64: Person of Lordly Caliber");

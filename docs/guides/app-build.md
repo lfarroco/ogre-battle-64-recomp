@@ -61,6 +61,26 @@ On first run the app:
 
 If no ROM path is given, the app looks for the stored ROM in the config dir.
 
+## Scripted runs
+
+Two environment variables make a run self-driving and bounded, for measurements
+and captures without a human at the keyboard (see `docs/DECISIONS.md`,
+session 25). Both default to 0 (off).
+
+| Variable | Effect |
+|---|---|
+| `OGRE_TAP_MS=<n>` | controller 0 presses Start for 150 ms out of every `n` ms (the native equivalent of the web probes' Enter tap) |
+| `OGRE_EXIT_AFTER_MS=<n>` | the main thread requests exit after `n` ms, and the app prints the last recompiled function each game thread entered |
+| `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces (very chatty) |
+
+```sh
+OGRE_TAP_MS=5000 OGRE_EXIT_AFTER_MS=60000 ./build-app/ogrebattle64 > /tmp/ogre.out 2>&1
+grep -A 12 "per-thread last" /tmp/ogre.out
+```
+
+The black canvas that a stalled boot produces is the game's idle trajectory (it
+submits only its boot blanking display list), not a renderer failure.
+
 ## Config directory
 
 - macOS: `~/Library/Application Support/ogrebattle64/`

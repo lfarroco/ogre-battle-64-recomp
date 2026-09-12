@@ -5,6 +5,140 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 25) — the native app drives itself, and the idle trajectory is reproduced + localised on it
+
+### Context
+
+Session 24 left two open threads: the title sprites now render correctly in the
+browser, and the native RT64 build runs but paints a black canvas because it
+never receives input. The web probes feed input (`tap()` in
+`debug/lib/harness.cjs`, one Enter press every 5 s), so no native measurement
+could be reproduced without a human at the keyboard, and none of the web
+probes' tooling (screenshots, pixel counts, `tasks=`) had a native counterpart.
+
+### Decision: `OGRE_TAP_MS` / `OGRE_EXIT_AFTER_MS` instead of an external driver
+
+A scripted native run is now self-driving, with two env vars read once in
+`configure_automation()` (`app/src/sdl_platform.cpp`):
+
+* `OGRE_TAP_MS=<n>` — controller 0 presses Start for the first 150 ms of every
+  `n` ms window, contributing **button state only**. This mirrors the web
+  harness's Enter tap so the two platforms' input is the same in kind.
+* `OGRE_EXIT_AFTER_MS=<n>` — the main thread requests exit after `n` ms, so a
+  run is bounded. At that moment the app also prints the last recompiled
+  function each game thread entered (`ultramodern::debug_last_func_vram`), which
+  turns a stalled run's stderr into a per-thread location table.
+
+Two alternatives were rejected:
+
+* **Synthesising SDL key events** (`SDL_PushEvent` from the main thread). It
+  would work, but it puts the button state through SDL's keyboard layer, which
+  fights the main-thread-only `SDL_PumpEvents` constraint documented in session
+  24; button state cannot violate it.
+* **Driving the app externally** (AppleScript/`cliclick` keystrokes). It needs
+  Accessibility permissions and a focused window, i.e. it is not headless, and
+  it would be the only part of the project's verification that is not
+  self-contained.
+
+Both default to 0, so an interactive run behaves exactly as before.
+
+### Finding: the idle trajectory is not input-gated, and not platform-specific
+
+| run | input | outcome |
+|---|---|---|
+| `ogrebattle64`, 40 s, no env | none | 1 display list (the boot blanking DL), no RSP task at all |
+| `ogrebattle64`, 60 s, `OGRE_TAP_MS=5000` | 11 Start taps | 1 display list, **1085** type-2 RSP tasks, `bootstate=0x00000060` |
+| `ogrebattle64`, 45 s, `OGRE_TAP_MS=3000` | 14 taps | 1 display list, no RSP task, `bootstate=0xBF880415` |
+| `progress.cjs`, 4 x 70 s (web, taps Enter) | 4 boots | `maxTasks=1` on all four |
+
+So the taps *do* reach the game — they moved the boot state from the
+`0xBF880415` stall to `0x00000060` and started the audio path — but they are not
+what gates frames. The web build, with its own input pump, failed to reach a
+real display list on 4/4 attempts in this session, where session 21's six
+attempts reached 1, 9, 19, 19, 35, 39. The distinct stall points
+(`0xBF880415`, `0x00000060`) and the run-to-run spread say this is a **race in
+the game's boot**, not a renderer or input problem, and it is shared by both
+platforms.
+
+### Finding: the stall is localised — the frame/RSP worker never gets a message
+
+With `OGRE_DEBUG_TRACES=1` the whole 25 s message-queue trace is only five
+successful sends:
+
+```
+T=147  do_send OK queue=0x800C6490 msg=0x800E8B10 count=1/1   (PI-manager handshake)
+T=177  do_send OK queue=0x800E8B4C msg=0x800E7D90 count=1/8   (boot frame -> t17)
+T=178  do_send OK queue=0x800E8BBC msg=0x0000029B             (SP done)
+T=182  do_send OK queue=0x800E8BF4 msg=0x0000029C             (SI done)
+T=193  do_send OK queue=0x800E9BA8 msg=0x800E7D90 count=1/8   (boot frame -> t5)
+```
+
+and the per-thread exit table:
+
+```
+t1  last func 0x80099740   (PI/DMA busy-wait)
+t3  last func 0x800901C0   (osCont family)
+t4  last func 0x80089054   (osSetEventMesg wrapper, func_8008AFE0's queue loop)
+t5  last func 0x80089540   (queue worker: osCreateMesgQueue + osRecvMesg)
+t16 last func 0x80089358   (RSP task thread: osRecvMesg + osSpGetStatus)
+t17 last func 0x800901C0   (osCont family)
+t18 last func 0x80089200   (RSP task thread)
+t19 last func 0x800891A0   (VI-retrace worker, receives 0x29A ~60/s)
+```
+
+What this establishes:
+
+* The VI path is healthy: `[vi-debug] retrace -> mq=0x800E8B84 msg=0x0000029A`
+  fires at ~60 Hz and t19 consumes it, so "the VI thread is stalled" is not the
+  story (session 21's measurement said the same).
+* `func_8008AFE0` (thread 4, priority 50) creates its own queue
+  `0x800C4C28` (buf `0x800BE1A0`, count 8), registers an event (`func_80089054`
+  with type 3), and then blocks on `osRecvMesg` forever. **Nothing ever sends to
+  it** — zero sends in 25 s of trace, and it re-blocks ~45 times/s.
+* The frame message `0x800E7D90` is delivered exactly once, at T=193, to
+  `0x800E9BA8`; t16's RSP thread (`func_80089358`) is blocked on a *different*
+  queue (`0x800B9C40`) and never runs its `osSpGetStatus` → submit path again.
+  Since gfx tasks are submitted by these RSP threads, that is why exactly one
+  display list exists.
+* t16's resume counter is stuck at 3 across every snapshot (`t17=3`,
+  `t16=3`), i.e. it has not been scheduled since boot.
+
+### Correction: `[snap]`'s `bootstate(D_800AEF98)` is read as a word, but the game stores a byte
+
+`func_80071EB0` (the boot/init function) writes `D_800AEF98` with `sb`:
+
+```
+/* 23EC 80071FEC */  lui  $at, %hi(D_800AEF98)
+/* 23F0 80071FF0 */  sb   $zero, %lo(D_800AEF98)($at)
+```
+
+and every other reference in `asm/1060.s` is `lbu`/`sb`. The snapshot prints it
+with `snap_w` (32-bit), so `bootstate=0xBF880415` is one byte of game state plus
+three bytes of adjacent memory — the low byte (`0x15`) is the state, the rest is
+noise. It is still useful as a coarse "which stall point" fingerprint (it is
+reproducibly `0xBF880415` or `0x00000060`), but it must not be read as a word
+value. The other fields on that line come from globals whose access width has
+not been checked either; treat the line as a fingerprint, not as decoded state.
+
+### Verified
+
+| check | result |
+|---|---|
+| `cmake --build build-app -j 8` | clean (only the pre-existing sdl2-compat deployment-target link warning) |
+| interactive run (no env) | unchanged: window opens, `api=3`, boot DL 1, stalls at ~3 display lists |
+| `screencapture -l <window id>` on a live run | works (2560x1496 PNG); the canvas area is black on a stalled boot (`colorful=0`), which matches "one blanking DL" |
+| bounded run | `OGRE_EXIT_AFTER_MS=60000` exits on time and prints the per-thread table |
+
+### What this does not establish
+
+The **taps' effect on the boot trajectory** is not proven causal. They changed
+`bootstate` and started the audio path in one run, but the next run with
+*different* tap timing stalled earlier, so the input tap and the boot race are
+still confounded; a controlled A/B (same boot count, taps on/off, several runs
+each) is the way to separate them.
+
+---
+
 ## 2026-09-11 (session 24, native bring-up) — the native RT64 build works on macOS: two SDL-glue bugs
 
 ### Context

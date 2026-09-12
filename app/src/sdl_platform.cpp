@@ -1,6 +1,7 @@
 #include "sdl_platform.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include <SDL.h>
 #if defined(__APPLE__)
@@ -9,6 +10,31 @@
 #endif
 
 namespace ogre {
+
+namespace {
+
+// How long a synthetic Start press is held, in ms. Long enough that a 60 Hz
+// input poll sees it, short enough that the release dominates the interval.
+constexpr uint32_t kTapHoldMs = 150;
+
+// Milliseconds since the platform was initialised. SDL_GetTicks64 is a
+// monotonic host clock, which is what the tap/exit timers below want.
+uint64_t platform_millis(const Platform& platform) {
+    return SDL_GetTicks64() - platform.start_ticks;
+}
+
+// `OGRE_TAP_MS=<n>` / `OGRE_EXIT_AFTER_MS=<n>`; 0 or unset disables. Read once
+// so a mid-run change cannot move the timers.
+uint32_t env_millis(const char* name) {
+    const char* value = getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
+    }
+    const long parsed = strtol(value, nullptr, 0);
+    return parsed > 0 ? static_cast<uint32_t>(parsed) : 0;
+}
+
+}  // namespace
 
 // N64 controller button bits (as read by libultra osContGetReadData).
 enum N64Button : uint16_t {
@@ -34,6 +60,18 @@ bool init_sdl() {
         return false;
     }
     return true;
+}
+
+// Reads the self-driving-run knobs. Must run after SDL_Init so that
+// SDL_GetTicks64 has a valid base.
+void configure_automation(Platform& platform) {
+    platform.start_ticks = SDL_GetTicks64();
+    platform.tap_ms = env_millis("OGRE_TAP_MS");
+    platform.exit_after_ms = env_millis("OGRE_EXIT_AFTER_MS");
+    if (platform.tap_ms != 0 || platform.exit_after_ms != 0) {
+        fprintf(stderr, "[SDL] automation: tap_ms=%u exit_after_ms=%u\n",
+                platform.tap_ms, platform.exit_after_ms);
+    }
 }
 
 ultramodern::renderer::WindowHandle create_window(Platform& platform, const char* title) {
@@ -136,6 +174,27 @@ void open_audio(Platform& platform, uint32_t frequency) {
 }
 
 void pump_sdl_events(Platform& platform, bool* quit) {
+    // Bounded run: OGRE_EXIT_AFTER_MS requests exit from the main thread, the
+    // same place SDL_QUIT is handled.
+    if (platform.exit_after_ms != 0 && platform_millis(platform) >= platform.exit_after_ms) {
+        fprintf(stderr, "[SDL] exit_after_ms=%u elapsed, requesting quit\n", platform.exit_after_ms);
+        platform.exit_after_ms = 0;
+        *quit = true;
+        // The queue snapshot's per-thread view is a block *kind* and a resume
+        // count, which cannot say where a thread that is simply not being
+        // scheduled is sitting. N64Recomp calls recomp_trace_func() at every
+        // function entry, so the runtime knows the last function each game
+        // thread entered; print those once, at the moment a scripted run ends.
+        fprintf(stderr, "[SDL] per-thread last recompiled function:\n");
+        for (int tid = 1; tid < 32; tid++) {
+            const uint32_t func = ultramodern::debug_last_func_vram(tid);
+            if (func != 0) {
+                fprintf(stderr, "[SDL]   t%-3d last func 0x%08X\n", tid, func);
+            }
+        }
+        fflush(stderr);
+    }
+
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -173,6 +232,35 @@ void pump_sdl_events(Platform& platform, bool* quit) {
     }
 }
 
+// The synthetic Start press of a scripted run (`OGRE_TAP_MS`), or 0.
+//
+// This is the native equivalent of the web harness's `tap()`: one short press
+// per interval, so the game's title branch sees a button *up* after it. It
+// contributes button state only; it does not synthesise SDL events. That is
+// deliberate - ultramodern calls poll_input from the game thread, and pushing
+// events into SDL from there is exactly the Cocoa main-thread violation fixed
+// in the session-24 native bring-up.
+static uint16_t automation_buttons() {
+    extern Platform g_platform;
+    if (g_platform.tap_ms == 0) {
+        return 0;
+    }
+    const uint64_t elapsed = platform_millis(g_platform);
+    const uint64_t phase = elapsed % g_platform.tap_ms;
+    const uint64_t tap = elapsed / g_platform.tap_ms;
+    if (phase >= kTapHoldMs) {
+        return 0;
+    }
+    // Log once per press so a run's stderr shows the taps landed.
+    static uint64_t logged_taps = 0;
+    if (tap != logged_taps && tap > 0) {
+        logged_taps = tap;
+        fprintf(stderr, "[SDL] automation tap %llu at %llums\n",
+                (unsigned long long)tap, (unsigned long long)elapsed);
+    }
+    return N64_BTN_START;
+}
+
 static uint16_t keyboard_buttons() {
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     uint16_t buttons = 0;
@@ -193,6 +281,8 @@ static uint16_t keyboard_buttons() {
     if (is_down(SDL_SCANCODE_K)) buttons |= N64_BTN_C_DOWN;
     if (is_down(SDL_SCANCODE_J)) buttons |= N64_BTN_C_LEFT;
     if (is_down(SDL_SCANCODE_L)) buttons |= N64_BTN_C_RIGHT;
+
+    buttons |= automation_buttons();
 
     return buttons;
 }
