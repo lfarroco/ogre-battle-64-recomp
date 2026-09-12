@@ -5,6 +5,99 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 28) — the game renders natively: a scheduler handoff bug, not a game or renderer bug
+
+### Context
+
+Session 27 proved the native render path end to end with a synthetic display
+list, and left one open item: the game itself still submits only its boot
+blanking display list (1 gfx task per run) and the boot thread (t3) never returns
+from `func_80089804`. Four candidate explanations had been on the table across
+sessions 15/24/26/27: `func_80089A10`'s spin, the frame-completion handshake, a
+missing asset, or the presenter.
+
+### Finding: the boot thread is *stranded* by a spurious scheduler wakeup
+
+`OGRE_SCHED_TRACE=1` records every scheduler operation into a lock-free ring with
+a global sequence number (`[sched-ring]`), because the `[Sched]` printfs come
+from several host threads and interleave through a buffered stdout - useless for
+an ordering question. The ring shows the boot thread parking once inside
+`func_80089804`'s `osSendMesg` (`swap_to_thread` -> `wait_for_resumed`) and then
+**never being popped, resumed or woken again** for the rest of the run, while the
+running queue drains to empty and every other thread blocks on `recv`.
+
+The wakeup it was waiting for was the one `wake_blocked_head` sends when a
+message is delivered to a queue a thread is blocked on. That code signalled the
+same `running` semaphore that `wait_for_resumed` waits on. A thread parked in a
+*handoff* wait could therefore consume a *message poke* and continue without
+having been handed execution - and so could the thread it had just swapped to.
+Two game threads then run at once, which breaks the cooperative scheduler's
+single-runner invariants and is what lets the running queue lose an entry. The
+existing comment ("every scheduler semaphore wait re-checks its condition, so a
+surplus count is harmless") was the mistaken premise: `wait_for_resumed` does
+not and cannot re-check.
+
+### Decision: a strict handoff token (`running`) and a separate idle poke (`poke`)
+
+`UltraThreadContext` gets a second `LightweightSemaphore`. Only a real grant of
+execution (a pop from the running queue via `run_next_thread`/
+`run_next_thread_and_wait`, or `resume_thread_and_wait`) signals `running`;
+`wake_blocked_head` signals `poke`, which is reaped by the idle path of
+`run_next_thread_and_wait` exactly as before. `wait_for_resumed` can no longer
+return without a handoff.
+
+This is a *runtime* fix, not a game-specific patch, and it is what unblocked the
+boot: 6/6 native runs now submit the game's real display lists (`0x801C1520` /
+`0x801C80A0` alternating, ~2.5/s) where 4/6 used to stall with 1.
+
+### Decision: scheduler forensics get a race-free ring, not more printfs
+
+The event ring (`debug_sched_event*`, `debug_dump_sched_ring`) records
+insert/pop/remove/resume/park/wake/swap *and the running queue after each event*.
+It is enabled by `OGRE_SCHED_TRACE=1` and dumped at `OGRE_EXIT_AFTER_MS`
+(`OGRE_SCHED_TRACE_TID` filters it). `debug_printf` was previously compiled out;
+it is now gated on the same flag, so the thread-queue traces that were already
+written become usable. This is the diagnostic to reach for on any future
+"a thread stopped running" question.
+
+### Finding: the diagnostics were reading out of the committed RDRAM mapping
+
+Once the boot progressed with input, the VI thread's periodic queue snapshot
+crashed (`EXC_BAD_ACCESS`, 3 of 4 tap runs). A queue's `blocked_on_recv` held
+`0x8606FF09`; the guard accepted anything in `0x80000000..0xA0000000` (the whole
+KSEG0 range), the read resolved past the 512 MiB committed RDRAM, and the *VI
+thread* died. Only the game's RDRAM window (`0x80000000..0x80800000`) can hold an
+`OSThread`.
+
+### Decision: snapshot guards use the RDRAM window, and `NULL` queues are refused
+
+The guard in `debug_dump_queue_snapshot` (and its `valid_ptr`, assettab,
+frame-dispatch and title-dispatch siblings) is now `0x80000000..0x80800000`.
+Separately, `queue_to_ptr` in `threadqueue.cpp` refuses a `NULL`/non-KSEG0 queue
+instead of resolving `TO_PTR(NULLPTR)` out of bounds: `osSetThreadPri` and
+`osDestroyThread` can legitimately be called on a *running* thread, whose `queue`
+is `NULLPTR`.
+
+### Note: `func_80089A10` was never the wall
+
+Its generated code already contains the `yield_self` poll-loop yield (N64Recomp's
+poll-loop detection), so the boot thread's spin yields. The session-15 runtime
+override of the same name remains dead code (the recompiled symbol is strong and
+direct calls bind to it), but it is not load-bearing: the boot thread was parked
+*inside* the frame submit's `osSendMesg`, not spinning in `func_80089A10`.
+
+### Open (recorded, not decided)
+
+- The 512 MiB RDRAM mapping is a recurring foot-gun; `thread_ptr_valid` in
+  `threadqueue.cpp` and the mesgqueue `mq` list reads still use `0xA0000000`.
+  Safe today only because 512 MiB is committed.
+- The periodic queue snapshot (with its ~20 ms `debug_sample_hot_loop`) runs
+  unconditionally every ~1.5 s; it should be env-gated and off by default.
+- "Start advances the title to the menu" is untested - this session proves the
+  game renders and accepts input, not that input progresses the game.
+
+---
+
 ## 2026-09-12 (session 27) — the native window renders: GPU readback, and four display-list encoding bugs
 
 ### Context

@@ -98,6 +98,8 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_WORKLOAD_TRACE=1` | `[workload]` traces: the framebuffer pair RT64 built (colour image, scissor, call count) |
 | `OGRE_FBRENDER_TRACE=1` | `[fbrender]` traces: the renderer's per-call view (cycle type, fill colour, rect) |
 | `OGRE_VI_TRACE=1` | `[vi]` trace of the decoded VI RT64 is about to present |
+| `OGRE_SCHED_TRACE=1` | enable the scheduler traces and, at exit, dump the race-free scheduler event ring (`[sched-ring]`): every insert/pop/remove/resume/park/wake/swap with a global sequence number and the running queue after it. This is how a thread that yielded and was never resumed is read off a run |
+| `OGRE_SCHED_TRACE_TID=<tid>` | with `OGRE_SCHED_TRACE`, filter the ring dump to events involving thread `<tid>` |
 
 ```sh
 # a bounded run with taps, and the per-thread call chains
@@ -147,6 +149,24 @@ keeps an old black frame even though the render path works, and without
 `OGRE_PRESENT_FBTARGET` an RDP-only fill has no framebuffer in the manager so the
 presenter uploads empty RDRAM instead of the drawn target.
 
+### The game's own frames
+
+The game drives its own double-buffered VI, so none of the probe knobs are
+needed to see it - only the capture. This is the end-to-end check that the port
+renders the game (it should show the title scene's ring of soldiers):
+
+```sh
+# title scene, captured straight off the presented swap chain
+OGRE_TAP_MS=4000 OGRE_CAPTURE_PRESENT=/tmp/game OGRE_CAPTURE_AFTER=30 \
+  OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64
+# -> /tmp/game.31.ppm ... : the twelve soldiers of the title screen
+```
+
+`docs/proofs/native-game-title.png` and `native-game-title-still.png` are captures
+of that run. A healthy run submits the game's real display lists
+(`data=0x801C1520` / `0x801C80A0` alternating, ~2.5/s) rather than only the boot
+blanking list at `0x800C6500`.
+
 ### Reading a dump
 
 The runtime byte-reverses RDRAM (see `recomp.h`): the 32-bit word at game address
@@ -155,9 +175,9 @@ byte at `a` is at `(a ^ 3) - 0x80000000`. So a Python read is
 `struct.unpack_from('<I', data, a & 0x1FFFFFFF)[0]` for words and
 `data[(a & 0x1FFFFFFF) ^ 3]` for logical bytes.
 
-The black canvas a stalled boot produces is the game's idle trajectory (it
-submits only its boot blanking display list), not a renderer failure - but do not
-conclude that from a screen capture; see "Capturing the native output".
+The black canvas a stalled boot produces is the game's idle trajectory, not a
+renderer failure - but do not conclude that from a screen capture; see
+"Capturing the native output".
 
 ## Config directory
 

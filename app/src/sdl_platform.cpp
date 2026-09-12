@@ -203,6 +203,16 @@ void pump_sdl_events(Platform& platform, bool* quit) {
                 ultramodern::debug_dump_call_chain(tid, "at exit");
             }
         }
+        // OGRE_SCHED_TRACE=1: the scheduler event ring, in true order. This is
+        // how a thread that yielded into the running queue and was never
+        // resumed is read off the trace (the [Sched] printfs interleave).
+        if (getenv("OGRE_SCHED_TRACE") != nullptr) {
+            int only = -1;
+            if (const char* f = getenv("OGRE_SCHED_TRACE_TID")) {
+                only = atoi(f);
+            }
+            ultramodern::debug_dump_sched_ring(only);
+        }
         // OGRE_DUMP_RDRAM=<path>: write the whole RDRAM image so the state at
         // the stall can be analysed offline (and diffed against a run on the
         // other platform) instead of guessed from a handful of snapshot words.

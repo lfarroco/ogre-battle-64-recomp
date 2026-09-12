@@ -284,6 +284,25 @@ hardware. RT64 remains the primary native renderer throughout. See
     right colour image) - the window still shows black, so the remaining gap is
     presentation, not parsing or drawing. See
     `docs/HANDOFF-2026-09-12-session26.md`.
+  - ✅ **The game renders natively (session 28)**: the boot thread was not stuck
+    in the game - it was **stranded by a scheduler bug in the runtime**. A thread
+    parked in `wait_for_resumed` could consume a *message-queue poke* as if it
+    were a handoff (both used the same `running` semaphore), so two game threads
+    ran at once, the cooperative scheduler's invariants broke, and the priority-10
+    boot thread was eventually left parked with an empty running queue while the
+    per-VI service threads (pri 50-120) ping-ponged. Found with a new race-free
+    scheduler event ring (`OGRE_SCHED_TRACE=1` -> `[sched-ring]`, with a global
+    sequence number and the running queue after each event). Fixed by splitting
+    the semaphores (`running` = strict handoff, `poke` = idle wake) and by
+    refusing `NULL` queues in the queue helpers; the VI thread's queue snapshot
+    also stopped dereferencing wild KSEG0 values (its guards now use the game's
+    RDRAM window, `0x80000000..0x80800000`, not all of KSEG0 - that was an
+    `EXC_BAD_ACCESS` on 3 of 4 input runs). Result: 6/6 no-input and 4/4 input
+    runs reach the frame loop and submit the game's real display lists
+    (`0x801C1520`/`0x801C80A0`, ~2.5/s) instead of only the boot blanking list,
+    and the presented swap chain shows the **title screen**:
+    `docs/proofs/native-game-title.png`. See
+    `docs/HANDOFF-2026-09-12-session28.md`.
   - ✅ **The native window renders (session 27)**: the session-26 "window is
     black" conclusion was a measurement artifact. The display is locked, so
     `screencapture -x` returns wallpaper and `screencapture -l<id>` returns the
