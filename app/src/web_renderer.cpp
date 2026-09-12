@@ -72,7 +72,14 @@ char g_stats_snapshot[4096];
 //           opaquely) - separates "is the colour pipeline right" from "is the
 //           mask right";
 //   bit 1 = draw only the first sprite of a display list, so one rendered sprite
-//           can be compared with the texture pair that produced it.
+//           can be compared with the texture pair that produced it;
+//   bits 3-4 = bypass the combiner and output TEXEL1 (bit 3 set) or TEXEL0
+//           (bit 4 set) raw, so the sampled texture can be compared with
+//           ogre_gfx_debug_last_tex's decoded image;
+//   bit 2 = ignore full-screen rectangles (>= 300x220). OB64's intro draws a
+//           full-screen PRIM-alpha rect *after* its sprites and animates the
+//           alpha from opaque to transparent, i.e. a fade-in from black;
+//           skipping it shows the frame at full brightness immediately.
 std::atomic<uint32_t> g_debug_flags{0};
 
 std::atomic<uint64_t> g_exec_cmd{0};      // command index within the current DL
@@ -724,6 +731,10 @@ uniform int u_bp1, u_bm1, u_ba1, u_bb1;
 uniform int u_force_blend;
 uniform int u_blend_approx;
 uniform int u_combiner_cycles;
+// Debug: 1 = output TEXEL1's RGB raw, 2 = output TEXEL0's RGB raw. Set from
+// ogre_gfx_debug_flags bits 3-4 by the probes; bypasses the combiner and the
+// blender so the sampled texture can be compared with the decoded image.
+uniform int u_debug_mode;
 
 // The texel a TEXEL0/TEXEL1 selector samples in the cycle being evaluated.
 // In the second cycle of a 2-cycle combiner the RDP swaps the two texel values
@@ -903,6 +914,14 @@ vec4 blender_run(vec4 cc) {
 }
 
 void main() {
+    if (u_debug_mode == 1) {
+        fragColor = vec4(texture(u_tex1, v_uv1).rgb, 1.0);
+        return;
+    }
+    if (u_debug_mode == 2) {
+        fragColor = vec4(texture(u_tex0, v_uv0).rgb, 1.0);
+        return;
+    }
     if (u_cycle == 0) {
         // G_CYC_COPY bypasses the combiner and writes TEXEL0 straight through
         // (RT64 ColorCombiner::run).
@@ -980,6 +999,7 @@ struct TexUpload {
 // (combiner mux, colors, blend, scissor, texture key). The gfx pthread records
 // these; the browser main thread executes them in ogre_gfx_flush().
 struct DrawCmd {
+    int kind = 0;                         // 0 = triangle, 1 = fill rect, 2 = texrect
     int vertex_count = 0;                 // 3 or 6
     float pos[12] = {};                   // NDC (x,y) per vertex
     float uv[12] = {};                    // texture (u,v) per vertex
@@ -1080,8 +1100,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         uint32_t o = kDlOff;
         // G_SETFILLCOLOR dark grey
         put32(o, 0xF7000000); put32(o + 4, 0x20202020); o += 8;
-        // G_FILLRECT (0,0)-(63,47)  [10.2 fixed: 63<<2=252, 47<<2=188]
-        put32(o, 0xF6000000); put32(o + 4, (63 << 2) << 12 | (47 << 2)); o += 8;
+        // G_FILLRECT (0,0)-(63,47)  [10.2 fixed: 63<<2=252, 47<<2=188].
+        // Rectangles carry `lrx/lry` in w0 and `ulx/uly` in w1 (the SDK splits
+        // them that way and RT64 decodes them that way); the synthetic list used
+        // to put both corners in w1, which only worked while the renderer had
+        // the two words swapped.
+        put32(o, 0xF6000000 | (63 << 2) << 12 | (47 << 2)); put32(o + 4, 0); o += 8;
         // G_SETTIMG RGBA16 width=2 -> texture at kTexOff
         put32(o, 0xFD100001); put32(o + 4, kTexOff); o += 8;
         // G_SETTILE RGBA16, line=1, tmem=0, clamp
@@ -1100,7 +1124,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // black, so the probe "passed" while proving nothing.
         put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
         // G_TEXRECT (0,0)-(63,47), tile 0; RDPHALF_1 s=0,t=0; RDPHALF_2 dsdx=1,dtdy=1
-        put32(o, 0xE4000000); put32(o + 4, (63 << 2) << 12 | (47 << 2)); o += 8;
+        put32(o, 0xE4000000 | (63 << 2) << 12 | (47 << 2)); put32(o + 4, 0); o += 8;
         put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
         put32(o, 0xF1000000); put32(o + 4, 0x00010001); o += 8;
         // G_ENDDL
@@ -1208,6 +1232,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            static_cast<unsigned>(cmds.size()),
                            static_cast<unsigned>(tex_upload_count_));
         }
+        bool had_rect = false;
+        for (const DrawCmd& c : cmds) {
+            if (c.kind != 0) had_rect = true;
+        }
+        if (blit_logged_ < 6 && !cmds.empty()) {
+            ++blit_logged_;
+            std::string seq;
+            for (const DrawCmd& c : cmds) {
+                if (seq.size() >= 120) { seq += "..."; break; }
+                seq += c.kind == 1 ? 'F' : (c.kind == 2 ? 'T' : (c.textured ? 't' : 'u'));
+            }
+            OGRE_MILESTONE("GFX-BLIT", "flush %u: %zu cmds -> %s",
+                           flush_count_, cmds.size(), seq.c_str());
+        }
         flushed_cmds_ += static_cast<unsigned>(cmds.size());
         ++flush_count_;
         g_flush_ok.store(flush_count_, std::memory_order_relaxed);
@@ -1281,6 +1319,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             seti("u_ca1", cmd.ca[1]); seti("u_cb1", cmd.cb[1]); seti("u_cc1", cmd.cc[1]); seti("u_cd1", cmd.cd[1]);
             seti("u_aa1", cmd.aa[1]); seti("u_ab1", cmd.ab[1]); seti("u_ac1", cmd.ac[1]); seti("u_ad1", cmd.ad[1]);
             seti("u_cycle", cmd.cycle);
+            seti("u_debug_mode",
+                 static_cast<int>((g_debug_flags.load(std::memory_order_relaxed) >> 3) & 3));
             // Blender (render mode) uniforms.
             seti("u_force_blend", cmd.force_blend ? 1 : 0);
             seti("u_blend_approx", cmd.blend_approx);
@@ -1354,6 +1394,27 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
             glBufferData(GL_ARRAY_BUFFER, count * 8 * sizeof(float), vbuf, GL_DYNAMIC_DRAW);
             glDrawArrays(GL_TRIANGLES, 0, count);
+        }
+
+        // Read the canvas back right after the batch, so "what the frame looks
+        // like once every draw has landed" is measured rather than inferred
+        // from a screenshot that may catch a partially flushed frame.
+        static unsigned after_logged = 0;
+        if (after_logged < 24 && had_rect) {
+            static std::vector<uint8_t> px;
+            px.resize(static_cast<size_t>(canvas_width_) * canvas_height_ * 4);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, canvas_width_, canvas_height_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            size_t nz = 0; uint64_t sum = 0;
+            for (size_t i = 0; i + 3 < px.size(); i += 4) {
+                const unsigned v = px[i] + px[i + 1] + px[i + 2];
+                if (v) { ++nz; sum += v; }
+            }
+            ++after_logged;
+            OGRE_MILESTONE("GFX-AFTER",
+                           "flush %u: canvas after batch nonBlack=%zu/%d meanRGB=%llu",
+                           flush_count_, nz, canvas_width_ * canvas_height_,
+                           (unsigned long long)(nz ? sum / nz : 0));
         }
     }
 
@@ -1489,6 +1550,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     void set_rdram(uint8_t* rdram) { rdram_ = rdram; }
 
     // ----- debug texture access (ogre_gfx_debug_tex) ---------------------------
+    bool debug_last_texture_copy(int unit, std::vector<uint8_t>& out, int* w, int* h,
+                                 int* tile, int* fmt, int* siz) {
+        std::lock_guard<std::mutex> lock(debug_mutex_);
+        const DebugTex& t = debug_last_[unit & 1];
+        if (t.width <= 0 || t.height <= 0) {
+            return false;
+        }
+        out = t.pixels;
+        if (w) *w = t.width;
+        if (h) *h = t.height;
+        if (tile) *tile = t.tile;
+        if (fmt) *fmt = t.fmt;
+        if (siz) *siz = t.siz;
+        return true;
+    }
     int debug_texture_count() {
         std::lock_guard<std::mutex> lock(debug_mutex_);
         return static_cast<int>(debug_tex_.size());
@@ -1534,6 +1610,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned txr_logged_ = 0;
     unsigned tex_state_logged_ = 0;
     unsigned tex_state_dump_logged_ = 0;
+    unsigned mtx_logged_ = 0;
+    unsigned draw_mtx_logged_ = 0;
+    unsigned rect_logged_ = 0;
+    unsigned blit_logged_ = 0;
     unsigned flushed_cmds_ = 0;
     unsigned flush_count_ = 0;
     unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
@@ -1560,6 +1640,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     };
     std::mutex debug_mutex_;
     std::vector<DebugTex> debug_tex_;
+    // The two images (TEXEL0, TEXEL1) of the most recent textured draw. The
+    // ring above is a window over decodes and spans several frames once the
+    // upload de-duplication kicks in, so "the last pair" in the ring is not
+    // necessarily the pair a rendered sprite was drawn with.
+    DebugTex debug_last_[2];
 
     // ----- GL init (browser main thread only) ----------------------------------
 
@@ -1661,6 +1746,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // Texture keys already queued for upload by this display list (a
         // sprite's two triangles sample the same image).
         std::set<uint64_t> uploaded;
+        // Session-23: the order the draws were recorded in, one character each
+        // (F = fill rect, T = texrect, t = textured triangle, u = untextured
+        // triangle). The title scene dimmed because the full-screen rect that
+        // should be its background was drawn over the sprites.
+        std::string order;
+        // The NDC extent of the first triangle of the frame: whether the intro
+        // animates its geometry (a widening ring) or only its colours (a fade)
+        // is what decides if a "thin sprite" is our bug or the game's.
+        bool first_quad_done = false;
+        float quad_w = 0, quad_h = 0;
+        bool uv_logged = false;
+        float u0 = 0, u1 = 0, v0 = 0, v1 = 0;
+        int iw0 = 0, ih0 = 0, iw1 = 0, ih1 = 0;
         // Session-21: a runaway DL walk (budget exhausted far from any real
         // display list) is diagnosed from the first commands walked and the
         // last ones before the budget ran out. The head shows whether the
@@ -1747,6 +1845,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         gbi::walk_dl(rdram, dl_offset, visitor, &ctx);
         last_dl_cmds_ = ctx.cmd_index;
+        if (!ctx.order.empty() && (task_count_.load() <= 4 || (task_count_.load() % 4) == 0)) {
+            OGRE_MILESTONE("GFX-ORDER",
+                           "task %u quad0=%.4fx%.4f uv=[%.1f..%.1f, %.1f..%.1f] "
+                           "tex0=%dx%d tex1=%dx%d order: %.20s",
+                           task_count_.load(), ctx.quad_w, ctx.quad_h,
+                           ctx.u0, ctx.u1, ctx.v0, ctx.v1,
+                           ctx.iw0, ctx.ih0, ctx.iw1, ctx.ih1, ctx.order.c_str());
+        }
         // A walk that never finds G_ENDDL is a runaway: the renderer's input
         // is garbage, and both the analyzer and the executor are burning their
         // 4M-command budget on it. Print the head and tail once so the bogus
@@ -1808,6 +1914,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint32_t flags = p0(w0, 0, 8) ^ gbi::MTX_PUSH;
                 const uint32_t addr = resolve_address(ctx->segments, w1);
                 Mat4 m = read_matrix(addr);
+                if (mtx_logged_ < 10) {
+                    ++mtx_logged_;
+                    // Row-vector convention: the translation is row 3.
+                    OGRE_MILESTONE("GFX-MTX",
+                                   "task %u G_MTX raw=0x%02X -> flags=0x%02X proj=%d load=%d push=%d "
+                                   "addr=0x%08X diag=[%.4f %.4f %.4f %.4f] trans=[%.3f %.3f %.3f]",
+                                   task_count_.load(), p0(w0, 0, 8), flags,
+                                   (flags & gbi::MTX_PROJECTION) ? 1 : 0,
+                                   (flags & gbi::MTX_LOAD) ? 1 : 0,
+                                   (flags & gbi::MTX_PUSH) ? 1 : 0, addr,
+                                   m.m[0], m.m[5], m.m[10], m.m[15],
+                                   m.m[12], m.m[13], m.m[14]);
+                }
                 if (flags & gbi::MTX_PROJECTION) {
                     // The projection stack is a single composite (RT64 keeps
                     // one `viewProjMatrix`): LOAD replaces it, MUL multiplies
@@ -1919,10 +2038,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 break;
 
             case gbi::OP_FILLRECT: {
-                const int xl = static_cast<int>(p0(w0, 12, 12)) >> 2;
-                const int yl = static_cast<int>(p0(w0, 0, 12)) >> 2;
-                const int xh = static_cast<int>(p0(w1, 12, 12)) >> 2;
-                const int yh = static_cast<int>(p0(w1, 0, 12)) >> 2;
+                // Same layout as G_TEXRECT: lrx/lry in w0, ulx/uly in w1. With
+                // the two words swapped a full-screen fill decodes as an
+                // inverted rect and is dropped by draw_fill_rect()'s guard - so
+                // the game's per-frame clear never happened and every frame
+                // accumulated on the canvas (the title scene's "trails").
+                int xl = static_cast<int>(p0(w1, 12, 12)) >> 2;
+                int yl = static_cast<int>(p0(w1, 0, 12)) >> 2;
+                int xh = static_cast<int>(p0(w0, 12, 12)) >> 2;
+                int yh = static_cast<int>(p0(w0, 0, 12)) >> 2;
+                // Fill/copy mode rounds up to the end of the 4-pixel group
+                // (RT64 RDP::fillRect: `lrx |= 3; lry |= 3`) and rounds the
+                // origin down (RDP::drawRect).
+                const uint32_t cyc = (st.othermode_h >> 20) & 3;
+                if (cyc == kCycCopy || cyc == kCycFill) {
+                    xl &= ~3;
+                    yl &= ~3;
+                    xh |= 3;
+                    yh |= 3;
+                }
                 draw_fill_rect(ctx, st, xl, yl, xh, yh);
                 break;
             }
@@ -1930,18 +2064,33 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             case gbi::OP_TEXRECT:
             case gbi::OP_TEXRECTFLIP: {
                 // The next two commands carry (s,t) and (dsdx,dtdy).
+                //
+                // The rectangle itself is `lrx/lry` in w0 and `ulx/uly` in w1
+                // (RT64 GBI_RDP::texrect reads `p0` for the lower-right corner
+                // and `p1` for the upper-left; the SDK macro splits them the
+                // same way). Reading them the other way round turns every
+                // `gSPTextureRectangle(pkt, 0, 0, w-1, h-1, ...)` - including
+                // the game's full-screen background - into an inverted rect.
                 ctx->pending_texrect = (op == gbi::OP_TEXRECT);
                 ctx->pending_texrect_flip = (op == gbi::OP_TEXRECTFLIP);
                 ctx->rdp_half1 = 0;
                 ctx->rdp_half2 = 0;
-                const int xl = static_cast<int>(p0(w0, 12, 12)) >> 2;
-                const int yl = static_cast<int>(p0(w0, 0, 12)) >> 2;
-                const int xh = static_cast<int>(p0(w1, 12, 12)) >> 2;
-                const int yh = static_cast<int>(p0(w1, 0, 12)) >> 2;
+                int xl = static_cast<int>(p0(w1, 12, 12)) >> 2;
+                int yl = static_cast<int>(p0(w1, 0, 12)) >> 2;
+                const int xh = static_cast<int>(p0(w0, 12, 12)) >> 2;
+                const int yh = static_cast<int>(p0(w0, 0, 12)) >> 2;
+                // Copy/fill mode rounds the upper-left corner down to a 4-pixel
+                // boundary (RT64 RDP::drawRect).
+                const uint32_t cyc = (st.othermode_h >> 20) & 3;
+                if (cyc == kCycCopy || cyc == kCycFill) {
+                    xl &= ~3;
+                    yl &= ~3;
+                }
                 texrect_geom_[0] = xl;
                 texrect_geom_[1] = yl;
                 texrect_geom_[2] = xh;
                 texrect_geom_[3] = yh;
+                texrect_tile_ = static_cast<int>(p0(w1, 24, 3));
                 break;
             }
 
@@ -2300,7 +2449,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // tile's own format/size, its rect, and its `line` as the row stride.
     // Replaces "decode the load rect with the load's format", which could not
     // express the mask above and used the wrong stride whenever they differ.
-    void ensure_tile_image(ExecCtx* ctx, RenderState& st, int tile) {
+    void ensure_tile_image(ExecCtx* ctx, RenderState& st, int tile, int unit = 0) {
         TileState& t = st.tiles[tile & (kMaxTiles - 1)];
         if (!t.image_source_valid) {
             return;
@@ -2353,7 +2502,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (debug_tex_.size() >= 24) {
                 debug_tex_.erase(debug_tex_.begin());
             }
-            debug_tex_.push_back(std::move(dbg));
+            debug_tex_.push_back(dbg);
+            debug_last_[unit & 1] = std::move(dbg);
         }
 
         // One upload per key per display list: a sprite's two triangles share it.
@@ -2501,6 +2651,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // Queues one triangle list (NDC pos + uv + shade per vertex).
     void queue_triangles(ExecCtx* ctx, DrawCmd& cmd, const float* data, int count) {
         cmd.vertex_count = count;
+        if (!ctx->first_quad_done && cmd.kind == 0 && count >= 3) {
+            ctx->first_quad_done = true;
+            float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+            for (int i = 0; i < count; ++i) {
+                minx = std::min(minx, data[i * 8 + 0]); maxx = std::max(maxx, data[i * 8 + 0]);
+                miny = std::min(miny, data[i * 8 + 1]); maxy = std::max(maxy, data[i * 8 + 1]);
+            }
+            ctx->quad_w = maxx - minx;
+            ctx->quad_h = maxy - miny;
+        }
         for (int i = 0; i < count; ++i) {
             cmd.pos[i * 2 + 0] = data[i * 8 + 0];
             cmd.pos[i * 2 + 1] = data[i * 8 + 1];
@@ -2572,7 +2732,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     void draw_tri(ExecCtx* ctx, RenderState& st, int i0, int i1, int i2) {
         // Debug: draw only the first sprite of the list (ogre_gfx_debug_flags
         // bit 1), so a probe can compare one rendered sprite with its textures.
-        if ((g_debug_flags.load(std::memory_order_relaxed) & 2u) != 0 && ctx->draws.size() >= 2) {
+        // 3 = the frame's fill rect plus this sprite's two triangles; a lower
+        // bound would cut the sprite in half along the quad's diagonal.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 2u) != 0 && ctx->draws.size() >= 3) {
             return;
         }
         if (i0 >= kMaxVertices || i1 >= kMaxVertices || i2 >= kMaxVertices) {
@@ -2601,14 +2763,43 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 return;  // back-facing / clipped
             }
         }
+        if (ctx->order.size() < 200) ctx->order += texture_available(st) ? 't' : 'u';
         // A draw samples TMEM through its render tiles, so decode the two
         // images now (lazily, once per key) and use their rects as the UV basis.
         // This is not gated on G_TEXTURE's `on` field: whether a texel unit is
         // read at all is decided by the combiner's selectors (RT64
         // ColorCombiner::usesTexture), and an unused unit is simply never
         // sampled by the shader.
-        ensure_tile_image(ctx, st, st.active_tile);
-        ensure_tile_image(ctx, st, st.active_tile + 1);
+        ensure_tile_image(ctx, st, st.active_tile, 0);
+        ensure_tile_image(ctx, st, st.active_tile + 1, 1);
+        if (draw_mtx_logged_ < 2) {
+            ++draw_mtx_logged_;
+            const Mat4& mv = st.modelview_stack.back();
+            const Mat4& pj = st.projection;
+            OGRE_MILESTONE("GFX-MTX",
+                           "draw: modelview diag=[%.4f %.4f %.4f %.4f] trans=[%.3f %.3f %.3f] | "
+                           "projection diag=[%.4f %.4f %.4f %.4f] trans=[%.3f %.3f %.3f] | "
+                           "viewport scale=[%.2f %.2f] trans=[%.2f %.2f] set=%d",
+                           mv.m[0], mv.m[5], mv.m[10], mv.m[15], mv.m[12], mv.m[13], mv.m[14],
+                           pj.m[0], pj.m[5], pj.m[10], pj.m[15], pj.m[12], pj.m[13], pj.m[14],
+                           st.view_scale[0], st.view_scale[1], st.view_trans[0], st.view_trans[1],
+                           st.viewport_set ? 1 : 0);
+        }
+        if (!ctx->uv_logged && texture_available(st)) {
+            ctx->uv_logged = true;
+            ctx->u0 = ctx->u1 = data[2];
+            ctx->v0 = ctx->v1 = data[3];
+            for (int i = 1; i < 3; ++i) {
+                ctx->u0 = std::min(ctx->u0, data[i * 8 + 2]);
+                ctx->u1 = std::max(ctx->u1, data[i * 8 + 2]);
+                ctx->v0 = std::min(ctx->v0, data[i * 8 + 3]);
+                ctx->v1 = std::max(ctx->v1, data[i * 8 + 3]);
+            }
+            ctx->iw0 = st.tiles[st.active_tile & (kMaxTiles - 1)].image.width;
+            ctx->ih0 = st.tiles[st.active_tile & (kMaxTiles - 1)].image.height;
+            ctx->iw1 = st.tiles[(st.active_tile + 1) & (kMaxTiles - 1)].image.width;
+            ctx->ih1 = st.tiles[(st.active_tile + 1) & (kMaxTiles - 1)].image.height;
+        }
         DrawCmd cmd;
         record_state(cmd, st, texture_available(st));
         if (texture_available(st)) {
@@ -2618,12 +2809,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     void draw_fill_rect(ExecCtx* ctx, RenderState& st, int xl, int yl, int xh, int yh) {
+        if (ctx->order.size() < 200) ctx->order += 'F';
         // The RDP ignores empty/inverted rectangles (RT64 RDP::fillRect and
         // FixedRect::isEmpty). OB64's title DL contains a TEXRECT with
         // xl=319,yl=239,xh=0,yh=0 - decoding that span as a quad produced a
         // full-screen black cover over the whole scene.
         if (xh < xl || yh < yl) {
             return;
+        }
+        if (rect_logged_ < 3) {
+            ++rect_logged_;
+            OGRE_MILESTONE("GFX-RECT",
+                           "fillrect (%d,%d)-(%d,%d) cyc=%d omh=0x%06X oml=0x%08X "
+                           "fill=[%.2f,%.2f,%.2f,%.2f] scissor=%d(%d,%d,%d,%d)",
+                           xl, yl, xh, yh, static_cast<int>((st.othermode_h >> 20) & 3),
+                           st.othermode_h, st.othermode_l,
+                           st.fill_color[0], st.fill_color[1], st.fill_color[2], st.fill_color[3],
+                           st.scissor_enabled ? 1 : 0,
+                           st.scissor_x0, st.scissor_y0, st.scissor_x1, st.scissor_y1);
+        }
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 4u) != 0 &&
+            (xh - xl) >= 299 && (yh - yl) >= 219) {
+            return;   // debug: keep the previous frame instead of clearing it
         }
         // G_FILLRECT in fill mode outputs the fill color directly (the
         // combiner is bypassed). Approximate by driving the combiner with the
@@ -2666,6 +2873,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             st.combiner.ad[i] = ASEL_ZERO;
         }
 
+        cmd.kind = 1;
         record_state(cmd, st, false);
         queue_triangles(ctx, cmd, data, 6);
 
@@ -2677,10 +2885,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     void draw_texrect(ExecCtx* ctx) {
+        if (ctx->order.size() < 200) ctx->order += 'T';
         RenderState& st = *ctx->st;
+        // A rectangle samples the tile it names, not G_TEXTURE's (RT64
+        // RDP::drawTexRect takes the tile as a parameter). Scope the override
+        // to this draw.
+        const int saved_tile = st.active_tile;
+        st.active_tile = texrect_tile_ & (kMaxTiles - 1);
         const int xl = texrect_geom_[0], yl = texrect_geom_[1];
         const int xh = texrect_geom_[2], yh = texrect_geom_[3];
         if (xh < xl || yh < yl) {
+            st.active_tile = saved_tile;
             return;  // empty rectangle: the RDP draws nothing (see draw_fill_rect)
         }
         const int16_t s0 = static_cast<int16_t>((ctx->rdp_half1 >> 16) & 0xFFFF);
@@ -2690,8 +2905,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         if (txr_logged_ < 3) {
             ++txr_logged_;
-            ensure_tile_image(ctx, st, st.active_tile);
-            ensure_tile_image(ctx, st, st.active_tile + 1);
+            ensure_tile_image(ctx, st, st.active_tile, 0);
+            ensure_tile_image(ctx, st, st.active_tile + 1, 1);
             char muxbuf[256];
             format_combiner(st.combiner, ((st.othermode_h >> 20) & 3) == kCyc2 ? 0 : 1,
                             muxbuf, sizeof(muxbuf));
@@ -2710,12 +2925,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                        (int)last_tex_shifts_, (int)last_tex_shiftt_,
                        (int)last_tex_masks_, (int)last_tex_maskt_);
         }
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 4u) != 0 &&
+            (xh - xl) >= 299 && (yh - yl) >= 219) {
+            st.active_tile = saved_tile;
+            return;   // debug: show the frame without the intro's fade-in rect
+        }
         // Decode the two tile images first: texture_available() reads the
         // result, and a rect that samples a tile loaded straight into it (the
         // synthetic test_draw) has no other place to pick the image up.
-        ensure_tile_image(ctx, st, st.active_tile);
-        ensure_tile_image(ctx, st, st.active_tile + 1);
+        ensure_tile_image(ctx, st, st.active_tile, 0);
+        ensure_tile_image(ctx, st, st.active_tile + 1, 1);
         if (!texture_available(st)) {
+            st.active_tile = saved_tile;
             return;
         }
 
@@ -2760,8 +2981,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
 
         DrawCmd cmd;
+        cmd.kind = 2;
         record_state(cmd, st, texture_available(st));
+        if (rect_logged_ < 3) {
+            ++rect_logged_;
+            OGRE_MILESTONE("GFX-RECT",
+                           "texrect (%d,%d)-(%d,%d) tile=%d cyc=%d textured=%d ablend=%d pri=%d "
+                           "omh=0x%06X oml=0x%08X prim=[%.2f,%.2f,%.2f,%.2f] scissor=%d(%d,%d,%d,%d) "
+                           "key=0x%llX key1=0x%llX s0=%d t0=%d dsdx=%d dtdy=%d",
+                           xl, yl, xh, yh, st.active_tile, cmd.cycle, cmd.textured ? 1 : 0,
+                           cmd.alpha_blend ? 1 : 0, cmd.combiner_cycles,
+                           st.othermode_h, st.othermode_l,
+                           cmd.prim[0], cmd.prim[1], cmd.prim[2], cmd.prim[3],
+                           cmd.scissor_on ? 1 : 0, cmd.sx0, cmd.sy0, cmd.sx1, cmd.sy1,
+                           (unsigned long long)cmd.tex_key, (unsigned long long)cmd.tex_key1,
+                           s0, t0, dsdx, dtdy);
+        }
         queue_triangles(ctx, cmd, data, 6);
+        st.active_tile = saved_tile;
     }
 
     // Screen (pixel) -> NDC.
@@ -2852,8 +3089,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     // Geometry cache for the pending texrect (set by G_TEXRECT, consumed at
-    // the following G_RDPHALF_2).
+    // the following G_RDPHALF_2). A rectangle carries its own tile, which need
+    // not be G_TEXTURE's (RT64 RDP::drawTexRect takes it as a parameter).
     int texrect_geom_[4] = {};
+    int texrect_tile_ = 0;
     // Diagnostics for the texrect path (last load only).
     uint8_t last_tex_rgba_[4] = {0, 0, 0, 0};
     uint8_t last_tex_fmt_ = 0, last_tex_siz_ = 0;
@@ -3000,6 +3239,22 @@ const uint8_t* ogre_gfx_debug_tex(int index, int* out_width, int* out_height,
 // Debug switches for the probes (bit 0: ignore alpha blending).
 void ogre_gfx_debug_flags(unsigned flags) {
     ogre::g_debug_flags.store(flags, std::memory_order_relaxed);
+}
+
+// Debug hook: the two images (0 = TEXEL0, 1 = TEXEL1) the most recent textured
+// draw sampled. This is the pair a rendered sprite must be compared against;
+// ogre_gfx_debug_tex's ring can span frames.
+const uint8_t* ogre_gfx_debug_last_tex(int unit, int* out_width, int* out_height,
+                                       int* out_tile, int* out_fmt, int* out_siz) {
+    static std::vector<uint8_t> out;
+    if (ogre::g_active_renderer == nullptr) {
+        return nullptr;
+    }
+    if (!ogre::g_active_renderer->debug_last_texture_copy(unit, out, out_width, out_height,
+                                                          out_tile, out_fmt, out_siz)) {
+        return nullptr;
+    }
+    return out.data();
 }
 
 // Number of decoded textures currently kept for inspection.

@@ -209,7 +209,19 @@ hardware. RT64 remains the primary native renderer throughout. See
     colorful, twelve readable characters. `testdraw.cjs` was also repaired: its
     scratch address resolved through a segment to zeroed memory and its combiner
     word evaluated to 0, so the isolation probe had been drawing black; it now
-    shows the synthetic 2x2 texture's four quadrants. Next: the idle trajectory (unchanged -
+    shows the synthetic 2x2 texture's four quadrants. A follow-up found the
+    real reason the sprites looked like streaked columns: `G_FILLRECT` and
+    `G_TEXRECT` take `lrx/lry` from **w0** and `ulx/uly` from **w1** (SDK and
+    RT64), and the renderer had the two words swapped - so every full-screen
+    rectangle decoded as inverted, the session-20 empty-rect guard dropped it,
+    and **the game's per-frame clear never ran: frames accumulated on the
+    canvas**. The intro also fades in from black through a full-screen
+    PRIM-alpha rect drawn after the sprites, so the first rendered frame is
+    black and its pixel counts are not a fidelity measure. Geometry, UVs and
+    tile sizes are constant over 48 display lists. Against the reference
+    screenshot from a real session the scene's layout now matches; one sprite's
+    rendered pixels still do not match its texture pair (see the handoff's
+    open item 0). Next: the idle trajectory (unchanged -
     ~half of all boots never build a real display list), a reference frame to
     compare against, and the remaining combiner inputs
     (`NOISE`/`K4`/`K5`/`LOD_FRACTION`/keys). See

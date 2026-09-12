@@ -186,7 +186,7 @@ if (EMSCRIPTEN)
         "-sUSE_WEBGL2=1"
         "-sMAX_WEBGL_VERSION=2"
         
-        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_ogre_gfx_debug_tex,_ogre_gfx_debug_tex_count,_ogre_gfx_debug_flags,_ogre_set_trace_enabled,_ogre_send_prnmi,_malloc,_free,_main"
+        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_ogre_gfx_debug_tex,_ogre_gfx_debug_tex_count,_ogre_gfx_debug_last_tex,_ogre_gfx_debug_flags,_ogre_set_trace_enabled,_ogre_send_prnmi,_malloc,_free,_main"
         # Session-16 diagnostic: keep C function names in the wasm so worker
         # crash stacks identify the faulting game/runtime function. Remove
         # before any release (costs size).

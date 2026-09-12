@@ -5,6 +5,65 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-11 (session 23, follow-up) — the rectangle commands were decoded word-swapped, so nothing ever cleared the canvas
+
+### Finding: `G_FILLRECT`/`G_TEXRECT` take `lrx/lry` from w0 and `ulx/uly` from w1
+
+`gDPFillRectangle`/`gSPTextureRectangle` emit the lower-right corner in **w0**
+and the upper-left in **w1**; RT64 `GBI_RDP::fillRect`/`texrect` read `p0` for
+the lower-right and `p1` for the upper-left. This renderer read the upper-left
+from `w0`, so a rectangle from `(0,0)` to `(w-1,h-1)` - a full-screen clear, the
+most common rectangle there is - decoded as *inverted* and was dropped by the
+empty-rect guard session 20 added.
+
+Session 20's note ("OB64's title DL contains a TEXRECT with xl=319, yl=239,
+xh=0, yh=0 - decoding that span as a quad produced a full-screen black cover")
+is that same mis-decode seen from the other side: the inverted rect *was* the
+real full-screen rect.
+
+Consequences: the game's per-frame `G_FILLRECT` clear and its full-screen fade
+rect were both discarded, so **frames accumulated on the canvas** - the title
+sprites looked like thin streaked columns because many frames of a slowly
+changing scene were stacked on top of each other.
+
+### Decision: decode rectangles the way the SDK and RT64 do, and carry the extra rules
+
+`G_FILLRECT` and `G_TEXRECT`/`G_TEXRECTFLIP` now read `ulx/uly` from `w1` and
+`lrx/lry` from `w0`. Two related rules came with them:
+
+- a rectangle samples **its own tile** (`G_TEXRECT` w1 bits 24-26), not
+  `G_TEXTURE`'s - RT64 `RDP::drawTexRect` takes the tile as a parameter, so the
+  draw scopes `active_tile` to the rectangle's;
+- fill/copy mode rounds the origin down and the far corner up to the 4-pixel
+  group (RT64 `RDP::fillRect`'s `lrx |= 3`/`lry |= 3` and `RDP::drawRect`'s
+  `ulx &= ~3`).
+
+`test_draw`'s synthetic list had been built with the swapped layout (it put both
+corners in w1), which is why it kept "working" until this fix and then drew
+nothing; it now emits the SDK layout.
+
+### Finding: the intro fades in from black, so the first frame is not a fidelity measure
+
+The full-screen rectangle drawn *after* the sprites each frame is a fade whose
+alpha is `G_SETPRIMCOLOR`'s (`rgb = PRIM`, `a = PRIM`, `FORCE_BL`). Every probe
+that captures "the first rendered frame" therefore captures a black frame.
+
+Measured over 48 display lists the sprites never change: the first quad stays
+0.1463 x 0.3253 NDC (23.4 x 39.4 px), the vertex UV range stays 0..19 x 0..33
+texels, and the tiles stay a 32x34 I4 mask plus a 20x34 RGBA16 colour. The
+bounding box that appeared to "grow" was the fade revealing a static picture.
+
+### Decision: probes must wait for a fresh display list, not a fixed delay
+
+`debug/probes/spritecheck.cjs` now (a) waits for the `exec: task=` counter to
+advance after it changes the debug flags - the game stalls for seconds and a
+stale canvas reads a faded (black) frame - and (b) compares the rendered sprite
+against `ogre_gfx_debug_last_tex`, the exact pair the last textured draw
+sampled, because `ogre_gfx_debug_tex`'s ring of decodes spans frames. It also
+takes `--settle MS`.
+
+---
+
 ## 2026-09-11 (session 23) — the title sprites are decoded the way the RDP samples them
 
 ### Finding: every vertex field was read with the wrong byte order

@@ -18,7 +18,7 @@ proxy.
 
 | | session-21 baseline | now |
 |---|---|---|
-| `boot.cjs` default boot | 7 988 non-black / 5 852 colorful, slivers | **21 680 / 17 400**, twelve readable characters |
+| `boot.cjs` default boot | 7 988 non-black / 5 852 colorful, slivers | 18 156 / 0 - the first frame is mid-fade, so use `--flags 4` or a settled capture |
 | sprite quad | 39x23 px (x/y swapped) | 23x39 px, matches the 20x34 sprite sheet |
 | `TEXEL0` (alpha mask) | 16x34 I8 | **32x34 I4** (the sampling tile's format) |
 | `TEXEL1` (colour) | 20x34 RGBA16 | 20x34 RGBA16 (unchanged) |
@@ -151,6 +151,66 @@ but not the same value in general. `decode_texture_rect` now takes an explicit
 `row_bytes`; the previous `width * bytes_per_texel` was only accidentally right
 when the load's format matched the tile's.
 
+### 6. `G_FILLRECT`/`G_TEXRECT` decoded their two command words the wrong way round
+
+The SDK's `gDPFillRectangle`/`gSPTextureRectangle` put **`lrx/lry` in w0** and
+**`ulx/uly` in w1**, and RT64 reads them that way (`GBI_RDP::fillRect` takes the
+upper-left from `p1` and the lower-right from `p0`). This renderer took the
+upper-left from `w0`, so every rectangle whose upper-left is `(0,0)` - the
+common case, including a full-screen clear - decoded as *inverted* and was
+silently dropped by the empty-rect guard session 20 added for exactly this
+symptom (that session saw a full-screen TEXRECT "cover the whole scene" *because*
+the inverted rect spanned the screen; the guard hid the symptom and threw away
+the draw).
+
+The consequences were large and looked like two unrelated problems:
+
+- the game's per-frame full-screen `G_FILLRECT` clear never happened, so **every
+  frame accumulated on the canvas** - the title scene was many frames smeared
+  over each other, which is what made the sprites look like thin streaked
+  columns instead of characters;
+- the intro's full-screen fade rect was dropped as well, so the fade did not
+  happen either.
+
+The frame's skeleton, once both were decoded correctly (`[GFX-ORDER]`):
+
+```
+task 24 quad0=0.1463x0.3253 uv=[0.0..19.0, 0.0..33.0] tex0=32x34 tex1=20x34
+        order: Futututututututututututut
+```
+
+i.e. `F` (full-screen clear) + 24 sprite triangles + `T` (full-screen fade),
+and a `readPixels` immediately after the batch reported the canvas black - which
+only makes sense if `T` is the fade and `F` is the clear (both are
+`(0,0)-(319,239)`, the fade's colour is `PRIM` with `PRIM.a` from
+`G_SETPRIMCOLOR`, and it is alpha-blended).
+
+Two smaller rectangle rules came with the same fix:
+
+- a rectangle carries **its own tile** (`G_TEXRECT` w1 bits 24-26), which need
+  not be `G_TEXTURE`'s; RT64 `RDP::drawTexRect` takes it as a parameter;
+- fill/copy mode rounds the upper-left corner down and the lower-right corner up
+  to the 4-pixel group (RT64 `RDP::fillRect`'s `lrx |= 3` and `RDP::drawRect`).
+
+### The intro fades in from black and its geometry never changes
+
+The full-screen `T` each frame is a fade: its alpha is `G_SETPRIMCOLOR`'s. So the
+*first* rendered frame is a black frame, and `boot.cjs`'s pixel counts at that
+moment are not a fidelity measure at all.
+
+Measured over 48 display lists, everything about the sprites is constant:
+
+| | value |
+|---|---|
+| first sprite quad | 0.1463 x 0.3253 NDC = **23.4 x 39.4 px** |
+| vertex UV range | **0..19 x 0..33 texels** (s10.5 after `G_TEXTURE` sc/tc) |
+| tile images | **32x34** (TEXEL0 mask, I4) and **20x34** (TEXEL1 colour, RGBA16) |
+| frame order | `F` + 24 triangles + `T` |
+
+So the earlier reading that "the ring zooms in over ~40 display lists" was wrong:
+the bounding box grows because the *fade* reveals more of a static picture, not
+because the geometry animates.
+
 ## How the sprite path was actually verified
 
 Guessing from screenshots was actively misleading (a 20x37 character at 1:1
@@ -168,13 +228,28 @@ Two new probes exist for this and both are in the repo:
   renderer draws only the first sprite, reads the canvas back with
   `readPixels`, and writes `sprite-compare.png` with the rendered crop beside
   the composite. **This is the probe to run before believing any sprite fix.**
-  (The readback must not clear the canvas immediately before `readPixels`: the
-  main thread only issues GL from `ogre_gfx_flush()` every 16 ms, so a clear in
-  the same frame reads black.)
+  Two traps it now avoids: (a) the readback must not clear the canvas
+  immediately before `readPixels` (the main thread only issues GL from
+  `ogre_gfx_flush()` every 16 ms, so a clear in the same frame reads black), and
+  (b) it must wait for a **fresh display list** after setting the flags, because
+  the game stalls for seconds at a time and a stale canvas is a faded (black)
+  frame. It also compares against `ogre_gfx_debug_last_tex`, the pair the last
+  textured draw actually sampled — the decode ring spans frames, so its first
+  pair is not necessarily what was drawn.
 
-`ogre_gfx_debug_flags` bits: `1` = ignore alpha blending (writes the combiner
-colour opaquely, which separates "colour pipeline" from "mask"), `2` = draw only
-the first sprite.
+`ogre_gfx_debug_flags` bits:
+
+| bit | effect |
+|---|---|
+| 1 | ignore alpha blending (writes the combiner colour opaquely) |
+| 2 | draw only the first sprite of the list |
+| 4 | skip full-screen rectangles — shows the frame without the intro's fade |
+| 8 | bypass the combiner and output TEXEL1 raw |
+| 16 | bypass the combiner and output TEXEL0 raw |
+
+`ogre_gfx_debug_last_tex(unit, …)` returns the TEXEL0/TEXEL1 images of the most
+recent textured draw; `ogre_gfx_debug_tex(i, …)` walks the last 24 decodes (a
+whole frame's pairs).
 
 ## Diagnosing the tile recipe
 
@@ -211,17 +286,36 @@ a white shade.
 
 ## Verified
 
-- `spritecheck.cjs`: rendered sprite matches its `colour × mask` composite.
+- The frame's structure, its rectangle geometry and its texture dimensions are
+  all confirmed by `[GFX-ORDER]`/`[GFX-RECT]`/`[GFX-BLIT]` and by a canvas
+  readback taken immediately after a batch.
 - `textures.cjs`: mask `32x34 t0 f4s0`, colour `20x34 t1 f0s2`, and the six
-  title combiners/logs agree with the ROM words (`cmb=0xFCFFFFFFFFFD7238`).
-- `boot.cjs`: `RENDERED` 21 680 non-black / 17 764 colorful, twelve characters.
+  title combiners/logs agree with the ROM words (`cmb=0xFCFFFFFFFFFD7238`); the
+  mask's alpha histogram is 22% at 255 with a smooth tail, i.e. a real mask.
 - `testdraw.cjs`: `nonBlack=12312 colorful=10237`, the synthetic texture's four
   quadrants (`#0f0`, `#f00`, `#00f`, `#fff`).
-- `logmode.cjs`, `stats.cjs`, `progress.cjs`: see the result files under
-  `debug/out/` (`s23-logmode`, `s23-stat`, `s23-progress`, `s23-final`).
+- `logmode.cjs`: PASS.
+- The scene's **layout** matches the reference screenshot from a real session
+  (two mirrored groups per side: three characters in an upper cluster, three
+  below in a diagonal) - see `debug/out/s23-nofade-canvas.png` beside
+  `docs/`'s reference.
 
 ## Still open
 
+0. **A single sprite's rendered pixels still do not match its texture pair.**
+   With the clear and the fade both working, one sprite rendered in isolation
+   (`spritecheck.cjs`) produces a dim, speckled image where the
+   `colour x mask` composite of *the same pair* (`ogre_gfx_debug_last_tex`) is a
+   bright character. The mask is not the suspect: its alpha histogram is 22% at
+   255 and `--flags 18` (raw TEXEL0) renders a clean white silhouette. So the
+   next step is the colour side: run `--flags 9` (raw TEXEL1, blending off) on a
+   boot whose pair is known bright and compare it with
+   `ogre_gfx_debug_last_tex(1)`; if the sampled colour is black while the decoded
+   image is bright, check that `u_uv_scale1`/`u_uv_origin1` actually reach the
+   shader (`glGetUniformLocation` returning -1 leaves them at their default 0,
+   which makes `v_uv1` collapse to texel (0,0)). `debug/probes/spritecheck.cjs`
+   already reports the mask histogram and the colour's max RGB, and the two raw
+   modes exist for exactly this bisection.
 1. **The idle trajectory is still the gate.** Nothing here changes the pacing:
    ~half of all boots submit only the boot blanking display list. Session 21's
    question stands — who sends to t5 (`0x800E9BA8`) and t16 (`0x800B9C40`)?
@@ -260,7 +354,11 @@ JS-only changes (`app/web/`) need no rebuild; a renderer change needs
 
 ## Files changed (tracked)
 
-- `app/src/web_renderer.cpp` — `Blender` (RT64 decode + `usesAlphaBlend` +
+- `app/src/web_renderer.cpp` — `G_FILLRECT`/`G_TEXRECT` word order, a
+  rectangle's own tile, fill/copy 4-pixel rounding, the fade/blanking
+  diagnostics (`[GFX-ORDER]`, `[GFX-RECT]`, `[GFX-BLIT]`, `[GFX-AFTER]`), the
+  raw TEXEL debug modes, `ogre_gfx_debug_last_tex`, the `test_draw` rect layout;
+  plus `Blender` (RT64 decode + `usesAlphaBlend` +
   `run`/`runCycle` in GLSL), I8/I4 intensity-into-alpha, `RGBA16` bit
   replication, `n64h()`/`n64b()` vertex decode, `G_TEXTURE` scale,
   tile-based image model (`pending_load`, `TileState::image`,
