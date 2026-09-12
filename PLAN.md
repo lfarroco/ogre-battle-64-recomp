@@ -356,19 +356,37 @@ hardware. RT64 remains the primary native renderer throughout. See
     screen), both swap-chain readbacks
     (`OGRE_CAPTURE_PRESENT=… OGRE_CAPTURE_AFTER=…`). Confirmed by eye: soldiers,
     falling block, block → N64 logo, title screen.
-  - ⬜ **The late crash is a streamed-overlay stub (session 31)**: an unattended
-    96.7s run reaches display list 2770, then
+  - ✅ **The publisher screens now render correctly (session 32)**: the
+    "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
+    (they are the game's hi-res mode) but scanned out with the runtime's dummy
+    320x240 VI geometry, so only the top-left quarter of the RDP framebuffer
+    reached the screen. The cause was a **mis-named libultra symbol**: the
+    function at `0x80095820` that `symbol_addrs.txt` called `osViSetMode` is
+    really `__osViSwapContext`, and the *real* `osViSetMode` (which stores the
+    game's `OSViMode` pointer) is `func_800955C0` and was never named — so the
+    runtime never learned the game's VI mode and stayed on its dummy mode.
+    `func_800955C0` is now `osViSetMode`, `0x80095820` is `__osViSwapContext`
+    (a no-op; the runtime's VI thread does the swap), and the game's
+    640x480 `D_800AB9B0` mode now reaches RT64. Proofs:
+    `docs/proofs/native-licensed-screen.png`,
+    `docs/proofs/native-atlus-screen.png`,
+    `docs/proofs/native-quest-screen.png`. See
+    `docs/HANDOFF-2026-09-12-session32.md`.
+  - ⬜ **The late crash is an overlay *bank swap*, confirmed (session 32)**: an
+    unattended ~95s run reaches display list 2770, then
     `streamed function stub called @ 0x801AD5C0 (not yet loaded)` and
     `Failed to find function at 0x00000000` abort the process (exit 134, from
-    `func_80076AE8` in the main loop). Register the remaining overlay-C
-    addresses in `app/src/overlays.cpp` (or determine whether `0x801AD5C0` is a
-    different bank) and re-run. This is the Phase-4 overlay boundary, not a
-    session-31 regression.
-  - ⬜ **The "Licensed by Nintendo" / ATLUS / QUEST screens render only their
-    upper-left quarter, stretched (session 31)**: the N64 logo and title screen
-    are correct, so this is specific to those full-screen stills — suspect the
-    `SETTIMG`/`SETTILE` source size, a quartered texrect destination, or VI
-    `width`/`hRegion` being taken at half size.
+    `func_80076AE8` in the main loop). Session 31's lead was right to ask
+    whether `0x801AD5C0` is a different bank: it is. The game DMA's a **new
+    streamed overlay** over overlay C at t≈95s in three pieces —
+    ROM `0xE4910` → RAM `0x80197B90` (`0x72C0`), ROM `0xEBBD0` → RAM
+    `0x8019EE70` (`0xE440`), ROM `0xFA600` → RAM `0x801AD5C0` (`0x7700`) — and
+    calls its entry (`0x801AD5C0` has a real prologue in the ROM). The port
+    still has overlay C registered at those addresses, so the call falls to the
+    streamed stub, the callback never initialises its object, and the next
+    function-pointer call is NULL. That is the Phase-4 overlay-swap boundary:
+    it needs a relocatable/overlay-section scheme (overlay C and D overlap in
+    RAM, so both cannot be linked at their fixed addresses in one ELF).
   - ⬜ **19 more splat split symbols in overlay C (session 30)**: the same class
     of bug (a symbol cut out of the middle of a logical function makes the
     compiled function return without unwinding its frame, clobbering the

@@ -2015,7 +2015,7 @@ glabel func_80072738
     /* 2BBC 800727BC 3C04800B */  lui        $a0, %hi(D_800ABA50)
     /* 2BC0 800727C0 2484BA50 */  addiu      $a0, $a0, %lo(D_800ABA50)
   .L800727C4:
-    /* 2BC4 800727C4 0C025570 */  jal        func_800955C0
+    /* 2BC4 800727C4 0C025570 */  jal        osViSetMode
     /* 2BC8 800727C8 00000000 */   nop
   .L800727CC:
     /* 2BCC 800727CC 8FBF0010 */  lw         $ra, 0x10($sp)
@@ -2711,7 +2711,7 @@ glabel func_8007307C
     /* 3520 80073120 3C04800B */  lui        $a0, %hi(D_800ABA00)
     /* 3524 80073124 2484BA00 */  addiu      $a0, $a0, %lo(D_800ABA00)
   .L80073128:
-    /* 3528 80073128 0C025570 */  jal        func_800955C0
+    /* 3528 80073128 0C025570 */  jal        osViSetMode
     /* 352C 8007312C 00000000 */   nop
     /* 3530 80073130 320200FF */  andi       $v0, $s0, 0xFF
   .L80073134:
@@ -28437,7 +28437,7 @@ glabel func_80088C50
     /* 19174 80088D74 00042100 */  sll        $a0, $a0, 4
     /* 19178 80088D78 3C02800B */  lui        $v0, %hi(D_800AA7E0)
     /* 1917C 80088D7C 2442A7E0 */  addiu      $v0, $v0, %lo(D_800AA7E0)
-    /* 19180 80088D80 0C025570 */  jal        func_800955C0
+    /* 19180 80088D80 0C025570 */  jal        osViSetMode
     /* 19184 80088D84 00822021 */   addu      $a0, $a0, $v0
     /* 19188 80088D88 0C0226F9 */  jal        func_80089BE4
     /* 1918C 80088D8C 24040001 */   addiu     $a0, $zero, 0x1
@@ -41294,7 +41294,7 @@ glabel func_80093CB0
     /* 2414C 80093D4C 00042100 */  sll        $a0, $a0, 4
     /* 24150 80093D50 3C02800B */  lui        $v0, %hi(D_800AA7E0)
     /* 24154 80093D54 2442A7E0 */  addiu      $v0, $v0, %lo(D_800AA7E0)
-    /* 24158 80093D58 0C025570 */  jal        func_800955C0
+    /* 24158 80093D58 0C025570 */  jal        osViSetMode
     /* 2415C 80093D5C 00822021 */   addu      $a0, $a0, $v0
     /* 24160 80093D60 0C0256CC */  jal        func_80095B30
     /* 24164 80093D64 24040001 */   addiu     $a0, $zero, 0x1
@@ -43037,7 +43037,7 @@ glabel func_800953C0
     /* 2583C 8009543C 08025505 */  j          .L80095414
     /* 25840 80095440 00000000 */   nop
   .L80095444:
-    /* 25844 80095444 0C025608 */  jal        osViSetMode
+    /* 25844 80095444 0C025608 */  jal        __osViSwapContext
     /* 25848 80095448 00000000 */   nop
     /* 2584C 8009544C 3C02800C */  lui        $v0, %hi(D_800C35B0)
     /* 25850 80095450 944235B0 */  lhu        $v0, %lo(D_800C35B0)($v0)
@@ -43143,9 +43143,9 @@ endlabel osViSetEvent
     /* 259B8 800955B8 00000000 */  nop
     /* 259BC 800955BC 00000000 */  nop
 
-nonmatching func_800955C0, 0x4C
+nonmatching osViSetMode, 0x4C
 
-glabel func_800955C0
+glabel osViSetMode
     /* 259C0 800955C0 27BDFFE8 */  addiu      $sp, $sp, -0x18
     /* 259C4 800955C4 AFB00010 */  sw         $s0, 0x10($sp)
     /* 259C8 800955C8 AFBF0014 */  sw         $ra, 0x14($sp)
@@ -43165,7 +43165,7 @@ glabel func_800955C0
     /* 25A00 80095600 8FB00010 */  lw         $s0, 0x10($sp)
     /* 25A04 80095604 03E00008 */  jr         $ra
     /* 25A08 80095608 27BD0018 */   addiu     $sp, $sp, 0x18
-endlabel func_800955C0
+endlabel osViSetMode
     /* 25A0C 8009560C 00000000 */  nop
 
 nonmatching osViSetSpecialFeatures, 0x164
@@ -43323,9 +43323,9 @@ endlabel osViSwapBuffer
     /* 25C18 80095818 00000000 */  nop
     /* 25C1C 8009581C 00000000 */  nop
 
-nonmatching osViSetMode, 0x308
+nonmatching __osViSwapContext, 0x308
 
-glabel osViSetMode
+glabel __osViSwapContext
     /* 25C20 80095820 27BDFFD8 */  addiu      $sp, $sp, -0x28
     /* 25C24 80095824 AFB00010 */  sw         $s0, 0x10($sp)
     /* 25C28 80095828 3C10800B */  lui        $s0, %hi(D_800ABBD4)
@@ -43530,7 +43530,7 @@ glabel osViSetMode
     /* 25F1C 80095B1C 8FB00010 */  lw         $s0, 0x10($sp)
     /* 25F20 80095B20 03E00008 */  jr         $ra
     /* 25F24 80095B24 27BD0028 */   addiu     $sp, $sp, 0x28
-endlabel osViSetMode
+endlabel __osViSwapContext
     /* 25F28 80095B28 00000000 */  nop
     /* 25F2C 80095B2C 00000000 */  nop
 
@@ -49499,7 +49499,7 @@ glabel func_8009AB50
     /* 2B034 8009AC34 3C02A440 */   lui       $v0, %hi(D_A4400000)
   .L8009AC38:
     /* 2B038 8009AC38 AC400000 */  sw         $zero, %lo(D_A4400000)($v0)
-    /* 2B03C 8009AC3C 0C025608 */  jal        osViSetMode
+    /* 2B03C 8009AC3C 0C025608 */  jal        __osViSwapContext
     /* 2B040 8009AC40 00000000 */   nop
     /* 2B044 8009AC44 8FBF0014 */  lw         $ra, 0x14($sp)
     /* 2B048 8009AC48 8FB00010 */  lw         $s0, 0x10($sp)

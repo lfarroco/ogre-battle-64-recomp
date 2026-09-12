@@ -18,7 +18,17 @@ osCreateMesgQueue = 0x80093570;     // type:func
 osCreateViManager = 0x80095220;     // type:func
 osCreatePiManager = 0x8008B8C0;     // type:func
 osCartRomInit = 0x8008BD30;         // type:func
-osViSetMode = 0x80095820;           // type:func
+// CORRECTION (2026-09-12, session 32): 0x80095820 was named osViSetMode, but it
+// is `__osViSwapContext` (it reads __osViNext->modep/framep from its own context
+// and writes the VI hardware registers; it never uses $a0). The REAL
+// osViSetMode is func_800955C0: it stores the mode pointer into __osViNext
+// (offset 0x8) and copies modep->comRegs.ctrl into the context, exactly like
+// libultra. Because the real one was never named, the runtime never learned the
+// game's VI mode, so the 640x480 "Licensed by Nintendo"/ATLUS/QUEST screens were
+// scanned out with the dummy 320x240 VI geometry - the top-left quarter of the
+// RDP's 640x480 framebuffer, stretched over the screen.
+__osViSwapContext = 0x80095820;     // type:func  (stubbed - the runtime's VI thread does the swap)
+osViSetMode = 0x800955C0;           // type:func
 osViSetSpecialFeatures = 0x80095610; // type:func
 osDpSetNextBuffer = 0x8009A630;     // type:func
 osGetCount = 0x8009A6E0;            // type:func

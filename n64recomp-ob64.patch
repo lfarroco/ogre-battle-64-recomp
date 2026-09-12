@@ -800,10 +800,24 @@ index c228433..17d96c4 100644
  
      // Terminate the function
 diff --git a/src/symbol_lists.cpp b/src/symbol_lists.cpp
-index 9c8f27d..04cfc57 100644
+index 9c8f27d..c18b9c9 100644
 --- a/src/symbol_lists.cpp
 +++ b/src/symbol_lists.cpp
-@@ -28,6 +28,7 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
+@@ -21,6 +21,13 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
+     "osViSwapBuffer",
+     "osViSetMode",
+     "osViSetEvent",
++    // The game's __osViSwapContext writes the VI registers from the game-side
++    // __osViNext context. The port's VI thread (ultramodern events.cpp
++    // update_vi) already does that from its own state, and the game-side
++    // context's mode pointer is never populated because osViSetMode is bridged,
++    // so running the game's body would dereference a null mode. Reimplement it
++    // as a no-op (librecomp/src/vi.cpp).
++    "__osViSwapContext",
+     // RDP functions
+     "osDpSetNextBuffer",
+     // RSP functions
+@@ -28,6 +35,7 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
      "osSpTaskStartGo",
      "osSpTaskYield",
      "osSpTaskYielded",

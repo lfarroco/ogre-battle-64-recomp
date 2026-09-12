@@ -133,7 +133,7 @@ index 0f7de83..6bbe537 100644
  #   error "Unsupported architecture"
  #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..01b8734 100644
+index 8c8e5d1..d153cc4 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,10 @@
@@ -162,8 +162,21 @@ index 8c8e5d1..01b8734 100644
  static SectionTableEntry* patch_code_sections = nullptr;
  size_t num_patch_code_sections = 0;
  static std::vector<char> patch_data;
-@@ -363,12 +375,32 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +373,49 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
+ }
  
++// Temporary diagnostic: dump the calling N64 thread's recompiled call chain.
++static void dump_caller_chain(const char* label) {
++    uint8_t* rdram = ultramodern::get_rdram_base();
++    if (rdram == nullptr) {
++        return;
++    }
++    PTR(OSThread) self = ultramodern::this_thread();
++    int tid = (self != 0) ? TO_PTR(OSThread, self)->id : -1;
++    ultramodern::debug_dump_call_chain(tid, label);
++}
++
  extern "C" recomp_func_t * get_function(int32_t addr) {
      auto func_find = func_map.find(addr);
 -    if (func_find == func_map.end()) {
@@ -182,10 +195,14 @@ index 8c8e5d1..01b8734 100644
 +    uint32_t a = (uint32_t)addr;
 +    if ((a >= 0x8016A000 && a < 0x80400000) || (a >= 0x84000000 && a < 0x84200000)) {
 +        last_streamed_stub_addr.store(a);
++        // Temporary diagnostic: dump the calling thread's recompiled call chain
++        // so a stub call can be attributed to the exact game function.
++        dump_caller_chain("streamed-stub");
 +        return streamed_stub_generic;
 +    }
 +
 +    fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
++    dump_caller_chain("null-lookup");
 +#if !defined(__EMSCRIPTEN__)
 +    // Temporary: dump the host call stack to identify the caller.
 +    void* bt[32];
@@ -695,6 +712,27 @@ index e0d367e..bd6e8b9 100644
      ctx->r2 = osJamMesg(rdram, (int32_t)ctx->r4, (OSMesg)ctx->r5, (s32)ctx->r6);
  }
  
+diff --git a/librecomp/src/vi.cpp b/librecomp/src/vi.cpp
+index 1f3a4cf..c5810cc 100644
+--- a/librecomp/src/vi.cpp
++++ b/librecomp/src/vi.cpp
+@@ -42,6 +42,16 @@ extern "C" void osViSetMode_recomp(uint8_t* rdram, recomp_context* ctx) {
+     osViSetMode(rdram, (int32_t)ctx->r4);
+ }
+ 
++// The game's __osViSwapContext writes the VI hardware registers from the
++// game-side __osViNext context (modep/framep in rdram). The port does not use
++// that context: osViSetMode/osViSwapBuffer are bridged into the runtime's own
++// ViState, and the VI thread (ultramodern events.cpp update_vi) writes the
++// registers from it every retrace. Running the game's body would dereference
++// __osViNext->modep, which the bridged osViSetMode never populates (it is null).
++extern "C" void __osViSwapContext_recomp(uint8_t* rdram, recomp_context* ctx) {
++    ;
++}
++
+ extern uint64_t total_vis;
+ 
+ extern "C" void wait_one_frame(uint8_t* rdram, recomp_context* ctx) {
 diff --git a/ultramodern/CMakeLists.txt b/ultramodern/CMakeLists.txt
 index 5593172..c99c729 100644
 --- a/ultramodern/CMakeLists.txt
@@ -883,7 +921,7 @@ index 3198be0..864705d 100644
      uint32_t sample_count = byte_count / sizeof(int16_t);
  
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index 2f1cfb5..759a07a 100644
+index 2f1cfb5..1b6b971 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -8,6 +8,7 @@
@@ -927,7 +965,35 @@ index 2f1cfb5..759a07a 100644
              const OSViCommonRegs* common_regs = &next_mode->comRegs;
              const OSViFieldRegs* field_regs = &next_mode->fldRegs[field];
              PTR(void) framebuffer = osVirtualToPhysical(next_state->framebuffer);
-@@ -143,6 +163,7 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
+@@ -105,7 +125,26 @@ static struct {
+             regs.VI_X_SCALE_REG = common_regs->xScale; // TODO implement osViSetXScale
+             regs.VI_Y_SCALE_REG = yScale; // TODO implement osViSetYScale
+             regs.VI_STATUS_REG = next_state->control;
+-            
++
++            // Temporary diagnostic: log every change of the scanout geometry so
++            // a game-side VI mode switch (e.g. the 640x480 "Licensed by
++            // Nintendo" screens) is visible in the trace.
++            if (debug_trace_vi()) {
++                static uint32_t last_width = ~0u, last_hstart = ~0u, last_xscale = ~0u, last_vstart = ~0u;
++                if (regs.VI_WIDTH_REG != last_width || regs.VI_H_START_REG != last_hstart ||
++                    regs.VI_X_SCALE_REG != last_xscale || regs.VI_V_START_REG != last_vstart) {
++                    last_width = regs.VI_WIDTH_REG;
++                    last_hstart = regs.VI_H_START_REG;
++                    last_xscale = regs.VI_X_SCALE_REG;
++                    last_vstart = regs.VI_V_START_REG;
++                    OGRE_TRACE("[vi-debug] VI change width=%u hStart=0x%08X xScale=0x%08X vStart=0x%08X "
++                               "yScale=0x%08X origin=0x%08X ctrl=0x%08X\n",
++                               regs.VI_WIDTH_REG, regs.VI_H_START_REG, regs.VI_X_SCALE_REG,
++                               regs.VI_V_START_REG, regs.VI_Y_SCALE_REG, (uint32_t)regs.VI_ORIGIN_REG,
++                               regs.VI_STATUS_REG);
++                }
++            }
++
+             // Swap VI states.
+             cur_state ^= 1;
+             *get_next_state() = *get_cur_state();
+@@ -143,6 +182,7 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
  
  extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_, OSMesg msg) {
      std::lock_guard lock{ events_context.message_mutex };
@@ -935,7 +1001,7 @@ index 2f1cfb5..759a07a 100644
  
      switch (event_id) {
          case OS_EVENT_SP:
-@@ -165,6 +186,9 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
+@@ -165,6 +205,9 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
  
  extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 retrace_count) {
      std::lock_guard lock{ events_context.message_mutex };
@@ -945,7 +1011,7 @@ index 2f1cfb5..759a07a 100644
      ViState* next_state = events_context.vi.get_next_state();
      next_state->mq = mq_;
      next_state->msg = msg;
-@@ -187,6 +211,7 @@ void vi_thread_func() {
+@@ -187,6 +230,7 @@ void vi_thread_func() {
      using namespace std::chrono_literals;
  
      int remaining_retraces = 1;
@@ -953,7 +1019,7 @@ index 2f1cfb5..759a07a 100644
  
      while (!exited) {
          // Determine the next VI time (more accurate than adding 16ms each VI interrupt)
-@@ -229,6 +254,13 @@ void vi_thread_func() {
+@@ -229,6 +273,13 @@ void vi_thread_func() {
          // Update VI registers and swap VI modes.
          events_context.vi.update_vi();
  
@@ -967,7 +1033,7 @@ index 2f1cfb5..759a07a 100644
          // If the game has started, handle sending VI and AI events.
          if (ultramodern::is_game_started()) {
              remaining_retraces--;
-@@ -237,6 +269,9 @@ void vi_thread_func() {
+@@ -237,6 +288,9 @@ void vi_thread_func() {
              ViState* cur_state = events_context.vi.get_cur_state();
              if (remaining_retraces == 0) {
                  if (cur_state->mq != NULLPTR) {
@@ -977,7 +1043,7 @@ index 2f1cfb5..759a07a 100644
                      // Send a message to the VI queue, and do not set it to be requeued if the queue was full.
                      // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next. 
                      ultramodern::enqueue_external_message_src(cur_state->mq, cur_state->msg, false, ultramodern::EventMessageSource::Vi);
-@@ -258,12 +293,14 @@ void vi_thread_func() {
+@@ -258,12 +312,14 @@ void vi_thread_func() {
  void sp_complete() {
      uint8_t* rdram = events_context.rdram;
      std::lock_guard lock{ events_context.message_mutex };
@@ -992,7 +1058,7 @@ index 2f1cfb5..759a07a 100644
      ultramodern::enqueue_external_message_src(events_context.dp.mq, events_context.dp.msg, false, ultramodern::EventMessageSource::Dp);
  }
  
-@@ -393,7 +430,13 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+@@ -393,7 +449,13 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  }
              }
              else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
@@ -1007,7 +1073,7 @@ index 2f1cfb5..759a07a 100644
              }
          }
      }
-@@ -443,6 +486,10 @@ static const OSViMode dummy_mode = []() {
+@@ -443,6 +505,10 @@ static const OSViMode dummy_mode = []() {
      return ret;
  }();
  
@@ -1018,7 +1084,7 @@ index 2f1cfb5..759a07a 100644
  void set_dummy_vi(bool odd) {
      ViState* next_state = events_context.vi.get_next_state();
      next_state->mode = &dummy_mode;
-@@ -454,15 +501,44 @@ void set_dummy_vi(bool odd) {
+@@ -454,17 +520,53 @@ void set_dummy_vi(bool odd) {
      }
  }
  
@@ -1063,8 +1129,17 @@ index 2f1cfb5..759a07a 100644
 +    }
      next_state->mode = mode;
      next_state->control = next_state->mode->comRegs.ctrl;
++    if (debug_trace_vi()) {
++        OGRE_TRACE("[vi-debug] osViSetMode(0x%08X) ctrl=0x%08X width=%u hStart=0x%08X xScale=0x%08X "
++                   "f0.vStart=0x%08X f0.yScale=0x%08X f0.origin=0x%08X\n",
++                   (uint32_t)mode_, mode->comRegs.ctrl, mode->comRegs.width, mode->comRegs.hStart,
++                   mode->comRegs.xScale, mode->fldRegs[0].vStart, mode->fldRegs[0].yScale,
++                   mode->fldRegs[0].origin);
++    }
  }
-@@ -511,7 +587,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
+ 
+ #define OS_VI_GAMMA_ON          0x0001
+@@ -511,7 +613,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
  
      if ((func & OS_VI_DITHER_FILTER_OFF) != 0) {
          *control_out &= ~VI_CTRL_DITHER_FILTER_ON;
@@ -1076,7 +1151,7 @@ index 2f1cfb5..759a07a 100644
      }
  }
  
-@@ -550,10 +629,16 @@ extern "C" void osViSetYScale(float scale) {
+@@ -550,10 +655,16 @@ extern "C" void osViSetYScale(float scale) {
  }
  
  extern "C" PTR(void) osViGetNextFramebuffer() {

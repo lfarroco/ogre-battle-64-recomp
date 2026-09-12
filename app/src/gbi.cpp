@@ -8,6 +8,7 @@
 #include "gbi.hpp"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -549,6 +550,177 @@ std::string format_summary(const WorkloadStats& s) {
                   static_cast<unsigned long long>(s.setzimg));
 
     return std::string(buf, static_cast<size_t>(std::max(n, 0)));
+}
+
+namespace {
+
+// Decodes one command into `line` (offset + raw words are added by the caller).
+// `pending` carries the G_TEXRECT halves (G_RDPHALF_1/2 follow the rect command
+// in the F3DEX2 stream; RT64's rt64_gbi_rdp.cpp texrect() reads exactly those
+// two following words for uls/ult and dsdx/dtdy).
+struct DecodeVisitor {
+    std::string* out;
+    // Pending texrect state.
+    bool rect_pending = false;
+    bool rect_flip = false;
+    uint32_t rect_w0 = 0, rect_w1 = 0;
+    bool have_st = false;
+    int16_t uls = 0, ult = 0;
+    // Last texture setup, echoed on each texrect.
+    uint32_t timg_addr = 0;
+    uint8_t timg_fmt = 0, timg_siz = 0;
+    uint32_t timg_width = 0;
+
+    void line(const DlCommand& c, const char* fmt, ...) {
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        char head[64];
+        snprintf(head, sizeof(head), "%05X %02X %08X %08X  ", c.offset, c.op, c.w0, c.w1);
+        *out += head;
+        *out += buf;
+        *out += '\n';
+    }
+
+    void cmd(const DlCommand& c) {
+        const uint32_t a = c.w0, b = c.w1;
+        switch (c.op) {
+            case OP_MOVEWORD:
+                if (p0(a, 16, 8) == MW_SEGMENT) {
+                    line(c, "MOVEWORD segment[%u] = 0x%08X", p0(a, 2, 4), b);
+                } else {
+                    line(c, "MOVEWORD type=0x%02X idx=%u value=0x%08X", p0(a, 16, 8), p0(a, 0, 16), b);
+                }
+                return;
+            case OP_SETTIMG:
+                timg_fmt = static_cast<uint8_t>(p0(a, 21, 3));
+                timg_siz = static_cast<uint8_t>(p0(a, 19, 2));
+                timg_width = p0(a, 0, 12) + 1;
+                timg_addr = b;
+                line(c, "SETTIMG fmt=%s siz=%s width=%u addr=0x%08X", fmt_name(timg_fmt),
+                     siz_name(timg_siz), timg_width, timg_addr);
+                return;
+            case OP_SETTILE:
+                line(c, "SETTILE t%u fmt=%u siz=%u line=%u tmem=0x%X pal=%u cms=%u cmt=%u "
+                        "masks=%u maskt=%u shifts=%u shiftt=%u",
+                     p0(b, 24, 3), p0(a, 21, 3), p0(a, 19, 2), p0(a, 9, 9), p0(a, 0, 9),
+                     p0(b, 20, 4), p0(b, 8, 2), p0(b, 18, 2), p0(b, 4, 4), p0(b, 14, 4),
+                     p0(b, 0, 4), p0(b, 10, 4));
+                return;
+            case OP_SETTILESIZE:
+                line(c, "SETTILESIZE t%u uls=%u ult=%u lrs=%u lrt=%u", p0(b, 24, 3),
+                     p0(a, 12, 12), p0(a, 0, 12), p0(b, 12, 12), p0(b, 0, 12));
+                return;
+            case OP_LOADBLOCK:
+                line(c, "LOADBLOCK t%u uls=%u ult=%u texels=%u dxt=%u", p0(b, 24, 3),
+                     p0(a, 12, 12), p0(a, 0, 12), p0(b, 12, 12), p0(b, 0, 11));
+                return;
+            case OP_LOADTILE:
+                line(c, "LOADTILE t%u uls=%u ult=%u lrs=%u lrt=%u", p0(b, 24, 3),
+                     p0(a, 12, 12), p0(a, 0, 12), p0(b, 12, 12), p0(b, 0, 12));
+                return;
+            case OP_LOADTLUT:
+                line(c, "LOADTLUT t%u uls=%u ult=%u count=%u", p0(b, 24, 3), p0(a, 12, 12),
+                     p0(a, 0, 12), p0(b, 14, 10));
+                return;
+            case OP_TEXRECT:
+            case OP_TEXRECTFLIP:
+                rect_pending = true;
+                rect_flip = (c.op == OP_TEXRECTFLIP);
+                rect_w0 = a;
+                rect_w1 = b;
+                have_st = false;
+                return;
+            case OP_RDPHALF_1:
+                if (rect_pending && !have_st) {
+                    uls = static_cast<int16_t>(p0(b, 16, 16));
+                    ult = static_cast<int16_t>(p0(b, 0, 16));
+                    have_st = true;
+                    return;
+                }
+                line(c, "RDPHALF_1 0x%08X", b);
+                return;
+            case OP_RDPHALF_2:
+                if (rect_pending && have_st) {
+                    const int16_t dsdx = static_cast<int16_t>(p0(b, 16, 16));
+                    const int16_t dtdy = static_cast<int16_t>(p0(b, 0, 16));
+                    line(c, "%s ulx=%d uly=%d lrx=%d lry=%d tile=%u s=%d t=%d dsdx=%d dtdy=%d "
+                            "(timg fmt=%u siz=%u w=%u @0x%08X)",
+                         rect_flip ? "TEXRECTFLIP" : "TEXRECT", (int)p0(rect_w1, 12, 12),
+                         (int)p0(rect_w1, 0, 12), (int)p0(rect_w0, 12, 12), (int)p0(rect_w0, 0, 12),
+                         p0(rect_w1, 24, 3), (int)uls, (int)ult, (int)dsdx, (int)dtdy, timg_fmt,
+                         timg_siz, timg_width, timg_addr);
+                    rect_pending = false;
+                    return;
+                }
+                line(c, "RDPHALF_2 0x%08X", b);
+                return;
+            case OP_FILLRECT:
+                // RT64 GBI_RDP::fillRect reads the upper-left corner from the
+                // second word (p1) and the lower-right from the first (p0),
+                // like TEXRECT.
+                line(c, "FILLRECT ulx=%d uly=%d lrx=%d lry=%d", (int)p0(b, 12, 12), (int)p0(b, 0, 12),
+                     (int)p0(a, 12, 12), (int)p0(a, 0, 12));
+                return;
+            case OP_SETSCISSOR:
+                line(c, "SETSCISSOR ulx=%d uly=%d lrx=%d lry=%d mode=%u", (int)p0(a, 12, 12),
+                     (int)p0(a, 0, 12), (int)p0(b, 12, 12), (int)p0(b, 0, 12), p0(b, 24, 2));
+                return;
+            case OP_SETCIMG:
+            case OP_SETZIMG:
+                line(c, "%s fmt=%u siz=%u width=%u addr=0x%08X",
+                     (c.op == OP_SETCIMG) ? "SETCIMG" : "SETZIMG", p0(a, 21, 3), p0(a, 19, 2),
+                     p0(a, 0, 12) + 1, b);
+                return;
+            case OP_SETCOMBINE:
+                line(c, "SETCOMBINE");
+                return;
+            case OP_SETOTHERMODE_H:
+                line(c, "SETOTHERMODE_H shift=%u len=%u data=0x%08X", p0(a, 8, 8), p0(a, 0, 8), b);
+                return;
+            case OP_SETOTHERMODE_L:
+                line(c, "SETOTHERMODE_L shift=%u len=%u data=0x%08X", p0(a, 8, 8), p0(a, 0, 8), b);
+                return;
+            case OP_SETPRIMCOLOR:
+                line(c, "SETPRIMCOLOR lodfrac=%u mip=%u 0x%08X", p0(a, 8, 8), p0(a, 0, 8), b);
+                return;
+            case OP_SETENVCOLOR:
+            case OP_SETBLENDCOLOR:
+            case OP_SETFOGCOLOR:
+            case OP_SETFILLCOLOR:
+                line(c, "%s 0x%08X", opcode_name(c.op), b);
+                return;
+            case OP_GEOMETRYMODE:
+                line(c, "GEOMETRYMODE clear=0x%08X set=0x%08X", a & 0xFFFFFF, b);
+                return;
+            case OP_TEXTURE:
+                line(c, "TEXTURE tile=%u level=%u on=%u sc=%u tc=%u", p0(a, 8, 3), p0(a, 11, 3),
+                     p0(a, 1, 7), p0(b, 16, 16), p0(b, 0, 16));
+                return;
+            case OP_VTX:
+                line(c, "VTX n=%u v0=%u addr=0x%08X", p0(a, 12, 8), p0(a, 1, 7), b);
+                return;
+            default:
+                line(c, "%s", opcode_name(c.op));
+                return;
+        }
+    }
+};
+
+void decode_trampoline(void* user, const DlCommand& cmd) {
+    static_cast<DecodeVisitor*>(user)->cmd(cmd);
+}
+
+}  // namespace
+
+std::string decode_dl(uint8_t* rdram, uint32_t dl_offset) {
+    std::string out;
+    out.reserve(64 * 1024);
+    DecodeVisitor visitor{&out};
+    walk_dl(rdram, dl_offset, &decode_trampoline, &visitor);
+    return out;
 }
 
 }  // namespace ogre::gbi

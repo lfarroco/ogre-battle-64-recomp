@@ -5,6 +5,69 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 32) — the publisher screens were a mis-named `osViSetMode`; the late crash is an overlay bank swap
+
+### Finding: `0x80095820` is `__osViSwapContext`, not `osViSetMode`
+
+The "Licensed by Nintendo" / ATLUS / QUEST stills rendered as the top-left
+quarter of the image, stretched over the window. Rendering was *correct*: an
+`OGRE_CAPTURE_TARGET` dump of the framebuffer the VI samples showed a perfect
+640x480 still. The fault was in the VI scanout: the runtime was presenting with
+its `dummy_mode` geometry (`width=320`, `hRegion=0x006C02EC`, `xScale=0x200`)
+the whole run, and RT64's video-interface shader crops sampling to
+`videoResolution/textureResolution`, i.e. the top-left quarter of a 640x480
+target.
+
+The game *does* switch to a 640x480 hi-res mode (`D_800AB9B0`: `ctrl=0x324E`,
+`width=640`, `xScale=0x400`, `yScale=0x800`) for those screens, but the call
+never reached the runtime. `symbol_addrs.txt` named `0x80095820`
+`osViSetMode`, and session 10 had already shown that function is really
+`__osViSwapContext` (it reads `__osViNext->modep/framep` and writes the VI
+MMIO registers; it ignores `$a0`). The **real** `osViSetMode` is
+`func_800955C0`, which stores the mode pointer at `__osViNext+0x8` and copies
+`modep->comRegs.ctrl` to `+0xC`, exactly like libultra — and it was unnamed, so
+it was compiled verbatim and never bridged.
+
+**Decision:** `func_800955C0` is `osViSetMode` (bridged to the runtime);
+`0x80095820` is `__osViSwapContext`, reimplemented as a no-op, because the
+port's VI thread (`update_vi`) already writes the registers from its own
+`ViState` and the game-side `__osViNext` context is never populated. The
+mislabeled function stays out of the way and the game's mode switching now
+reaches RT64. Verified: the three publisher screens render full-frame
+(`docs/proofs/native-{licensed,atlus,quest}-screen.png`), the intro/title are
+unchanged, and a 15s run still reaches ~400 display lists (~28fps).
+
+### Finding: the late crash is a streamed-overlay *bank swap*, not a missing overlay-C address
+
+The ~95s abort (`streamed function stub called @ 0x801AD5C0` then
+`Failed to find function at 0x00000000`) was attributed in session 31 to
+"overlay C's upper reach". Instrumenting `get_function` with the recompiled
+call chain, and logging every inline PI DMA (`OGRE_DEBUG_TRACES`), shows
+otherwise:
+
+- the stub is called from `func_800765D8`, via `jalr $a1` where
+  `$a1 = *(0x800E7A40)` (an object template's callback field);
+- immediately before the crash (t≈95s) the game DMA's a **new overlay over
+  overlay C** in three pieces: ROM `0xE4910` → RAM `0x80197B90` (`0x72C0`),
+  ROM `0xEBBD0` → RAM `0x8019EE70` (`0xE440`), ROM `0xFA600` → RAM
+  `0x801AD5C0` (`0x7700`);
+- ROM `0xFA600` starts with a normal prologue (`addiu $sp,$sp,-0x30`), so
+  `0x801AD5C0` is that overlay's entry point; in the linked overlay C the same
+  address is a mid-function label (`D_801AD5C0` inside `func_801AD558`).
+
+So the port is running overlay C's `func_map` while the game has swapped to a
+different bank. The stub returns without initialising the object the callback
+belongs to, and the caller's next function-pointer call is NULL.
+
+**Decision (scope):** this is the Phase-4 boundary proper. Overlays C and D
+overlap in RAM (`0x80197B90..0x801B8090` vs `0x80197B90..0x801B4CC0`), so they
+cannot both be linked at their fixed RAM addresses in one ELF; the fix is a
+relocatable/overlay-section scheme with runtime load/unload, not another
+`app/src/overlays.cpp` registration. Session 32 stops at documenting the
+evidence.
+
+---
+
 ## 2026-09-12 (session 31) — a size override only resizes a symbol; calls into it must be redirected
 
 ### Finding: the intro crash was a split symbol called without its frame

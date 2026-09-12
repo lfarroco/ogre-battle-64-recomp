@@ -230,4 +230,10 @@ std::string format_summary(const WorkloadStats& stats);
 // Opcode byte -> short name (for debugging; returns "??" for unknowns).
 const char* opcode_name(uint8_t op);
 
+// Debug: walks the display list rooted at `dl_offset` and returns a
+// line-per-command dump with the RDP-relevant fields decoded (SETTIMG / SETTILE
+// / SETTILESIZE / LOAD* / TEXRECT(+ the RDPHALF halves carrying s,t,dsdx,dtdy) /
+// combiner / othermode / rects). Used by the OGRE_DL_DECODE diagnostic.
+std::string decode_dl(uint8_t* rdram, uint32_t dl_offset);
+
 }  // namespace ogre::gbi

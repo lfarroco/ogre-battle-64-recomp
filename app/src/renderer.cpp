@@ -369,6 +369,20 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                     (unsigned long long)stats.settimg, (unsigned long long)stats.unknown_cmds);
             fflush(stderr);
         }
+        // OGRE_DL_DECODE=<dl>|all: dump the decoded command stream of one
+        // submission. This is the ground truth for "which RDP command draws
+        // this" questions (source size, texrect destination, combiner).
+        if (const char* dec = getenv("OGRE_DL_DECODE")) {
+            const bool all = (strcmp(dec, "all") == 0);
+            const unsigned want = (unsigned)strtoul(dec, nullptr, 0);
+            if (all || want == dl_count_) {
+                std::string dump = ogre::gbi::decode_dl(app_->core.RDRAM,
+                                                        task->t.data_ptr & 0x1FFFFFFF);
+                fprintf(stderr, "[dl-decode] dl=%u ptr=0x%08X (%zu bytes)\n%s", dl_count_,
+                        (uint32_t)task->t.data_ptr, dump.size(), dump.c_str());
+                fflush(stderr);
+            }
+        }
         const auto dl_end = std::chrono::high_resolution_clock::now();
         const auto dl_ms = std::chrono::duration_cast<std::chrono::microseconds>(dl_end - dl_begin).count();
         if (dl_count_ <= 8 || (dl_count_ % 10) == 0 || dl_ms > 100000) {
