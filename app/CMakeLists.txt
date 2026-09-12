@@ -102,6 +102,33 @@ target_compile_options(ogrebattle64_recomp PRIVATE
     -Wno-implicit-function-declaration
 )
 
+# --- Streamed-overlay bank unit (Phase 4) -----------------------------------
+# A second, independent recompilation (config-bank.yaml / config-bank.toml, built
+# by `make bank-recomp`) for the streamed overlay records the game loads into
+# overlay C's RAM from a different bank. They cannot share overlay C's VMAs in
+# one ELF, so their symbols are prefixed `ovl_` (config-bank.yaml) and they are
+# registered at runtime by src/bank_overlays.cpp.
+file(GLOB BANK_RECOMP_C_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../BankFuncs/*.c)
+
+add_library(ogrebattle64_bank STATIC ${BANK_RECOMP_C_SOURCES})
+
+# BankFuncs/ first: the bank objects must include the bank unit's own funcs.h.
+target_include_directories(ogrebattle64_bank PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../BankFuncs
+    ${OGRE_TOOLS}/N64ModernRuntime/N64Recomp/include
+    ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
+    ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
+)
+
+target_compile_options(ogrebattle64_bank PRIVATE
+    -fno-strict-aliasing
+    -Wno-unused-variable
+    -Wno-unused-parameter
+    -Wno-unused-function
+    -Wno-unused-but-set-variable
+    -Wno-implicit-function-declaration
+)
+
 # --- The app --------------------------------------------------------------
 # Native: SDL-based entry + platform callbacks. Web: no-SDL entry + no-op
 # callbacks; the browser main thread stays responsive while the runtime runs
@@ -113,6 +140,7 @@ if (EMSCRIPTEN)
         src/web_platform.cpp
         src/rsp.cpp
         src/overlays.cpp
+        src/bank_overlays.cpp
         src/gbi.cpp
     )
 else()
@@ -122,6 +150,7 @@ else()
         src/synth_frame.cpp
         src/rsp.cpp
         src/overlays.cpp
+        src/bank_overlays.cpp
         src/gbi.cpp
     )
 endif()
@@ -154,6 +183,7 @@ endif()
 
 target_link_libraries(ogrebattle64 PRIVATE
     ogrebattle64_recomp
+    ogrebattle64_bank
     librecomp
     ultramodern
 )

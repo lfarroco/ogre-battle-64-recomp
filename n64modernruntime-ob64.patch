@@ -27,6 +27,52 @@ index 37556bd..eefe64b 100644
      }
  };
  
+diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
+index 35703bd..8a15e5c 100644
+--- a/librecomp/include/librecomp/overlays.hpp
++++ b/librecomp/include/librecomp/overlays.hpp
+@@ -45,6 +45,41 @@ namespace recomp {
+ 
+         void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
+ 
++        // --- Streamed-overlay bank management (Phase 4) ---------------------
++        //
++        // Streamed overlays are DMA'd into RAM that other overlays (banks) reuse,
++        // so the function map has to be swapped when the game loads a bank. These
++        // helpers drive that from the PI DMA itself rather than from the game's
++        // (potentially recompiled-away) loader code.
++        //
++        // A "function bank" is a set of recompiled functions that do not come
++        // from a section of this ELF: app/src/bank_overlays.cpp recompiles them
++        // in a separate unit because their VMAs overlap another bank's.
++        // Registering one records its RAM extent, so
++        // unload_overlapping_overlays() drops it when another bank overwrites
++        // that RAM.
++        struct BankFunctionEntry {
++            int32_t ram_addr;
++            recomp_func_t* func;
++        };
++
++        void load_function_bank(int32_t ram_addr, uint32_t size, const BankFunctionEntry* funcs, size_t count);
++        bool is_function_bank_loaded(int32_t ram_addr);
++
++        // Unload every loaded code section *and* function bank whose RAM extent
++        // overlaps [ram_addr, ram_addr + size). Unlike unload_overlays() this
++        // permits partial overlap, which is what a bank swap produces.
++        void unload_overlapping_overlays(int32_t ram_addr, uint32_t size);
++
++        // Installed by the app; called for every PI DMA after the runtime has
++        // resolved it against its own section table. `rom_offset` is a ROM byte
++        // offset, `ram_addr` the RDRAM destination.
++        void set_streamed_dma_hook(void (*hook)(uint32_t rom_offset, uint32_t ram_addr, uint32_t size));
++
++        // Called by recomp::do_rom_read(): loads/relocates the streamed section
++        // covering the DMA, then forwards to the app hook.
++        void notify_rom_read(uint32_t rom_offset, uint32_t ram_addr, uint32_t size);
++
+         struct BasePatchedFunction {
+             size_t patch_section;
+             size_t function_index;
 diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
 index 748558c..7f43491 100644
 --- a/librecomp/include/librecomp/rsp.hpp
@@ -133,7 +179,7 @@ index 0f7de83..6bbe537 100644
  #   error "Unsupported architecture"
  #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..d153cc4 100644
+index 8c8e5d1..a909854 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,10 @@
@@ -162,7 +208,147 @@ index 8c8e5d1..d153cc4 100644
  static SectionTableEntry* patch_code_sections = nullptr;
  size_t num_patch_code_sections = 0;
  static std::vector<char> patch_data;
-@@ -361,14 +373,49 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -37,6 +49,19 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
+ static std::unordered_map<uint32_t, uint16_t> patch_code_sections_by_rom{};
+ static std::vector<LoadedSection> loaded_sections{};
+ static std::unordered_map<int32_t, recomp_func_t*> func_map{};
++
++// Streamed-overlay bank management (Phase 4). A "function bank" is a set of
++// recompiled functions supplied by the app that does not come from a section of
++// this ELF (their VMAs overlap another bank's, so they live in a separate
++// recompilation unit — see app/src/bank_overlays.cpp).
++struct LoadedFunctionBank {
++    int32_t ram_addr;
++    uint32_t size;
++    const recomp::overlays::BankFunctionEntry* funcs;
++    size_t count;
++};
++static std::vector<LoadedFunctionBank> loaded_function_banks{};
++static void (*streamed_dma_hook)(uint32_t, uint32_t, uint32_t) = nullptr;
+ static std::unordered_map<std::string, recomp_func_t*> base_exports{};
+ static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
+ static std::unordered_map<std::string, size_t> base_events;
+@@ -271,8 +296,119 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+     }
+ }
+ 
++// ---------------------------------------------------------------------------
++// Streamed-overlay bank management (Phase 4). See librecomp/overlays.hpp.
++// ---------------------------------------------------------------------------
++
++// The base sections (entry + main) sit at their linear-mapped addresses and are
++// never swapped. Every code section above them is a streamed overlay that the
++// game may replace with a different bank at the same RAM address.
++static constexpr int32_t kFirstStreamedRamAddr = (int32_t)0x800E0000;
++
++static bool is_section_loaded(size_t section_table_index) {
++    for (const auto& section : loaded_sections) {
++        if (section.section_table_index == section_table_index) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void recomp::overlays::unload_overlapping_overlays(int32_t ram_addr, uint32_t size) {
++    const int64_t lo = (int64_t)ram_addr;
++    const int64_t hi = (int64_t)ram_addr + (int64_t)size;
++
++    for (auto it = loaded_sections.begin(); it != loaded_sections.end();) {
++        const SectionTableEntry& section = sections_info.code_sections[it->section_table_index];
++        const int64_t section_lo = (int64_t)it->loaded_ram_addr;
++        const int64_t section_hi = section_lo + (int64_t)section.size;
++
++        if (section_lo < hi && lo < section_hi) {
++            for (size_t func_index = 0; func_index < section.num_funcs; func_index++) {
++                func_map.erase((int32_t)(section.funcs[func_index].offset + it->loaded_ram_addr));
++            }
++            section_addresses[section.index] = section.ram_addr;
++            it = loaded_sections.erase(it);
++        } else {
++            ++it;
++        }
++    }
++
++    for (auto it = loaded_function_banks.begin(); it != loaded_function_banks.end();) {
++        const int64_t bank_lo = (int64_t)it->ram_addr;
++        const int64_t bank_hi = bank_lo + (int64_t)it->size;
++
++        if (bank_lo < hi && lo < bank_hi) {
++            for (size_t i = 0; i < it->count; i++) {
++                func_map.erase(it->funcs[i].ram_addr);
++            }
++            it = loaded_function_banks.erase(it);
++        } else {
++            ++it;
++        }
++    }
++}
++
++void recomp::overlays::load_function_bank(int32_t ram_addr, uint32_t size, const BankFunctionEntry* funcs, size_t count) {
++    unload_overlapping_overlays(ram_addr, size);
++    for (size_t i = 0; i < count; i++) {
++        func_map[funcs[i].ram_addr] = funcs[i].func;
++    }
++    loaded_function_banks.push_back({ ram_addr, size, funcs, count });
++}
++
++bool recomp::overlays::is_function_bank_loaded(int32_t ram_addr) {
++    for (const auto& bank : loaded_function_banks) {
++        if (bank.ram_addr == ram_addr) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void recomp::overlays::set_streamed_dma_hook(void (*hook)(uint32_t, uint32_t, uint32_t)) {
++    streamed_dma_hook = hook;
++}
++
++void recomp::overlays::notify_rom_read(uint32_t rom_offset, uint32_t ram_addr, uint32_t size) {
++    if (sections_info.code_sections != nullptr) {
++        for (size_t i = 0; i < sections_info.num_code_sections; i++) {
++            const SectionTableEntry& section = sections_info.code_sections[i];
++
++            if ((int32_t)section.ram_addr < kFirstStreamedRamAddr) {
++                continue;
++            }
++            if (rom_offset < section.rom_addr || rom_offset >= section.rom_addr + section.size) {
++                continue;
++            }
++
++            // Every chunk of a record keeps a constant rom->ram delta; only that
++            // delta identifies a load of *this* section. The chunk's destination
++            // is not the section base, though, so load at the base.
++            int32_t chunk_ram = (int32_t)((uint32_t)section.ram_addr + (rom_offset - section.rom_addr));
++            if ((uint32_t)chunk_ram != ram_addr) {
++                continue;
++            }
++
++            if (!is_section_loaded(i)) {
++                OGRE_TRACE("[overlays] bank swap: rom=0x%06X ram=0x%08X size=0x%X\n",
++                           section.rom_addr, section.ram_addr, section.size);
++                unload_overlapping_overlays((int32_t)section.ram_addr, section.size);
++                load_overlay(i, (int32_t)section.ram_addr);
++            }
++            break;
++        }
++    }
++
++    if (streamed_dma_hook != nullptr) {
++        streamed_dma_hook(rom_offset, ram_addr, size);
++    }
++}
++
+ void recomp::overlays::init_overlays() {
+     func_map.clear();
++    loaded_sections.clear();
++    loaded_function_banks.clear();
+     section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
+ 
+     // Sort the executable sections by rom address
+@@ -361,14 +497,49 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
@@ -219,10 +405,18 @@ index 8c8e5d1..d153cc4 100644
  
  std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {
 diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
-index 43509ba..bdb940e 100644
+index 43509ba..81ba211 100644
 --- a/librecomp/src/pi.cpp
 +++ b/librecomp/src/pi.cpp
-@@ -39,6 +39,9 @@ extern "C" void __osPiGetAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
+@@ -8,6 +8,7 @@
+ #include "librecomp/addresses.hpp"
+ #include "librecomp/game.hpp"
+ #include "librecomp/files.hpp"
++#include "librecomp/overlays.hpp"
+ #include <ultramodern/ultra64.h>
+ #include <ultramodern/ultramodern.hpp>
+ 
+@@ -39,6 +40,9 @@ extern "C" void __osPiGetAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
  extern "C" void __osPiRelAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
  }
  
@@ -232,7 +426,7 @@ index 43509ba..bdb940e 100644
  extern "C" void osCartRomInit_recomp(uint8_t* rdram, recomp_context* ctx) {
      OSPiHandle* handle = TO_PTR(OSPiHandle, recomp::cart_handle);
      handle->type = 0; // cart
-@@ -58,7 +61,120 @@ extern "C" void osDriveRomInit_recomp(uint8_t * rdram, recomp_context * ctx) {
+@@ -58,7 +62,120 @@ extern "C" void osDriveRomInit_recomp(uint8_t * rdram, recomp_context * ctx) {
  }
  
  extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
@@ -354,6 +548,20 @@ index 43509ba..bdb940e 100644
  }
  
  void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
+@@ -67,6 +184,13 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
+     // TODO handle misaligned DMA
+     assert((physical_addr & 0x1) == 0 && "Only PI DMA from aligned ROM addresses is currently supported");
+     assert((ram_address & 0x7) == 0 && "Only PI DMA to aligned RDRAM addresses is currently supported");
++
++    // Streamed-overlay bank swap (Phase 4): the game loads overlays into RAM
++    // that other overlays reuse, so the function map must follow the DMA. The
++    // hook runs before the copy — registering a bank never touches RDRAM.
++    recomp::overlays::notify_rom_read(physical_addr - recomp::rom_base,
++                                      (uint32_t)(int32_t)ram_address, (uint32_t)num_bytes);
++
+     uint8_t* rom_addr = rom.data() + physical_addr - recomp::rom_base;
+     for (size_t i = 0; i < num_bytes; i++) {
+         MEM_B(i, ram_address) = *rom_addr;
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
 index ea1c49b..74bd907 100644
 --- a/librecomp/src/recomp.cpp

@@ -28,6 +28,7 @@
 #include "renderer.hpp"
 #include "rsp.hpp"
 #include "overlays.hpp"
+#include "bank_overlays.hpp"
 
 namespace ogre {
 Platform g_platform;
@@ -78,9 +79,12 @@ int main(int argc, char** argv) {
     entry.game_id = std::u8string(ogre::GAME_ID);
     entry.entrypoint_address = ogre::ENTRYPOINT_ADDRESS;
     entry.entrypoint = recomp_entrypoint;
-    // Register streamed overlays A/B/C after init_overlays() clears the map.
+    // Register streamed overlays A/B/C after init_overlays() clears the map,
+    // then arm the streamed-overlay bank swap (records the game DMA's into
+    // overlay C's RAM from a different bank — see bank_overlays.cpp).
     entry.on_init_callback = [](uint8_t* rdram, recomp_context* ctx) {
         ogre::register_streamed_overlays();
+        ogre::register_bank_overlays();
     };
     // TODO: determine OB64's save hardware (Controller Pak / EEPROM / Flashram)
     // from the ROM's osPfs/osEeprom/osFlash call sites.

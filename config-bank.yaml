@@ -1,0 +1,102 @@
+# Secondary splat config: the streamed-overlay *bank records* (Phase 4).
+#
+# The main config (config.yaml) recompiles overlay C (ROM 0x1CE040 -> RAM
+# 0x80197B90) at its RAM address. The game's other streamed overlays are loaded
+# into the *same* RAM, so their code cannot share overlay C's VMAs in one ELF.
+# This config disassembles the records of the bank that the game swaps in at
+# t~95s (segment table entries 2, 3 and 6 at ROM 0x387C0) at their true RAM
+# addresses, in isolation, so spimdisasm can follow their `jal` targets and find
+# real function boundaries, and so every absolute reference matches the RAM the
+# game DMA's them to.
+#
+# The result is linked into its own ELF (build/ogrebank.elf), recompiled by
+# N64Recomp with config-bank.toml into BankFuncs/, and registered by
+# app/src/bank_overlays.cpp when the game DMA's a record. The records are
+# pre-linked with absolute RAM pointers (the game does no relocation), so no
+# runtime relocations are needed: the bank sections are deliberately NOT in
+# relocatable_sections.txt.
+#
+# See docs/HANDOFF-2026-09-12-session32.md sec.3 and docs/DECISIONS.md.
+
+name: Ogre Battle 64 - streamed overlay bank records
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebank
+  target_path: assets/ogre64.z64
+  elf_path: build/ogrebank.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the main unit's tree.
+  asm_path: build/bank/asm
+  build_path: build/bank
+  asset_path: build/bank/assets
+  ld_script_path: build/ogrebank.ld
+  undefined_syms_auto_path: build/bank/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bank/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  # The bank code shares its RAM addresses with the main unit's overlay C, so
+  # every generated symbol needs a namespace prefix to avoid colliding with
+  # overlay C's symbols when both units are linked into the app binary. (The
+  # prefix is only about names; the addresses are the real RAM addresses.)
+  symbol_name_format: "ovl_$VRAM"
+  symbol_name_format_no_rom: "ovl_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused prefix of the ROM: covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Bank record 2: ROM 0xE4910..0xEBBD0 -> RAM 0x80197B90.
+  # code 0x6610 (-> 0x8019E1A0), data 0xCB0 (-> 0x8019EE50), bss 0x20.
+  - name: bankRec2
+    type: code
+    start: 0xE4910
+    vram: 0x80197B90
+    subsegments:
+      - [0xE4910, asm]
+      - [0xEAF20, data]
+
+  # Bank record 3: ROM 0xEBBD0..0xFA010 -> RAM 0x8019EE70.
+  # code 0xC9A0 (-> 0x801AB810), data 0x1AA0 (-> 0x801AD2B0), bss 0x310.
+  - name: bankRec3
+    type: code
+    start: 0xEBBD0
+    vram: 0x8019EE70
+    subsegments:
+      - [0xEBBD0, asm]
+      - [0xF8570, data]
+
+  # Bank records 4/5 (ROM 0xFA010..0xFA600): data/rodata only, no code range.
+  - type: bin
+    start: 0xFA010
+    vram: 0xFA010
+
+  # Bank record 6: ROM 0xFA600..0x101D00 -> RAM 0x801AD5C0.
+  # code 0x5DF0 (-> 0x801B33B0), data 0x1910 (-> 0x801B4CC0), bss 0xA0.
+  # 0x801AD5C0 is the streamed-stub address the session-32 run aborted on.
+  - name: bankRec6
+    type: code
+    start: 0xFA600
+    vram: 0x801AD5C0
+    subsegments:
+      - [0xFA600, asm]
+      - [0x1003F0, data]
+
+  # Remaining bank records (7..9, 18) are not recompiled yet; the declared ROM
+  # ends here (splat only needs the ranges it is told about).
+  - [0x101D00]

@@ -30,6 +30,12 @@ git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-ob64.patch
 # regenerate the recompiled code if it has changed (uses the ELF + config.toml)
 make recomp
 
+# streamed-overlay bank unit (Phase 4): a second recompilation for the overlay
+# records the game loads into overlay C's RAM from a different bank. Required
+# before configuring the app — it writes BankFuncs/ and app/src/bank_funcs.inc,
+# and the app links both.
+make bank-recomp
+
 # build the app
 cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
 cmake --build build-app -j

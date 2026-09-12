@@ -380,21 +380,23 @@ hardware. RT64 remains the primary native renderer throughout. See
     `hStart = 0`, so RT64 clears instead of scanning out stale RDRAM). `osViFade`
     (`func_80095780`) is still unemulated, so fades snap. See
     `docs/HANDOFF-2026-09-12-session32.md` §1d.
-  - ⬜ **The late crash is an overlay *bank swap*, confirmed (session 32)**: an
-    unattended ~95s run reaches display list 2770, then
-    `streamed function stub called @ 0x801AD5C0 (not yet loaded)` and
-    `Failed to find function at 0x00000000` abort the process (exit 134, from
-    `func_80076AE8` in the main loop). Session 31's lead was right to ask
-    whether `0x801AD5C0` is a different bank: it is. The game DMA's a **new
-    streamed overlay** over overlay C at t≈95s in three pieces —
-    ROM `0xE4910` → RAM `0x80197B90` (`0x72C0`), ROM `0xEBBD0` → RAM
-    `0x8019EE70` (`0xE440`), ROM `0xFA600` → RAM `0x801AD5C0` (`0x7700`) — and
-    calls its entry (`0x801AD5C0` has a real prologue in the ROM). The port
-    still has overlay C registered at those addresses, so the call falls to the
-    streamed stub, the callback never initialises its object, and the next
-    function-pointer call is NULL. That is the Phase-4 overlay-swap boundary:
-    it needs a relocatable/overlay-section scheme (overlay C and D overlap in
-    RAM, so both cannot be linked at their fixed addresses in one ELF).
+  - ✅ **The late crash is fixed — streamed-overlay banks swap at the DMA
+    (session 33)**: session 32 localised the ~95s abort to the game DMA-ing a
+    different overlay bank over overlay C. The **streamed-segment table** (19
+    records of 10 words at ROM `0x387C0`) and the **bank descriptor lists** (11
+    banks at ROM `0x38AB8`, pointer array at `0x38AFC`) are now decoded, and the
+    records the game swaps in at t≈95s are entries 2, 3 and 6. Because their
+    RAM ranges overlap overlay C's, they are recompiled in a **separate unit**
+    (`config-bank.yaml` → `build/ogrebank.elf` → `config-bank.toml` →
+    `BankFuncs/`) linked at their true RAM addresses with an `ovl_` symbol
+    prefix; `app/src/bank_overlays.cpp` registers a record's functions when the
+    game DMA's it and drops whatever bank occupied that RAM. The runtime gained
+    `notify_rom_read` (called from `recomp::do_rom_read`), `unload_overlapping_overlays`
+    and `load_function_bank`. Verified: the 170s unattended run is now **exit 0,
+    4850 display lists at 168s** (was exit 134 at display list 2770 / 94.8s);
+    proof `docs/proofs/native-post-bankswap-present2805.png` (a rendered night
+    castle scene at present 2805, after the swap). See
+    `docs/HANDOFF-2026-09-12-session33.md`.
   - ⬜ **19 more splat split symbols in overlay C (session 30)**: the same class
     of bug (a symbol cut out of the middle of a logical function makes the
     compiled function return without unwinding its frame, clobbering the

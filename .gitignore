@@ -7,6 +7,10 @@ build-app/
 build-null/
 build-wasm/
 RecompiledFuncs/
+# Streamed-overlay bank unit (Phase 4): N64Recomp output for config-bank.toml,
+# plus the table tools/gen_bank_funcs.py derives from it.
+BankFuncs/
+app/src/bank_funcs.inc
 *.bin
 *.elf
 *.map

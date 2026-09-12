@@ -5,6 +5,109 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 33) — Phase 4: streamed-overlay banks swap on the game's DMA
+
+### Finding: the streamed-overlay *segment table* and *bank descriptors* are now decoded
+
+The "streamed-segment table at ROM `0x387C0`" that session 7 found is an array of
+**19 records of 0x28 bytes**, one per loadable segment:
+
+| word | meaning |
+|---|---|
+| +0x00 | RAM start (also the DMA destination) |
+| +0x04 | RAM end (including bss, 16-aligned) |
+| +0x08 / +0x0C | ROM start / ROM end (the bytes `func_8009DA50` copies) |
+| +0x10 / +0x14 | bss start / end (`func_80093380` zeroes this) |
+| +0x18 / +0x1C | code range (`func_800900C0`, icache invalidate) |
+| +0x20 / +0x24 | data range (`func_80090010`, dcache invalidate) |
+
+`func_800761E4`'s inner loop loads one record: flush/invalidate the code and data
+ranges, `func_8009DA50(rom_start, ram_start, rom_end - rom_start)`, then
+`bzero(bss_start, bss_end - bss_start)`. The **bank descriptors** are byte lists
+of record indices terminated by `0xFF`, at ROM `0x38AB8`; the 11-entry pointer
+array is at ROM `0x38AFC` and `func_80076430` matches a requested bitmask to one
+of them. So there are **11 banks over 19 records**; records are shared between
+banks, and banks overlap in RAM.
+
+The bank the t≈95s run swapped in is `{2, 3, 6}`: ROM `0xE4910` → RAM
+`0x80197B90` (0x72C0), ROM `0xEBBD0` → RAM `0x8019EE70` (0xE440), ROM
+`0xFA600` → RAM `0x801AD5C0` (0x7700). Record 6's ROM size and code/data split
+match the table exactly, and `0x801AD5C0` is its entry point.
+
+### Finding: splat's `exclusive_ram_id` overlay mode is unusable here
+
+splat/spimdisasm do have first-class overlay support: `exclusive_ram_id` groups
+segments that share RAM, `overlayCategory` namespaces their spimdisasm symbols,
+and references are resolved by ROM address within the group. It looked like the
+intended mechanism for overlaying C and the new bank in **one** ELF.
+
+**It does not work with this splat/spimdisasm version.** Tagging `streamedC`
+with an `exclusive_ram_id` makes splat emit `asm/1CE040.s` with **zero branch
+label definitions** (1650 `.Lxxxx:` labels before, none after; the references to
+them remain), so the link fails with ~3843 undefined `.L` symbols. The same
+happens whether C shares a group with the new records or has its own. It is not
+an option for the working overlay C.
+
+### Decision: recompile the bank records as a *separate unit*
+
+`config-bank.yaml` recompiles records 2/3/6 at their true RAM addresses in
+isolation (so spimdisasm follows their `jal` targets and finds 204 real
+functions), with `symbol_name_format: "ovl_$VRAM"` so their symbols cannot
+collide with overlay C's when both units are linked into the app. The leading
+and inter-record ROM gaps are read as `bin`s and never linked. `make bank`
+builds `build/ogrebank.elf`; `config-bank.toml` recompiles it into `BankFuncs/`.
+
+The bank sections are deliberately **not** relocatable: the game pre-links its
+overlays with absolute pointers, so the linked addresses *are* the RAM
+addresses, and every emitted reference is absolute — no `section_addresses` /
+`RELOC_HI16` involvement at all. `tools/gen_bank_funcs.py` flattens the bank's
+`recomp_overlays.inl` into `app/src/bank_funcs.inc`
+(`{ rom_start, ram_start, size, {ram addr, func}[] }`).
+
+### Decision: the bank swap is driven by the PI DMA
+
+`recomp::do_rom_read` now calls `recomp::overlays::notify_rom_read(rom_offset,
+ram, size)`, which:
+
+1. scans the main unit's section table for a streamed section (`ram_addr >=
+   0x800E0000`) whose ROM range contains `rom_offset` **and** whose
+   `ram - rom` delta matches — i.e. this DMA is a chunk of that overlay — and,
+   if it is not already resident, `unload_overlapping_overlays()` +
+   `load_overlay()` at the section base;
+2. then calls an app-installed hook, which does the same for the bank unit's
+   records via `load_function_bank()`.
+
+`unload_overlapping_overlays` (new) allows *partial* overlap, unlike the
+existing `unload_overlays` (which asserts): a bank swap overwrites most of the
+previous bank. It drops both real sections and registered function banks, so
+re-loading overlay C later cleanly replaces the bank. `loaded_function_banks`
+records each bank's RAM extent for that purpose.
+
+**Bug found while bringing this up:** the first version compared the *chunk's*
+destination against the section's loaded base, so every 0x200-byte chunk after
+the first looked like a new load and re-registered overlay A/B at shifted
+addresses (and unloaded the real one) — boot died immediately with a NULL
+function pointer in overlay B. The check must be "is this section loaded at
+all" (`is_section_loaded`), and the load address must be the section base, not
+the chunk destination.
+
+### Outcome
+
+| run | session 32 | now |
+|---|---|---|
+| 5s | exit 0 | exit 0 |
+| 170s unattended | exit 134, dl 2770 at t≈94.8s | **exit 0, dl 4850 at t≈168s** |
+| bank swap | `streamed function stub called @ 0x801AD5C0` | `[bank] loading overlay record …` ×3 at t≈95.1s |
+| render after swap | — | `docs/proofs/native-post-bankswap-present2805.png` (night castle scene) |
+| `build-null`, `build-wasm` | clean | clean |
+
+Open from here: banks `{0,1}` and `{0,2,3,7,8,9}` etc. still fall to the stub
+when first loaded (any bank whose records are not compiled shows the old
+`streamed function stub` behaviour); the remaining 16 records can be added to
+`config-bank.yaml` and `make bank-recomp` the same way.
+
+---
+
 ## 2026-09-12 (session 32) — the publisher screens were a mis-named `osViSetMode`; the late crash is an overlay bank swap
 
 ### Finding: `0x80095820` is `__osViSwapContext`, not `osViSetMode`
