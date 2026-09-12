@@ -1710,6 +1710,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         }
 
+        // A uniform whose location comes back as -1 silently keeps its default
+        // (0), which for a UV scale collapses every sample to texel (0,0). Log
+        // the locations once so that failure mode is visible rather than
+        // inferred.
+        {
+            static const char* const names[] = {
+                "u_tex0", "u_tex1", "u_uv_scale", "u_uv_origin",
+                "u_uv_scale1", "u_uv_origin1", "u_prim", "u_env", "u_cycle",
+            };
+            char buf[256];
+            int o = 0;
+            for (const char* n : names) {
+                o += snprintf(buf + o, sizeof(buf) - o, "%s=%d ",
+                              n, glGetUniformLocation(program_, n));
+                if (o >= static_cast<int>(sizeof(buf)) - 24) break;
+            }
+            OGRE_MILESTONE("RENDERER", "uniform locations: %s", buf);
+        }
+
         glViewport(0, 0, canvas_width_, canvas_height_);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);

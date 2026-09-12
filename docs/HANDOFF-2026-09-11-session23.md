@@ -310,12 +310,17 @@ a white shade.
    255 and `--flags 18` (raw TEXEL0) renders a clean white silhouette. So the
    next step is the colour side: run `--flags 9` (raw TEXEL1, blending off) on a
    boot whose pair is known bright and compare it with
-   `ogre_gfx_debug_last_tex(1)`; if the sampled colour is black while the decoded
-   image is bright, check that `u_uv_scale1`/`u_uv_origin1` actually reach the
-   shader (`glGetUniformLocation` returning -1 leaves them at their default 0,
-   which makes `v_uv1` collapse to texel (0,0)). `debug/probes/spritecheck.cjs`
-   already reports the mask histogram and the colour's max RGB, and the two raw
-   modes exist for exactly this bisection.
+   `ogre_gfx_debug_last_tex(1)`. Ruled out already: the shader's TEXEL0/TEXEL1
+   mapping matches RT64 `ColorCombiner::fromColorInput` field for field, the
+   combiner words agree with the ROM, and **every uniform location is valid**
+   (`[RENDERER] uniform locations: u_tex0=38 u_tex1=39 u_uv_scale=1
+   u_uv_origin=2 u_uv_scale1=3 u_uv_origin1=4 …`), so the UV transforms do reach
+   the shader. Also note that a full-frame capture at a later fade state *does*
+   look like the reference in layout and palette
+   (`debug/out/s23-uni-canvas.png`), so the discrepancy is specific to the
+   single-sprite isolation and may yet be an artifact of how that probe reads
+   the canvas (it clears, then waits for one fresh display list - a partially
+   faded frame can still land in between).
 1. **The idle trajectory is still the gate.** Nothing here changes the pacing:
    ~half of all boots submit only the boot blanking display list. Session 21's
    question stands — who sends to t5 (`0x800E9BA8`) and t16 (`0x800B9C40`)?
