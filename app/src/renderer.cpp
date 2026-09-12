@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -153,6 +154,24 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         setup_result = ultramodern::renderer::SetupResult::Success;
         chosen_api = ultramodern::renderer::GraphicsApi::Auto;
 
+        // The synthetic-frame probe only makes sense if RT64 is willing to
+        // present when nothing changes (a stalled boot never swaps VI buffers)
+        // and to show a render target the framebuffer manager has not seen.
+        // Both are env-gated diagnostics on the RT64 side; turn them on for the
+        // probe unless the user set them explicitly (overwrite=0).
+#if !defined(_WIN32)
+        if (getenv("OGRE_SYNTH_FRAME") != nullptr) {
+            setenv("OGRE_PRESENT_ALWAYS", "1", 0);
+            // The render-target fallback is only wanted for the display-list
+            // probe. With OGRE_SYNTH_NO_DL the probe is testing the raw RDRAM
+            // upload path, which the fallback would bypass in favour of a stale
+            // (empty) render target.
+            if (getenv("OGRE_SYNTH_NO_DL") == nullptr) {
+                setenv("OGRE_PRESENT_FBTARGET", "1", 0);
+            }
+        }
+#endif
+
         // Set up the RT64 application core fields.
         RT64::Application::Core app_core{};
 #if defined(_WIN32)
@@ -234,6 +253,19 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // a silent failure.
         fprintf(stderr, "[renderer] RT64 renderer initialized (api=%d)\n", static_cast<int>(chosen_api));
         fflush(stderr);
+
+        // RT64 only pushes a present when the VI changes or the RDRAM copy of the
+        // VI framebuffer changes (rt64_state.cpp State::updateScreen). A stalled
+        // boot does neither (the game is wedged before its frame loop), so the
+        // presenter stops after the first few VIs and the window keeps an old
+        // (black) frame forever. OGRE_INSTANT_PRESENT=1 switches RT64 to
+        // PresentEarly, where a submitted display list presents the framebuffer
+        // it drew instead of waiting for a VI change.
+        if (getenv("OGRE_INSTANT_PRESENT") != nullptr) {
+            enable_instant_present();
+            fprintf(stderr, "[renderer] instant present enabled (PresentEarly)\n");
+            fflush(stderr);
+        }
     }
 
     ~RT64Renderer() override = default;
@@ -314,6 +346,31 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
     void update_screen() override {
         if (app_ == nullptr) {
             return;
+        }
+        // OGRE_VI_TRACE=1: report the VI state RT64 is about to present. The
+        // presenter only draws when the decoded VI is visible and has a nonzero
+        // size (rt64_present_queue.cpp: viVisible/fbSize), so a black canvas is
+        // either "not visible" or "not this framebuffer".
+        if (getenv("OGRE_VI_TRACE") != nullptr) {
+            static uint32_t vi_trace_count = 0;
+            ++vi_trace_count;
+            if (vi_trace_count <= 5 || (vi_trace_count % 120) == 0) {
+                RT64::VI vi = app_->core.decodeVI();
+                hlslpp::uint2 size = vi.fbSize();
+                char buf[512];
+                snprintf(buf, sizeof(buf),
+                         "[vi] n=%u status=0x%08X origin=0x%06X width=%u visible=%u fbAddr=0x%06X "
+                         "fbSizeX=%u fbSizeY=%u fbSiz=%u hRegionW=0x%08X vRegionW=0x%08X "
+                         "xformW=0x%08X yformW=0x%08X xScale=%.4f yScale=%.4f swapChainH=%d",
+                         vi_trace_count, (unsigned)vi.status.word, (unsigned)vi.origin, (unsigned)vi.width,
+                         (unsigned)(vi.visible() ? 1 : 0), (unsigned)vi.fbAddress(), (unsigned)size.x,
+                         (unsigned)size.y, (unsigned)vi.fbSiz(), (unsigned)vi.hRegion.word,
+                         (unsigned)vi.vRegion.word, (unsigned)vi.xTransform.word, (unsigned)vi.yTransform.word,
+                         vi.xScaleFloat(), vi.yScaleFloat(),
+                         (app_->sharedQueueResources != nullptr) ? (int)app_->sharedQueueResources->swapChainHeight : -1);
+                fprintf(stderr, "%s\n", buf);
+                fflush(stderr);
+            }
         }
         app_->updateScreen();
     }

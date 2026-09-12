@@ -1,0 +1,65 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+index 373c87e..4990f0b 100644
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -3022,6 +3022,60 @@ namespace plume {
+                 dstOrigin
+             );
+             activeBlitEncoder->popDebugGroup();
++        } else if (dstLocation.type == RenderTextureCopyType::PLACED_FOOTPRINT && srcLocation.type == RenderTextureCopyType::SUBRESOURCE) {
++            // OGRE addition: texture -> buffer readback. This is the mirror of the
++            // buffer -> texture path above and is what RenderBufferDesc::ReadbackBuffer
++            // consumers (screenshots / GPU-side diagnostics) need on Metal.
++            assert(dstBuffer != nullptr);
++            assert(srcTexture != nullptr);
++
++            // The source may be a MetalDrawable (swap chain texture), which is
++            // not a MetalTexture, so go through the virtual accessor instead of
++            // reading MetalTexture::mtl directly.
++            const ExtendedRenderTexture *srcExtended = static_cast<const ExtendedRenderTexture *>(srcLocation.texture);
++            MTL::Texture *srcMtl = srcExtended->getTexture();
++
++            MTL::Origin srcOrigin;
++            MTL::Size size;
++
++            // The size lives in the *destination* placed footprint (the source
++            // is just a subresource with no footprint of its own).
++            if (srcBox != nullptr) {
++                srcOrigin = { NS::UInteger(srcBox->left), NS::UInteger(srcBox->top), NS::UInteger(srcBox->front) };
++                size = { NS::UInteger(srcBox->right - srcBox->left), NS::UInteger(srcBox->bottom - srcBox->top), NS::UInteger(srcBox->back - srcBox->front) };
++            } else {
++                srcOrigin = { 0, 0, 0 };
++                size = { NS::UInteger(dstLocation.placedFootprint.width), NS::UInteger(dstLocation.placedFootprint.height), NS::UInteger(dstLocation.placedFootprint.depth) };
++            }
++
++            const uint32_t blockWidth = RenderFormatBlockWidth(srcExtended->desc.format);
++            const uint32_t horizontalBlocks = (dstLocation.placedFootprint.rowWidth + blockWidth - 1) / blockWidth;
++            const uint32_t bytesPerRow = horizontalBlocks * RenderFormatSize(srcExtended->desc.format);
++            const uint32_t bytesPerImage = bytesPerRow * ((dstLocation.placedFootprint.height + blockWidth - 1) / blockWidth);
++
++            activeBlitEncoder->pushDebugGroup(MTLSTR("CopyTextureToBufferRegion"));
++            if (getenv("OGRE_PLUME_TRACE") != nullptr) {
++                static uint32_t plumeTrace = 0;
++                if (++plumeTrace <= 10) {
++                    fprintf(stderr, "[plume] copyTextureToBuffer srcFormat=%d %ux%u rowWidth=%u bytesPerRow=%u bytesPerImage=%u offset=%llu\n",
++                            (int)srcExtended->desc.format, (unsigned)srcLocation.placedFootprint.width,
++                            (unsigned)srcLocation.placedFootprint.height, (unsigned)srcLocation.placedFootprint.rowWidth,
++                            bytesPerRow, bytesPerImage, (unsigned long long)dstLocation.placedFootprint.offset);
++                    fflush(stderr);
++                }
++            }
++            activeBlitEncoder->copyFromTexture(
++                srcMtl,
++                srcLocation.subresource.arrayIndex,
++                srcLocation.subresource.mipLevel,
++                srcOrigin,
++                size,
++                dstBuffer->mtl,
++                dstLocation.placedFootprint.offset,
++                bytesPerRow,
++                bytesPerImage
++            );
++            activeBlitEncoder->popDebugGroup();
+         } else {
+             assert(dstTexture != nullptr);
+             assert(srcTexture != nullptr);

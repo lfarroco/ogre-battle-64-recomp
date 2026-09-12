@@ -63,20 +63,38 @@ void emit(uint32_t w0, uint32_t w1) {
     *g_dl++ = w1;
 }
 
-// Fill one rectangle of the framebuffer with a solid colour. Rect coordinates
-// are 10.2 fixed point; lrx/lry are exclusive.
+// Fill one rectangle of the framebuffer with a solid colour. Coordinates are in
+// *pixels*; the RDP wants 10.2 fixed point, so this shifts by 2 before packing.
+//
+// NOTE: every RDP command here is exactly TWO words, so it must be a single
+// `emit(w0, w1)` call. Emitting the two halves as separate emit() calls turns
+// one command into two, and the second one is garbage. That bug made every
+// G_FILLRECT here carry lrx=lry=0 (an empty rectangle) and made the
+// G_SETSCISSOR a null scissor, so RT64 recorded the fills but never rasterized
+// them - the display list "executed" but the framebuffer stayed black.
 void emit_fill(int x0, int y0, int x1, int y1, uint32_t rgba) {
     // G_SETCIMG: fmt=RGBA(0), siz=16b(2), width-1, address.
     emit(0xFF000000u | (0u << 21) | (2u << 19) | (kScreenWidth - 1u),
          kFramebufferVram);
-    // G_RDPSETOTHERMODE: high 24 bits in w0's low half, low 8 bits in w1.
-    emit(0xEF000000u | (kFillOtherMode >> 8), kFillOtherMode & 0xFFu);
+    // G_RDPSETOTHERMODE: RT64 keeps the 24-bit "mode0" verbatim in w0's low
+    // bits and the 8-bit mode1 in w1, and tests fields at their full-word
+    // positions (OtherMode::cycleType() is `H & (3 << G_MDSFT_CYCLETYPE)`, i.e.
+    // bits 20-21 of H). So the cycle type must sit at bit 20 of w0, not be
+    // pre-shifted right by 8.
+    emit(0xEF000000u | (kFillOtherMode & 0xFFFFFFu), 0u);
     // G_SETFILLCOLOR: RGBA, alpha in the high byte.
     emit(0xF7000000u, rgba);
-    // G_FILLRECT: ulx(12b)@12|uly(12b)@0 in w0, lrx(12b)@12|lry(12b)@0 in w1.
-    emit(0xF6000000u | (((uint32_t)x0 & 0xFFFu) << 12) | ((uint32_t)y0 & 0xFFFu),
-         0u);
-    emit((((uint32_t)x1 & 0xFFFu) << 12) | ((uint32_t)y1 & 0xFFFu), 0u);
+    // G_FILLRECT: RT64 decodes ulx/uly from w1 and lrx/lry from w0 (see
+    // GBI_RDP::fillRect), which is also what libultra's gDPFillRectangle emits:
+    //   w0 = opcode | lrx(12b)@12 | lry(12b)@0
+    //   w1 = ulx(12b)@12 | uly(12b)@0
+    // The values are 10.2 fixed point (pixel << 2).
+    const uint32_t ulx = ((uint32_t)x0 << 2) & 0xFFFu;
+    const uint32_t uly = ((uint32_t)y0 << 2) & 0xFFFu;
+    const uint32_t lrx = ((uint32_t)x1 << 2) & 0xFFFu;
+    const uint32_t lry = ((uint32_t)y1 << 2) & 0xFFFu;
+    emit(0xF6000000u | (lrx << 12) | lry,
+         (ulx << 12) | uly);
 }
 
 void build_display_list() {
@@ -87,19 +105,26 @@ void build_display_list() {
     // recorded but never rasterized.
     //   w0 = opcode | ulx(12b)@12 | uly(12b)@0
     //   w1 = mode(2b)@24 | lrx(12b)@12 | lry(12b)@0
-    emit(0xED000000u, ((uint32_t)0 << 12) | 0u);
-    emit(0u, ((uint32_t)kScreenWidth << 12) | (uint32_t)kScreenHeight);
+    // (one command: a single two-word emit) The rect is 10.2 fixed point.
+    emit(0xED000000u | (0u << 12) | 0u,
+         (0u << 24) | (((uint32_t)kScreenWidth << 2) << 12) | ((uint32_t)kScreenHeight << 2));
 
     // Seven vertical bars, so the frame is unmistakable in a screenshot and a
     // partial draw (only some bars) is visible too.
+    //
+    // The colour image is 16-bit (G_IM_SIZ_16b), so G_SETFILLCOLOR must carry an
+    // RGBA16 (5/5/5/1) value, not RGBA8888: RT64's fill path does
+    // `RGBA16::toRGBAF(call.callDesc.fillColor & 0xFFFF)` for a 16-bit target,
+    // so a 0xFF0000FF-style value becomes 0x00FF (essentially black/transparent)
+    // and the fill rasterizes as nothing.
     static const uint32_t kColors[] = {
-        0xFF0000FFu,  // opaque red
-        0xFF00FF00u,  // opaque green
-        0xFFFF0000u,  // opaque blue
-        0xFFFFFFFFu,  // opaque white
-        0xFF00FFFFu,  // opaque yellow
-        0xFFFF00FFu,  // opaque magenta
-        0xFFC0C0C0u,  // opaque light grey
+        0x0000F801u,  // red
+        0x000007C1u,  // green
+        0x0000003Fu,  // blue
+        0x0000FFFFu,  // white
+        0x0000FFC1u,  // yellow
+        0x0000F83Fu,  // magenta
+        0x0000C618u,  // light grey
     };
     const int bars = (int)(sizeof(kColors) / sizeof(kColors[0]));
     const int bar_width = (int)kScreenWidth / bars;
@@ -175,16 +200,48 @@ void synth_frame_vi_tick(uint8_t* rdram) {
     if (getenv("OGRE_SYNTH_RAW") != nullptr) {
         uint16_t* fb = reinterpret_cast<uint16_t*>(g_synth.rdram + (kFramebufferVram - 0x80000000u));
         static const uint16_t raw_colors[] = {0xF801, 0x07C1, 0x003F, 0xFFFF, 0xFFC1, 0xF83F, 0xC618};
+        // OGRE_SYNTH_ANIMATE=1 rotates the palette every VI. RT64's presenter is
+        // change-driven (it only pushes a present when the VI or the RDRAM copy
+        // of the VI framebuffer changes), so a *static* framebuffer is never
+        // re-presented - the window keeps the last frame it was shown.
+        static uint32_t raw_phase = 0;
+        const bool animate = getenv("OGRE_SYNTH_ANIMATE") != nullptr;
+        if (animate) {
+            raw_phase++;
+        }
         for (int y = 0; y < (int)kScreenHeight; y++) {
             for (int x = 0; x < (int)kScreenWidth; x++) {
                 int bar = (x * 7) / (int)kScreenWidth;
+                uint16_t c = raw_colors[(bar + raw_phase) % 7];
                 // The runtime stores RDRAM words byte-reversed: pack the two
                 // framebuffer bytes back-to-front.
-                uint16_t c = raw_colors[bar];
                 fb[y * kScreenWidth + x] = (uint16_t)((c >> 8) | (c << 8));
             }
         }
+        // Read the bars back out of the same buffer RT64 reads, so "the raw
+        // write did not land where the presenter looks" cannot be confused with
+        // "the presenter ignores it".
+        if ((g_synth.vi_counter % 120) == 0) {
+            const uint8_t* p = g_synth.rdram + (kFramebufferVram - 0x80000000u);
+            uint32_t first = (uint32_t(p[3]) << 24) | (uint32_t(p[2]) << 16) | (uint32_t(p[1]) << 8) | uint32_t(p[0]);
+            uint32_t nonZero = 0;
+            for (uint32_t b = 0; b < kScreenWidth * kScreenHeight * 2; b++) {
+                if (p[b] != 0) nonZero++;
+            }
+            fprintf(stderr, "[synth] raw readback at rdram+0x%06X: first=0x%08X nonZero=%u\n",
+                    kFramebufferVram - 0x80000000u, first, nonZero);
+            fflush(stderr);
+        }
     }
+    // Pin the VI to the framebuffer the probe draws into. Without this the
+    // probe is timing-dependent: on some boots the game has repointed the VI at
+    // one of its own (black) framebuffers by the time the capture runs, and the
+    // presented frame is the game's, not the probe's. OGRE_SYNTH_FORCE_VI=0
+    // disables the pin.
+    if (getenv("OGRE_SYNTH_FORCE_VI") == nullptr || getenv("OGRE_SYNTH_FORCE_VI")[0] != '0') {
+        osViSwapBuffer(g_synth.rdram, (int32_t)kFramebufferVram);
+    }
+
     // Re-submit on every Nth VI so the frame stays on screen for a capture.
     g_synth.vi_counter++;
     uint32_t period = 30;
@@ -192,7 +249,12 @@ void synth_frame_vi_tick(uint8_t* rdram) {
         period = (uint32_t)strtoul(p, nullptr, 10);
     }
     if (period == 0 || (g_synth.vi_counter % period) == 0) {
-        submit_task(rdram);
+        // OGRE_SYNTH_NO_DL=1 keeps the raw-framebuffer diagnostic but does not
+        // submit a display list, so the RAM upload path can be measured without
+        // the RDP also owning a render target at the same address.
+        if (getenv("OGRE_SYNTH_NO_DL") == nullptr) {
+            submit_task(rdram);
+        }
     }
 }
 

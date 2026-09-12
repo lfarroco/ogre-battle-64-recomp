@@ -1,0 +1,549 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 7de5b69..313dd27 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -4,12 +4,44 @@
+ 
+ #include "rt64_present_queue.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++
+ #include "common/rt64_thread.h"
+ #include "rhi/rt64_render_hooks.h"
+ 
+ #include "rt64_workload_queue.h"
+ 
+ namespace RT64 {
++    // OGRE diagnostic: OGRE_PRESENT_TRACE=1 explains what the presenter decides
++    // to draw. A black window is either "no color target" (VI not visible, no
++    // matching framebuffer, or an empty render target) or "not presented".
++    static bool ogrePresentTrace() {
++        static const bool enabled = (getenv("OGRE_PRESENT_TRACE") != nullptr);
++        return enabled;
++    }
++
++    // OGRE diagnostic state for OGRE_CAPTURE_PRESENT / OGRE_CAPTURE_TARGET:
++    // GPU readback of (a) the swap chain texture being presented and (b) the
++    // render target the VI renderer sampled. OGRE_CAPTURE_AFTER=<n> skips the
++    // first n presents so the capture lands after boot.
++    struct OgreCaptureState {
++        std::unique_ptr<RenderBuffer> presentBuffer;
++        uint32_t presentWidth = 0;
++        uint32_t presentHeight = 0;
++        std::unique_ptr<RenderBuffer> targetBuffer;
++        uint32_t targetWidth = 0;
++        uint32_t targetHeight = 0;
++        RenderFormat targetFormat = RenderFormat::UNKNOWN;
++        uint32_t count = 0;
++        uint32_t after = 0;
++        bool afterRead = false;
++        bool thisFrame = false;
++        const char *presentPath = nullptr;
++        const char *targetPath = nullptr;
++    };
++    static OgreCaptureState ogreCapture;
++
+     // PresentQueue
+ 
+     PresentQueue::PresentQueue() {
+@@ -93,6 +125,20 @@ namespace RT64 {
+     }
+ 
+     void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
++        // OGRE diagnostics: refresh the capture configuration once per present.
++        {
++            ogreCapture.presentPath = getenv("OGRE_CAPTURE_PRESENT");
++            ogreCapture.targetPath = getenv("OGRE_CAPTURE_TARGET");
++            if (!ogreCapture.afterRead) {
++                ogreCapture.afterRead = true;
++                if (const char *afterEnv = getenv("OGRE_CAPTURE_AFTER")) {
++                    ogreCapture.after = uint32_t(strtoul(afterEnv, nullptr, 10));
++                }
++            }
++            ogreCapture.count++;
++            ogreCapture.thisFrame = ((ogreCapture.presentPath != nullptr) || (ogreCapture.targetPath != nullptr)) &&
++                                    (ogreCapture.count > ogreCapture.after);
++        }
+         FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
+         RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
+         const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
+@@ -146,6 +192,14 @@ namespace RT64 {
+                 viFb = fbManager.find(present.screenVI.fbAddress());
+             }
+ 
++            // OGRE diagnostic: OGRE_PRESENT_SCRATCH=1 ignores the framebuffer
++            // manager and always displays the RAM copy of the VI framebuffer
++            // (present.storage). This separates "the RDP render target is black"
++            // from "the RAM copy is black".
++            if (getenv("OGRE_PRESENT_SCRATCH") != nullptr) {
++                viFb = nullptr;
++            }
++
+             Framebuffer *presentFb = viFb;
+             
+             // Show the framebuffer the debugger has requested instead.
+@@ -221,6 +275,46 @@ namespace RT64 {
+             else {
+                 uint32_t fbAddress = present.screenVI.fbAddress();
+ 
++                // OGRE diagnostic: OGRE_PRESENT_FBTARGET=1 asks the render target
++                // manager directly for a target at the VI address. The framebuffer
++                // manager only tracks framebuffers it has seen through tile
++                // operations, so a display list that just sets a color image and
++                // fills it leaves its render target unregistered - and the
++                // presenter would upload the (empty) RAM copy instead.
++                RenderTarget *unregisteredTarget = nullptr;
++                if (getenv("OGRE_PRESENT_FBTARGET") != nullptr) {
++                    RenderTargetKey candidateKey(fbAddress, fbSize.x, present.screenVI.fbSiz(), Framebuffer::Type::Color);
++                    RenderTarget &candidate = targetManager.get(candidateKey, false);
++                    if (!candidate.isEmpty()) {
++                        unregisteredTarget = &candidate;
++                    }
++                }
++
++                if (unregisteredTarget != nullptr) {
++                    if (ogrePresentTrace()) {
++                        static uint32_t unregTrace = 0;
++                        if ((++unregTrace <= 5) || ((unregTrace % 120) == 0)) {
++                            fprintf(stderr, "[present] using unregistered render target for 0x%06X (%ux%u)\n",
++                                    (unsigned)fbAddress, (unsigned)unregisteredTarget->width, (unsigned)unregisteredTarget->height);
++                            fflush(stderr);
++                        }
++                    }
++                    colorTarget = unregisteredTarget;
++                    lockedWorkloadMutex = true;
++                    ext.sharedResources->workloadMutex.lock();
++                }
++                else {
++
++                if (ogrePresentTrace()) {
++                    static uint32_t scratchTrace = 0;
++                    scratchTrace++;
++                    if (scratchTrace <= 5 || (scratchTrace % 120) == 0) {
++                        fprintf(stderr, "[present] scratch path (no framebuffer for 0x%06X), uploading %zu RAM bytes\n",
++                                (unsigned)fbAddress, present.storage.size());
++                        fflush(stderr);
++                    }
++                }
++
+                 // Use a scratch framebuffer to upload the RAM to the render target.
+                 scratchFb.addressStart = fbAddress;
+                 scratchFb.width = fbSize.x;
+@@ -254,6 +348,7 @@ namespace RT64 {
+                 if (!present.paused && (viHistory.top().vi != present.screenVI)) {
+                     viHistory.pushVI(present.screenVI, fbSize.x);
+                 }
++                }
+             }
+         }
+ 
+@@ -266,6 +361,36 @@ namespace RT64 {
+                 swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
+             }
+         }
++
++        if (ogrePresentTrace()) {
++            static uint32_t traceCount = 0;
++            traceCount++;
++            if (traceCount <= 10 || (traceCount % 120) == 0) {
++                // Checksum the RAM copy the presenter would upload: proves
++                // whether the black frame comes from RDRAM or from the target.
++                uint32_t storageNonZero = 0;
++                uint32_t storageFirst = 0;
++                for (size_t b = 0; b < present.storage.size(); b++) {
++                    if (present.storage[b] != 0) {
++                        storageNonZero++;
++                    }
++                }
++                if (present.storage.size() >= 4) {
++                    storageFirst = (uint32_t(present.storage[3]) << 24) | (uint32_t(present.storage[2]) << 16) |
++                                   (uint32_t(present.storage[1]) << 8) | uint32_t(present.storage[0]);
++                }
++                fprintf(stderr,
++                        "[present] n=%u viVisible=%u fbAddr=0x%06X fbSize=%ux%u siz=%u colorTarget=%s framesToPresent=%d "
++                        "fbOps=%zu storage=%zu storageNonZero=%u storageFirst=0x%08X swapChainEmpty=%u\n",
++                        traceCount, (unsigned)(viVisible ? 1 : 0), (unsigned)present.screenVI.fbAddress(),
++                        (unsigned)fbSize.x, (unsigned)fbSize.y, (unsigned)present.screenVI.fbSiz(),
++                        (colorTarget == nullptr) ? "null" : (colorTarget->isEmpty() ? "empty" : "ok"),
++                        (int)framesToPresent, present.fbOperations.size(), present.storage.size(),
++                        storageNonZero, storageFirst,
++                        (unsigned)(ext.swapChain->isEmpty() ? 1 : 0));
++                fflush(stderr);
++            }
++        }
+         
+         for (int32_t i = 0; i < framesToPresent; i++) {
+             uint32_t frameCountersNextPresented = 0;
+@@ -342,11 +467,97 @@ namespace RT64 {
+                 }
+                 
+                 commandList->setFramebuffer(swapChainFramebuffer);
+-                commandList->clearColor();
++                // OGRE diagnostic: OGRE_PRESENT_SIGNAL=1 replaces the VI draw
++                // with a flat colour that encodes what this present carries:
++                //   green  = the RAM copy of the VI framebuffer has content
++                //   red    = the RAM copy is empty
++                //   blue   = no color target at all
++                //   magenta= OGRE_PRESENT_MAGENTA (unconditional)
++                const bool signalMode = (getenv("OGRE_PRESENT_SIGNAL") != nullptr);
++                if (getenv("OGRE_PRESENT_MAGENTA") != nullptr) {
++                    commandList->clearColor(0, RenderColor(1.0f, 0.0f, 1.0f, 1.0f));
++                }
++                else if (signalMode) {
++                    uint32_t nonZero = 0;
++                    for (size_t b = 0; b < present.storage.size(); b++) {
++                        if (present.storage[b] != 0) nonZero++;
++                    }
++                    static uint32_t signalCount = 0;
++                    signalCount++;
++                    if (signalCount <= 5 || (signalCount % 120) == 0) {
++                        fprintf(stderr, "[signal] n=%u presentId=%llu storageSize=%zu nonZero=%u colorTarget=%s fbAddr=0x%06X\n",
++                                signalCount, (unsigned long long)present.presentId, present.storage.size(), nonZero,
++                                (colorTarget == nullptr) ? "null" : "ok", (unsigned)present.screenVI.fbAddress());
++                        fflush(stderr);
++                    }
++                    if (getenv("OGRE_PRESENT_SIGNAL_CYCLE") != nullptr) {
++                        // Cycle a bright colour per presented frame so a window
++                        // capture can tell "dynamic presentation works" from
++                        // "the layer never updates".
++                        static const RenderColor cycleColors[] = {
++                            RenderColor(1.0f, 0.0f, 0.0f, 1.0f),
++                            RenderColor(0.0f, 1.0f, 0.0f, 1.0f),
++                            RenderColor(0.0f, 0.0f, 1.0f, 1.0f),
++                            RenderColor(1.0f, 1.0f, 0.0f, 1.0f),
++                            RenderColor(0.0f, 1.0f, 1.0f, 1.0f),
++                            RenderColor(1.0f, 0.0f, 1.0f, 1.0f),
++                        };
++                        commandList->clearColor(0, cycleColors[signalCount % 6]);
++                    }
++                    else if (colorTarget == nullptr) {
++                        commandList->clearColor(0, RenderColor(0.0f, 0.0f, 1.0f, 1.0f));
++                    }
++                    else if (nonZero > 0) {
++                        commandList->clearColor(0, RenderColor(0.0f, 1.0f, 0.0f, 1.0f));
++                    }
++                    else {
++                        commandList->clearColor(0, RenderColor(1.0f, 0.0f, 0.0f, 1.0f));
++                    }
++                }
++                else {
++                    commandList->clearColor();
++                }
+ 
+-                if (renderParams.texture != nullptr) {
++                if ((renderParams.texture != nullptr) && !signalMode) {
+                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
+                     viRenderer->render(renderParams);
++
++                    // OGRE diagnostic: dump the render target the VI renderer
++                    // just sampled (raw bytes + format). Answers "is the
++                    // framebuffer the RDP drew into actually non-black".
++                    if ((ogreCapture.targetPath != nullptr) && ogreCapture.thisFrame) {
++                        const uint32_t tw = renderParams.textureWidth;
++                        const uint32_t th = renderParams.textureHeight;
++                        ogreCapture.targetFormat = renderParams.textureFormat;
++                        if ((ogreCapture.targetBuffer == nullptr) || (ogreCapture.targetWidth != tw) || (ogreCapture.targetHeight != th)) {
++                            ogreCapture.targetWidth = tw;
++                            ogreCapture.targetHeight = th;
++                            // 8 bytes/texel is enough for any RT64 color target format (RGBA8/RGBA16F).
++                            ogreCapture.targetBuffer = ext.device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(tw) * th * 8));
++                        }
++                        commandList->barriers(RenderBarrierStage::NONE, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::COPY_SOURCE));
++                        commandList->copyTextureRegion(
++                            RenderTextureCopyLocation::PlacedFootprint(ogreCapture.targetBuffer.get(), RenderFormat::R8G8B8A8_UNORM, tw, th, 1, tw),
++                            RenderTextureCopyLocation::Subresource(renderParams.texture));
++                    }
++                }
++
++                if (ogrePresentTrace()) {
++                    static uint32_t drawCount = 0;
++                    drawCount++;
++                    if (drawCount <= 10 || (drawCount % 120) == 0) {
++                        fprintf(stderr,
++                                "[present] draw n=%u swapChainIndex=%u texture=%s texSize=%ux%u colorTargetSize=%ux%u "
++                                "resScale=%.3fx%.3f presentFrame=%u swapChainValid=%u\n",
++                                drawCount, swapChainIndex, (renderParams.texture == nullptr) ? "null" : "ok",
++                                (unsigned)renderParams.textureWidth, (unsigned)renderParams.textureHeight,
++                                (colorTarget != nullptr) ? (unsigned)colorTarget->width : 0u,
++                                (colorTarget != nullptr) ? (unsigned)colorTarget->height : 0u,
++                                (colorTarget != nullptr) ? colorTarget->resolutionScale.x : 0.0f,
++                                (colorTarget != nullptr) ? colorTarget->resolutionScale.y : 0.0f,
++                                (unsigned)(presentFrame ? 1 : 0), (unsigned)(swapChainValid ? 1 : 0));
++                        fflush(stderr);
++                    }
+                 }
+ 
+                 RenderHookDraw *drawHook = GetRenderHookDraw();
+@@ -354,6 +565,28 @@ namespace RT64 {
+                     drawHook(commandList, swapChainFramebuffer);
+                 }
+ 
++                // OGRE diagnostic: OGRE_CAPTURE_PRESENT=<path> writes the exact
++                // swap chain texture this frame presents. This is the only
++                // reliable way to inspect the native output: a macOS
++                // `screencapture` of the window depends on Screen Recording
++                // permission and on the window being composited, and a stalled
++                // boot never re-presents.
++                if (ogreCapture.thisFrame) {
++                    const uint32_t width = ext.swapChain->getWidth();
++                    const uint32_t height = ext.swapChain->getHeight();
++                    if (ogreCapture.presentPath != nullptr) {
++                        if ((ogreCapture.presentBuffer == nullptr) || (ogreCapture.presentWidth != width) || (ogreCapture.presentHeight != height)) {
++                            ogreCapture.presentWidth = width;
++                            ogreCapture.presentHeight = height;
++                            ogreCapture.presentBuffer = ext.device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(width) * height * 4));
++                        }
++                        commandList->barriers(RenderBarrierStage::NONE, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COPY_SOURCE));
++                        commandList->copyTextureRegion(
++                            RenderTextureCopyLocation::PlacedFootprint(ogreCapture.presentBuffer.get(), RenderFormat::B8G8R8A8_UNORM, width, height, 1, width),
++                            RenderTextureCopyLocation::Subresource(swapChainTexture));
++                    }
++                }
++
+                 {
+                     const std::scoped_lock lock(inspectorMutex);
+                     if (inspector != nullptr) {
+@@ -367,6 +600,51 @@ namespace RT64 {
+                     RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
+                     ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
+                     ext.presentGraphicsWorker->wait();
++
++                    if (ogreCapture.thisFrame && (ogreCapture.presentBuffer != nullptr)) {
++                        const RenderRange readRange(0, uint64_t(ogreCapture.presentWidth) * ogreCapture.presentHeight * 4);
++                        const uint8_t *pixels = reinterpret_cast<const uint8_t *>(ogreCapture.presentBuffer->map(0, &readRange));
++                        if (pixels != nullptr) {
++                            // Numbered so a run can capture a sequence without
++                            // overwriting; the base name comes from the env var.
++                            char finalPath[1024];
++                            snprintf(finalPath, sizeof(finalPath), "%s.%u.ppm", ogreCapture.presentPath, ogreCapture.count);
++                            if (FILE *f = fopen(finalPath, "wb")) {
++                                fprintf(f, "P6\n%u %u\n255\n", ogreCapture.presentWidth, ogreCapture.presentHeight);
++                                for (uint32_t y = 0; y < ogreCapture.presentHeight; y++) {
++                                    const uint8_t *row = pixels + size_t(y) * ogreCapture.presentWidth * 4;
++                                    for (uint32_t x = 0; x < ogreCapture.presentWidth; x++) {
++                                        // Swap chain format is B8G8R8A8_UNORM.
++                                        const uint8_t rgb[3] = { row[x * 4 + 2], row[x * 4 + 1], row[x * 4 + 0] };
++                                        fwrite(rgb, 1, 3, f);
++                                    }
++                                }
++                                fclose(f);
++                                fprintf(stderr, "[capture] wrote %s (%ux%u)\n", finalPath, ogreCapture.presentWidth, ogreCapture.presentHeight);
++                                fflush(stderr);
++                            }
++                        }
++                        ogreCapture.presentBuffer->unmap();
++                    }
++
++                    // OGRE diagnostic: dump the render target the VI sampled.
++                    if ((ogreCapture.targetPath != nullptr) && ogreCapture.thisFrame && (ogreCapture.targetBuffer != nullptr)) {
++                        const uint32_t tw = ogreCapture.targetWidth;
++                        const uint32_t th = ogreCapture.targetHeight;
++                        const RenderRange readRange(0, uint64_t(tw) * th * 8);
++                        const uint8_t *pixels = reinterpret_cast<const uint8_t *>(ogreCapture.targetBuffer->map(0, &readRange));
++                        if (pixels != nullptr) {
++                            char finalPath[1024];
++                            snprintf(finalPath, sizeof(finalPath), "%s.%u.bin", ogreCapture.targetPath, ogreCapture.count);
++                            if (FILE *f = fopen(finalPath, "wb")) {
++                                fwrite(pixels, 1, size_t(tw) * th * 8, f);
++                                fclose(f);
++                                fprintf(stderr, "[capture] wrote %s (%ux%u format=%d)\n", finalPath, tw, th, (int)ogreCapture.targetFormat);
++                                fflush(stderr);
++                            }
++                        }
++                        ogreCapture.targetBuffer->unmap();
++                    }
+                 }
+             }
+ 
+diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
+index a10c11a..f0e1d03 100644
+--- a/src/hle/rt64_rdp.cpp
++++ b/src/hle/rt64_rdp.cpp
+@@ -248,6 +248,13 @@ namespace RT64 {
+     }
+ 
+     void RDP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
++        if (getenv("OGRE_RDP_TRACE") != nullptr) {
++            static uint32_t cimgTrace = 0;
++            if (++cimgTrace <= 20) {
++                fprintf(stderr, "[rdp] setColorImage fmt=%u siz=%u width=%u address=0x%08X\n", (unsigned)fmt, (unsigned)siz, (unsigned)width, (unsigned)address);
++                fflush(stderr);
++            }
++        }
+         // Make sure the new color image is actually different. Some games will set the color image
+         // multiple times despite setting the exact same parameters.
+         const uint32_t newAddress = maskAddress(address);
+@@ -1035,6 +1042,14 @@ namespace RT64 {
+         RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
+ #   endif
+ 
++        if (getenv("OGRE_RDP_TRACE") != nullptr) {
++            static uint32_t fillTrace = 0;
++            if (++fillTrace <= 30) {
++                fprintf(stderr, "[rdp] fillRect ulx=%d uly=%d lrx=%d lry=%d\n", (int)ulx, (int)uly, (int)lrx, (int)lry);
++                fflush(stderr);
++            }
++        }
++
+         // Filter out incorrect rectangles.
+         if ((lrx < ulx) || (lry < uly)) {
+             return;
+@@ -1222,6 +1237,17 @@ namespace RT64 {
+                 }
+             }
+         }
++
++        // OGRE diagnostic: OGRE_RDP_TRACE=1 reports each rectangle the RDP is
++        // asked to draw and whether it survives the scissor intersection.
++        if (getenv("OGRE_RDP_TRACE") != nullptr) {
++            static uint32_t rdpTrace = 0;
++            if (++rdpTrace <= 40) {
++                fprintf(stderr, "[rdp] drawRect ulx=%d uly=%d lrx=%d lry=%d scissorNull=%d drawRectEmpty=%d\n",
++                        (int)ulx, (int)uly, (int)lrx, (int)lry, (int)scissorRect.isNull(), (int)drawRect.isEmpty());
++                fflush(stderr);
++            }
++        }
+         
+         bool flushedState = state->checkDrawState();
+ 
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 2970e71..df481c8 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1944,9 +1944,42 @@ namespace RT64 {
+                 uint64_t newScreenHash = XXH3_64bits(present.storage.data(), screenFbBytes);
+                 screenChangesMade = (newScreenHash != lastScreenHash);
+                 lastScreenHash = newScreenHash;
++                // OGRE diagnostic: what did we just copy out of RDRAM?
++                if (getenv("OGRE_PRESENT_TRACE") != nullptr) {
++                    static uint32_t stateTrace = 0;
++                    stateTrace++;
++                    if (stateTrace <= 10 || (stateTrace % 120) == 0) {
++                        uint32_t nonZero = 0;
++                        for (uint32_t b = 0; b < screenFbBytes; b++) {
++                            if (present.storage[b] != 0) nonZero++;
++                        }
++                        uint32_t first = 0;
++                        if (screenFbBytes >= 4) {
++                            first = (uint32_t(present.storage[3]) << 24) | (uint32_t(present.storage[2]) << 16) |
++                                    (uint32_t(present.storage[1]) << 8) | uint32_t(present.storage[0]);
++                        }
++                        fprintf(stderr,
++                                "[state] n=%u screenFbAddr=0x%06X screenFbSize=%ux%u siz=%u bytes=%u nonZero=%u first=0x%08X "
++                                "ramNonZeroSample=0x%08X change=%u\n",
++                                stateTrace, (unsigned)screenFbAddress, (unsigned)screenFbSize.x, (unsigned)screenFbSize.y,
++                                (unsigned)screenFbSiz, screenFbBytes, nonZero, first,
++                                (unsigned)((uint32_t(RDRAM[screenFbAddress]) << 24) | (uint32_t(RDRAM[screenFbAddress + 1]) << 16) |
++                                           (uint32_t(RDRAM[screenFbAddress + 2]) << 8) | uint32_t(RDRAM[screenFbAddress + 3])),
++                                (unsigned)(screenChangesMade ? 1 : 0));
++                        fflush(stderr);
++                    }
++                }
+             }
+         }
+         
++        // OGRE diagnostic: OGRE_PRESENT_ALWAYS=1 pushes a present on every VI
++        // update even when the VI and the RAM copy of the framebuffer are
++        // unchanged. A stalled boot changes neither, so without this the
++        // presenter stops after the first few VIs and keeps an old frame.
++        if (!fromEarlyPresent && (getenv("OGRE_PRESENT_ALWAYS") != nullptr)) {
++            viDifferent = true;
++        }
++
+         // We only push a new present event to the timeline when it's necessary.
+         if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
+             // Push a new renderer event to the timeline for presenting this VI.
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5a331aa..14a8715 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -418,6 +418,15 @@ namespace RT64 {
+                 const FramebufferPair &fbPair = workload.fbPairs[f];
+                 const auto &colorImg = fbPair.colorImage;
+                 const auto &depthImg = fbPair.depthImage;
++                if (getenv("OGRE_WORKLOAD_TRACE") != nullptr) {
++                    static uint32_t wlTrace = 0;
++                    if (++wlTrace <= 20) {
++                        fprintf(stderr, "[workload] fbPair=%u colorImg=0x%06X fmt=%u siz=%u width=%u drawColorRectEmpty=%d gameCalls=%u\n",
++                                (unsigned)f, (unsigned)colorImg.address, (unsigned)colorImg.fmt, (unsigned)colorImg.siz,
++                                (unsigned)colorImg.width, (int)fbPair.drawColorRect.isEmpty(), (unsigned)fbPair.gameCallCount);
++                        fflush(stderr);
++                    }
++                }
+                 fixedResScale = workloadConfig.resolutionScale;
+                 if (!fbPair.drawColorRect.isEmpty()) {
+                     colorFb = nullptr;
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 9fae0d4..24ae5b9 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -1318,6 +1318,16 @@ namespace RT64 {
+ 
+     void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
+         assert(p.fbStorage != nullptr);
++
++        if (getenv("OGRE_FBRENDER_TRACE") != nullptr) {
++            static uint32_t addTrace = 0;
++            if (++addTrace <= 12) {
++                fprintf(stderr, "[fbrender] addFramebuffer maxGameCall=%u fbPairGameCalls=%u projections=%u fbW=%u fbH=%u\n",
++                        p.maxGameCall, p.curWorkload->fbPairs[p.fbPairIndex].gameCallCount,
++                        p.curWorkload->fbPairs[p.fbPairIndex].projectionCount, p.fbWidth, p.fbHeight);
++                fflush(stderr);
++            }
++        }
+         
+         // Setup framebuffer pair data and descriptor set.
+         const FramebufferPair &fbPair = p.curWorkload->fbPairs[p.fbPairIndex];
+@@ -1452,6 +1462,15 @@ namespace RT64 {
+         RenderViewport viewportClip;
+         for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
+             const Projection &proj = fbPair.projections[pr];
++            if (getenv("OGRE_FBRENDER_TRACE") != nullptr) {
++                static uint32_t projTrace = 0;
++                if (++projTrace <= 12) {
++                    fprintf(stderr, "[fbrender] proj=%u type=%d scissorNull=%d gameCalls=%u fbPairScissorNull=%d\n",
++                            (unsigned)pr, (int)proj.type, (int)proj.scissorRect.isNull(), (unsigned)proj.gameCallCount,
++                            (int)fbPair.scissorRect.isNull());
++                    fflush(stderr);
++                }
++            }
+             if (proj.scissorRect.isNull()) {
+                 continue;
+             }
+@@ -1508,6 +1527,17 @@ namespace RT64 {
+ 
+             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
+                 const GameCall &call = proj.gameCalls[d];
++                if (getenv("OGRE_FBRENDER_TRACE") != nullptr) {
++                    static uint32_t callTrace = 0;
++                    if (++callTrace <= 14) {
++                        fprintf(stderr, "[fbrender] call d=%u cycleType=%u fillColor=0x%08X rect=(%d,%d)-(%d,%d) scissorNull=%d\n",
++                                (unsigned)d, (unsigned)call.callDesc.otherMode.cycleType(), call.callDesc.fillColor,
++                                (int)call.callDesc.rect.ulx, (int)call.callDesc.rect.uly,
++                                (int)call.callDesc.rect.lrx, (int)call.callDesc.rect.lry,
++                                (int)call.callDesc.scissorRect.isNull());
++                        fflush(stderr);
++                    }
++                }
+                 renderIndices.instanceIndex = call.callDesc.callIndex;
+                 renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
+                 renderIndices.rdpTileIndex = call.callDesc.tileIndex;
+@@ -1517,6 +1547,17 @@ namespace RT64 {
+ 
+                 uint32_t cycleType = call.callDesc.otherMode.cycleType();
+                 if (cycleType == G_CYC_FILL) {
++                    if (getenv("OGRE_FBRENDER_TRACE") != nullptr) {
++                        static uint32_t fillTrace = 0;
++                        if (++fillTrace <= 12) {
++                            fprintf(stderr, "[fbrender] FillRect fillColor=0x%08X cimgSiz=%u colorTarget=%s rect=(%d,%d)-(%d,%d)\n",
++                                    call.callDesc.fillColor, (unsigned)fbPair.colorImage.siz,
++                                    (p.fbStorage->colorTarget != nullptr) ? "yes" : "no",
++                                    (int)call.callDesc.rect.ulx, (int)call.callDesc.rect.uly,
++                                    (int)call.callDesc.rect.lrx, (int)call.callDesc.rect.lry);
++                            fflush(stderr);
++                        }
++                    }
+                     instanceDrawCall.type = InstanceDrawCall::Type::FillRect;
+ 
+                     auto &clearRect = instanceDrawCall.clearRect;

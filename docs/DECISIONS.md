@@ -5,6 +5,109 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 27) — the native window renders: GPU readback, and four display-list encoding bugs
+
+### Context
+
+Session 26 ended with "RT64 receives, parses and executes a real display list,
+but the window never shows the result" and two candidate explanations: the
+presenter never composites the framebuffer, or `screencapture` cannot see the
+Metal layer. Both were wrong, and the way they were wrong mattered: every
+session-26 capture-based conclusion rested on `screencapture` output.
+
+### Finding: window contents *are* capturable, but the session-26 captures were of a locked display
+
+`CGWindowListCopyWindowInfo` shows a `loginwindow` window at layer 2004 covering
+the whole screen: the display is locked. `screencapture -x` (whole screen) then
+returns wallpaper only, while `screencapture -l<windowid>` (per window) *does*
+return window contents - a Chrome window captures perfectly. The app's own window
+captures as its title bar plus a black canvas.
+
+So a window capture is usable for a still frame, but it is not a trustworthy way
+to see a *changing* frame on a locked display: with a cycling clear colour the
+window capture stays on one colour for seconds. It reports the last frame the
+window server committed, which on a locked display is rare.
+
+### Decision: trust the presented swap-chain texture, not the window (RT64 + plume)
+
+RT64 now has `OGRE_CAPTURE_PRESENT=<path>`: at present time it copies the exact
+swap-chain texture this frame presents into a `RenderBufferDesc::ReadbackBuffer`
+and writes `<path>.<n>.ppm`. `OGRE_CAPTURE_TARGET=<path>` does the same for the
+render target the VI renderer sampled (`renderParams.texture`) and
+`OGRE_CAPTURE_AFTER=<n>` skips the first `n` frames.
+
+Plume's Metal `copyTextureRegion` only implemented buffer -> texture, so the
+mirror case (texture -> buffer, what a readback needs) was added. It also has to
+go through `ExtendedRenderTexture::getTexture()` because a swap-chain texture is
+a `MetalDrawable`, not a `MetalTexture`, and reading `MetalTexture::mtl` off one
+is undefined behaviour (it crashed inside `copyFromTexture:toBuffer:`).
+
+This readback is the session's ground truth: it is what RT64 presents, with no
+window server, permission or compositing in the path.
+
+### Finding: RT64's presenter is change-driven, so a stalled boot freezes the window
+
+`State::updateScreen` pushes a present only when the VI changed, the RDRAM copy
+of the VI framebuffer changed, or a framebuffer operation was recorded. A stalled
+boot does none of those: the traced present count stops after ~10 VIs and the
+window keeps whatever it last showed forever. `OGRE_PRESENT_ALWAYS=1` forces a
+present per VI. Separately, the presenter looks its framebuffer up in the
+framebuffer manager, which only knows framebuffers it has seen through tile
+operations; a display list that just sets a colour image and fills it leaves its
+render target unregistered, and the presenter would upload the (empty) RDRAM copy
+instead. `OGRE_PRESENT_FBTARGET=1` falls back to a non-empty render target at the
+VI address.
+
+### Finding: the synthetic display list was never drawing — four encoding bugs
+
+The renderer half looked "proven" because RT64's logs showed `setFillColor` and
+`fillRect` firing. Firing is not rasterizing. The hand-built F3DEX2 list in
+`app/src/synth_frame.cpp` was wrong in four independent ways:
+
+1. **Every two-word RDP command was emitted as two `emit()` calls** (four words).
+   `G_SETSCISSOR` became `w1 = 0` (a null scissor) followed by a garbage opcode,
+   and `G_FILLRECT` became `lrx = lry = 0` (an empty rectangle). RT64's
+   `RDP::drawRect` returns early for an empty rect and only merges
+   `drawColorRect` when a scissor is set, so nothing was ever recorded as drawn.
+2. **`G_FILLRECT` operand halves were swapped.** RT64's `GBI_RDP::fillRect`
+   decodes `ulx/uly` from `w1` and `lrx/lry` from `w0` (libultra's
+   `gDPFillRectangle` does the same); the probe had the reverse, which is what
+   the session-26 note recorded.
+3. **Coordinates were not 10.2 fixed point.** The RDP wants `pixel << 2`; passing
+   raw pixels made a "full screen" fill 80x60 and clipped everything to the top
+   60 rows.
+4. **`G_RDPSETOTHERMODE` was pre-shifted.** RT64 keeps the 24-bit mode0 verbatim
+   in `w0` and tests fields at their full-word positions
+   (`OtherMode::cycleType() == H & (3 << G_MDSFT_CYCLETYPE)`, i.e. bits 20-21 of
+   `w0`). Sending `mode0 >> 8` made the cycle type `G_CYC_1CYCLE`, so the fill
+   path in `FramebufferRenderer` never ran. The fill colour also has to be
+   RGBA16 (`0xF801`), not RGBA8888, because the colour image is 16-bit.
+
+With all four fixed, `G_CYC_FILL` draw calls reach `FramebufferRenderer`, the
+target contains the seven bars, and the presented swap-chain texture is
+`docs/proofs/native-synth-frame-rdp.png`.
+
+### Decision: the probe turns on the presenter diagnostics it needs
+
+`RT64Renderer` calls `setenv("OGRE_PRESENT_ALWAYS"/"OGRE_PRESENT_FBTARGET", "1",
+0)` when `OGRE_SYNTH_FRAME` is set, so one command shows a frame. With
+`OGRE_SYNTH_NO_DL` (the raw RDRAM path) only `OGRE_PRESENT_ALWAYS` is set: the
+render-target fallback would otherwise bypass the RAM upload path being tested,
+which made the raw probe black. The RT64-side knobs stay env-gated so the default
+(no-env) run behaves exactly as before.
+
+### Decision: the probe pins the VI
+
+The probe first came out black in about one run in three. The cause is that the
+VI is the game's: on some boots the game has repointed it at one of its own
+(black) framebuffers by the time the capture runs, and the presented frame is the
+game's, not the probe's. `synth_frame_vi_tick` now calls
+`osViSwapBuffer(rdram, 0x80700000)` every VI (the VI thread is outside the
+runtime's `message_mutex` at that point), which makes both probe paths
+deterministic across runs. `OGRE_SYNTH_FORCE_VI=0` disables the pin.
+
+---
+
 ## 2026-09-12 (session 26) — a real call stack for game threads, and the renderer half proven
 
 ### Context

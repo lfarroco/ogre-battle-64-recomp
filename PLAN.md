@@ -284,6 +284,28 @@ hardware. RT64 remains the primary native renderer throughout. See
     right colour image) - the window still shows black, so the remaining gap is
     presentation, not parsing or drawing. See
     `docs/HANDOFF-2026-09-12-session26.md`.
+  - ✅ **The native window renders (session 27)**: the session-26 "window is
+    black" conclusion was a measurement artifact. The display is locked, so
+    `screencapture -x` returns wallpaper and `screencapture -l<id>` returns the
+    last frame the window server committed (a cycling clear colour stays one
+    colour across seconds of captures). The new ground truth is
+    `OGRE_CAPTURE_PRESENT=<path>`: RT64 GPU-reads back the exact swap-chain
+    texture it presents (texture -> buffer readback added to plume's Metal
+    backend; `rt64-plume-ob64.patch`). With that, the synthetic-frame probe
+    shows the seven bars end to end in **both** paths - the RDRAM upload path
+    and the real RDP display-list path - and the result is
+    `docs/proofs/native-synth-frame-rdp.png`. Four display-list encoding bugs
+    had to be fixed first: two-word commands were emitted as two `emit()` calls
+    (null scissor, empty fill rect), `G_FILLRECT` had its operand halves
+    swapped, coordinates were not 10.2 fixed point, and `G_RDPSETOTHERMODE` was
+    pre-shifted so the cycle type was never `G_CYC_FILL`. Two presenter
+    behaviours were also needed: RT64 only presents when the VI or its RDRAM
+    copy changes, so a stalled boot freezes the window on an old frame
+    (`OGRE_PRESENT_ALWAYS=1`); and its framebuffer manager does not know an
+    RDP-only colour image, so the presenter uploaded empty RDRAM instead of the
+    drawn render target (`OGRE_PRESENT_FBTARGET=1`). Both are turned on
+    automatically by `OGRE_SYNTH_FRAME`. See
+    `docs/HANDOFF-2026-09-12-session27.md`.
   - ✅ **Game audio is muted by default (session 22)**: the audio microcode is
     not emulated (the RSP audio task is only auto-completed), so what the game
     hands the AI interface is garbage and playing it is a wall of screeching.

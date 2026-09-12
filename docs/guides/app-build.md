@@ -21,6 +21,12 @@ git submodule update --init --recursive
 # (needed on systems with older SDL2, e.g. Ubuntu 22.04's 2.0.20)
 git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
 
+# apply the OGRE diagnostics (present traces, GPU readback capture, presenter
+# knobs). rt64-plume-ob64.patch is the texture -> buffer readback support in
+# plume's Metal backend.
+git -C tools/RT64 apply ../../rt64-ob64.patch
+git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-ob64.patch
+
 # regenerate the recompiled code if it has changed (uses the ELF + config.toml)
 make recomp
 
@@ -64,8 +70,8 @@ If no ROM path is given, the app looks for the stored ROM in the config dir.
 ## Scripted runs and diagnostics
 
 Environment variables make a run self-driving and bounded, for measurements and
-captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25
-and 26). All default to off.
+captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
+26 and 27). All default to off.
 
 | Variable | Effect |
 |---|---|
@@ -74,9 +80,24 @@ and 26). All default to off.
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces (very chatty) |
 | `OGRE_DUMP_RDRAM=<path>` | with `OGRE_EXIT_AFTER_MS`, write the whole 8 MiB RDRAM image for offline analysis |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
-| `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe |
-| `OGRE_SYNTH_AT_MS=<n>` / `OGRE_SYNTH_PERIOD=<n>` | when the probe first submits, and how many VIs between re-submits (default 30; 0 = once) |
+| `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |
+| `OGRE_SYNTH_AT_MS=<n>` / `OGRE_SYNTH_PERIOD=<n>` | when the probe first submits, and how many VIs between re-submits (default 30; 0 = every VI). Keep `AT_MS` above ~600 ms: before that the game's ucode is not in RDRAM yet and RT64 cannot identify the GBI |
 | `OGRE_NO_DUMMY_VI=1` | skip the pre-start dummy VI workload (it clears the screen black every VI and would hide a diagnostic draw) |
+| `OGRE_SYNTH_RAW=1` | also write the bars straight into the VI framebuffer in RDRAM, bypassing the RDP (isolates the presenter from the display list) |
+| `OGRE_SYNTH_ANIMATE=1` | rotate the raw palette every VI so RT64's change-driven presenter keeps presenting |
+| `OGRE_SYNTH_NO_DL=1` | with `OGRE_SYNTH_RAW`, do not submit the display list (RAM path only) |
+| `OGRE_SYNTH_FORCE_VI=0` | do not pin the VI to the probe's framebuffer (the pin is on by default; without it the probe is timing-dependent, because the game may have repointed the VI at one of its own framebuffers) |
+| `OGRE_CAPTURE_PRESENT=<path>` | at present time, GPU-read back the exact swap-chain texture and write `<path>.<n>.ppm` (see "Capturing the native output") |
+| `OGRE_CAPTURE_TARGET=<path>` | same, for the render target the VI renderer sampled (`<path>.<n>.bin`, `R16G16B16A16_UNORM`, 8 bytes/texel) |
+| `OGRE_CAPTURE_AFTER=<n>` | skip the first `n` presents before capturing |
+| `OGRE_PRESENT_ALWAYS=1` | push a present on every VI even when nothing changed (a stalled boot changes nothing, so the window otherwise freezes on an old frame) |
+| `OGRE_PRESENT_FBTARGET=1` | if the framebuffer manager has no framebuffer at the VI address, present a non-empty render target there instead of the RDRAM copy |
+| `OGRE_INSTANT_PRESENT=1` | switch RT64 to `PresentEarly` (a display list presents the framebuffer it drew) |
+| `OGRE_PRESENT_TRACE=1` | `[present]`/`[state]` traces: what each present carries and which path it took |
+| `OGRE_RDP_TRACE=1` | `[rdp]` traces: `setColorImage`, `fillRect`, `drawRect` (with the scissor/empty checks) |
+| `OGRE_WORKLOAD_TRACE=1` | `[workload]` traces: the framebuffer pair RT64 built (colour image, scissor, call count) |
+| `OGRE_FBRENDER_TRACE=1` | `[fbrender]` traces: the renderer's per-call view (cycle type, fill colour, rect) |
+| `OGRE_VI_TRACE=1` | `[vi]` trace of the decoded VI RT64 is about to present |
 
 ```sh
 # a bounded run with taps, and the per-thread call chains
@@ -92,6 +113,40 @@ OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=1000 OGRE_SYNTH_PERIOD=30 \
   OGRE_EXIT_AFTER_MS=20000 ./build-app/ogrebattle64
 ```
 
+### Capturing the native output
+
+Do **not** use `screencapture` to decide whether the renderer works. On a locked
+or asleep display it returns the last frame the window server committed, which
+can be seconds old (a cycling clear colour stays one colour across many
+captures), and the session-26 "the window is black" conclusion came from exactly
+that. Measure the presented texture instead:
+
+```sh
+# one command: submit the probe every 30 VIs and read back what is presented
+OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=900 OGRE_SYNTH_PERIOD=30 OGRE_NO_DUMMY_VI=1 \
+  OGRE_CAPTURE_PRESENT=/tmp/frame OGRE_CAPTURE_AFTER=200 \
+  OGRE_EXIT_AFTER_MS=8000 ./build-app/ogrebattle64
+# -> /tmp/frame.201.ppm, /tmp/frame.202.ppm, ... (P6; the swap chain is BGRA8)
+```
+
+`OGRE_CAPTURE_PRESENT` is the ground truth for "what does RT64 present": it is
+the swap-chain texture itself, with no window server in the path. Add
+`OGRE_CAPTURE_TARGET=/tmp/target` to also dump the render target the VI renderer
+sampled, which separates "the RDP did not draw" from "the presenter dropped it".
+
+`OGRE_SYNTH_FRAME` turns on `OGRE_PRESENT_ALWAYS` and `OGRE_PRESENT_FBTARGET` for
+you (with `setenv(..., overwrite=0)`, so an explicit value still wins); with
+`OGRE_SYNTH_NO_DL` it turns on only `OGRE_PRESENT_ALWAYS`, because the
+render-target fallback would bypass the RAM upload path the raw probe is testing.
+The probe also pins the VI to its own framebuffer every VI (`osViSwapBuffer`), so
+the presented frame is the probe's and not whichever of the game's framebuffers
+the VI happened to point at; `OGRE_SYNTH_FORCE_VI=0` turns that off.
+
+Without `OGRE_PRESENT_ALWAYS` a stalled boot never re-presents and the window
+keeps an old black frame even though the render path works, and without
+`OGRE_PRESENT_FBTARGET` an RDP-only fill has no framebuffer in the manager so the
+presenter uploads empty RDRAM instead of the drawn target.
+
 ### Reading a dump
 
 The runtime byte-reverses RDRAM (see `recomp.h`): the 32-bit word at game address
@@ -101,7 +156,8 @@ byte at `a` is at `(a ^ 3) - 0x80000000`. So a Python read is
 `data[(a & 0x1FFFFFFF) ^ 3]` for logical bytes.
 
 The black canvas a stalled boot produces is the game's idle trajectory (it
-submits only its boot blanking display list), not a renderer failure.
+submits only its boot blanking display list), not a renderer failure - but do not
+conclude that from a screen capture; see "Capturing the native output".
 
 ## Config directory
 
