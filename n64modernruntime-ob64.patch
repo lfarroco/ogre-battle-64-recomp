@@ -723,7 +723,7 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..2a771b4 100644
+index 46aea61..4142bdf 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
 @@ -23,7 +23,17 @@
@@ -744,7 +744,7 @@ index 46aea61..2a771b4 100644
      moodycamel::LightweightSemaphore initialized;
  };
  
-@@ -77,6 +87,54 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
+@@ -77,6 +87,64 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
  void wait_for_external_message(RDRAM_ARG1);
  void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
  
@@ -774,6 +774,16 @@ index 46aea61..2a771b4 100644
 +void debug_dump_chain_history(void);
 +// Debug: sample last_func_vram[tid] 100x and print the histogram.
 +void debug_sample_hot_loop(int tid);
++// Debug: OGRE_PROFILE=1 sampling profiler. Started by the app; samples every
++// game thread's current recompiled function and dumps a (thread, function)
++// histogram at exit, so "the game is busy but not rendering" is attributed to
++// real work instead of guessed from snapshots.
++void debug_profile_start(void);
++void debug_profile_dump(void);
++// Debug: recompiled-function entry count for a thread (needs the trace hooks).
++uint64_t debug_entry_count(int tid);
++// Debug: recompiled-function entries across all threads.
++uint64_t debug_total_entry_count(void);
 +// Debug: dump the allocator-family entry ring (session-18 wedge forensics).
 +void debug_dump_alloc_ring(void);
 +// Debug: start the allocator transition sampler; dump its ring.
@@ -799,7 +809,7 @@ index 46aea61..2a771b4 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -170,11 +228,33 @@ void set_callbacks(
+@@ -170,11 +238,33 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -1085,18 +1095,23 @@ index 2f1cfb5..759a07a 100644
  
 diff --git a/ultramodern/src/function_trace.cpp b/ultramodern/src/function_trace.cpp
 new file mode 100644
-index 0000000..632c878
+index 0000000..23a4ce1
 --- /dev/null
 +++ b/ultramodern/src/function_trace.cpp
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,756 @@
 +#include <array>
 +#include <atomic>
 +#include <chrono>
 +#include <cstdio>
++#include <mutex>
 +#include <thread>
++#include <utility>
 +
 +#include "ultramodern/ultramodern.hpp"
 +#include "ultramodern/ultra64.h"
++
++// The runtime's global exit flag (threads.cpp).
++extern std::atomic_bool exited;
 +
 +// Per-thread "currently executing recompiled function" tracking for deadlock
 +// diagnostics. The recompiled code calls recomp_trace_func() at every function
@@ -1159,8 +1174,79 @@ index 0000000..632c878
 +// per-thread shadow call chain, and feeds the allocator ring. The generated
 +// prologue calls this with ctx->r31, which at function entry still holds the
 +// address in the caller that this frame will return to.
++// The per-function-entry hooks (recomp_trace_entry/recomp_trace_return) run on
++// EVERY recompiled function entry - millions of times per second - and write a
++// shadow call chain plus the last-function slot each time. That is far too
++// expensive to leave on for a normal run: it is a diagnostic, so it is enabled
++// only when a diagnostic that consumes it is requested
++// (OGRE_PROFILE / OGRE_SCHED_TRACE / OGRE_DEBUG_TRACES / OGRE_TRACE_HOOKS).
++static bool trace_hooks_enabled() {
++    static const bool enabled = [] {
++        return getenv("OGRE_TRACE_HOOKS") != nullptr ||
++               getenv("OGRE_PROFILE") != nullptr ||
++               getenv("OGRE_SCHED_TRACE") != nullptr ||
++               getenv("OGRE_DEBUG_TRACES") != nullptr;
++    }();
++    return enabled;
++}
++
++// Per-thread recompiled-function entry counts. A thread whose count is not
++// advancing is blocked or idle in a runtime call; one whose count advances is
++// executing game code. This is the "is it computing or waiting?" signal the
++// sampling profiler cannot get from last_func_vram alone.
++struct alignas(64) EntryCounter {
++    std::atomic<uint64_t> n{0};
++};
++static std::array<EntryCounter, 256> entry_counts{};
++
++// Set once by debug_profile_start(); forward-declared so the entry hook can
++// feed the hot-function table without a second definition.
++static std::atomic<bool> profile_on{false};
++
++// Per-function entry counts for the OGRE_PROFILE hot-function report. The
++// cooperative scheduler runs one game thread at a time, so this open-addressed
++// table is touched from a single game thread at any instant; probes from the
++// profiler thread at report time only ever see a torn count, never a fault.
++static constexpr size_t kFuncCountSlots = 8192;
++static uint32_t func_count_key[kFuncCountSlots];
++static uint64_t func_count_val[kFuncCountSlots];
++
++static inline void bump_func_count(uint32_t func_vram) {
++    size_t idx = (func_vram >> 2) & (kFuncCountSlots - 1);
++    for (size_t p = 0; p < 16; p++) {
++        size_t s = (idx + p) & (kFuncCountSlots - 1);
++        if (func_count_key[s] == func_vram) {
++            func_count_val[s]++;
++            return;
++        }
++        if (func_count_key[s] == 0) {
++            func_count_key[s] = func_vram;
++            func_count_val[s] = 1;
++            return;
++        }
++    }
++}
++
++uint64_t ultramodern::debug_entry_count(int tid) {
++    if (tid < 0 || tid >= (int)entry_counts.size()) {
++        return 0;
++    }
++    return entry_counts[tid].n.load(std::memory_order_relaxed);
++}
++
++uint64_t ultramodern::debug_total_entry_count(void) {
++    uint64_t total = 0;
++    for (auto& c : entry_counts) {
++        total += c.n.load(std::memory_order_relaxed);
++    }
++    return total;
++}
++
 +extern "C" void recomp_trace_entry(uint8_t *rdram, uint32_t func_vram, const char* func_name, uint32_t ra) {
 +    (void)rdram;
++    if (!trace_hooks_enabled()) {
++        return;
++    }
 +    PTR(OSThread) self = ultramodern::this_thread();
 +    if (self == 0) {
 +        return;
@@ -1170,6 +1256,10 @@ index 0000000..632c878
 +        return;
 +    }
 +    last_func_vram[tid].store(func_vram, std::memory_order_relaxed);
++    entry_counts[tid].n.fetch_add(1, std::memory_order_relaxed);
++    if (profile_on.load(std::memory_order_relaxed)) {
++        bump_func_count(func_vram);
++    }
 +
 +    ThreadCallChain& chain = call_chains[tid];
 +    uint32_t depth = chain.depth;
@@ -1199,6 +1289,9 @@ index 0000000..632c878
 +// it is cheap to do so.
 +extern "C" void recomp_trace_return(uint8_t *rdram, size_t func_index) {
 +    (void)func_index;
++    if (!trace_hooks_enabled()) {
++        return;
++    }
 +    PTR(OSThread) self = ultramodern::this_thread();
 +    if (self == 0) {
 +        return;
@@ -1400,6 +1493,7 @@ index 0000000..632c878
 +// a = the thread the event is about, b = the thread that caused it (-1 = none).
 +struct SchedEvent {
 +    uint64_t seq;
++    uint64_t tick;   // trace_millis() at the event: the ring's only wall clock
 +    int16_t kind;
 +    int16_t a;
 +    int16_t b;
@@ -1424,6 +1518,7 @@ index 0000000..632c878
 +    uint64_t i = sched_ring_next.fetch_add(1, std::memory_order_relaxed);
 +    SchedEvent& ev = sched_ring[i % kSchedRingSize];
 +    ev.seq = i;
++    ev.tick = ultramodern::trace_millis();
 +    ev.kind = (int16_t)kind;
 +    ev.a = (int16_t)a;
 +    ev.b = (int16_t)b;
@@ -1458,9 +1553,15 @@ index 0000000..632c878
 +           (unsigned long long)next, (unsigned long long)n,
 +           only_a >= 0 ? ", filtered" : "");
 +    for (uint64_t k = 0; k < n; k++) {
-+        uint64_t i = (next - n + k) % kSchedRingSize;
++        // Compare the stored sequence number against the global sequence this
++        // slot should hold, not against the slot index: seq is a monotonically
++        // increasing counter, so once it passes kSchedRingSize it never equals
++        // its own slot index and every event in a wrapped ring was dropped
++        // (only the first 16384 events of a long run were ever printed).
++        uint64_t seq = next - n + k;
++        uint64_t i = seq % kSchedRingSize;
 +        const SchedEvent& ev = sched_ring[i];
-+        if (ev.seq != i) {
++        if (ev.seq != seq) {
 +            continue;   // slot not written yet (torn read of the ring index)
 +        }
 +        if (only_a >= 0 && ev.a != only_a && ev.b != only_a) {
@@ -1475,8 +1576,8 @@ index 0000000..632c878
 +        if (off == 0) {
 +            snprintf(rqbuf, sizeof(rqbuf), "-");
 +        }
-+        printf("[sched-ring] %6llu %-7s t%d by t%d  rq=[%s]\n",
-+               (unsigned long long)ev.seq, name, ev.a, ev.b, rqbuf);
++        printf("[sched-ring] %6llu t=%-6llu %-7s t%d by t%d  rq=[%s]\n",
++               (unsigned long long)ev.seq, (unsigned long long)ev.tick, name, ev.a, ev.b, rqbuf);
 +    }
 +}
 +
@@ -1581,8 +1682,181 @@ index 0000000..632c878
 +        printf("\n");
 +    }
 +}
++
++// ---------------------------------------------------------------------------
++// Sampling profiler (OGRE_PROFILE=1).
++//
++// The scheduler ring and the VI snapshot can say that the game threads are
++// running and that no display list is being submitted, but not *what* the game
++// is executing during that time. This samples every game thread's last-entered
++// recompiled function (updated at every function entry by recomp_trace_entry)
++// on a timer and accumulates a (tid, function) histogram, dumped at exit and
++// resolved to function names with `nm` off the binary.
++//
++// Sampling (rather than instrumenting every entry with a clock) keeps the
++// measurement faithful: a recompiled function is entered millions of times per
++// second, so a clock read per entry would itself dominate the run.
++namespace {
++struct ProfileEntry {
++    uint32_t tid;
++    uint32_t func;
++    uint64_t count;
++};
++constexpr size_t kProfileSlots = 2048;
++ProfileEntry profile_table[kProfileSlots];
++size_t profile_used = 0;
++std::mutex profile_mutex;
++std::thread profile_thread;
++uint64_t profile_last_entry_counts[256] = {};
++}  // namespace
++
++void ultramodern::debug_profile_start(void) {
++    if (profile_on.exchange(true)) {
++        return;
++    }
++    profile_thread = std::thread([] {
++        const int tids[] = {1, 3, 4, 5, 16, 17, 18, 19, 50, 200};
++        auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(1);
++        while (!exited) {
++            for (int tid : tids) {
++                uint32_t f = last_func_vram[tid].load(std::memory_order_relaxed);
++                if (f == 0) {
++                    continue;
++                }
++                std::lock_guard<std::mutex> lock{profile_mutex};
++                size_t i = 0;
++                for (; i < profile_used; i++) {
++                    if (profile_table[i].tid == (uint32_t)tid && profile_table[i].func == f) {
++                        profile_table[i].count++;
++                        break;
++                    }
++                }
++                if (i == profile_used && profile_used < kProfileSlots) {
++                    profile_table[profile_used++] = {(uint32_t)tid, f, 1};
++                }
++            }
++            // Per-second timeline: the dominant function of every thread in the
++            // last second, in the same trace_millis clock as the display-list
++            // submissions. This is what distinguishes "the game is computing"
++            // from "the game is waiting on a queue" during a slow frame.
++            if (std::chrono::steady_clock::now() >= next_report) {
++                next_report += std::chrono::seconds(1);
++                std::lock_guard<std::mutex> lock{profile_mutex};
++                printf("[prof] T=%-6llu", (unsigned long long)ultramodern::trace_millis());
++                for (int tid : tids) {
++                    uint32_t best_func = 0;
++                    uint64_t best_count = 0, tid_total = 0;
++                    for (size_t i = 0; i < profile_used; i++) {
++                        if (profile_table[i].tid != (uint32_t)tid) {
++                            continue;
++                        }
++                        tid_total += profile_table[i].count;
++                        if (profile_table[i].count > best_count) {
++                            best_count = profile_table[i].count;
++                            best_func = profile_table[i].func;
++                        }
++                    }
++                    if (tid_total > 0) {
++                        printf(" t%d:%08X(%llu%%)", tid, best_func,
++                               (unsigned long long)(100 * best_count / tid_total));
++                    }
++                }
++                printf("\n");
++                fflush(stdout);
++                // Entry-count deltas: which threads actually executed game code
++                // in the last second (a blocked thread's count is frozen even
++                // though last_func_vram still names its last call site).
++                printf("[prof]   entries/s:");
++                for (int tid : tids) {
++                    uint64_t n = ultramodern::debug_entry_count(tid);
++                    printf(" t%d:%llu", tid, (unsigned long long)(n - profile_last_entry_counts[tid]));
++                    profile_last_entry_counts[tid] = n;
++                }
++                printf("\n");
++                // Hot-loop bounds: the work these functions do is proportional
++                // to game-side counts, and a garbage count turns a scan into a
++                // multi-hundred-ms stall. Print the ones the profiled threads
++                // sit in so a stall is explained by its bound, not by a guess.
++                if (uint8_t* rdram = ultramodern::get_rdram_base()) {
++                    auto rw = [&](uint32_t addr) -> uint32_t {
++                        return *(uint32_t*)(rdram + ((int64_t)(int32_t)addr - (int64_t)0xFFFFFFFF80000000ll));
++                    };
++                    auto rb = [&](uint32_t addr) -> uint32_t {
++                        return *(uint8_t*)(rdram + ((((int64_t)(int32_t)addr) ^ 3) - (int64_t)0xFFFFFFFF80000000ll));
++                    };
++                    printf("[prof]   bounds: D_800B1804=%u D_800B1860=0x%08X D_800B1864=0x%08X D_800B1878=%u\n",
++                           rw(0x800B1804u), rw(0x800B1860u), rw(0x800B1864u), rw(0x800B1878u));
++                    printf("[prof]   frame: retrace(D_800C4BCC)=%u last(D_800AEFA4)=%u acc(D_800A81FE)=%u/%u "
++                           "req(D_800E810C)=%u pend(D_800E7A0C)=%u ready(D_800C4CE4)=%u\n",
++                           rw(0x800C4BCCu), rw(0x800AEFA4u), rb(0x800A81FEu), rb(0x800A81FFu),
++                           rb(0x800E810Cu), rw(0x800E7A0Cu) & 0xFF, rb(0x800C4CE4u));
++                    if (getenv("OGRE_PROFILE_CHAINS") != nullptr) {
++                        for (int tid : {3, 4, 5, 17}) {
++                            ultramodern::debug_dump_call_chain(tid, "prof");
++                        }
++                    }
++                    fflush(stdout);
++                }
++                profile_used = 0;
++                // Hot functions by entry count in the last second. This says
++                // which recompiled function the game actually spent its time
++                // in, independent of whether it was runnable or blocked.
++                for (int n = 0; n < 8; n++) {
++                    size_t best = 0;
++                    bool found = false;
++                    for (size_t i = 0; i < kFuncCountSlots; i++) {
++                        if (func_count_val[i] > (found ? func_count_val[best] : 0)) {
++                            best = i;
++                            found = true;
++                        }
++                    }
++                    if (!found || func_count_val[best] == 0) {
++                        break;
++                    }
++                    if (n == 0) {
++                        printf("[prof]   hot:");
++                    }
++                    printf(" %08X x%llu", func_count_key[best], (unsigned long long)func_count_val[best]);
++                    func_count_val[best] = 0;
++                }
++                printf("\n");
++                fflush(stdout);
++            }
++            std::this_thread::sleep_for(std::chrono::microseconds(250));
++        }
++    });
++    profile_thread.detach();
++}
++
++void ultramodern::debug_profile_dump(void) {
++    if (!profile_on.load()) {
++        return;
++    }
++    std::lock_guard<std::mutex> lock{profile_mutex};
++    uint64_t total = 0;
++    for (size_t i = 0; i < profile_used; i++) {
++        total += profile_table[i].count;
++    }
++    // Selection sort of the top entries (small table, dump once).
++    constexpr size_t kTop = 30;
++    printf("[profile] %zu (tid,function) pairs, %llu samples:\n",
++           profile_used, (unsigned long long)total);
++    for (size_t n = 0; n < kTop && n < profile_used; n++) {
++        size_t best = n;
++        for (size_t i = n + 1; i < profile_used; i++) {
++            if (profile_table[i].count > profile_table[best].count) {
++                best = i;
++            }
++        }
++        std::swap(profile_table[n], profile_table[best]);
++        const ProfileEntry& e = profile_table[n];
++        printf("[profile] %6.2f%%  t%-3u 0x%08X  %llu samples\n",
++               100.0 * (double)e.count / (double)(total ? total : 1),
++               e.tid, e.func, (unsigned long long)e.count);
++    }
++}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..205e7db 100644
+index 9944a02..57c156c 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -2130,7 +2404,7 @@ index 9944a02..205e7db 100644
      }
      
      if (jam) {
-@@ -118,13 +601,36 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,13 +601,52 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -2160,6 +2434,22 @@ index 9944a02..205e7db 100644
 +        printf("[dbg] T=%llu PRENMI 0x29D delivered to queue 0x%08X (count=%d/%d)\n",
 +               (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq_, MQ_GET_COUNT(mq), mq->msgCount);
 +    }
++    // Diagnostic (frame pacing), opt-in via OGRE_VI_COUNT=1: count the game's
++    // VI-retrace messages (0x29A). The game renders every second delivered
++    // retrace, so this rate divided by two is the ceiling on the frame rate.
++    // Off by default: one line per second in every run would drown the log.
++    if ((uint32_t)msg == 0x29A) {
++        static const bool vi_count_trace = [] {
++            const char* v = getenv("OGRE_VI_COUNT");
++            return v != nullptr && v[0] != '0';
++        }();
++        static std::atomic<uint64_t> retrace_delivered{0};
++        uint64_t c = retrace_delivered.fetch_add(1, std::memory_order_relaxed) + 1;
++        if (vi_count_trace && (c % 60) == 0) {
++            printf("[vi-count] %llu retraces delivered to the game at T=%llu\n",
++                   (unsigned long long)c, (unsigned long long)ultramodern::trace_millis());
++        }
++    }
  
      // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
 -    PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
@@ -2172,7 +2462,7 @@ index 9944a02..205e7db 100644
      return true;
  }
  
-@@ -137,11 +643,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +659,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -2207,7 +2497,7 @@ index 9944a02..205e7db 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +680,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +696,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.

@@ -213,6 +213,8 @@ void pump_sdl_events(Platform& platform, bool* quit) {
             }
             ultramodern::debug_dump_sched_ring(only);
         }
+        // OGRE_PROFILE=1: the sampling profiler's (thread, function) histogram.
+        ultramodern::debug_profile_dump();
         // OGRE_DUMP_RDRAM=<path>: write the whole RDRAM image so the state at
         // the stall can be analysed offline (and diffed against a run on the
         // other platform) instead of guessed from a handful of snapshot words.

@@ -9,6 +9,7 @@
 // RecompFrontend UI / texture-pack / mod wiring).
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include "ultramodern/ultramodern.hpp"
 
 #include "renderer.hpp"
+#include "gbi.hpp"
 
 namespace ogre {
 
@@ -314,9 +316,25 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
 
         ++dl_count_;
-        if (dl_count_ <= 8 || (dl_count_ % 50) == 0) {
-            fprintf(stderr, "[renderer] display list %u (type=%u ucode=0x%08X data=0x%08X)\n",
-                    dl_count_, task->t.type, task->t.ucode, task->t.data_ptr);
+        const auto dl_begin = std::chrono::high_resolution_clock::now();
+        // Wall time between submissions plus the recompiled-function entries the
+        // game spent on the frame: a frame that takes 2 s because it executes
+        // 50x the work is a different bug from one that simply slept.
+        static uint64_t last_entries = 0;
+        {
+            uint64_t entries = ultramodern::debug_total_entry_count();
+            const uint64_t delta = entries - last_entries;
+            last_entries = entries;
+            // OGRE_DL_TRACE=1 prints every submission with its time; the default
+            // samples the first few and every tenth.
+            if (getenv("OGRE_DL_TRACE") != nullptr || dl_count_ <= 8 || (dl_count_ % 10) == 0) {
+                // trace_millis, not time_since_start: the profiler and scheduler
+                // ring report on the same clock, so stalls can be lined up with
+                // the work the game was doing.
+                fprintf(stderr, "[renderer] display list %u at t=%llums entries=%llu (type=%u ucode=0x%08X data=0x%08X)\n",
+                        dl_count_, (unsigned long long)ultramodern::trace_millis(),
+                        (unsigned long long)delta, task->t.type, task->t.ucode, task->t.data_ptr);
+            }
         }
 
         // GBI selection note (2026-08-29): OB64's gfx ucode is "RSP Gfx ucode
@@ -327,6 +345,32 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // Do NOT force the plain F3DEX GBI here — it does not map those opcodes
         // and misparses the DLs.
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFF, 0, true);
+        // OGRE_DL_ANALYZE=1: walk the submitted display list with the app's own
+        // F3DEX2 analyzer and report its geometry. "The cube is missing" is
+        // either "the DL has no triangles" (game-side) or the triangles are
+        // there and the renderer drops them.
+        if (getenv("OGRE_DL_ANALYZE") != nullptr) {
+            ogre::gbi::WorkloadStats stats;
+            ogre::gbi::analyze_dl(app_->core.RDRAM, task->t.data_ptr & 0x1FFFFFFF,
+                                  (uint32_t)task->t.data_size, stats);
+            fprintf(stderr,
+                    "[dl-analyze] dl=%u ptr=0x%08X cmds=%llu dls=%llu tri1=%llu tri2=%llu quad=%llu "
+                    "texrect=%llu fill=%llu vtx=%llu verts=%llu settimg=%llu unknown=%llu\n",
+                    dl_count_, (uint32_t)task->t.data_ptr, (unsigned long long)stats.commands,
+                    (unsigned long long)stats.dls_walked, (unsigned long long)stats.tri1,
+                    (unsigned long long)stats.tri2, (unsigned long long)stats.quad,
+                    (unsigned long long)stats.texrect, (unsigned long long)stats.fillrect,
+                    (unsigned long long)stats.vtx_calls, (unsigned long long)stats.vertices,
+                    (unsigned long long)stats.settimg, (unsigned long long)stats.unknown_cmds);
+            fflush(stderr);
+        }
+        const auto dl_end = std::chrono::high_resolution_clock::now();
+        const auto dl_ms = std::chrono::duration_cast<std::chrono::microseconds>(dl_end - dl_begin).count();
+        if (dl_count_ <= 8 || (dl_count_ % 10) == 0 || dl_ms > 100000) {
+            fprintf(stderr, "[renderer]   processDisplayLists %lld us (dl %u)\n",
+                    (long long)dl_ms, dl_count_);
+            fflush(stderr);
+        }
     }
 
     void send_dummy_workload(uint32_t fb_address) override {

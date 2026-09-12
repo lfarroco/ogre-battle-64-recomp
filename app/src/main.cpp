@@ -51,6 +51,12 @@ int main(int argc, char** argv) {
     // sdl_platform.hpp); both are off unless set.
     ogre::configure_automation(ogre::g_platform);
 
+    // OGRE_PROFILE=1: sample every game thread's current recompiled function so
+    // a "busy but not rendering" stall can be attributed to real work.
+    if (getenv("OGRE_PROFILE") != nullptr) {
+        ultramodern::debug_profile_start();
+    }
+
     fprintf(stderr, "[boot] create_window...\n");
     auto window_handle = ogre::create_window(ogre::g_platform, "Ogre Battle 64: Person of Lordly Caliber");
     if (ogre::g_platform.window == nullptr) {

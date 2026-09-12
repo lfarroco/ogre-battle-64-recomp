@@ -247,7 +247,7 @@ index 669c4a1..23248a4 100644
                      }
  
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..4234db9 100644
+index c228433..ae14510 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
 @@ -1,5 +1,6 @@
@@ -306,7 +306,7 @@ index c228433..4234db9 100644
  
              fmt::print(stderr, "[Warn] Function {} is branching outside of the function (to 0x{:08X})\n", func.name, branch_target);
          }
-@@ -410,6 +432,98 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -410,6 +432,149 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
  
      bool handled = true;
  
@@ -359,10 +359,25 @@ index c228433..4234db9 100644
 +            }
 +        };
 +
-+        // Pass 1: any GPR written by a non-constant op anywhere in the body
-+        // makes it non-loop-invariant (a load base can't depend on it).
++        // The loop body is [head, branch] *including the branch's delay slot*.
++        // The delay slot executes on every iteration, so a register written
++        // there is not loop-invariant. Excluding it made an ordinary array scan
++        // look like a spin on a fixed address: `func_80081B08` walks a 36-entry
++        // object array and bumps its pointer in the delay slot
++        // (`bne ..., head` / `addiu $v1, $v1, 0x13C`), and with the delay slot
++        // ignored `$v1` looked constant, so every iteration of the scan yielded
++        // to the scheduler - tens of yields per frame, seconds per call.
++        size_t body_end = instr_index + 2;
++        if (body_end > instructions.size()) {
++            body_end = instructions.size();
++        }
++
++        // Pass 1: classify every write in the body.
++        //   nonconst_written  - written by something other than `lui` or a load
++        //   load_written      - written by a load's destination
 +        std::array<bool, 32> nonconst_written{};
-+        for (size_t i = head_idx; i < instr_index; i++) {
++        std::array<bool, 32> load_written{};
++        for (size_t i = head_idx; i < body_end; i++) {
 +            const auto& li = instructions[i];
 +            InstrId id = li.getUniqueId();
 +            if (id == InstrId::cpu_jal || id == InstrId::cpu_jalr) {
@@ -371,29 +386,65 @@ index c228433..4234db9 100644
 +            if (is_store_id(id)) {
 +                return false;
 +            }
-+            if (id != InstrId::cpu_lui) {
-+                int rd = (int)li.GetO32_rd();
-+                if (rd > 0 && rd < 32) {
-+                    nonconst_written[rd] = true;
++            bool is_load = is_load_id(id);
++            auto note_write = [&](int reg) {
++                if (reg <= 0 || reg >= 32) {
++                    return;
 +                }
-+                int rt = (int)li.GetO32_rt();
-+                if (rt > 0 && rt < 32 && !is_load_id(id)) {
-+                    // Loads write the destination with the loaded value; only
-+                    // non-load instructions count as meaningful writes.
-+                    nonconst_written[rt] = true;
++                if (is_load) {
++                    load_written[reg] = true;
 +                }
-+            }
++                else if (id != InstrId::cpu_lui) {
++                    nonconst_written[reg] = true;
++                }
++            };
++            note_write((int)li.GetO32_rd());
++            note_write((int)li.GetO32_rt());
 +        }
 +
++        // A load is a poll load if its base address is the same on every
++        // iteration. `lui`-set bases qualify; a base carried between iterations
++        // by a load (a pointer chase) does not. Checking only "some register is
++        // never written non-constantly" was not enough: `lw $a0, 0x10($a0);
++        // bne $a0, $zero, head` writes $a0 only with loads, so it looked
++        // invariant and the game's malloc free-list walk (func_80071A3C) - and
++        // the whole allocator family - yielded once per list node.
++        auto poll_base = [&](size_t load_idx, int base) -> bool {
++            if (base <= 0 || base >= 32 || nonconst_written[base]) {
++                return false;
++            }
++            // Nearest write to the base before the load, within this iteration.
++            for (size_t j = load_idx; j-- > head_idx; ) {
++                const auto& lj = instructions[j];
++                InstrId jid = lj.getUniqueId();
++                bool writes = false;
++                if (jid != InstrId::cpu_lui) {
++                    int rd = (int)lj.GetO32_rd();
++                    writes = (rd == base);
++                }
++                int rt = (int)lj.GetO32_rt();
++                writes = writes || (rt == base);
++                if (writes) {
++                    // The address used by this load is whatever that write
++                    // produced: constant only if it was a `lui`.
++                    return jid == InstrId::cpu_lui;
++                }
++            }
++            // No write earlier in the iteration: the base was set before the
++            // loop or by the previous iteration. It is invariant only if the
++            // body never re-derives it from a load.
++            return !load_written[base];
++        };
++
 +        // Pass 2: the loop is a poll if any memory read uses a loop-invariant
-+        // base register (never written by a non-constant op in the body).
++        // base register.
 +        bool has_poll_load = false;
-+        for (size_t i = head_idx; i < instr_index; i++) {
++        for (size_t i = head_idx; i < body_end; i++) {
 +            const auto& li = instructions[i];
 +            InstrId id = li.getUniqueId();
 +            if (is_load_id(id)) {
 +                int base = (int)li.GetO32_rs();
-+                if (base > 0 && base < 32 && !nonconst_written[base]) {
++                if (poll_base(i, base)) {
 +                    has_poll_load = true;
 +                    break;
 +                }
@@ -405,7 +456,7 @@ index c228433..4234db9 100644
      switch (instr_id) {
      case InstrId::cpu_nop:
          fmt::print(output_file, "\n");
-@@ -424,8 +538,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -424,8 +589,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_read(rt);
                  break;
              default:
@@ -417,7 +468,7 @@ index c228433..4234db9 100644
              }
              break;
          }
-@@ -438,11 +553,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -438,11 +604,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_write(rt);
                  break;
              default:
@@ -450,7 +501,7 @@ index c228433..4234db9 100644
      // Arithmetic
      case InstrId::cpu_add:
      case InstrId::cpu_addu:
-@@ -518,6 +652,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -518,6 +703,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  print_indent();
                  generator.emit_return(context, func_index);
              }
@@ -469,7 +520,7 @@ index c228433..4234db9 100644
              else {
                  fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
                  return false;
-@@ -720,6 +866,10 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -720,6 +917,10 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
              }
          }
          else {
@@ -480,7 +531,7 @@ index c228433..4234db9 100644
              if (!print_branch((uint32_t)instr.getBranchVramGeneric())) {
                  return false;
              }
-@@ -765,7 +915,7 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+@@ -765,7 +966,7 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
      //fmt::print("Recompiling {}\n", func.name);
      std::vector<rabbitizer::InstructionCpu> instructions;
  
