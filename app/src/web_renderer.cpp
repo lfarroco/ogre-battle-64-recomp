@@ -76,10 +76,13 @@ char g_stats_snapshot[4096];
 //   bits 3-4 = bypass the combiner and output TEXEL1 (bit 3 set) or TEXEL0
 //           (bit 4 set) raw, so the sampled texture can be compared with
 //           ogre_gfx_debug_last_tex's decoded image;
-//   bit 2 = ignore full-screen rectangles (>= 300x220). OB64's intro draws a
+//   bit 2 = ignore full-screen *texrects* (>= 300x220). OB64's intro draws a
 //           full-screen PRIM-alpha rect *after* its sprites and animates the
 //           alpha from opaque to transparent, i.e. a fade-in from black;
-//           skipping it shows the frame at full brightness immediately.
+//           skipping it shows the frame at full brightness immediately. The
+//           fill rect (the clear) is deliberately NOT skipped - dropping both
+//           just makes frames accumulate again, which is the bug this
+//           diagnostic was used to find.
 std::atomic<uint32_t> g_debug_flags{0};
 
 std::atomic<uint64_t> g_exec_cmd{0};      // command index within the current DL
@@ -2847,10 +2850,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            st.scissor_enabled ? 1 : 0,
                            st.scissor_x0, st.scissor_y0, st.scissor_x1, st.scissor_y1);
         }
-        if ((g_debug_flags.load(std::memory_order_relaxed) & 4u) != 0 &&
-            (xh - xl) >= 299 && (yh - yl) >= 219) {
-            return;   // debug: keep the previous frame instead of clearing it
-        }
         // G_FILLRECT in fill mode outputs the fill color directly (the
         // combiner is bypassed). Approximate by driving the combiner with the
         // fill color as PRIMITIVE: rgb = (PRIM - 0) * 1 + 0.
@@ -2947,7 +2946,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if ((g_debug_flags.load(std::memory_order_relaxed) & 4u) != 0 &&
             (xh - xl) >= 299 && (yh - yl) >= 219) {
             st.active_tile = saved_tile;
-            return;   // debug: show the frame without the intro's fade-in rect
+            return;   // debug: show the frame without the intro's fade-in
         }
         // Decode the two tile images first: texture_available() reads the
         // result, and a rect that samples a tile loaded straight into it (the

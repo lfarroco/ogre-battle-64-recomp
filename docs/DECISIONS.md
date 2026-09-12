@@ -42,6 +42,14 @@ changing scene were stacked on top of each other.
 corners in w1), which is why it kept "working" until this fix and then drew
 nothing; it now emits the SDK layout.
 
+### Note: the reference screenshot is a zoomed capture
+
+The reference frame from a real session that this work was checked against is
+**zoomed**, so it is only valid for zoom-invariant comparisons: layout, palette,
+and whether a sprite is recognisable. Its pixel counts and absolute scale say
+nothing about our render. The scene's layout does match it (two mirrored groups
+per side, three characters above and three below in a diagonal).
+
 ### Finding: the intro fades in from black, so the first frame is not a fidelity measure
 
 The full-screen rectangle drawn *after* the sprites each frame is a fade whose

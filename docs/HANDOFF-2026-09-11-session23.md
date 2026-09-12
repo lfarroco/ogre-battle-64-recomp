@@ -207,9 +207,11 @@ Measured over 48 display lists, everything about the sprites is constant:
 | tile images | **32x34** (TEXEL0 mask, I4) and **20x34** (TEXEL1 colour, RGBA16) |
 | frame order | `F` + 24 triangles + `T` |
 
-So the earlier reading that "the ring zooms in over ~40 display lists" was wrong:
-the bounding box grows because the *fade* reveals more of a static picture, not
-because the geometry animates.
+So the earlier reading that "the ring zooms in over ~40 display lists" was
+wrong about the cause: the bounding box grows because the *fade* reveals more of
+a picture whose sprites keep their size. (Sprites this size in a 135x85 px
+region do overlap heavily at the start, which is part of why the first frames
+read as a tangle rather than as characters.)
 
 ## How the sprite path was actually verified
 
@@ -243,9 +245,13 @@ Two new probes exist for this and both are in the repo:
 |---|---|
 | 1 | ignore alpha blending (writes the combiner colour opaquely) |
 | 2 | draw only the first sprite of the list |
-| 4 | skip full-screen rectangles — shows the frame without the intro's fade |
+| 4 | skip full-screen **texrects** - shows the frame without the intro's fade |
 | 8 | bypass the combiner and output TEXEL1 raw |
 | 16 | bypass the combiner and output TEXEL0 raw |
+
+Bit 4 deliberately does *not* skip the full-screen fill rect: dropping the
+clear as well as the fade just makes frames accumulate again, which is the bug
+this whole session was about.
 
 `ogre_gfx_debug_last_tex(unit, …)` returns the TEXEL0/TEXEL1 images of the most
 recent textured draw; `ogre_gfx_debug_tex(i, …)` walks the last 24 decodes (a
@@ -297,8 +303,12 @@ a white shade.
 - `logmode.cjs`: PASS.
 - The scene's **layout** matches the reference screenshot from a real session
   (two mirrored groups per side: three characters in an upper cluster, three
-  below in a diagonal) - see `debug/out/s23-nofade-canvas.png` beside
-  `docs/`'s reference.
+  below in a diagonal). The reference is a **zoomed** capture, so only
+  zoom-invariant comparisons are valid - layout, palette, and "is the sprite
+  recognisable"; its pixel counts and absolute scale mean nothing. Our sprites
+  and the reference's are within a pixel of the same size anyway
+  (~23x39 px vs ~35 px wide in a frame 1.5x wider), which is why the stacked
+  comparison lines up.
 
 ## Still open
 
@@ -308,9 +318,17 @@ a white shade.
    `colour x mask` composite of *the same pair* (`ogre_gfx_debug_last_tex`) is a
    bright character. The mask is not the suspect: its alpha histogram is 22% at
    255 and `--flags 18` (raw TEXEL0) renders a clean white silhouette. So the
-   next step is the colour side: run `--flags 9` (raw TEXEL1, blending off) on a
-   boot whose pair is known bright and compare it with
-   `ogre_gfx_debug_last_tex(1)`. Ruled out already: the shader's TEXEL0/TEXEL1
+   next step is the colour side, and there is now a concrete lead: with
+   `--flags 18` (raw **TEXEL0**, blending off) the sprite renders a clean white
+   silhouette - so the mask's binding and sampling are right - while
+   `--flags 9` (raw **TEXEL1**, blending off) renders *nothing at all*, i.e.
+   `texture(u_tex1, v_uv1)` comes back **black** even though
+   `ogre_gfx_debug_last_tex(1)` for the same draw holds a bright character.
+   That points at unit 1's binding rather than at the sampler: log
+   `cmd.tex_key1`, whether `gl_textures_` contains it, the GL texture id, and
+   whether `glGetError()` is set after the upload, for the first textured draw.
+   (A GL texture that was generated but never received `glTexImage2D`, or one
+   uploaded with a zero extent, samples black.) Ruled out already: the shader's TEXEL0/TEXEL1
    mapping matches RT64 `ColorCombiner::fromColorInput` field for field, the
    combiner words agree with the ROM, and **every uniform location is valid**
    (`[RENDERER] uniform locations: u_tex0=38 u_tex1=39 u_uv_scale=1
