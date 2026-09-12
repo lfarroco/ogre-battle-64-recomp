@@ -319,21 +319,42 @@ hardware. RT64 remains the primary native renderer throughout. See
     loops (`func_80089A10`, `func_80075BC0`, ...). Result: **171 display lists in
     6.2s, median inter-frame gap 34ms (~30fps), no stall over 500ms** (was 8
     display lists in 8s). See `docs/HANDOFF-2026-09-12-session29.md`.
-  - ⬜ **The title's object table is never populated, so the cube never falls
-    (session 29, the new wall)**: at ~6.2s (display list 171, the same point with
-    and without the session-29 fix) the game SIGSEGVs in `func_801A1170`
-    (`lbu $v0, 0x3($v1)`, `$v1 = *(entry) = NULL`) while drawing object-table
-    entry 11 (`D_801B81D0 + 0x770`). Entries 10-12 are populated only by
-    `func_801A103C`, which is called only from `func_8017B9C8` - the *draw*
-    callback of scene-state descriptors `0x8018FD70`/`D84`/`D98`/`DAC`
-    (states 5-7) - while the game boots into state 9 (`D_800E8214 = 9`, set at
-    `0x800721F0`) whose descriptor `0x8018FB70` draws `func_801A1FCC` directly.
-    So in state 9 the table is malloc'd and zeroed (start `func_80177DA0` ->
-    `func_801A1A2C`), animated (`func_801A1B74`/`func_801A1328`) and drawn, but
-    never filled: the soldiers and smoke come from the parallel
-    `func_801A0E44`/`func_8019FC68` path, and the cube (the table entries) is
-    missing. The next step is the state machine (`D_800E8214`/`D_800C4BBC`),
-    not the renderer. See `docs/HANDOFF-2026-09-12-session29.md`.
+  - ✅ **The title's object table is populated (session 30)**: the "cube never
+    falls" diagnosis was a recompilation bug, not a missing overlay. State 9's
+    init calls `jal 0x801A1034`, and splat had emitted the *prologue* of
+    `func_801A103C` as its own symbol, so N64Recomp compiled a 2-instruction
+    stub that returned immediately and the 13 texture records at `base+0x6C0`
+    (11 soldier objects + record 10, the object the script walks downward = the
+    fall) were never created. `config.toml` now overrides
+    `func_801A1034 = 0x13C`; with it all 13 records exist with real object
+    pointers, `flag=255` on 0-10, and record 10 animating (`x=124 y=-144`).
+    `OGRE_SCENE_TRACE=1` shows this live. See
+    `docs/HANDOFF-2026-09-12-session30.md`.
+  - ⬜ **19 more splat split symbols in overlay C (session 30)**: the same class
+    of bug (a symbol cut out of the middle of a logical function makes the
+    compiled function return without unwinding its frame, clobbering the
+    caller's `$sp`/s-registers). All are now covered by `function_sizes`
+    overrides, whose sizes were derived by fixpoint over "fall-through absorbs
+    the next symbol" and "branch/delay-slot/forward-target extension".
+  - ⬜ **N64Recomp cuts a function that falls through into a discovered shared
+    epilogue (session 30, the new wall)**: `func_801A1FCC` (state 9 draw) still
+    SIGSEGVs, now later and for a different reason - its `$s3` becomes `0x310`.
+    Chain: `func_801A1170` → `func_80198ECC` → `func_801989AC` (whose `$s3`
+    restore reads the wrong slot because `$sp` moved by 0x10) →
+    `func_80197C94`, whose shared epilogue `.L801985D8` is a *discovered*
+    function (8 jump sites), so extending the symbol cannot pull it in; the
+    taken path `.L801981F0 → .L801984BC` falls through into
+    `static_16_801985D8` and N64Recomp emits `static_16_801984BC` with no
+    `return`, dropping the epilogue and leaking 0x10 of stack per call.
+    Fix belongs in `tools/N64Recomp/src/recompilation.cpp`: when a function body
+    ends without a control transfer and the next address is a known function,
+    emit a tail call + `return` (mirror of the existing `print_branch`
+    tail-call handling). See `docs/HANDOFF-2026-09-12-session30.md` §3.
+  - ⬜ **The native port needs `OGRE_NO_AUDIO=1` on hosts where
+    `SDL_OpenAudioDevice` blocks (session 30, environment)**: the runtime calls
+    it from the game start thread's `preinit`, so a blocking open wedges the
+    whole boot (RDRAM stays all zero, no display lists). Gate added in
+    `app/src/sdl_platform.cpp`.
   - ✅ **The native window renders (session 27)**: the session-26 "window is
     black" conclusion was a measurement artifact. The display is locked, so
     `screencapture -x` returns wallpaper and `screencapture -l<id>` returns the

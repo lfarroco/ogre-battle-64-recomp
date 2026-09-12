@@ -1,5 +1,15 @@
 # Handoff — 2026-09-12 — session 29: the title runs at 30fps (a recompiler bug), and the cube's wall
 
+> **Superseded in part by session 30** (`docs/HANDOFF-2026-09-12-session30.md`).
+> The frame-rate work below stands. The "cube's wall" section does not: the
+> records at `base+0x6C0` are created by `func_801A103C`, which state 9's init
+> *does* reach — it was being compiled as a 2-instruction stub because splat had
+> split off its prologue (`func_801A1034`). With that override, and 19 more for
+> the same class of split, the records exist. Session 29's "needs streamed
+> overlay banking" lead was a dead end: bank1's bytes at the state-9 entry
+> points are mid-function, so overlay C is the correct resident overlay. See
+> session 30 for the wall that remains.
+
 ## Outcome
 
 Session 28 made the game render its own title scene, but at 2-8fps with
@@ -142,6 +152,44 @@ filled. The twelve soldiers and the smoke render from the parallel
 array), while the cube — the table entries — has no object to draw. That is the
 "cube should fall into the middle of the soldiers" gap.
 
+### Session-29 follow-up on the cube (what the deeper dig found)
+
+The state sequence was measured, not assumed. Instrumenting the dispatcher
+(`func_80075BC0`, on state change) shows `9 -> 10` (state 9's update
+`func_80177DCC` pushes `0x800A` once `func_801A1B74` returns 1, which happens
+when its phase `D_801BA70C` reaches 4). A 6-minute run never leaves state 10;
+states 5-7 are not reached on the normal path in that time. Forcing the boot
+state to 5 or 24 (`D_800E8214`) SIGSEGVs during the first second, because those
+states are **paging loaders**: `func_8017B60C`/`func_8017B6D0`/`func_8017B794`
+DMA ROM `0x79750`/`0x87220`/`0x712A0` chunks into `0x8019A7C0` (overlay C) and
+set the phase `D_801977E8` = 1/2/3; `func_8017B9C8` (their draw) then dispatches
+on that phase, and phase 1 is what calls `func_801A103C`.
+
+Two attempts to create the records from state 9 failed, both transparently:
+
+* calling `func_801A103C` early in `func_801A1A2C` (state-9 start) fills all 13
+  records with valid pointers (`0x801BFC60..`) but the first draw then
+  SIGSEGVs inside `func_801A18A4 -> func_800924D0 -> func_800988A0` (matrix
+  math), i.e. the records' models are not usable yet;
+* calling it at the **end** of `func_801A1A2C` (after `func_80073164` /
+  `func_8019F5C8` set up the DL buffer) does **not** crash but hangs the game
+  after the boot list (1 display list).
+
+That is consistent with the records' models coming from resource `0x322952`,
+which is loaded by the states 5-7 paging path (their start callbacks' ROM DMAs),
+not by state 9. State 9's own start (`func_8019EA64`) loads a different set:
+a script block at `base+0x818` plus four effect models at `base+0x81C/820/824/828`
+from ROM `0x1BA6094` (indices 0x74, 0xFF) and `0x1C2EC8C` (index 0x2A), used by
+the effect/smoke path (`func_8019E7B0 -> func_8019E220` queries the `0x818`
+block, magic `0x4D583300`, which is intact).
+
+The game's own script (loaded into `base+0x82C`, advanced by `func_801A1328`;
+~990 entries, opcodes 0-12) drives the whole intro: op11 sets the 12 soldier
+animation records, op1/2/3 spawn effect objects (smoke puffs: types 17-20, each
+a textured quad drawn by `func_8019E588`), op4/5/6 write the `0x6C0` texture
+records, op8 triggers the soldiers' attack (`entry[0x4C] == 0xC` resets all 12),
+op9/op12 fire sounds.
+
 ### A temporary unblock (not committed)
 
 Guarding the NULL pointer in the generated `func_801A1170`
@@ -152,20 +200,34 @@ experiment only; `RecompiledFuncs/` has been regenerated clean.
 
 ### Leads for session 30
 
-1. **Whose state should it be?** The cube scene being states 5-7 while the
-   soldiers are state 9 is the suspicious part. Find what writes the state
-   halfword (`D_800E8214` / the structure at `*(D_800C4BBC)`) after boot; only
-   one `sh` to `D_800E8214` exists (`0x800721F0`), so a byte store or a second
-   structure must be involved, or the sequence genuinely stays in state 9 and
-   state 9 is supposed to call `func_801A103C` somewhere that the recompiler
-   dropped. `func_8019FC68`'s boundary is already an open suspect (session 8,
-   lead 3); `config.toml` has `function_sizes` overrides for exactly this class
-   of bug.
-2. **`func_801A1328` spawns entries 0-9 and animates the 3D positions**
-   (`sqrt.s`/`func_8009CFE0` at `0x801A1D20`-`0x801A1DC8`) — that is the title's
-   3D object motion and the likely cube rotation/fall code.
-3. **`D_801BA70C`** is the phase variable the title sequences through
-   (1/2/4 seen); it is probably the cleanest "where in the intro are we" read.
+0. **The real blocker is streamed-overlay banking.** The three "states" are
+   stages of the game's streamed-code loader and they page **different code**
+   into the *same* RAM region. Verified against the ROM: the bytes that state 5
+   DMAs to `0x8019A7C0` (ROM `0x79750`) are not the bytes the port has there
+   (`streamedC` = ROM `0x1CE040` -> RAM `0x80197B90`; `streamedC`'s
+   `0x8019A7C0` is `30A200F0 00822023 ...`, bank 1's is
+   `27BDFFB0 3C04800F ...`). The game pages `0x712A0`, `0x79750` and `0x87220`
+   over that region during the intro; `config.yaml` only defines **one** bank
+   (`streamedC`, ROM `0x1CE040`), and the other three fall in the deliberately
+   unconfigured gap `ROM 0x66E30..0x1CE040`. So `func_8017B9C8`'s call to
+   `0x801A103C` executes whichever bank is loaded on hardware, but the port
+   always links/CALLs `streamedC`'s function at that address. Extending the port
+   to bank this region (splat segments + recompiled banks + runtime
+   registration/`get_function` switching) is the actual fix for the cube, and it
+   is Phase 4 work, not a renderer tweak.
+1. **Reach states 5-7 properly once banking exists.** State 5's descriptor start
+   (`func_8017B60C`) DMAs bank 1 and sets phase `D_801977E8 = 1`; the draw
+   `func_8017B9C8` then calls `0x801A103C`, which (in that bank) creates the 13
+   texture records. `func_8017B5DC` selects state 6's descriptor by
+   `D_80193700`; the debug-menu path pushes `0x8006` at `0x80178AE0`.
+2. **The record models are the cube and the N64 logo.** The script animates
+   record 10 (`+0x760`) downward (op5 `a2=10, a6 += 3`), the fall; the crash is
+   entry 11 (`+0x770`), which the bank-0 filler would have given model index 0.
+3. **`func_8019F25C` + `func_801A18A4`** are the draw and matrix build that
+   consume a record's texture, and both already run in state 9 today — only the
+   record *content* is missing.
+
+
 
 ## Diagnostics added (all env-gated, off by default)
 

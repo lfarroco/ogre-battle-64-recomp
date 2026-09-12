@@ -162,6 +162,17 @@ void shutdown_sdl(Platform& platform) {
 void open_audio(Platform& platform, uint32_t frequency) {
     if (platform.audio_device != 0) {
         SDL_CloseAudioDevice(platform.audio_device);
+        platform.audio_device = 0;
+    }
+    // OGRE_NO_AUDIO=1: skip opening an output device entirely. SDL's
+    // SDL_OpenAudioDevice() blocks indefinitely on some hosts (observed on
+    // macOS when no output device is usable), and because the runtime calls it
+    // from the game start thread's preinit(), that stalls the whole boot before
+    // a single recompiled function runs. Audio is not needed for rendering
+    // diagnostics, so allow a run to proceed silently without it.
+    if (getenv("OGRE_NO_AUDIO") != nullptr) {
+        platform.audio_frequency = frequency;
+        return;
     }
     SDL_AudioSpec want{};
     want.freq = static_cast<int>(frequency);

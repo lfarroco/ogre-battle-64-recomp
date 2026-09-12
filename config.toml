@@ -21,12 +21,24 @@ functions_per_output_file = 100
 # func_8019FC68). Extend through the 0x20-byte epilogue.
 function_sizes = [
     { name = "func_8019ABC4", size = 0x368 },
-    # func_8019A1B4 (0x60C) falls through into func_8019A7C0 (0xC4, frameless
-    # shared code) and then func_8019A884 (0x340, shared epilogue): one logical
-    # function split across three symbols. Without this, N64Recomp ends
-    # func_8019A1B4 at the first boundary and every call leaks 0x58 of game
-    # stack (session-16 boot death, second fault).
     { name = "func_8019A1B4", size = 0xA10 },
+    { name = "func_801A1034", size = 0x13C },
+    { name = "func_801989AC", size = 0x520 },
+    { name = "func_8019A7C0", size = 0x404 },
+    { name = "func_8019AF5C", size = 0x118 },
+    { name = "func_8019B300", size = 0x3F8 },
+    { name = "func_8019C188", size = 0x44C },
+    { name = "func_8019D568", size = 0xCB0 },
+    { name = "func_801AB76C", size = 0x22C },
+    { name = "func_801AFAF4", size = 0x5E0 },
+    { name = "func_801B00D0", size = 0x544 },
+    { name = "func_801B7F14", size = 0x154 },
+    { name = "func_80197C94", size = 0x948 },
+    { name = "func_8019C5D4", size = 0x5D8 },
+    { name = "func_801AB568", size = 0x1E0 },
+    { name = "func_801AB740", size = 0x30 },
+    { name = "func_801AFC2C", size = 0x4A8 },
+    { name = "func_801B8068", size = 0x2C },
 ]
 
 # The game's main() is renamed to avoid conflicting with the C entry point.

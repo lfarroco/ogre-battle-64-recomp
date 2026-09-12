@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -26,6 +27,8 @@
 #include "gbi.hpp"
 
 namespace ogre {
+
+extern "C" uint8_t* ultramodern_get_rdram_base();
 
 namespace {
 
@@ -175,6 +178,8 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
 #endif
 
         // Set up the RT64 application core fields.
+        // Keep the RDRAM base for the env-gated scene/record diagnostics below.
+        rdram_ = rdram;
         RT64::Application::Core app_core{};
 #if defined(_WIN32)
         app_core.window = window_handle.window;
@@ -416,6 +421,96 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 fflush(stderr);
             }
         }
+        // OGRE_SCENE_TRACE=1: dump the intro scene state once per second. The
+        // intro ("soldiers, falling cube, N64 logo") is driven by overlay C's
+        // state machines; every value below is plain RDRAM, so no recompiled code
+        // needs to be touched to observe it:
+        //   0x801B81D0  scene object base (13 x 0x10 texture records at base+0x6C0)
+        //   0x801BA70C  9/10 phase counters, plus the 700/701/72C draw flags
+        //   0x801977E8  which streamed bank the loader staged (1/2/3)
+        //   0x80190F30  boot scene bitmask (DMA'd from ROM 0x275D98C)
+        //   0x801B84AC  the state-10 object (0x1114/0x1116 fades, 0x1118 timer)
+        if (getenv("OGRE_SCENE_TRACE") != nullptr) {
+            static uint32_t last_ms = 0;
+            static uint32_t last_base = 0;
+            uint32_t now_ms = (uint32_t)ultramodern::trace_millis();
+            // Dump immediately when the scene object first appears: the intro
+            // currently dies a frame or two after state 9 init, so an
+            // interval-only trace would never show the records.
+            const bool base_appeared = (last_base == 0) && (u32(0x801B81D0) != 0);
+            if (now_ms - last_ms >= 200 || base_appeared) {
+                last_ms = now_ms;
+                last_base = u32(0x801B81D0);
+                if (uint8_t* live = ultramodern_get_rdram_base()) {
+                    rdram_ = live;
+                }
+                // RDRAM is native-endian 32-bit words indexed by
+                // (addr - 0x80000000); 16/8-bit accesses are byte-swapped
+                // inside the word (see MEM_W/MEM_HU/MEM_BU in recomp.h).
+                auto wptr = [this](uint32_t addr) -> uint8_t* { return rdram_ + (addr - 0x80000000u); };
+                auto u32 = [&wptr](uint32_t addr) -> uint32_t {
+                    uint32_t v;
+                    std::memcpy(&v, wptr(addr), sizeof(v));
+                    return v;
+                };
+                auto s16 = [&wptr](uint32_t addr) -> int {
+                    int16_t v;
+                    std::memcpy(&v, wptr(addr ^ 2u), sizeof(v));
+                    return (int)v;
+                };
+                auto u8 = [&wptr](uint32_t addr) -> unsigned { return wptr(addr ^ 3u)[0]; };
+                auto f32 = [&u32](uint32_t addr) -> float {
+                    uint32_t w = u32(addr);
+                    float f;
+                    std::memcpy(&f, &w, sizeof(f));
+                    return f;
+                };
+                {
+                    static bool scanned = false;
+                    if (!scanned) {
+                        scanned = true;
+                        size_t nz = 0;
+                        for (size_t i = 0; i < 0x800000; i++) {
+                            if (rdram_[i] != 0) nz++;
+                        }
+                        uint32_t first_nz = 0;
+                        for (size_t i = 0; i < 0x800000; i++) {
+                            if (rdram_[i] != 0) { first_nz = (uint32_t)i; break; }
+                        }
+                        fprintf(stderr, "[scene]   rdram=%p core_rdram=%p nonzero=%zu first_nz=0x%X\n", (void*)rdram_,
+                                (void*)app_->core.RDRAM, nz, first_nz);
+                        fflush(stderr);
+                    }
+                }
+                const uint32_t base = u32(0x801B81D0);
+                fprintf(stderr,
+                        "[scene] t=%ums state=%u req=0x%04X base=0x%08X phase=%u p710=%u flags=%u/%u/%u bank=%u "
+                        "mask=0x%08X\n",
+                        now_ms, (unsigned)(u32(0x800E8214) & 0xFFFF), (unsigned)(u32(0x800C4C26) & 0xFFFF), base,
+                        u32(0x801BA70C), u32(0x801BA710), u8(0x801BA700), u8(0x801BA701), u8(0x801BA72C),
+                        u32(0x801977E8), u32(0x80190F30));
+                if (base != 0) {
+                    for (int i = 0; i < 13; i++) {
+                        uint32_t rec = base + 0x6C0 + (uint32_t)i * 0x10;
+                        fprintf(stderr, "[scene]   rec[%2d] @0x%08X ptr=0x%08X flag=%d x=%d y=%d\n", i, rec,
+                                u32(rec), s16(rec + 4), s16(rec + 0xA), s16(rec + 0xC));
+                    }
+                    uint32_t neff = u32(base + 0x810);
+                    fprintf(stderr, "[scene]   idx790=%u idx794=%u effects=%u script=0x%08X at=%u\n",
+                            u32(base + 0x790), u32(base + 0x794), neff, u32(base + 0x82C),
+                            u32(base + 0x830));
+                    for (uint32_t i = 0; i < neff && i < 8; i++) {
+                        uint32_t e = u32(base + 0x798 + i * 4);
+                        fprintf(stderr, "[scene]     eff[%u]=0x%08X\n", i, e);
+                    }
+                }
+                const uint32_t s10 = u32(0x801B84AC);
+                fprintf(stderr, "[scene]   s10=0x%08X f14=%d f16=%d f18=%.3f\n", s10,
+                        s10 ? s16(s10 + 0x1114) : 0, s10 ? s16(s10 + 0x1116) : 0,
+                        s10 ? f32(s10 + 0x1118) : 0.0f);
+                fflush(stderr);
+            }
+        }
         app_->updateScreen();
     }
 
@@ -454,6 +549,8 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
 
   private:
     std::unique_ptr<RT64::Application> app_;
+    // RDRAM base, kept so the env-gated scene diagnostics can peek at game state.
+    uint8_t* rdram_ = nullptr;
     // Display lists actually submitted by the game. The title scene's stall is
     // "the game never sends a gfx task", and nothing else on this path reports
     // that, so log the first few and then every 50th.
