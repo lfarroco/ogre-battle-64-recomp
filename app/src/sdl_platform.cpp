@@ -3,6 +3,10 @@
 #include <cstdio>
 
 #include <SDL.h>
+#if defined(__APPLE__)
+#include <SDL_metal.h>
+#include <SDL_syswm.h>
+#endif
 
 namespace ogre {
 
@@ -47,16 +51,41 @@ ultramodern::renderer::WindowHandle create_window(Platform& platform, const char
     platform.window = window;
 
 #if defined(__APPLE__)
-    // For the Metal backend: hand RT64/ultramodern the SDL window and the
-    // CAMetalLayer SDL creates for it.
+    // RT64's Metal path needs two native handles, and neither of them is the
+    // SDL_Window*:
     //
-    // NOTE: SDL_Metal_GetLayer segfaults with Homebrew's sdl2-compat on this
-    // setup, so the view is left null for now. The null renderer doesn't use it;
-    // the RT64 Metal integration will need a working Metal layer (possibly via
-    // SDL3 or a direct CAMetalLayer creation).
+    //   * WindowHandle::window is cast to an NSWindow* by plume
+    //     (`CocoaWindow::updateWindowAttributesInternal` does
+    //     `[[nsWindow contentView] frame]`, `[nsWindow screen]`), so it must be
+    //     the Cocoa window from SDL_GetWindowWMInfo, not the SDL window.
+    //     Passing the SDL_Window* crashes instantly in objc_msgSend with
+    //     EXC_BAD_ACCESS on the main-thread event pump.
+    //   * WindowHandle::view must be the window's CAMetalLayer*.
+    //
+    // This used to pass `{window, nullptr}` because SDL_Metal_GetLayer was
+    // believed to segfault under Homebrew's sdl2-compat. That no longer
+    // reproduces (verified with a standalone probe: SDL_GetWindowWMInfo,
+    // SDL_Metal_CreateView and SDL_Metal_GetLayer all return valid pointers).
+    SDL_SysWMinfo wm_info;
+    SDL_VERSION(&wm_info.version);
+    if (!SDL_GetWindowWMInfo(window, &wm_info)) {
+        fprintf(stderr, "[SDL] SDL_GetWindowWMInfo failed: %s\n", SDL_GetError());
+        return {};
+    }
+    platform.metal_view = SDL_Metal_CreateView(window);
+    if (platform.metal_view == nullptr) {
+        fprintf(stderr, "[SDL] SDL_Metal_CreateView failed: %s\n", SDL_GetError());
+        return {};
+    }
     ultramodern::renderer::WindowHandle handle;
-    handle.window = window;
-    handle.view = nullptr;  // SDL_Metal_GetLayer(window) segfaults w/ sdl2-compat
+    handle.window = reinterpret_cast<void*>(wm_info.info.cocoa.window);
+    handle.view = SDL_Metal_GetLayer(static_cast<SDL_MetalView>(platform.metal_view));
+    if (handle.view == nullptr) {
+        fprintf(stderr, "[SDL] SDL_Metal_GetLayer returned null\n");
+        return {};
+    }
+    fprintf(stderr, "[SDL] window=%p ns_window=%p metal_layer=%p\n",
+            static_cast<void*>(window), handle.window, handle.view);
     return handle;
 #else
     return window;
@@ -74,6 +103,13 @@ void shutdown_sdl(Platform& platform) {
         SDL_CloseAudioDevice(platform.audio_device);
         platform.audio_device = 0;
     }
+#if defined(__APPLE__)
+    // The Metal view must be released before the window it belongs to.
+    if (platform.metal_view != nullptr) {
+        SDL_Metal_DestroyView(static_cast<SDL_MetalView>(platform.metal_view));
+        platform.metal_view = nullptr;
+    }
+#endif
     if (platform.window != nullptr) {
         SDL_DestroyWindow(platform.window);
         platform.window = nullptr;
@@ -194,8 +230,17 @@ static uint16_t gamecontroller_buttons(SDL_GameController* controller) {
 }
 
 static void poll_input() {
-    // Keep the keyboard/gamecontroller state current. Safe to call from any thread.
-    SDL_PumpEvents();
+    // Deliberately does NOT pump SDL events.
+    //
+    // ultramodern calls this from the game thread (inside osContStartReadData),
+    // and on macOS SDL_PumpEvents -> Cocoa_PumpEvents ->
+    // [NSApp nextEventMatchingMask:...] raises
+    //   NSInternalInconsistencyException: 'nextEventMatchingMask should only be
+    //   called from the Main Thread!'
+    // which terminates the process - 2 of 3 native runs died here, right after
+    // the boot display list. The main thread already pumps every frame in
+    // pump_sdl_events() (called from update_gfx), and reading SDL's keyboard and
+    // controller *state* from another thread is fine; only pumping is not.
 }
 
 static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {

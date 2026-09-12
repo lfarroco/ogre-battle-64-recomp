@@ -16,6 +16,11 @@ struct Platform {
     SDL_AudioDeviceID audio_device = 0;
     uint32_t audio_frequency = 0;
 
+    // macOS/Metal only: the SDL_MetalView backing the window's CAMetalLayer.
+    // It is handed to RT64 as WindowHandle::view and must outlive the window,
+    // so it is owned here and destroyed in shutdown_sdl().
+    void* metal_view = nullptr;
+
     // Tracked game controllers (slot i maps to N64 controller i).
     SDL_GameController* controllers[4] = {};
 };

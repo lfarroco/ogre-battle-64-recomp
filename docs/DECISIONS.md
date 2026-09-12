@@ -5,6 +5,249 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-11 (session 24, native bring-up) — the native RT64 build works on macOS: two SDL-glue bugs
+
+### Context
+
+The web build had become the project's only renderer: `app/src/web_renderer.cpp`
+is 3 355 lines against `app/src/renderer.cpp`'s 357, and sessions 19-24 were all
+web-renderer work. The plan was to move the renderer phase to Linux/Vulkan
+(`docs/guides/linux-migration.md`), partly because the macOS window path was
+believed to be blocked. Before committing to that, the native app was brought up
+on the current machine (macOS 15.7.9, x86_64, Metal).
+
+It runs. RT64 initialises its Metal backend (`api=3`, `AMD Radeon Pro 560X`), the
+window opens, the game boots and stays up. Two bugs in the app's own SDL glue
+were in the way, both macOS-only.
+
+### Bug 1: `create_window` handed RT64 the SDL_Window*, not the NSWindow*
+
+`renderer.cpp` fills `RT64::Application::Core::window` from
+`ultramodern::renderer::WindowHandle`. On Apple that struct is
+`{void* window; void* view;}`, and plume casts `window` straight to an
+`NSWindow*` - `plume_apple.mm`'s `CocoaWindow::updateWindowAttributesInternal`
+does `[[nsWindow contentView] frame]` and `[nsWindow screen]`. `create_window`
+passed the `SDL_Window*` and left `view` null, so the first main-thread event
+pump died in `objc_msgSend` with `EXC_BAD_ACCESS (code=1, address=0x18)`.
+
+The null `view` was a deliberate stub whose comment said `SDL_Metal_GetLayer`
+"segfaults with Homebrew's sdl2-compat". That does not reproduce: a standalone
+probe (`SDL_Init` -> `SDL_CreateWindow(SDL_WINDOW_METAL)` -> `SDL_GetWindowWMInfo`
+/ `SDL_Metal_CreateView` / `SDL_Metal_GetLayer`) returns valid pointers for all
+three under sdl2-compat 2.32.70.
+
+`create_window` now takes the Cocoa window from `SDL_GetWindowWMInfo` and the
+CAMetalLayer from `SDL_Metal_CreateView` + `SDL_Metal_GetLayer`, and owns the
+`SDL_MetalView` in `Platform` so it is released before the window.
+
+This is *not* what RT64's own `ApplicationWindow::create` does - it sets
+`windowHandle.window = sdlWindow` as well. The frontend is expected to supply the
+handles, which is what this app does.
+
+### Bug 2: `poll_input` pumped SDL events from the game thread
+
+```cpp
+static void poll_input() {
+    SDL_PumpEvents();   // "Safe to call from any thread" - it is not
+}
+```
+
+ultramodern calls `poll_input` from `osContStartReadData`, i.e. the game thread.
+On macOS `SDL_PumpEvents` -> `Cocoa_PumpEvents` -> `[NSApp nextEventMatchingMask:]`
+raises
+
+```
+NSInternalInconsistencyException: 'nextEventMatchingMask should only be called from the Main Thread!'
+```
+
+which terminates the process: 2 of 3 runs died there, immediately after the boot
+display list. The main thread already pumps every frame through
+`pump_sdl_events` (from `update_gfx`), and reading SDL's keyboard/controller
+*state* off-thread is fine - only pumping is not. The call is gone; 3 of 3 runs
+then survived 45 s.
+
+### Verified
+
+| check | result |
+|---|---|
+| `cmake --build build-app` | clean (one pre-existing sdl2-compat deployment-target link warning) |
+| RT64 setup | `[renderer] RT64 renderer initialized (api=3)`, `Device Name: AMD Radeon Pro 560X` |
+| window | opens (1280x748); captured with `screencapture -l <window id>` |
+| stability | 3/3 runs alive after 45 s (1/3 before bug 2) |
+| display lists | 1 per run: `type=1 ucode=0x8009F540 data=0x800C6500` - the boot blanking DL |
+| canvas | black |
+
+### What this does and does not establish
+
+The **environment is not a blocker**: macOS + Metal + sdl2-compat is a workable
+native platform, so `linux-migration.md`'s premise (switch for the renderer phase
+because macOS is blocked) no longer stands on its own. Linux is now a preference
+- RT64's most-tested backend is Vulkan - not a requirement.
+
+The **game-side stall is unchanged and platform-independent**: every native run
+submits only its boot blanking display list and then idles, exactly like the web
+build. The web probes get past that wall by pressing Enter every 5 s
+(`debug/lib/harness.cjs`, `tapMs: 5000`), and session 17 found that input advances
+the title. These native runs sent no input, so the black canvas is expected and
+is not evidence of a renderer failure.
+
+Two diagnostics were added to `renderer.cpp`: the RT64-init line now goes to
+stderr (it was `printf`, and stdout is block-buffered when piped, so a successful
+setup looked like a silent failure), and `send_dl` logs the first few display
+lists and then every 50th - nothing on the native path reported whether the game
+submits gfx tasks at all.
+
+---
+
+## 2026-09-11 (session 24) — the "green smudges": texture bytes read at the wrong offset, and a blender cycle folded when it should cancel
+
+### Symptom
+
+The twelve title-screen soldiers rendered with green and purple speckle
+"smudges" over the helmet area, and a dim colour cast everywhere. The sprites
+were recognisable and their palette was broadly right, so this read like a
+combiner, filtering or blending problem. It was two separate bugs: a texture
+decode that read the wrong byte, and a blender cycle whose overflow simulation
+should not have applied.
+
+### Finding: `decode_texture_rect` read texture bytes at their *logical* offset
+
+The runtime's rdram stores every N64 32-bit word byte-reversed, so the logical
+byte at address `a` lives at physical `a ^ 3` (`recomp.h`'s `MEM_B`). RT64's TMEM
+load states the rule exactly (`hle/rt64_rdp.cpp`, `loadWord`):
+
+```
+TMEM[(tmemAddress + i) ^ tmemXorMask] = RDRAM[(textureAddress + i) ^ 3];
+```
+
+`decode_texture_rect` used a raw `rd16()`/`p[0]` at the logical offset.
+`read_matrix` has always dodged this with its `c ^ 1` column index and session 23
+added `n64h`/`n64b` for `Vtx`; the texture decoder was the one place left. Two
+distortions followed, and only the second is obvious:
+
+- **16-bit texels** (TEXEL1, the RGBA16 colour): `rd16()` at logical offset `o`
+  returns the halfword at `o ^ 2`, i.e. the *adjacent* texel, so every horizontal
+  pair came out swapped. Harmless inside flat regions, wrong wherever the art has
+  detail.
+- **I4/CI4 bytes** (TEXEL0, the 32x34 mask): a byte read at logical offset `b`
+  returns logical `b ^ 3`, so the four bytes of every word came back reversed -
+  eight texels per group, in 2-texel units. The mask's alpha therefore landed in
+  the wrong places and uncovered colour texels the mask exists to hide. OB64's
+  colour data really does carry green under the mask, which is where the green
+  smudges came from.
+
+The mask's alpha *histogram* is identical before and after (the bug is a
+permutation, so the multiset of nibbles is preserved) - only the spatial
+arrangement changes. Comparing histograms would have missed this entirely.
+
+### Decision: apply RT64's byte rule in the texture decoder
+
+`n64be16(rdram, addr)` joins `n64h`/`n64b` next to `rd16`. `decode_texture_rect`
+reads I4/I8 via `n64b` and 16/32-bit texels via `n64be16`, and `OP_LOADTLUT`
+reads its entries the same way. Nothing about the tile model changes - sizes,
+strides, formats and rects are untouched; only the byte index is compensated.
+
+### Finding: the viewport was correct only by accident, and its comment said the opposite
+
+`set_viewport` read `rd16(rdram_ + addr + i * 2)` and then took x from index 1, y
+from index 0 and z from index 3. Because the raw reads return the other halfword,
+the local array held `[y, x, 0, z]` and those index choices undid the swap: the
+code logged `vscale=[480 640 0 511]` and was right. The comment, though, asserted
+that `Vp_t` is laid out `(y, x, pad, z)`. That is not true - it is `(x, y, z, 0)`
+and OB64 submits `[640 480 511 0]` - and a reader who believed it would have
+"fixed" the index juggling into a transposed viewport.
+
+It now reads through `n64h()` with the canonical indices. Equivalent, and the
+`[GFX-VP]` log shows the same transform with the swap gone:
+
+```
+before: vscale=[480 640 0 511] -> scale=[160.00 120.00 127.75]
+after:  vscale=[640 480 511 0] -> scale=[160.00 120.00 127.75]
+```
+
+### Finding: the blender's overflow simulation folded a cycle that cancels exactly
+
+With the decode fixed the decoded pair was clean but the rendered sprite was
+still a dim, speckled mess, so the fault had to be downstream of the sampler.
+`[GFX-UV]` ruled the sampler out (`k1` found, a 20x34 colour texture bound to
+unit 1, `scl1=(0.0500 0.0294)`, vertex `uv1=(0.000 0.000)`, `glGetError` clean),
+and `[GFX-CMD]` gave the sprite's exact state:
+
+```
+cyc=2 omh=0x182CF0 oml=0x00184240 cmb=0xFCFFFFFFFFFD7238
+mux0=[rgb=(ZERO-ZERO)*ZERO+TEXEL1 a=(ZERO-ZERO)*ZERO+TEXEL0]
+mux1=[rgb=(ZERO-ZERO)*ZERO+COMBINED a=(ZERO-ZERO)*ZERO+COMBINED]
+prim=[1.00,1.00,1.00,0.00] ablend=1 force=1 approx=0 ccyc=2
+b0=[P=CC M=CC A=CC_A B=ONE]   b1=[P=CC M=FB A=CC_A B=1MA]
+```
+
+So the combiner is `rgb = TEXEL1, a = TEXEL0` - correct - and the colour goes
+through the blender. That mode has `forceBlend` set with a 2-cycle combiner, so
+`blendCycleCount` is 2 and cycle 0 (`P=CC, M=CC, A=CC_A, B=ONE`) is evaluated
+before cycle 1 does the framebuffer blend. Cycle 1 feeds cycle 0's colour
+through as its `CC` input, so cycle 0 must be an identity.
+
+It is: `(P*a + M*b) / (a + b)` with `P == M` is exactly `P`. But our cycle is a
+field-for-field port of RT64 `Blender::runCycle`, which wraps the numerator with
+`fmod(numerator, 1 + 8/255)` to simulate the hardware's accumulator overflow -
+and that fold is applied unconditionally. With `P=M=CC` and `B=ONE` the
+numerator is `CC*(a+1)`, which exceeds `1.031` for ordinary colours, so the fold
+fires on almost every pixel. Because the fold is per channel, it changes hue:
+
+```
+mask alpha=0.0: orange(255,166,33) -> (255,166, 33)
+mask alpha=0.1:                    -> ( 16,166, 33)   green
+mask alpha=0.5:                    -> ( 80,166, 33)   green
+mask alpha=1.0:                    -> (124, 34, 33)   dark red
+```
+
+Red is the first channel to exceed the limit, so mid-alpha pixels lose red and
+come out green, and fully opaque pixels come out about half brightness. The mask
+histogram shows most of the helmet/detail texels sit at intermediate alpha, which
+is exactly where the green appeared.
+
+Note this is not a porting slip: RT64's `runCycle` computes a `numeratorOverflow`
+flag (`!passthrough && (B != B_ONE_MINUS_A)`) and then never uses it. RT64
+already special-cases the analogous identity - `(P == M) && (B == B_ONE_MINUS_A)`
+- as a passthrough, so treating `P == M` as an identity is consistent with its
+own intent.
+
+### Decision: skip the fold when `P == M`
+
+`blender_run_cycle` now computes the numerator and applies `mod(..., Overflow)`
+only when `P != M`. When `P == M` the division cancels the numerator exactly, so
+the fold can only ever corrupt the result and skipping it cannot change any
+correct output. The fold is left in place for `P != M`, where the pinned RT64's
+behaviour is a separate question (the same reasoning suggests it should not fold
+there either, since a weighted average of two in-range inputs is in range - the
+example above with `P=CC, M=0.5, a=b=1` folds `1.5` to `0.234` instead of
+`0.75` - but nothing in this scene exercises it, so it is left alone and flagged
+here rather than changed blind).
+
+### Verified
+
+| check | before | after |
+|---|---|---|
+| `textures.cjs` mask silhouette | ragged, 8-texel block steps, detached fragment | smooth plume + figure |
+| `spritecheck.cjs` rendered side | dim green/purple speckle, no resemblance to the composite | the same character as the composite (orange body, white plume, green helmet band, magenta sash) |
+| full settled canvas | tangle of green/purple/blue slivers | twelve readable soldiers in two mirrored clusters of three |
+| `shots.cjs` settled `nonBlack` | `239425` | `239425` (unchanged - only the colours changed, so this is not a brightness effect) |
+| `testdraw.cjs` | `nonBlack=12312 colorful=10237` | unchanged |
+| `logmode.cjs` | PASS | PASS |
+| `[GFX-VP]` scale | `[160.00 120.00 127.75]` | unchanged |
+
+This closes session 23's open item 0: a single isolated sprite now matches its own
+`colour x mask` composite.
+
+Still open from session 23: raw TEXEL1 (`--flags 9`) was reported to sample black
+while its decoded image is bright. That was not re-measured here, and with the
+blender fixed the composite comparison no longer shows a discrepancy, so it may
+have been an artifact of the isolation probe (which compares the *first* sprite
+against the *last* textured draw's texture pair - two different sprites). It
+needs a measurement before it is either fixed or dismissed.
+
+---
+
 ## 2026-09-11 (session 23, follow-up) — the rectangle commands were decoded word-swapped, so nothing ever cleared the canvas
 
 ### Finding: `G_FILLRECT`/`G_TEXRECT` take `lrx/lry` from w0 and `ulx/uly` from w1

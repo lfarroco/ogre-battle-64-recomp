@@ -502,9 +502,24 @@ inline uint16_t rd16(const uint8_t* p) {
 // was decoding (y,x)(flag,z)(t,s)(a,b,g,r) and the title sprites were drawn
 // with x/y swapped and their texture coordinates transposed. read_matrix() has
 // always compensated with its `c ^ 1` column index (equivalent to `^ 2` on the
-// offset); vertex reads did not.
+// offset); vertex reads did not, and neither did the texture decoder - which
+// needs the rule at byte granularity, not at halfword offsets (see n64be16).
 inline uint16_t n64h(const uint8_t* p, int off) { return rd16(p + (off ^ 2)); }
 inline uint8_t n64b(const uint8_t* p, int off) { return p[off ^ 3]; }
+
+// Texture/TLUT reads need the same compensation, at *byte* granularity, and
+// `n64h` is not it: a texture's rows are not 4-byte aligned fields, so the byte
+// rule has to be applied to every byte index. RT64's TMEM load is the reference
+// (hle/rt64_rdp.cpp `loadWord`): `TMEM[..] = RDRAM[(textureAddress + i) ^ 3]`.
+// Reading a texture byte at its logical offset without the `^ 3` returns a
+// different byte of the same word, which scrambles the image in two ways:
+// a 16-bit texel comes back as its horizontal neighbour (a pair swap), and an
+// I4/CI4 byte comes back from a different position in its 4-byte group (four
+// bytes reversed = 8 texels per group).
+inline uint16_t n64be16(const uint8_t* p, uint32_t addr) {
+    return static_cast<uint16_t>((n64b(p, static_cast<int>(addr)) << 8) |
+                                 n64b(p, static_cast<int>(addr) + 1));
+}
 
 inline uint32_t p0(uint32_t w, uint8_t pos, uint8_t bits) {
     return (w >> pos) & ((1u << bits) - 1);
@@ -574,9 +589,9 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
 
             if (siz == gbi::IM_SIZ_4b) {
                 // Two texels per byte; byte index = (ty*row_bytes + tx/2).
-                const uint32_t byte_off = static_cast<uint32_t>(ty * row_bytes + tx / 2);
-                const uint8_t* p = rdram + timg_address + byte_off;
-                const uint8_t byte = rd16(p);  // byte-swapped storage: byte = p[0]
+                const uint32_t byte_addr =
+                    timg_address + static_cast<uint32_t>(ty * row_bytes + tx / 2);
+                const uint8_t byte = n64b(rdram, static_cast<int>(byte_addr));
                 const uint8_t nib = (tx & 1) ? (byte & 0xF) : (byte >> 4);
                 switch (fmt) {
                     case gbi::IM_FMT_IA: {
@@ -610,11 +625,11 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
                         break;
                 }
             } else {
-                const uint32_t byte_off = static_cast<uint32_t>(ty * row_bytes + tx * bpp);
-                const uint8_t* p = rdram + timg_address + byte_off;
+                const uint32_t byte_addr =
+                    timg_address + static_cast<uint32_t>(ty * row_bytes + tx * bpp);
                 switch (siz) {
                     case gbi::IM_SIZ_8b: {
-                        const uint8_t v = p[0];
+                        const uint8_t v = n64b(rdram, static_cast<int>(byte_addr));
                         switch (fmt) {
                             case gbi::IM_FMT_IA: {
                                 const uint8_t i = (v >> 4) * 255 / 15;
@@ -643,7 +658,7 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
                         break;
                     }
                     case gbi::IM_SIZ_16b: {
-                        const uint16_t v = rd16(p);
+                        const uint16_t v = n64be16(rdram, byte_addr);
                         if (fmt == gbi::IM_FMT_IA) {
                             ia16_to_rgba8(v, rgba);
                         } else {
@@ -653,8 +668,8 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
                     }
                     case gbi::IM_SIZ_32b: {
                         // RGBA32: two 16-bit halves: (alpha,red) (green,blue).
-                        const uint16_t hi = rd16(p);
-                        const uint16_t lo = rd16(p + 2);
+                        const uint16_t hi = n64be16(rdram, byte_addr);
+                        const uint16_t lo = n64be16(rdram, byte_addr + 2);
                         rgba[0] = static_cast<uint8_t>(hi & 0xFF);
                         rgba[1] = static_cast<uint8_t>(lo >> 8);
                         rgba[2] = static_cast<uint8_t>(lo & 0xFF);
@@ -878,10 +893,27 @@ void blender_run_cycle(bool force_blend, bool last_cycle, bool not_first_cycle,
         vec3 input_color = replace_cc ? blender_color : combiner_rgb;
         float a_multiplier = from_input_a(A, combiner_alpha);
         float b_multiplier = from_input_b(B, a_multiplier);
-        // Simulate the hardware's numerator overflow with fmod.
+        vec3 numerator = from_input_pm(P, input_color) * a_multiplier +
+                         from_input_pm(M, input_color) * b_multiplier;
+        // Simulate the hardware's numerator overflow with fmod (RT64
+        // rt64_blender.h) - but not when P and M are the same input. The
+        // numerator is then P*(a+b) and the division below cancels it exactly,
+        // so the output is P whatever the multipliers are; folding it is an
+        // artifact of the simulation, not of the hardware.
+        //
+        // OB64's title sprites are exactly that case: b0 is
+        // [P=CC M=CC A=CC_A B=ONE] with b1 = [P=CC M=FB A=CC_A B=1MA], and
+        // cycle 1 feeds cycle 0's colour through as its "CC". Folding there
+        // damaged every pixel whose mask alpha was above ~0.05: a bright orange
+        // body pixel (255,166,33) came out green for alpha 0.1-0.6 (red is the
+        // only channel that exceeds 1 + 8/255, so only red folded) and about
+        // half brightness at alpha 1. That is the "green smudges" over the
+        // soldiers' helmets, and the reason the rendered sprite looked dim
+        // next to its own colour x mask composite.
         const float Overflow = 1.0 + 8.0 / 255.0;
-        vec3 numerator = mod(from_input_pm(P, input_color) * a_multiplier +
-                             from_input_pm(M, input_color) * b_multiplier, Overflow);
+        if (P != M) {
+            numerator = mod(numerator, Overflow);
+        }
         blender_color = numerator / max(a_multiplier + b_multiplier, 1.0 / 255.0);
         final_alpha = 1.0;
     }
@@ -1357,6 +1389,34 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glUniform2f(glGetUniformLocation(program_, "u_uv_scale1"), cmd.tex_scale1[0], cmd.tex_scale1[1]);
                 glUniform2f(glGetUniformLocation(program_, "u_uv_origin1"), cmd.tex_origin1[0], cmd.tex_origin1[1]);
                 glActiveTexture(GL_TEXTURE0);
+
+                // Which image each sampler actually got, and where the first
+                // vertex lands in it. A sprite whose decoded pair is clean but
+                // whose render is speckled is a question about *this* - a key
+                // that never reached gl_textures_, a unit that fell back to the
+                // 1x1 white texture, or a uv1 outside [0,1] (which clamps to an
+                // edge texel, or repeats the image across the quad, depending on
+                // the tile's wrap mode).
+                if (tex_uv_logged_ < 4) {
+                    ++tex_uv_logged_;
+                    const bool f0 = cmd.tex_key != 0 && gl_textures_.count(cmd.tex_key) != 0;
+                    const bool f1 = cmd.tex_key1 != 0 && gl_textures_.count(cmd.tex_key1) != 0;
+                    const float su = cmd.uv[0], sv = cmd.uv[1];
+                    OGRE_MILESTONE("GFX-UV",
+                                   "k0=0x%llX/%d/id%u k1=0x%llX/%d/id%u "
+                                   "scl0=(%.4f %.4f) scl1=(%.4f %.4f) org1=(%.1f %.1f) "
+                                   "v0=(%.1f %.1f) -> uv0=(%.3f %.3f) uv1=(%.3f %.3f) e=%X",
+                                   (unsigned long long)cmd.tex_key, f0 ? 1 : 0, lookup(cmd.tex_key),
+                                   (unsigned long long)cmd.tex_key1, f1 ? 1 : 0, lookup(cmd.tex_key1),
+                                   cmd.tex_scale[0], cmd.tex_scale[1],
+                                   cmd.tex_scale1[0], cmd.tex_scale1[1],
+                                   cmd.tex_origin1[0], cmd.tex_origin1[1], su, sv,
+                                   (su - cmd.tex_origin[0]) * cmd.tex_scale[0],
+                                   (sv - cmd.tex_origin[1]) * cmd.tex_scale[1],
+                                   (su - cmd.tex_origin1[0]) * cmd.tex_scale1[0],
+                                   (sv - cmd.tex_origin1[1]) * cmd.tex_scale1[1],
+                                   glGetError());
+                }
             }
 
             // Scissor.
@@ -1608,6 +1668,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     float ndc_max_[2] = {-1e9f, -1e9f};
     bool logged_first_flush_ = false;
     unsigned tex_logged_ = 0;    unsigned tri_reject_logged_ = 0;
+    unsigned tex_uv_logged_ = 0;
     unsigned draw_logged_ = 0;
     unsigned vert_logged_ = 0;
     unsigned txr_logged_ = 0;
@@ -2191,7 +2252,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint32_t bank = static_cast<uint32_t>(t.palette) * 16;
                 const uint32_t base = st.timg_address + ((p0(w0, 12, 12) >> 2) << st.timg_siz >> 1);
                 for (uint16_t i = 0; i < count && bank + i < 256; ++i) {
-                    st.tlut[bank + i] = rd16(rdram_ + base + i * 2);
+                    st.tlut[bank + i] = n64be16(rdram_, base + i * 2);
                 }
                 st.tlut_valid = true;
                 (void)tile;
@@ -3033,25 +3094,33 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
     // G_MOVEMEM MV_VIEWPORT: reads the RSP viewport (Vp_t) and stores the
     // resulting screen-space transform. `Vp_t` is
-    //     s16 vscale[4];  // 14.2 fixed, s16 vtrans[4];
-    // and the fields are laid out (y, x, pad, z) as the RSP consumes them:
-    // OB64 submits vscale=[480 640 0 511] for its 320x240 screen, so index 1
-    // (640) is the x scale and index 0 (480) the y scale. This is exactly
-    // RT64's mapping (RSP::setViewport in hle/rt64_rsp.cpp). The renderer never
-    // applied any viewport before, which is why 3D geometry landed in raw clip
-    // space (ndc_x up to 3.25) with most of it off-screen.
+    //     s16 vscale[4];   // x, y, z, 0 in 14.2 fixed
+    //     s16 vtrans[4];   // x, y, z, 0 in 14.2 fixed
+    // OB64 submits vscale = [640 480 511 0] for its 320x240 screen - the
+    // canonical (x, y, z, pad) order - and RT64 maps index 0/1/2 to x/y/z
+    // (RSP::setViewport in hle/rt64_rsp.cpp).
+    //
+    // The reads go through n64h(), not a plain rd16(): the runtime's rdram is
+    // word-byte-reversed, so reading a halfword at its logical offset returns
+    // the *other* half of the word (see n64h's comment). The old code read with
+    // rd16() and then took x from index 1, y from index 0 and z from index 3,
+    // which cancelled that swap by hand: it logged vscale=[480 640 0 511] and
+    // was correct only because of the index juggling. Nothing below relies on
+    // the swap any more. The renderer applied no viewport at all before session
+    // 20, which is why 3D geometry landed in raw clip space (ndc_x up to 3.25)
+    // with most of it off-screen.
     void set_viewport(ExecCtx* ctx, RenderState& st, uint32_t addr) {
         int16_t vscale[4], vtrans[4];
         for (int i = 0; i < 4; ++i) {
-            vscale[i] = static_cast<int16_t>(rd16(rdram_ + addr + i * 2));
-            vtrans[i] = static_cast<int16_t>(rd16(rdram_ + addr + 8 + i * 2));
+            vscale[i] = static_cast<int16_t>(n64h(rdram_, static_cast<int>(addr) + i * 2));
+            vtrans[i] = static_cast<int16_t>(n64h(rdram_, static_cast<int>(addr + 8) + i * 2));
         }
-        st.view_scale[0] = static_cast<float>(vscale[1]) / 4.0f;  // x
-        st.view_scale[1] = static_cast<float>(vscale[0]) / 4.0f;  // y
-        st.view_scale[2] = static_cast<float>(vscale[3]) / 4.0f;  // z
-        st.view_trans[0] = static_cast<float>(vtrans[1]) / 4.0f;  // x
-        st.view_trans[1] = static_cast<float>(vtrans[0]) / 4.0f;  // y
-        st.view_trans[2] = static_cast<float>(vtrans[3]) / 4.0f;  // z
+        st.view_scale[0] = static_cast<float>(vscale[0]) / 4.0f;  // x
+        st.view_scale[1] = static_cast<float>(vscale[1]) / 4.0f;  // y
+        st.view_scale[2] = static_cast<float>(vscale[2]) / 4.0f;  // z
+        st.view_trans[0] = static_cast<float>(vtrans[0]) / 4.0f;  // x
+        st.view_trans[1] = static_cast<float>(vtrans[1]) / 4.0f;  // y
+        st.view_trans[2] = static_cast<float>(vtrans[2]) / 4.0f;  // z
         st.viewport_set = true;
         if (ctx->trace_task == 2 && ctx->vp_logged < 4) {
             ctx->vp_logged++;

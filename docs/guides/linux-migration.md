@@ -1,9 +1,22 @@
 # Migrating the dev environment to Linux (Ubuntu)
 
-Status: **planned** (2026-08-24). The dev machine is currently an Intel Mac
-(Xcode 26.2, Apple clang 17, Homebrew SDL2/sdl2-compat). The next session moves
-to Ubuntu. This guide lists what to install, what macOS-specific code to remove,
-and the gotchas.
+Status: **optional** — revised 2026-09-11. Originally "planned" (2026-08-24) on
+the assumption that the macOS renderer path was blocked. That assumption was
+wrong: the native RT64/Metal build now runs on the Intel Mac (see
+`docs/DECISIONS.md`, session 24 native bring-up). The two blockers were in this
+app's own SDL glue, not in macOS or RT64:
+
+* `create_window` passed the `SDL_Window*` where plume requires an `NSWindow*`
+  (instant `EXC_BAD_ACCESS` in `objc_msgSend`), and left the `CAMetalLayer*` null;
+* `poll_input` called `SDL_PumpEvents` from the game thread, which Cocoa rejects
+  with `NSInternalInconsistencyException`.
+
+With both fixed, RT64 initialises Metal (`api=3`), the window opens, and the game
+runs stably. So the switch is now a **preference** — RT64's most-tested backend is
+Vulkan, and the N64Recomp/N64ModernRuntime/RT64 ecosystem is Linux/Windows-first —
+not a requirement. It still makes sense for the best-tested backend or CI parity;
+it is no longer needed to get pixels on screen. The instructions below remain
+correct for a move.
 
 ---
 
@@ -14,7 +27,8 @@ and the gotchas.
   identically on Linux.
 - **Recommended for the RT64/renderer phase** (RSP microcode + RT64 integration):
   RT64's Vulkan backend is the primary, most-tested path, and the whole
-  N64Recomp/N64ModernRuntime/RT64 ecosystem is Linux/Windows-first.
+  N64Recomp/N64ModernRuntime/RT64 ecosystem is Linux/Windows-first. This is a
+  preference, not a blocker — see the status note above.
 
 ---
 
@@ -80,8 +94,8 @@ the patch — re-apply it whenever RT64 is re-checked-out.
 
 These are the only macOS-specific pieces in our own `app/` source. They are
 guarded by `APPLE`/`__APPLE__`, so they do **not** break the Linux build on
-their own — removing them is cleanup (and avoids the Metal/`SDL_Metal_GetLayer`
-workaround path entirely).
+their own — removing them is cleanup (and drops the Metal window-handle path
+entirely).
 
 ### 1. `app/CMakeLists.txt`
 
@@ -108,15 +122,19 @@ workaround path entirely).
 
 ### 2. `app/src/sdl_platform.cpp`
 
-- **Simplify `create_window`** (lines 44-58): the `#if defined(__APPLE__)`
-  block constructs a `WindowHandle{window, nullptr}` and is a workaround for
-  `SDL_Metal_GetLayer` segfaulting under Homebrew sdl2-compat. On Linux the
-  Vulkan path just passes the `SDL_Window*`:
+- **Simplify `create_window`**: the `#if defined(__APPLE__)` block now builds a
+  real handle (Cocoa `NSWindow*` from `SDL_GetWindowWMInfo` + the `CAMetalLayer*`
+  from `SDL_Metal_CreateView`/`SDL_Metal_GetLayer`, with the `SDL_MetalView`
+  owned by `Platform`). On Linux the Vulkan path just passes the `SDL_Window*`:
   ```cpp
   platform.window = window;
   return window;
   ```
   Delete the `#if defined(__APPLE__) ... #else ... #endif` entirely.
+- **Keep the `poll_input` no-op.** It must not pump SDL events on any platform
+  (see the session-24 native bring-up entry): on macOS pumping off the main
+  thread terminates the process, and the main thread already pumps in
+  `pump_sdl_events`. Do not "restore" the `SDL_PumpEvents()` call.
 
 ### 3. `tools/` (macOS-only build artifacts, not committed)
 
@@ -130,8 +148,8 @@ workaround path entirely).
 
 - The Metal toolchain component (`xcodebuild -downloadComponent MetalToolchain`)
   is not needed — RT64 uses **Vulkan** on Linux.
-- Homebrew sdl2-compat / the `SDL_Metal_GetLayer` segfault are gone with
-  distro SDL2.
+- Homebrew's sdl2-compat is an SDL3 shim; it works for the Metal path (verified),
+  but distro SDL2 is the better-tested combination for RT64.
 - If the RT64 shader pipeline hits issues, install the relevant drivers:
   NVIDIA proprietary driver (recommended) or `mesa-vulkan-drivers` for AMD/Intel.
 
@@ -170,8 +188,8 @@ cmake --build build-app -j$(nproc)
    gitignored — re-clone + re-apply `n64recomp-ob64.patch`.
 3. **Sticky CMake cache**: after toolchain changes, delete `build-app` and
    reconfigure.
-4. **SDL2**: use the distro `libsdl2-dev`, not SDL3/sdl2-compat, so the
-   `SDL_Metal_GetLayer`-style issues can't recur.
+4. **SDL2**: use the distro `libsdl2-dev`; Homebrew's `sdl2` is now `sdl2-compat`
+   (an SDL3 shim), which works but is not the combination RT64 is tested against.
 5. **`RecompiledFuncs/` is generated** (gitignored) — regenerate with
    `make recomp`; never hand-edit.
 6. The `n64recomp-ob64.patch` applies to a specific upstream N64Recomp commit;

@@ -229,7 +229,11 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
 
         app_->setFullScreen(cur_config.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
-        printf("[renderer] RT64 renderer initialized (api=%d)\n", static_cast<int>(chosen_api));
+        // stderr, not stdout: stdout is block-buffered when the app is piped and
+        // this line was being lost, which made a successful RT64 setup look like
+        // a silent failure.
+        fprintf(stderr, "[renderer] RT64 renderer initialized (api=%d)\n", static_cast<int>(chosen_api));
+        fflush(stderr);
     }
 
     ~RT64Renderer() override = default;
@@ -276,6 +280,12 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
+
+        ++dl_count_;
+        if (dl_count_ <= 8 || (dl_count_ % 50) == 0) {
+            fprintf(stderr, "[renderer] display list %u (type=%u ucode=0x%08X data=0x%08X)\n",
+                    dl_count_, task->t.type, task->t.ucode, task->t.data_ptr);
+        }
 
         // GBI selection note (2026-08-29): OB64's gfx ucode is "RSP Gfx ucode
         // F3DEX fifo 2.08". RT64's GBI database matches it (by hash) to
@@ -343,6 +353,10 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
 
   private:
     std::unique_ptr<RT64::Application> app_;
+    // Display lists actually submitted by the game. The title scene's stall is
+    // "the game never sends a gfx task", and nothing else on this path reports
+    // that, so log the first few and then every 50th.
+    uint32_t dl_count_ = 0;
 };
 
 }  // namespace

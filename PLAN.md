@@ -226,6 +226,46 @@ hardware. RT64 remains the primary native renderer throughout. See
     compare against, and the remaining combiner inputs
     (`NOISE`/`K4`/`K5`/`LOD_FRACTION`/keys). See
     `docs/HANDOFF-2026-09-11-session23.md`.
+  - ✅ **The title sprites render correctly (session 24)**: the "green smudges"
+    over the soldiers' helmets and the dim colour cast had two independent
+    causes, both now fixed and both verified against the sprite's own
+    `colour x mask` composite. (1) **Texture decode**: every texture byte was
+    read at its *logical* offset out of the runtime's byte-reversed rdram, which
+    returns a different byte of the same word - for the RGBA16 colour tile that
+    swapped every horizontal texel pair, and for the I4 alpha mask it reversed
+    the four bytes of every word (8 texels per group), landing the mask's alpha
+    in the wrong places. RT64's `loadWord` (`RDRAM[(textureAddress + i) ^ 3]`) is
+    the reference; `n64be16` now sits beside `n64h`/`n64b` and `OP_LOADTLUT` uses
+    it too. (2) **Blender**: cycle 0 of the sprite render mode
+    (`b0=[P=CC M=CC A=CC_A B=ONE]`) is `(P*a + M*b)/(a+b)` with `P == M`, i.e.
+    exactly `P`, but the port of RT64's `Blender::runCycle` folded the numerator
+    with `fmod(..., 1+8/255)` unconditionally. The fold is per channel, so a
+    bright orange pixel at mask alpha 0.5 came out green - the smudges - and
+    opaque pixels came out about half brightness. The fold is now skipped when
+    `P == M`, where the division cancels it exactly. The viewport, which was
+    correct only because it cancelled the same byte swap by hand behind a comment
+    that described the hardware wrongly, now reads through `n64h` with the
+    canonical `(x, y, z, 0)` indices. The settled canvas shows twelve readable
+    soldiers where it used to be scrambled slivers. See `docs/DECISIONS.md`
+    (session 24) and `docs/HANDOFF-2026-09-11-session24.md`.
+  - ✅ **The native RT64 build runs on macOS again (session 24, native
+    bring-up)**: the web build had become the project's only renderer
+    (`web_renderer.cpp` 3 355 lines vs `renderer.cpp` 357, and sessions 19-24 all
+    web work), so the native path was brought up before committing to a Linux
+    move. The only blockers were two bugs in the app's own SDL glue, both
+    macOS-only: `create_window` handed RT64 the `SDL_Window*` where plume casts to
+    an `NSWindow*` (instant `EXC_BAD_ACCESS`) and left the `CAMetalLayer*` null -
+    the `SDL_Metal_GetLayer` segfault it was stubbing around does not reproduce
+    under sdl2-compat 2.32.70; and `poll_input` called `SDL_PumpEvents` from the
+    game thread, which Cocoa rejects with `NSInternalInconsistencyException` (2 of
+    3 runs aborted there). RT64 now initialises Metal (`api=3`), the window opens,
+    and 3/3 runs survive. `docs/guides/linux-migration.md` is revised to
+    "optional" accordingly - Linux is a preference (Vulkan is RT64's best-tested
+    backend), not a requirement. **The game-side stall is unchanged and
+    platform-independent**: every native run submits only its boot blanking
+    display list, so the canvas stays black unless input is fed (the web probes
+    press Enter every 5 s for exactly this reason). See `docs/DECISIONS.md`
+    (session 24 native bring-up).
   - ✅ **Game audio is muted by default (session 22)**: the audio microcode is
     not emulated (the RSP audio task is only auto-completed), so what the game
     hands the AI interface is garbage and playing it is a wall of screeching.
