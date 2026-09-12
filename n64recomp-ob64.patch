@@ -140,10 +140,10 @@ index d155b83..dd03ba5 100644
          void emit_comment(const std::string& comment) const final;
      private:
 diff --git a/src/cgenerator.cpp b/src/cgenerator.cpp
-index 94f85c5..140fc5d 100644
+index 94f85c5..bec0393 100644
 --- a/src/cgenerator.cpp
 +++ b/src/cgenerator.cpp
-@@ -392,14 +392,17 @@ void N64Recomp::CGenerator::get_binary_expr_string(BinaryOpType type, const Bina
+@@ -392,14 +392,20 @@ void N64Recomp::CGenerator::get_binary_expr_string(BinaryOpType type, const Bina
      }
  }
  
@@ -153,17 +153,31 @@ index 94f85c5..140fc5d 100644
      fmt::print(output_file,
          "RECOMP_FUNC void {}(uint8_t* rdram, recomp_context* ctx) {{\n"
 +        // Record the currently executing function per thread for deadlock
-+        // diagnostics (the VI thread's snapshot prints it).
-+        "    recomp_trace_func(rdram, 0x{:08X});\n"
++        // diagnostics (the VI thread's snapshot prints it), and push this
++        // frame's return address onto the per-thread shadow call chain (see
++        // function_trace.cpp) so a stall can be reported as a real call chain
++        // instead of a single "last function entered" value.
++        "    recomp_trace_entry(rdram, 0x{:08X}, \"{}\", (uint32_t)ctx->r31);\n"
          // these variables shouldn't need to be preserved across function boundaries, so make them local for more efficient output
          "    uint64_t hi = 0, lo = 0, result = 0;\n"
          "    int c1cs = 0;\n", // cop1 conditional signal
 -        function_name);
-+        function_name, function_vram);
++        function_name, function_vram, function_name);
  }
  
  void N64Recomp::CGenerator::emit_function_end() const {
-@@ -501,6 +504,30 @@ void N64Recomp::CGenerator::emit_cop0_status_write(int reg) const {
+@@ -482,6 +488,10 @@ void N64Recomp::CGenerator::emit_return(const Context& context, size_t func_inde
+     if (context.trace_mode) {
+         fmt::print(output_file, "TRACE_RETURN()\n    ");
+     }
++    // Pop this frame off the per-thread shadow call chain (function_trace.cpp)
++    // before leaving, so the recorded chain is the live stack rather than every
++    // function the thread has ever entered.
++    fmt::print(output_file, "recomp_trace_return(rdram, {});\n    ", func_index);
+     fmt::print(output_file, "return;\n");
+ }
+ 
+@@ -501,6 +511,30 @@ void N64Recomp::CGenerator::emit_cop0_status_write(int reg) const {
      fmt::print(output_file, "cop0_status_write(ctx, {});", gpr_to_string(reg));
  }
  
@@ -194,7 +208,7 @@ index 94f85c5..140fc5d 100644
  void N64Recomp::CGenerator::emit_cop1_cs_read(int reg) const {
      fmt::print(output_file, "{} = get_cop1_cs();\n", gpr_to_string(reg));
  }
-@@ -554,6 +581,10 @@ void N64Recomp::CGenerator::emit_pause_self() const {
+@@ -554,6 +588,10 @@ void N64Recomp::CGenerator::emit_pause_self() const {
      fmt::print(output_file, "pause_self(rdram);\n");
  }
  

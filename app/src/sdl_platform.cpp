@@ -1,4 +1,5 @@
 #include "sdl_platform.hpp"
+#include "synth_frame.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,9 @@
 #include <SDL_metal.h>
 #include <SDL_syswm.h>
 #endif
+
+// Defined in librecomp/src/recomp.cpp: the RDRAM base handed to the game.
+extern "C" uint8_t* ultramodern_get_rdram_base();
 
 namespace ogre {
 
@@ -180,15 +184,39 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         platform.exit_after_ms = 0;
         // The queue snapshot's per-thread view is a block *kind* and a resume
         // count, which cannot say where a thread that is simply not being
-        // scheduled is sitting. N64Recomp calls recomp_trace_func() at every
-        // function entry, so the runtime knows the last function each game
-        // thread entered; print those once, at the moment a scripted run ends.
+        // scheduled is sitting. The recompiled code reports every function
+        // entry and return, so the runtime also knows the live call chain.
         fprintf(stderr, "[SDL] exit_after_ms=%u elapsed, stopping\n", budget);
         fprintf(stderr, "[SDL] per-thread last recompiled function:\n");
         for (int tid = 1; tid < 32; tid++) {
             const uint32_t func = ultramodern::debug_last_func_vram(tid);
             if (func != 0) {
                 fprintf(stderr, "[SDL]   t%-3d last func 0x%08X\n", tid, func);
+            }
+        }
+        if (getenv("OGRE_CHAIN_HISTORY") != nullptr) {
+            ultramodern::debug_dump_chain_history();
+        }
+        fprintf(stderr, "[SDL] per-thread live call chain:\n");
+        for (int tid = 1; tid < 32; tid++) {
+            if (ultramodern::debug_last_func_vram(tid) != 0) {
+                ultramodern::debug_dump_call_chain(tid, "at exit");
+            }
+        }
+        // OGRE_DUMP_RDRAM=<path>: write the whole RDRAM image so the state at
+        // the stall can be analysed offline (and diffed against a run on the
+        // other platform) instead of guessed from a handful of snapshot words.
+        if (const char* dump_path = getenv("OGRE_DUMP_RDRAM")) {
+            uint8_t* rdram = ultramodern_get_rdram_base();
+            if (rdram != nullptr) {
+                if (FILE* f = fopen(dump_path, "wb")) {
+                    const size_t size = 0x800000;
+                    size_t written = fwrite(rdram, 1, size, f);
+                    fclose(f);
+                    fprintf(stderr, "[SDL] dumped %zu bytes of rdram to %s\n", written, dump_path);
+                } else {
+                    fprintf(stderr, "[SDL] could not open %s for rdram dump\n", dump_path);
+                }
             }
         }
         fflush(stderr);
@@ -453,9 +481,15 @@ ultramodern::error_handling::callbacks_t make_error_handling_callbacks() {
     return {.message_box = show_message_box};
 }
 
+// Runs on the VI thread once per vblank; the synthetic-frame probe submits from
+// here (see synth_frame.cpp).
+static void vi_tick() {
+    synth_frame_vi_tick(ultramodern::get_rdram_base());
+}
+
 ultramodern::events::callbacks_t make_events_callbacks() {
     return {
-        .vi_callback = nullptr,
+        .vi_callback = synth_frame_enabled() ? vi_tick : nullptr,
         .gfx_init_callback = nullptr,
     };
 }

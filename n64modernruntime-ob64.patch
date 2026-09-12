@@ -338,10 +338,24 @@ index 43509ba..bdb940e 100644
  
  void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
-index ea1c49b..2f02f0d 100644
+index ea1c49b..74bd907 100644
 --- a/librecomp/src/recomp.cpp
 +++ b/librecomp/src/recomp.cpp
-@@ -437,19 +437,10 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
+@@ -410,6 +410,13 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
+     return recomp::RomValidationError::Good;
+ }
+ 
++// Debug: RDRAM base handed to the game (set by recomp::start, read by the
++// OGRE_DUMP_RDRAM diagnostic in the app).
++static std::atomic<uint8_t*> rdram_base_for_debug{nullptr};
++extern "C" uint8_t* ultramodern_get_rdram_base() {
++    return rdram_base_for_debug.load(std::memory_order_relaxed);
++}
++
+ extern "C" void osGetMemSize_recomp(uint8_t * rdram, recomp_context * ctx) {
+     ctx->r2 = 8 * 1024 * 1024;
+ }
+@@ -437,19 +444,10 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
              ctx->f_odd = &ctx->f0.u32h;
              ctx->mips3_float_mode = false;
          }
@@ -363,7 +377,7 @@ index ea1c49b..2f02f0d 100644
      ctx->status_reg = new_sr;
  }
  
-@@ -457,6 +448,53 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
+@@ -457,6 +455,53 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
      return (gpr)(int32_t)ctx->status_reg;
  }
  
@@ -417,7 +431,7 @@ index ea1c49b..2f02f0d 100644
  extern "C" void switch_error(const char* func, uint32_t vram, uint32_t jtbl) {
      printf("Switch-case out of bounds in %s at 0x%08X for jump table at 0x%08X\n", func, vram, jtbl);
      assert(false);
-@@ -495,11 +533,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+@@ -495,11 +540,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
      // Initialize the overlays
      recomp::overlays::init_overlays();
  
@@ -440,7 +454,7 @@ index ea1c49b..2f02f0d 100644
  
      // Read in any extra data from patches
      recomp::overlays::read_patch_data(rdram, (gpr)recomp::patch_rdram_start);
-@@ -698,6 +744,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
+@@ -698,6 +751,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
      return mod_context->set_mod_index(mod_game_id, mod_id, index);
  }
  
@@ -507,7 +521,7 @@ index ea1c49b..2f02f0d 100644
  bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
      game_status.wait(GameStatus::None);
  
-@@ -717,6 +823,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+@@ -717,6 +830,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                      game_entry.on_init_callback(rdram, context);
                  }
  
@@ -519,7 +533,7 @@ index ea1c49b..2f02f0d 100644
                  uint32_t mod_ram_used = 0;
                  if (!game_entry.mod_game_id.empty()) {
                      std::vector<recomp::mods::ModLoadErrorDetails> mod_load_errors;
-@@ -832,7 +943,15 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -832,7 +950,15 @@ void recomp::start(const recomp::Configuration& cfg) {
      // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
      uint8_t* rdram;
      bool alloc_failed;
@@ -536,7 +550,7 @@ index ea1c49b..2f02f0d 100644
      rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
      DWORD old_protect = 0;
      alloc_failed = (rdram == nullptr);
-@@ -847,7 +966,6 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -847,7 +973,6 @@ void recomp::start(const recomp::Configuration& cfg) {
      rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
      alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
      if (!alloc_failed) {
@@ -544,7 +558,25 @@ index ea1c49b..2f02f0d 100644
          alloc_failed = (mprotect(rdram, mem_size, PROT_READ | PROT_WRITE) == -1);
          if (alloc_failed) {
              munmap(rdram, allocation_size);
-@@ -893,7 +1011,10 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -864,6 +989,17 @@ void recomp::start(const recomp::Configuration& cfg) {
+     recomp::mods::register_config_exports();
+     recomp::mods::register_hook_exports();
+ 
++    // Debug: start the boot-thread chain-history sampler before any game thread
++    // runs, so the whole path into a wedge is recorded (see function_trace.cpp).
++    if (const char* chain_tid = getenv("OGRE_CHAIN_HISTORY")) {
++        ultramodern::debug_chain_history_start(atoi(chain_tid));
++    }
++
++    // Debug: expose the RDRAM base so a diagnostic can dump the whole image
++    // (see app/src/sdl_platform.cpp OGRE_DUMP_RDRAM).
++    rdram_base_for_debug.store(rdram, std::memory_order_relaxed);
++    ultramodern::set_rdram_base(rdram);
++
+     std::thread game_thread{[](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
+         debug_printf("[Recomp] Starting\n");
+ 
+@@ -893,7 +1029,10 @@ void recomp::start(const recomp::Configuration& cfg) {
      
      // Free rdram.
      bool free_failed;
@@ -691,13 +723,17 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..c640055 100644
+index 46aea61..ed1792a 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
-@@ -77,6 +77,34 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
+@@ -77,6 +77,43 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
  void wait_for_external_message(RDRAM_ARG1);
  void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
  
++// The RDRAM base the game runs on (null before recomp::start allocates it).
++uint8_t* get_rdram_base();
++void set_rdram_base(uint8_t* base);
++
 +// Debug: dump the state of known game message queues (used by the VI thread to
 +// diagnose boot deadlocks even when every game thread is blocked).
 +void debug_dump_queue_snapshot(RDRAM_ARG1);
@@ -713,6 +749,11 @@ index 46aea61..c640055 100644
 +
 +// Debug: the last recompiled function a game thread entered (0 if unknown).
 +uint32_t debug_last_func_vram(int tid);
++// Debug: print the thread's shadow call chain (oldest frame first).
++void debug_dump_call_chain(int tid, const char* label);
++// Debug: sample the chain of `tid` and dump the sequence of stack states seen.
++void debug_chain_history_start(int tid);
++void debug_dump_chain_history(void);
 +// Debug: sample last_func_vram[tid] 100x and print the histogram.
 +void debug_sample_hot_loop(int tid);
 +// Debug: dump the allocator-family entry ring (session-18 wedge forensics).
@@ -729,7 +770,7 @@ index 46aea61..c640055 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -170,11 +198,26 @@ void set_callbacks(
+@@ -170,11 +207,26 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -794,7 +835,7 @@ index 3198be0..864705d 100644
      uint32_t sample_count = byte_count / sizeof(int16_t);
  
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index 2f1cfb5..6201858 100644
+index 2f1cfb5..759a07a 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -8,6 +8,7 @@
@@ -903,7 +944,22 @@ index 2f1cfb5..6201858 100644
      ultramodern::enqueue_external_message_src(events_context.dp.mq, events_context.dp.msg, false, ultramodern::EventMessageSource::Dp);
  }
  
-@@ -443,6 +480,10 @@ static const OSViMode dummy_mode = []() {
+@@ -393,7 +430,13 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 }
+             }
+             else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
+-                renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
++                // Session-26 diagnostic: the pre-start dummy workload clears the
++                // screen to black every VI, which hides anything a diagnostic
++                // draws. OGRE_NO_DUMMY_VI=1 skips it so a capture shows the
++                // diagnostic's own frame.
++                if (getenv("OGRE_NO_DUMMY_VI") == nullptr) {
++                    renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
++                }
+             }
+         }
+     }
+@@ -443,6 +486,10 @@ static const OSViMode dummy_mode = []() {
      return ret;
  }();
  
@@ -914,7 +970,7 @@ index 2f1cfb5..6201858 100644
  void set_dummy_vi(bool odd) {
      ViState* next_state = events_context.vi.get_next_state();
      next_state->mode = &dummy_mode;
-@@ -454,15 +495,44 @@ void set_dummy_vi(bool odd) {
+@@ -454,15 +501,44 @@ void set_dummy_vi(bool odd) {
      }
  }
  
@@ -960,7 +1016,7 @@ index 2f1cfb5..6201858 100644
      next_state->mode = mode;
      next_state->control = next_state->mode->comRegs.ctrl;
  }
-@@ -511,7 +581,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
+@@ -511,7 +587,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
  
      if ((func & OS_VI_DITHER_FILTER_OFF) != 0) {
          *control_out &= ~VI_CTRL_DITHER_FILTER_ON;
@@ -972,7 +1028,7 @@ index 2f1cfb5..6201858 100644
      }
  }
  
-@@ -550,10 +623,16 @@ extern "C" void osViSetYScale(float scale) {
+@@ -550,10 +629,16 @@ extern "C" void osViSetYScale(float scale) {
  }
  
  extern "C" PTR(void) osViGetNextFramebuffer() {
@@ -991,10 +1047,10 @@ index 2f1cfb5..6201858 100644
  
 diff --git a/ultramodern/src/function_trace.cpp b/ultramodern/src/function_trace.cpp
 new file mode 100644
-index 0000000..7a7b46d
+index 0000000..105e0a9
 --- /dev/null
 +++ b/ultramodern/src/function_trace.cpp
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,396 @@
 +#include <array>
 +#include <atomic>
 +#include <chrono>
@@ -1013,7 +1069,37 @@ index 0000000..7a7b46d
 +
 +static std::array<std::atomic<uint32_t>, 256> last_func_vram{};
 +
-+// Session-18: allocator entry ring. recomp_trace_func() sees only the function
++// Session-26: per-thread shadow call chain.
++//
++// "last function entered" cannot say where a thread is actually stuck: the
++// recompiled code only reports function ENTRY, so a thread sitting in a leaf
++// helper (e.g. the icache flush func_800901C0) reports the helper, not its
++// caller. The codegen now emits recomp_trace_entry at every function start
++// (with ctx->r31, the address in the caller to return to) and
++// recomp_trace_return before every return, so this is a real live stack: the
++// tail is where the thread is, and every frame names its caller.
++//
++// Threads are native 1:1 with game threads, so only this thread writes its own
++// slot. The read side (VI thread's snapshot, and a foreign thread dumping a
++// blocked thread) tolerates a torn read: it prints a wrong frame, never faults.
++struct CallChainEntry {
++    uint32_t ra;        // return address inside the CALLER (0 = bottom of chain)
++    uint32_t func;      // callee vram
++    const char* name;   // callee name
++    uint64_t seq;       // monotonically increasing entry sequence number
++    uint64_t end;       // seq of the return that left this frame (0 = live)
++};
++
++static constexpr int kCallChainDepth = 64;
++// Padding to a cache line keeps neighbouring threads from bouncing the line.
++struct alignas(64) ThreadCallChain {
++    uint64_t next_seq = 1;  // next entry sequence number for this thread
++    uint32_t depth = 0;     // number of entries stored (may exceed the array)
++    CallChainEntry entries[kCallChainDepth]{};
++};
++static std::array<ThreadCallChain, 256> call_chains{};
++
++// Session-18: allocator entry ring. recomp_trace_entry() sees only the function
 +// address (no registers), but the ENTRY SEQUENCE per thread distinguishes a
 +// genuine malloc->search call chain from a return-address-smash landing
 +// directly in the search. Filtered to the allocator family to bound volume.
@@ -1031,7 +1117,12 @@ index 0000000..7a7b46d
 +           func_vram == 0x80071950 || func_vram == 0x800719E8;
 +}
 +
-+extern "C" void recomp_trace_func(uint8_t *rdram, uint32_t func_vram) {
++// Entry hook: records the executing function, pushes the frame onto the
++// per-thread shadow call chain, and feeds the allocator ring. The generated
++// prologue calls this with ctx->r31, which at function entry still holds the
++// address in the caller that this frame will return to.
++extern "C" void recomp_trace_entry(uint8_t *rdram, uint32_t func_vram, const char* func_name, uint32_t ra) {
++    (void)rdram;
 +    PTR(OSThread) self = ultramodern::this_thread();
 +    if (self == 0) {
 +        return;
@@ -1041,6 +1132,19 @@ index 0000000..7a7b46d
 +        return;
 +    }
 +    last_func_vram[tid].store(func_vram, std::memory_order_relaxed);
++
++    ThreadCallChain& chain = call_chains[tid];
++    uint32_t depth = chain.depth;
++    if (depth < (uint32_t)kCallChainDepth) {
++        CallChainEntry& e = chain.entries[depth];
++        e.ra = ra;
++        e.func = func_vram;
++        e.name = func_name;
++        e.seq = chain.next_seq++;
++        e.end = 0;
++        chain.depth = depth + 1;
++    }
++
 +    if (is_alloc_func(func_vram)) {
 +        uint64_t i = alloc_ring_next.fetch_add(1, std::memory_order_relaxed);
 +        AllocEvent ev;
@@ -1049,6 +1153,38 @@ index 0000000..7a7b46d
 +        ev.tick = i;
 +        alloc_ring[i % alloc_ring.size()] = ev;
 +    }
++}
++
++// Return hook: close the innermost live frame. Walk down from the newest entry
++// so a missed hook (or a tail call) cannot corrupt the chain. func_index is the
++// recompiled function id; it is only used to sanity-check the popped frame when
++// it is cheap to do so.
++extern "C" void recomp_trace_return(uint8_t *rdram, size_t func_index) {
++    (void)func_index;
++    PTR(OSThread) self = ultramodern::this_thread();
++    if (self == 0) {
++        return;
++    }
++    int tid = TO_PTR(OSThread, self)->id;
++    if (tid < 0 || tid >= (int)call_chains.size()) {
++        return;
++    }
++    ThreadCallChain& chain = call_chains[tid];
++    uint32_t depth = chain.depth;
++    if (depth == 0) {
++        return;
++    }
++    if (depth > (uint32_t)kCallChainDepth) {
++        // Saturated (recursion deeper than the array): just account for it.
++        chain.depth = depth - 1;
++        return;
++    }
++    // A function that returns without a matching entry (e.g. tail-call shims)
++    // is possible; the newest live frame may not be ours, in which case leave
++    // the chain alone rather than dropping a live frame.
++    CallChainEntry& e = chain.entries[depth - 1];
++    e.end = chain.next_seq - 1;
++    chain.depth = depth - 1;
 +}
 +
 +// Newest-first dump of the allocator ring for the snapshot (diagnostics only).
@@ -1102,6 +1238,76 @@ index 0000000..7a7b46d
 +        }
 +        std::this_thread::sleep_for(std::chrono::microseconds(1000));
 +    }
++}
++
++// Chain-history sampler (session 26): a dedicated host thread polls the
++// shadow chain of the boot thread and records the LIVE FRAME SEQUENCE (frames
++// that were on the stack at some sample), so a wedge can be read as a path
++// rather than a single state. Controlled by OGRE_CHAIN_HISTORY=<tid>.
++struct ChainEvent {
++    uint64_t tick = 0;
++    uint32_t tid = 0;
++    uint32_t func = 0;
++    const char* name = nullptr;
++};
++static std::array<ChainEvent, 256> chain_hist{};
++static std::atomic<uint64_t> chain_hist_next{0};
++static std::thread chain_sampler_thread{};
++static std::atomic<bool> chain_sampler_started{false};
++
++static void chain_sampler_main(int tid) {
++    std::vector<uint32_t> prev;
++    while (true) {
++        std::vector<uint32_t> cur;
++        if (tid >= 0 && tid < (int)call_chains.size()) {
++            const ThreadCallChain& chain = call_chains[tid];
++            uint32_t depth = chain.depth;
++            if (depth > (uint32_t)kCallChainDepth) depth = (uint32_t)kCallChainDepth;
++            for (uint32_t i = 0; i < depth; i++) {
++                const CallChainEntry& e = chain.entries[i];
++                if (e.end > e.seq) continue;      // dead frame
++                if (e.end != 0) continue;         // closed frame
++                cur.push_back(e.func);
++            }
++        }
++        if (cur != prev) {
++            prev = cur;
++            for (uint32_t f : cur) {
++                uint64_t i = chain_hist_next.fetch_add(1, std::memory_order_relaxed);
++                ChainEvent& ev = chain_hist[i % chain_hist.size()];
++                ev.tick = i;
++                ev.tid = (uint32_t)tid;
++                ev.func = f;
++                ev.name = nullptr;
++            }
++        }
++        std::this_thread::sleep_for(std::chrono::microseconds(200));
++    }
++}
++
++void ultramodern::debug_chain_history_start(int tid) {
++    bool expected = false;
++    if (chain_sampler_started.compare_exchange_strong(expected, true)) {
++        chain_sampler_thread = std::thread{chain_sampler_main, tid};
++        chain_sampler_thread.detach();
++    }
++}
++
++void ultramodern::debug_dump_chain_history(void) {
++    uint64_t next = chain_hist_next.load(std::memory_order_relaxed);
++    uint64_t n = next < chain_hist.size() ? next : chain_hist.size();
++    printf("[snap] chainhistory: last %llu entries (grouped):", (unsigned long long)n);
++    uint32_t last_func = 0;
++    for (uint64_t k = 0; k < n; k++) {
++        uint64_t i = (next - n + k) % chain_hist.size();
++        const ChainEvent& ev = chain_hist[i];
++        if (ev.func != last_func) {
++            printf("\n[snap]   ");
++        }
++        printf(" %08X", ev.func);
++        last_func = ev.func;
++    }
++    printf("\n");
 +}
 +
 +void ultramodern::debug_alloc_trans_start(void) {
@@ -1170,8 +1376,79 @@ index 0000000..7a7b46d
 +    }
 +    printf("\n");
 +}
++
++// Print the live shadow call chain recorded for a thread, outermost frame
++// first. Frames whose `end` sequence is hotter than the frame's own entry are
++// dead (the function returned); only live frames are printed, so the last line
++// is where the thread is right now. Diagnostic only: a torn read from a
++// concurrently-running thread prints a wrong frame or address, never faults.
++// Set once by recomp::start (librecomp) so runtime-side diagnostics can reach
++// the game's memory.
++static std::atomic<uint8_t*> rdram_base{nullptr};
++
++void ultramodern::set_rdram_base(uint8_t* base) {
++    rdram_base.store(base, std::memory_order_relaxed);
++}
++
++uint8_t* ultramodern::get_rdram_base() {
++    return rdram_base.load(std::memory_order_relaxed);
++}
++
++void ultramodern::debug_dump_call_chain(int tid, const char* label) {
++    if (tid < 0 || tid >= (int)call_chains.size()) {
++        return;
++    }
++    const ThreadCallChain& chain = call_chains[tid];
++    uint32_t depth = chain.depth;
++    if (depth > (uint32_t)kCallChainDepth) {
++        printf("[snap] callchain t%d %s: SATURATED (%u deep, array %d)\n",
++               tid, label, depth, kCallChainDepth);
++        depth = (uint32_t)kCallChainDepth;
++    }
++    printf("[snap] callchain t%d %s (%u deep, outermost first):", tid, label, depth);
++    int printed = 0;
++    for (uint32_t i = 0; i < depth; i++) {
++        const CallChainEntry& e = chain.entries[i];
++        // Live iff no return has closed this frame since it was entered.
++        if (e.end > e.seq) {
++            continue;
++        }
++        if (printed % 3 == 0) {
++            printf("\n[snap]   ");
++        }
++        // ra is the address in the CALLER just after its call to this frame.
++        printf(" %s(called from 0x%08X)", e.name != nullptr ? e.name : "?", e.ra);
++        printed++;
++    }
++    if (printed == 0) {
++        printf(" (no live frames)");
++    }
++    printf("\n");
++    // Also print the tail of recent entries by sequence number, so the dump
++    // shows the path a thread *took* to get here, not only where it stopped.
++    uint32_t total = chain.depth < (uint32_t)kCallChainDepth ? chain.depth : (uint32_t)kCallChainDepth;
++    if (total > 0) {
++        printf("[snap]   recent entries (newest last):");
++        uint32_t shown = 0;
++        for (uint32_t i = 0; i < total; i++) {
++            const CallChainEntry& e = chain.entries[i];
++            if (e.end != 0 && e.end < e.seq) {
++                continue;
++            }
++            if (e.end != 0) {
++                continue;   // only frames still on the stack
++            }
++            if (shown >= 12) {
++                break;
++            }
++            printf(" %s(0x%08X)", e.name != nullptr ? e.name : "?", e.ra);
++            shown++;
++        }
++        printf("\n");
++    }
++}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..f869619 100644
+index 9944a02..3ed0278 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -1185,7 +1462,7 @@ index 9944a02..f869619 100644
  
  #include "blockingconcurrentqueue.h"
  
-@@ -37,10 +42,413 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+@@ -37,10 +42,420 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -1356,6 +1633,13 @@ index 9944a02..f869619 100644
 +        } else {
 +            printf("[snap] thread t%d not blocked in mesg (last func 0x%08X)\n", tid,
 +                   ultramodern::debug_last_func_vram(tid));
++        }
++    }
++    // Session-26: the shadow call chain is the block site's real stack; print it
++    // for every thread that is parked so "who called this" is answerable.
++    for (int tid : known_threads) {
++        if (thread_block_kind[tid].load(std::memory_order_relaxed) != (uint32_t)ThreadBlockKind::None) {
++            ultramodern::debug_dump_call_chain(tid, "parked");
 +        }
 +    }
 +    // Dispatcher callback list (D_800B39240): node->[4]->[0] is the callback.
@@ -1600,7 +1884,7 @@ index 9944a02..f869619 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -51,6 +459,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+@@ -51,6 +466,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message(RDRAM_ARG1) {
@@ -1608,7 +1892,7 @@ index 9944a02..f869619 100644
      QueuedMessage to_send;
      external_messages.wait_dequeue(to_send);
      if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -59,6 +468,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -59,6 +475,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
@@ -1616,7 +1900,7 @@ index 9944a02..f869619 100644
      QueuedMessage to_send;
      if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -67,6 +477,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+@@ -67,6 +484,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
      }
  }
  
@@ -1624,7 +1908,7 @@ index 9944a02..f869619 100644
  extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
      OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
      mq->blocked_on_recv = NULLPTR;
-@@ -89,21 +500,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+@@ -89,21 +507,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
      return MQ_GET_COUNT(mq) >= mq->msgCount;
  }
  
@@ -1689,13 +1973,30 @@ index 9944a02..f869619 100644
      }
      
      if (jam) {
-@@ -118,13 +571,19 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,13 +578,36 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
 +    if (mq_ == 0x800E8BBC || mq_ == 0x800E8BF4 || mq_ == 0x800E9BA8 || mq_ == 0x800E8B14 || mq_ == 0x800E8B4C || mq_ == 0x800C6490
 +        || mq_ == 0x800E7988 || mq_ == 0x800E9B88) {
 +        OGRE_TRACE("[ev] T=%llu do_send OK queue=0x%08X msg=0x%08X count=%d/%d\n", (unsigned long long)ultramodern::trace_millis(), (uint32_t)mq_, (uint32_t)msg, MQ_GET_COUNT(mq), mq->msgCount);
++    }
++    // Session-26: these two queues are the ones nothing was ever seen to feed
++    // (0x800C4C28 = the boot worker's wait queue, 0x800B9C40 = the RSP task
++    // queue). Log every first send to them with the sender's call chain.
++    if (mq_ == 0x800C4C28 || mq_ == 0x800B9C40) {
++        static std::atomic<int> c4c28_sends{0};
++        static std::atomic<int> b9c40_sends{0};
++        std::atomic<int>& counter = (mq_ == 0x800C4C28) ? c4c28_sends : b9c40_sends;
++        int n = counter.fetch_add(1, std::memory_order_relaxed);
++        if (n < 4) {
++            printf("[ev] do_send to watched queue 0x%08X msg=0x%08X count=%d/%d (send #%d)\n",
++                   (uint32_t)mq_, (uint32_t)msg, MQ_GET_COUNT(mq), mq->msgCount, n + 1);
++            PTR(OSThread) self = ultramodern::this_thread();
++            if (self != 0) {
++                ultramodern::debug_dump_call_chain(TO_PTR(OSThread, self)->id, "sender of watched queue");
++            }
++        }
 +    }
 +    // Debug: the synthetic PRENMI must reach the VI-manager (0x800E8B84).
 +    if ((uint32_t)msg == 0x29D) {
@@ -1714,7 +2015,7 @@ index 9944a02..f869619 100644
      return true;
  }
  
-@@ -137,11 +596,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +620,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -1749,7 +2050,7 @@ index 9944a02..f869619 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +633,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +657,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.
@@ -2030,7 +2331,7 @@ index f9c0fa1..e585b82 100644
 +    printf("\n");
 +}
 diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
-index 6e3ed18..046727b 100644
+index 6e3ed18..0a406b0 100644
 --- a/ultramodern/src/threads.cpp
 +++ b/ultramodern/src/threads.cpp
 @@ -1,4 +1,7 @@
@@ -2164,7 +2465,27 @@ index 6e3ed18..046727b 100644
  }
  
  void ultramodern::resume_thread_and_wait(RDRAM_ARG OSThread *t) {
-@@ -283,6 +363,20 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+@@ -235,6 +315,19 @@ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
+     OSThread* t = TO_PTR(OSThread, t_);
+     debug_printf("[os] Start Thread %d\n", t->id);
+ 
++    // Diagnostic (session 26): show the call chain that starts each game thread
++    // and the function it will run, so the thread map is read off the log
++    // instead of guessed from disassembly.
++    if (ultramodern::debug_traces_active()) {
++        PTR(OSThread) self = ultramodern::this_thread();
++        printf("[thread] osStartThread t%d pri=%d starter=t%d\n",
++               t->id, t->priority,
++               self == 0 ? -1 : TO_PTR(OSThread, self)->id);
++        if (self != 0) {
++            ultramodern::debug_dump_call_chain(TO_PTR(OSThread, self)->id, "starting thread");
++        }
++    }
++
+     // If this is a game thread, insert the new thread into the running queue and then check the running queue.
+     if (thread_self) {
+         ultramodern::schedule_running_thread(PASS_RDRAM t_);
+@@ -283,6 +376,20 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
      }
  }
  

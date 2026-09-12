@@ -61,24 +61,46 @@ On first run the app:
 
 If no ROM path is given, the app looks for the stored ROM in the config dir.
 
-## Scripted runs
+## Scripted runs and diagnostics
 
-Two environment variables make a run self-driving and bounded, for measurements
-and captures without a human at the keyboard (see `docs/DECISIONS.md`,
-session 25). Both default to 0 (off).
+Environment variables make a run self-driving and bounded, for measurements and
+captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25
+and 26). All default to off.
 
 | Variable | Effect |
 |---|---|
 | `OGRE_TAP_MS=<n>` | controller 0 presses Start for 150 ms out of every `n` ms (the native equivalent of the web probes' Enter tap) |
-| `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function each game thread entered and exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
+| `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces (very chatty) |
+| `OGRE_DUMP_RDRAM=<path>` | with `OGRE_EXIT_AFTER_MS`, write the whole 8 MiB RDRAM image for offline analysis |
+| `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
+| `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe |
+| `OGRE_SYNTH_AT_MS=<n>` / `OGRE_SYNTH_PERIOD=<n>` | when the probe first submits, and how many VIs between re-submits (default 30; 0 = once) |
+| `OGRE_NO_DUMMY_VI=1` | skip the pre-start dummy VI workload (it clears the screen black every VI and would hide a diagnostic draw) |
 
 ```sh
+# a bounded run with taps, and the per-thread call chains
 OGRE_TAP_MS=5000 OGRE_EXIT_AFTER_MS=60000 ./build-app/ogrebattle64 > /tmp/ogre.out 2>&1
 grep -A 12 "per-thread last" /tmp/ogre.out
+
+# where the boot thread actually goes (the session-26 measurement)
+OGRE_CHAIN_HISTORY=3 OGRE_EXIT_AFTER_MS=3000 ./build-app/ogrebattle64 2>&1 | \
+  sed -n '/chainhistory/,/callchain t1/p'
+
+# renderer-path probe: build and submit a real display list while the boot is stuck
+OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=1000 OGRE_SYNTH_PERIOD=30 \
+  OGRE_EXIT_AFTER_MS=20000 ./build-app/ogrebattle64
 ```
 
-The black canvas that a stalled boot produces is the game's idle trajectory (it
+### Reading a dump
+
+The runtime byte-reverses RDRAM (see `recomp.h`): the 32-bit word at game address
+`a` is a **little-endian** word at file offset `a - 0x80000000`, and the logical
+byte at `a` is at `(a ^ 3) - 0x80000000`. So a Python read is
+`struct.unpack_from('<I', data, a & 0x1FFFFFFF)[0]` for words and
+`data[(a & 0x1FFFFFFF) ^ 3]` for logical bytes.
+
+The black canvas a stalled boot produces is the game's idle trajectory (it
 submits only its boot blanking display list), not a renderer failure.
 
 ## Config directory

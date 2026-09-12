@@ -119,6 +119,7 @@ else()
     set(OGRE_APP_SOURCES
         src/main.cpp
         src/sdl_platform.cpp
+        src/synth_frame.cpp
         src/rsp.cpp
         src/overlays.cpp
         src/gbi.cpp

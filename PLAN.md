@@ -266,25 +266,24 @@ hardware. RT64 remains the primary native renderer throughout. See
     display list, so the canvas stays black unless input is fed (the web probes
     press Enter every 5 s for exactly this reason). See `docs/DECISIONS.md`
     (session 24 native bring-up).
-  - 🚧 **Native runs drive themselves; the idle trajectory is localised (session
-    25)**: `OGRE_TAP_MS` makes controller 0 press Start every N ms and
-    `OGRE_EXIT_AFTER_MS` bounds a run and prints (then exits 0 with) the last
-    recompiled function each game thread entered, so a native measurement no
-    longer needs a human at the keyboard - and deliberately skips the graceful
-    unwind, which tears threads down mid-call and segfaults intermittently. With
-    that: (1) the taps reach the game (they move
-    `bootstate` from `0xBF880415` to `0x00000060` and start the audio path -
-    1085 type-2 RSP tasks in 60 s) but produce no second display list; (2) the
-    web build failed to reach one too on 4/4 `progress.cjs` boots this session,
-    so the wall is a **game-side boot race, shared by both platforms**, not
-    input or a renderer; (3) `OGRE_DEBUG_TRACES=1` shows only **five** queue
-    sends in 25 s - the frame message `0x800E7D90` is delivered once, and
-    `func_8008AFE0` (thread 4) blocks on its own queue `0x800C4C28` which nobody
-    ever sends to, while the RSP task thread (t16, `func_80089358`) stays
-    resumed-3 forever on `0x800B9C40`. Gfx tasks come from those RSP threads,
-    which is why exactly one display list exists. Next: a controlled taps-on/off
-    A/B to separate input from the race, then identify who owes `0x800C4C28` and
-    `0x800B9C40` a message. See `docs/HANDOFF-2026-09-12-session25.md`.
+  - 🚧 **The boot thread's real stack is now readable, and the renderer half is
+    proven (session 26)**: the previous "t4 blocks on `0x800C4C28`" was an
+    artifact of the snapshot view - that queue *is* fed (the send trace shows
+    `func_800891A0 → 0x800C4C28` dozens of times). The recompiled code now emits
+    an entry hook (with `ctx->r31`, the caller's return address, and the
+    function's name) and a return hook, and the runtime keeps a per-thread
+    shadow call chain; `OGRE_CHAIN_HISTORY=3` shows the boot thread going
+    `func_80071EB0 → func_8008A1B0 → func_80089660 → func_80089804` and never
+    returning from the **frame submit**. Two further results: the session-15
+    `func_80089A10_recomp` "yielding spin" fix is **dead code** (the recompiled
+    spin is a strong symbol and direct calls link to it, so the boot thread
+    really does execute `while (D_800E79A4 != 0);` in a cooperative scheduler);
+    and a hand-built F3DEX2 display list (`OGRE_SYNTH_FRAME=1`,
+    `app/src/synth_frame.cpp`) now reaches `send_dl`, where RT64 parses and
+    executes every command (seven `setFillColor`s, seven `fillRect`s with the
+    right colour image) - the window still shows black, so the remaining gap is
+    presentation, not parsing or drawing. See
+    `docs/HANDOFF-2026-09-12-session26.md`.
   - ✅ **Game audio is muted by default (session 22)**: the audio microcode is
     not emulated (the RSP audio task is only auto-completed), so what the game
     hands the AI interface is garbage and playing it is a wall of screeching.

@@ -5,6 +5,94 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 26) — a real call stack for game threads, and the renderer half proven
+
+### Context
+
+Session 25 concluded that the wall was `func_8008AFE0` (thread 4) blocking on
+`0x800C4C28`, a queue "nothing ever sends to". That came from a snapshot that
+knows only *block kind + resume count + last function entered* — and "last
+function entered" is the callee, not the caller, so it cannot say where a thread
+actually is. This session replaced the diagnostic and re-answered the question.
+
+### Decision: measure the stack, not the last entry (N64Recomp codegen + runtime)
+
+The code generator now emits
+
+```c
+recomp_trace_entry(rdram, 0x80089804, "func_80089804", (uint32_t)ctx->r31);
+```
+
+in every function prologue and `recomp_trace_return(rdram, <func_index>);` before
+every return. At prologue time `ctx->r31` still holds the caller's return
+address (the function has not saved it yet), so each frame knows both its own
+name and the call site that created it. The runtime keeps a per-thread shadow
+chain of live frames (`function_trace.cpp`), so entry/return pairs make a *stack*
+rather than an ever-growing ring of entries.
+
+Consequences that made the session:
+
+* the boot thread's live chain is stable across snapshots and readable;
+* `debug_dump_call_chain()` also runs for every parked thread in the VI
+  snapshot, and for all threads in the `OGRE_EXIT_AFTER_MS` dump;
+* `OGRE_CHAIN_HISTORY=<tid>` records the ordered sequence of live-frame sets, so
+  a wedge reads as a path (the frames it passed through), not a single state.
+
+The alternative — logging `[func] enter/exit` lines — was rejected: the VI
+snapshot and the game threads write the same stream and the interleaving destroys
+the ordering that is the whole point.
+
+### Finding: the earlier localisation was wrong
+
+The send trace (`do_send`) shows `func_800891A0 → mq=0x800C4C28 msg=0x800E8B10`
+dozens of times, and t4's chain shows it parked in `func_8008AFE0 →
+func_80089054`. `func_80089054` is the *retrace-subscriber registration*
+(`asm/1060.s` 0x80089054), so t4 is a per-frame service thread, not the wall.
+
+The boot thread (`func_8007F8E4` → `osCreateThread(t3, func_80071EB0)`), by
+contrast, goes `func_80071EB0 → func_8008A1B0 → {func_80089AB0 → func_80089A30}
+→ func_80089660 → func_80089804` and never returns from `func_80089804`, the
+frame-submit function. That is the handshake the boot is waiting on.
+
+### Finding: the runtime's `func_80089A10` override is dead code
+
+`librecomp/src/recomp.cpp`'s `func_80089A10_recomp` (a yielding spin) is never
+called. The recompiled `_func_80089A10` is a strong symbol defined in
+`funcs_5.c.o`; direct calls link to it, and only *function-pointer* lookups go
+through the overlay map that the runtime can patch (`get_function`). Session 15
+recorded the override as "the fix that unblocked the boot"; it was inert, which
+is why the stall kept surviving every "fix". This defines the actual boot gate:
+a high-priority thread executing `while (D_800E79A4 != 0);` with no yield, in a
+cooperative scheduler whose only preemption is voluntary.
+
+### Decision: a synthetic display list as a renderer-path probe
+
+`app/src/synth_frame.cpp` (`OGRE_SYNTH_FRAME=1`) builds a small F3DEX2 list in
+RDRAM and submits it through the same path the game uses
+(`ultramodern::submit_rsp_task` from the VI callback). It exists because "the
+canvas is black" cannot distinguish "the renderer never got a list" from "the
+renderer dropped it", and because a stalled boot only ever submits its blanking
+list. Three traps are documented in the file: `TO_PTR` sign-extends `int32_t`
+pointers (so KSEG0 only), `OSTask::t.data_ptr` must be a *physical* offset
+(`send_dl` masks with `0x3FFFFFF`), and RT64's fill path needs a scissor set or
+the rect never reaches `drawColorRect`.
+
+Result: the probe reaches `send_dl` and RT64 executes every command (verified by
+instrumenting `setFillColor`/`fillRect`). The captured window is still black, so
+the open gap is presentation, not display-list handling — a much narrower claim
+than "the renderer is not proven".
+
+### Finding: use a memory dump, not snapshot words
+
+`OGRE_DUMP_RDRAM=<path>` writes the whole 8 MiB image at the scripted exit.
+Reading a handful of words through the snapshot repeatedly produced
+contradictory readings during this session; the dump settles questions offline in
+one shot. Note the byte rules (`recomp.h`): the word at game address `a` is a
+little-endian word at file offset `a - 0x80000000`, and the logical byte at `a`
+is at `(a ^ 3) - 0x80000000`.
+
+---
+
 ## 2026-09-12 (session 25) — the native app drives itself, and the idle trajectory is reproduced + localised on it
 
 ### Context
