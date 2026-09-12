@@ -330,26 +330,55 @@ hardware. RT64 remains the primary native renderer throughout. See
     pointers, `flag=255` on 0-10, and record 10 animating (`x=124 y=-144`).
     `OGRE_SCENE_TRACE=1` shows this live. See
     `docs/HANDOFF-2026-09-12-session30.md`.
+  - ✅ **The intro no longer crashes; the game renders continuously (session
+    31)**: the `func_801A1FCC` SIGSEGV was a stack-frame defect, not a missing
+    scene. Two N64Recomp bugs, both now fixed:
+    1. a `jal`/`j` into a body extended by `function_sizes` was still compiled
+       and called as a standalone symbol, so `func_80198D28` (a false split
+       inside `func_801989AC`) ran `func_801989AC`'s epilogue without its
+       `0xB8` frame — leaking 0x10-0x38 of stack per call and corrupting every
+       caller's saved `$s3` (the crash's `$s3 = 0x80000318`). Such targets now
+       tail-call the containing function (24 sites redirected);
+    2. a body whose last instruction is not a control transfer
+       (`static_16_801984BC` → the shared epilogue `static_16_801985D8`) ran
+       off its end instead of tail-calling the next function. Now emitted as a
+       tail call + `return` (1726 sites), which unwinds the frame.
+    Session 30's over-wide `func_80197C94` override (`0x948`, which swallowed
+    the real function `func_801980A0`) is also corrected to `0x40C`. Result:
+    **8s run exits 0 with 205 display lists** (was SIGSEGV at display list 1,
+    t≈845ms), a 15s run reaches 395 display lists at t=14.2s (~28fps), and the
+    per-frame lists carry real geometry (12-17 triangles, 27-32 `SETTIMG`).
+    See `docs/HANDOFF-2026-09-12-session31.md`.
+  - ✅ **A visual proof of the intro exists (session 31)**:
+    `docs/proofs/native-intro-impact.png` (t≈3.3s: twelve soldiers, impact
+    smoke, the block falling between them) and
+    `docs/proofs/native-intro-title.png` (t≈8.4s: the N64 logo over the title
+    screen), both swap-chain readbacks
+    (`OGRE_CAPTURE_PRESENT=… OGRE_CAPTURE_AFTER=…`). Confirmed by eye: soldiers,
+    falling block, block → N64 logo, title screen.
+  - ⬜ **The late crash is a streamed-overlay stub (session 31)**: an unattended
+    96.7s run reaches display list 2770, then
+    `streamed function stub called @ 0x801AD5C0 (not yet loaded)` and
+    `Failed to find function at 0x00000000` abort the process (exit 134, from
+    `func_80076AE8` in the main loop). Register the remaining overlay-C
+    addresses in `app/src/overlays.cpp` (or determine whether `0x801AD5C0` is a
+    different bank) and re-run. This is the Phase-4 overlay boundary, not a
+    session-31 regression.
+  - ⬜ **The "Licensed by Nintendo" / ATLUS / QUEST screens render only their
+    upper-left quarter, stretched (session 31)**: the N64 logo and title screen
+    are correct, so this is specific to those full-screen stills — suspect the
+    `SETTIMG`/`SETTILE` source size, a quartered texrect destination, or VI
+    `width`/`hRegion` being taken at half size.
   - ⬜ **19 more splat split symbols in overlay C (session 30)**: the same class
     of bug (a symbol cut out of the middle of a logical function makes the
     compiled function return without unwinding its frame, clobbering the
     caller's `$sp`/s-registers). All are now covered by `function_sizes`
-    overrides, whose sizes were derived by fixpoint over "fall-through absorbs
-    the next symbol" and "branch/delay-slot/forward-target extension".
-  - ⬜ **N64Recomp cuts a function that falls through into a discovered shared
-    epilogue (session 30, the new wall)**: `func_801A1FCC` (state 9 draw) still
-    SIGSEGVs, now later and for a different reason - its `$s3` becomes `0x310`.
-    Chain: `func_801A1170` → `func_80198ECC` → `func_801989AC` (whose `$s3`
-    restore reads the wrong slot because `$sp` moved by 0x10) →
-    `func_80197C94`, whose shared epilogue `.L801985D8` is a *discovered*
-    function (8 jump sites), so extending the symbol cannot pull it in; the
-    taken path `.L801981F0 → .L801984BC` falls through into
-    `static_16_801985D8` and N64Recomp emits `static_16_801984BC` with no
-    `return`, dropping the epilogue and leaking 0x10 of stack per call.
-    Fix belongs in `tools/N64Recomp/src/recompilation.cpp`: when a function body
-    ends without a control transfer and the next address is a known function,
-    emit a tail call + `return` (mirror of the existing `print_branch`
-    tail-call handling). See `docs/HANDOFF-2026-09-12-session30.md` §3.
+    overrides, and since session 31 N64Recomp redirects calls to those split
+    symbols back into the containing body, so the workaround is enforced
+    instead of relying on the override alone.
+  - ✅ **N64Recomp cuts a function that falls through into a discovered shared
+    epilogue (session 30's wall) — fixed in session 31**: see the session-31
+    entry above and `docs/HANDOFF-2026-09-12-session31.md` §2.
   - ⬜ **The native port needs `OGRE_NO_AUDIO=1` on hosts where
     `SDL_OpenAudioDevice` blocks (session 30, environment)**: the runtime calls
     it from the game start thread's `preinit`, so a blocking open wedges the

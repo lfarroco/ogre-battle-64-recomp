@@ -5,6 +5,67 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 31) — a size override only resizes a symbol; calls into it must be redirected
+
+### Finding: the intro crash was a split symbol called without its frame
+
+The session-30 wall (`SIGSEGV` in `func_801A1FCC`, `$s3 = 0x80000318`) was
+reproduced and instrumented frame-by-frame. The saved `$s3` slot held
+`0x80000310`: the high halfword of `0x800A81C0` had been overwritten by a 16-bit
+store at the *wrong stack depth*, and `$sp` came back `0x10`-`0x38` high after
+each `func_801A1170` call.
+
+`func_801989AC` has `function_sizes = 0x520` (its real epilogue at `0x80198EC4`
+restores `$s3` from `0x9C($sp)` and adds `0xB8`), so the `func_80198D28` symbol
+inside it is a false split. But `func_80198D28` was *also* emitted and *called*
+as a standalone function: its first instruction is the label `L_80198B40` and it
+ends with `func_801989AC`'s epilogue, so it computed with a frame that was never
+allocated and restored `$ra`/`$s3` from garbage. That is the leak the whole call
+chain inherited.
+
+**Decision:** N64Recomp now treats a `jal`/`j` into a body extended by
+`function_sizes` as a jump into that body, never as a call to the split symbol.
+`Function::has_size_override` is set in `elf.cpp`, and `recompilation.cpp`
+resolves such targets to the innermost containing function
+(`find_containing_size_override`), emitting a tail call to it (its prologue sets
+up the frame the target expects and its epilogue unwinds it) instead of
+compiling/calling the split symbol again. 24 sites redirect at recomp time.
+This makes the `function_sizes` workaround self-enforcing: an override is now
+enough on its own, with no per-symbol hand patching.
+
+**Also decided:** session 30's `func_80197C94 = 0x948` override is wrong and is
+back to `0x40C`. `0x948` swallowed the real function `func_801980A0` (own
+prologue and epilogue), turning it into a ~0x10-byte stub; the genuine
+cross-function jumps at `0x80197C94`'s tail (`j 0x801984BC` / `j 0x801985D8`)
+are shared code and are handled by the fall-through fix below, not by moving the
+boundary.
+
+### Finding: a body that runs off its end never unwinds its frame
+
+`static_16_801984BC` (reached by `j 0x801984BC`) ends with a plain `sw` and
+falls through into the discovered static `static_16_801985D8` (the shared
+epilogue `lw $s3, 0xC($sp) ... jr $ra / addiu $sp, 0x10`). N64Recomp emitted the
+store and closed the function, so the `0x10` frame leaked per call.
+
+**Decision:** when a function body's last instruction is not a control transfer
+(`j`/`b`/`jr`/`syscall`), emit the tail call the fall-through performs plus
+`return`: call the body at the next address when one is known, otherwise
+register that address as a static in the same list `print_branch` uses and call
+it by name. 1726 sites were emitted; they are unreachable wherever the preceding
+instruction already returned, and real where a body genuinely ran off its end.
+
+**Consequence:** with both fixes the intro no longer crashes. An 8s run exits 0
+with 205 display lists (was SIGSEGV at display list 1, t~845ms); a 15s run
+reaches 395 display lists at t=14.2s (~28fps, the game's intended 30fps); the
+per-frame lists carry 12-17 triangles and 27-32 `SETTIMG`.
+`docs/proofs/native-intro-impact.png` (swap-chain readback at t~3.3s) shows the
+twelve soldiers, the impact smoke and the block falling between them.
+`OGRE_CAPTURE_PRESENT=<path> OGRE_CAPTURE_AFTER=<n>` writes
+`<path>.<n>.ppm`; do **not** combine it with `OGRE_PRESENT_ALWAYS=1`, which
+captures a black frame (the session-27 RDRAM-vs-render-target finding).
+
+---
+
 ## 2026-09-12 (session 29) — the frame rate was a recompiler poll-loop false positive
 
 ### Finding: `yield_self` in ordinary loops

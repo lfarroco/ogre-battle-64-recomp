@@ -22,6 +22,15 @@ functions_per_output_file = 100
 function_sizes = [
     { name = "func_8019ABC4", size = 0x368 },
     { name = "func_8019A1B4", size = 0xA10 },
+    # func_80197C94 jumps to 0x801985D8, which lies inside the *next* real
+    # function (func_801980A0). Session 30 "fixed" that by extending
+    # func_80197C94 to 0x948, but that swallows func_801980A0 whole: the latter's
+    # body and epilogue (0x801980A0..0x801985F0) were compiled as internal labels
+    # and func_801980A0 itself became a ~0x10-byte stub, so every caller returned
+    # with an unbalanced frame (session 31: $s3 = 0x310 -> SIGSEGV in
+    # func_801A1FCC). 0x40C is the real size (the gap to the next symbol); the
+    # 0x801985D8 epilogue is reached by tail-calling the discovered static there.
+    { name = "func_80197C94", size = 0x40C },
     { name = "func_801A1034", size = 0x13C },
     { name = "func_801989AC", size = 0x520 },
     { name = "func_8019A7C0", size = 0x404 },
@@ -33,7 +42,6 @@ function_sizes = [
     { name = "func_801AFAF4", size = 0x5E0 },
     { name = "func_801B00D0", size = 0x544 },
     { name = "func_801B7F14", size = 0x154 },
-    { name = "func_80197C94", size = 0x948 },
     { name = "func_8019C5D4", size = 0x5D8 },
     { name = "func_801AB568", size = 0x1E0 },
     { name = "func_801AB740", size = 0x30 },
