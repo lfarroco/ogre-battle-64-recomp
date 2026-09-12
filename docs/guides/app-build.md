@@ -70,7 +70,7 @@ session 25). Both default to 0 (off).
 | Variable | Effect |
 |---|---|
 | `OGRE_TAP_MS=<n>` | controller 0 presses Start for 150 ms out of every `n` ms (the native equivalent of the web probes' Enter tap) |
-| `OGRE_EXIT_AFTER_MS=<n>` | the main thread requests exit after `n` ms, and the app prints the last recompiled function each game thread entered |
+| `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function each game thread entered and exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces (very chatty) |
 
 ```sh

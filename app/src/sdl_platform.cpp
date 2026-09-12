@@ -174,17 +174,16 @@ void open_audio(Platform& platform, uint32_t frequency) {
 }
 
 void pump_sdl_events(Platform& platform, bool* quit) {
-    // Bounded run: OGRE_EXIT_AFTER_MS requests exit from the main thread, the
-    // same place SDL_QUIT is handled.
+    // Bounded run: OGRE_EXIT_AFTER_MS ends the process from the main thread.
     if (platform.exit_after_ms != 0 && platform_millis(platform) >= platform.exit_after_ms) {
-        fprintf(stderr, "[SDL] exit_after_ms=%u elapsed, requesting quit\n", platform.exit_after_ms);
+        const uint32_t budget = platform.exit_after_ms;
         platform.exit_after_ms = 0;
-        *quit = true;
         // The queue snapshot's per-thread view is a block *kind* and a resume
         // count, which cannot say where a thread that is simply not being
         // scheduled is sitting. N64Recomp calls recomp_trace_func() at every
         // function entry, so the runtime knows the last function each game
         // thread entered; print those once, at the moment a scripted run ends.
+        fprintf(stderr, "[SDL] exit_after_ms=%u elapsed, stopping\n", budget);
         fprintf(stderr, "[SDL] per-thread last recompiled function:\n");
         for (int tid = 1; tid < 32; tid++) {
             const uint32_t func = ultramodern::debug_last_func_vram(tid);
@@ -193,6 +192,16 @@ void pump_sdl_events(Platform& platform, bool* quit) {
             }
         }
         fflush(stderr);
+        // A bounded run is a measurement: exit immediately with a success code
+        // instead of unwinding. The graceful path tears down the renderer and
+        // the runtime's worker threads while the game's are still mid-call (the
+        // stalled boot leaves t1 inside a PI busy-wait), which segfaults
+        // intermittently - observed both with and without debug traces. Nothing
+        // in a scripted run needs the unwind, and the 100 ms lets the VI thread
+        // finish the snapshot it may be printing concurrently.
+        ultramodern::sleep_milliseconds(100);
+        fflush(nullptr);
+        _Exit(EXIT_SUCCESS);
     }
 
     SDL_Event event;

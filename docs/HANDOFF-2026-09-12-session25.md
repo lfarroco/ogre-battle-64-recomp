@@ -9,10 +9,10 @@ measurement could be repeated without a human at the keyboard.
 This session removed that blocker and used it:
 
 1. **The native app drives itself.** `OGRE_TAP_MS=<n>` presses Start for 150 ms
-   out of every `n` ms (the native equivalent of the web harness's Enter tap),
-   `OGRE_EXIT_AFTER_MS=<n>` bounds a run, and at exit the app prints the last
-   recompiled function each game thread entered. Both default to 0, so
-   interactive runs are unchanged.
+   out of every `n` ms (the native equivalent of the web harness's Enter tap);
+   `OGRE_EXIT_AFTER_MS=<n>` bounds a run deterministically - at that point the
+   app prints the last recompiled function each game thread entered and exits
+   0. Both default to 0, so interactive runs are unchanged.
 2. **The idle trajectory is reproduced on native and localised.** With traces
    on, a 25 s run makes only **five** successful message-queue sends. The frame
    message `0x800E7D90` is delivered once; `func_8008AFE0` (thread 4) blocks
@@ -35,15 +35,23 @@ This session removed that blocker and used it:
 returns `N64_BTN_START` for the first 150 ms of each window and logs each press;
 it is OR-ed into `keyboard_buttons()`, so it contributes **button state only**
 and never synthesises SDL events - the main-thread-only `SDL_PumpEvents`
-constraint from session 24 stays intact. `pump_sdl_events` (main thread) turns
-`exit_after_ms` into a quit request and prints the per-thread table on the way
-out:
+constraint from session 24 stays intact. `pump_sdl_events` (main thread) prints
+the per-thread table, waits 100 ms (the VI thread may be mid-snapshot) and calls
+`_Exit(EXIT_SUCCESS)`:
 
 ```
+[SDL] exit_after_ms=8000 elapsed, stopping
 [SDL] per-thread last recompiled function:
 [SDL]   t1   last func 0x80099740
 ...
 ```
+
+The hard exit is deliberate. Letting `ultramodern::quit()` unwind instead tears
+down the renderer and the runtime's workers while the game's threads are
+mid-call (a stalled boot leaves t1 inside a PI busy-wait), and that segfaults
+intermittently - observed both with and without `OGRE_DEBUG_TRACES`. A scripted
+run wants the log and an exit code, not the unwind; interactive runs (no
+`OGRE_EXIT_AFTER_MS`) still quit the normal way.
 
 ### `docs/DECISIONS.md`, `PLAN.md` — session-25 entries
 
@@ -109,8 +117,14 @@ Reading:
   (`func_80089054` with type 3), then loops on `osRecvMesg(0x800C4C28, flags=1)`
   forever. It re-blocks ~45 times/s and **nothing ever sends to that queue**
   (0 sends in 25 s of trace). Its two message callbacks are `D_800AA090` /
-  `D_800AA094`, invoked for message halfwords `1` / `2`; the caller that should
-  post them is the next thing to identify.
+  `D_800AA094`, invoked for message halfwords `1` / `2`.
+
+  Its thread is created by `func_8008B0B0` (`osCreateThread` priority 0x32 =
+  50), and that creator has exactly one caller: `func_8008A1B0`, called from
+  `func_80071EB0` (`asm/1060.s` 0x80071FEC region) - the same boot/init function
+  that clears `D_800AEF98`. So the worker is started *during boot init* and is
+  never fed: the caller that should post its `1`/`2` messages is the next thing
+  to identify.
 
 ### Correction: `[snap]`'s `bootstate` is a word read of a byte
 
@@ -126,7 +140,7 @@ value means nothing. The same caution applies to the rest of that line.
 |---|---|
 | `cmake --build build-app -j 8` | clean; only the pre-existing sdl2-compat deployment-target link warning |
 | interactive run (no env vars) | unchanged: `api=3`, window opens, DL 1, stall |
-| `OGRE_EXIT_AFTER_MS` | exits on time and prints the per-thread table |
+| `OGRE_EXIT_AFTER_MS` | exits 0 on time and prints the per-thread table (3/3 runs; the graceful path segfaulted intermittently, which is why the scripted exit is a hard one) |
 | `screencapture -l <window id>` | works; find the id with the Swift snippet below |
 | `progress.cjs --attempts 4 --secs 70` | `NO PROGRESS: best maxTasks=1` (exit 2) |
 

@@ -24,10 +24,14 @@ A scripted native run is now self-driving, with two env vars read once in
 * `OGRE_TAP_MS=<n>` — controller 0 presses Start for the first 150 ms of every
   `n` ms window, contributing **button state only**. This mirrors the web
   harness's Enter tap so the two platforms' input is the same in kind.
-* `OGRE_EXIT_AFTER_MS=<n>` — the main thread requests exit after `n` ms, so a
-  run is bounded. At that moment the app also prints the last recompiled
-  function each game thread entered (`ultramodern::debug_last_func_vram`), which
-  turns a stalled run's stderr into a per-thread location table.
+* `OGRE_EXIT_AFTER_MS=<n>` — the main thread prints the per-thread last-function
+  table after `n` ms and exits 0 immediately (`_Exit`, after a 100 ms grace so
+  the VI thread can finish a snapshot it is printing). The graceful path
+  (`ultramodern::quit()` → `recomp::start` unwinding) instead tears down the
+  renderer and the runtime's workers while the game's threads are mid-call,
+  which segfaults intermittently (seen with and without
+  `OGRE_DEBUG_TRACES`); a scripted run wants the log and an exit code, not the
+  unwind.
 
 Two alternatives were rejected:
 
@@ -100,6 +104,9 @@ What this establishes:
   queue (`0x800B9C40`) and never runs its `osSpGetStatus` → submit path again.
   Since gfx tasks are submitted by these RSP threads, that is why exactly one
   display list exists.
+* `func_8008AFE0`'s thread is created from `func_80071EB0` (the boot/init
+  function, via `func_8008A1B0` → `func_8008B0B0`), so the worker exists from
+  boot init and is simply never fed.
 * t16's resume counter is stuck at 3 across every snapshot (`t17=3`,
   `t16=3`), i.e. it has not been scheduled since boot.
 

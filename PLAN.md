@@ -268,9 +268,11 @@ hardware. RT64 remains the primary native renderer throughout. See
     (session 24 native bring-up).
   - 🚧 **Native runs drive themselves; the idle trajectory is localised (session
     25)**: `OGRE_TAP_MS` makes controller 0 press Start every N ms and
-    `OGRE_EXIT_AFTER_MS` bounds a run, so a native measurement no longer needs a
-    human at the keyboard; at exit the app prints the last recompiled function
-    each game thread entered. With that: (1) the taps reach the game (they move
+    `OGRE_EXIT_AFTER_MS` bounds a run and prints (then exits 0 with) the last
+    recompiled function each game thread entered, so a native measurement no
+    longer needs a human at the keyboard - and deliberately skips the graceful
+    unwind, which tears threads down mid-call and segfaults intermittently. With
+    that: (1) the taps reach the game (they move
     `bootstate` from `0xBF880415` to `0x00000060` and start the audio path -
     1085 type-2 RSP tasks in 60 s) but produce no second display list; (2) the
     web build failed to reach one too on 4/4 `progress.cjs` boots this session,
