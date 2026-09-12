@@ -37,6 +37,25 @@ reaches RT64. Verified: the three publisher screens render full-frame
 (`docs/proofs/native-{licensed,atlus,quest}-screen.png`), the intro/title are
 unchanged, and a 15s run still reaches ~400 display lists (~28fps).
 
+### Finding: the 0.2-0.5s of noise before each still was an unbridged `osViBlack`
+
+Once the mode switch worked, the 320x240 → 640x480 transition still showed a
+short burst of colour static (presents 276–278 in a capture from present 250):
+the VI is already hi-res while the new 640x480 framebuffer is only partly drawn.
+The game blanks the screen for exactly that window —
+`func_80093CB0` = `osViSetMode(hi-res)` + `osViBlack(1)`, and `func_800942C0` =
+`osViBlack(0)` + `osViSwapBuffer` when the new frame is ready — but `osViBlack`
+was another unnamed libultra function (`func_80095B30`, the real one: it
+tests/sets `__osViNext->state` bit `0x20`). Its neighbour `func_80095780` is
+`osViFade` (stores the fade level at `+0x24`, sets bit `0x4`).
+
+**Decision:** `osViBlack = 0x80095B30` (already in `reimplemented_funcs`, with
+`osViBlack_recomp` in `librecomp/src/vi.cpp`). `update_vi` sets `hStart = 0`
+while `VI_STATE_BLACK` is set, RT64's `VI::visible()` goes false, and the
+presenter clears rather than uploading stale RDRAM. `osViFade` is deliberately
+left verbatim for now (no runtime implementation; `update_vi` still has
+`TODO implement osViFade`), so fades snap instead of ramping.
+
 ### Finding: the late crash is a streamed-overlay *bank swap*, not a missing overlay-C address
 
 The ~95s abort (`streamed function stub called @ 0x801AD5C0` then

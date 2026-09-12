@@ -29,6 +29,13 @@ osCartRomInit = 0x8008BD30;         // type:func
 // RDP's 640x480 framebuffer, stretched over the screen.
 __osViSwapContext = 0x80095820;     // type:func  (stubbed - the runtime's VI thread does the swap)
 osViSetMode = 0x800955C0;           // type:func
+// func_80095B30 is osViBlack (tests/sets __osViNext->state bit 0x20). The game
+// blanks the screen around a mode switch (func_80093CB0: osViSetMode + blank,
+// then osViBlack(0) + osViSwapBuffer when the new frame is ready); without the
+// bridge the runtime kept scanning out the stale/partially-drawn framebuffer, so
+// the 320x240 -> 640x480 switch showed ~0.2s of noise before the "Licensed by
+// Nintendo" still.
+osViBlack = 0x80095B30;             // type:func
 osViSetSpecialFeatures = 0x80095610; // type:func
 osDpSetNextBuffer = 0x8009A630;     // type:func
 osGetCount = 0x8009A6E0;            // type:func

@@ -103,6 +103,35 @@ the geometry changing:
 (The `OGRE_TRACE` macro additionally requires `OGRE_DEBUG_TRACES=1`; `OGRE_DEBUG_VI`
 alone only opens the `debug_trace_vi()` gate.)
 
+### 1d. The 0.2-0.5s of noise before each still: `osViBlack` was also unbridged
+
+Fixing the mode alone left a short burst of colour noise on screen right before
+the "Licensed by Nintendo" still (presents 276-278 in a capture starting at 250;
+the user reported ~0.2-0.5s). That is the 320x240 → 640x480 switch itself: the
+VI is already hi-res while the new 640x480 framebuffer is only partly drawn, so
+the presenter scans out stale/partial RDRAM.
+
+The game does blank the screen for exactly this window — `func_80093CB0` does
+`osViSetMode(hi-res)` **+ `osViBlack(1)`**, and `func_800942C0` does
+`osViBlack(0)` + `osViSwapBuffer` once the new frame is ready. But `osViBlack`
+was never named either: the game's own function is `func_80095B30`, which is the
+real libultra `osViBlack` (tests/sets `__osViNext->state` bit `0x20`), while its
+neighbour `func_80095780` is `osViFade` (stores the fade level at `+0x24`, sets
+state bit `0x4`). So the blanks were compiled verbatim and the runtime's
+`VI_STATE_BLACK` was never set.
+
+Fix: `osViBlack = 0x80095B30` in `symbol_addrs.txt` (already in N64Recomp's
+`reimplemented_funcs`, with `osViBlack_recomp` in `recomp/librecomp/src/vi.cpp`).
+`update_vi` then drives `hStart = 0` while the bit is set, RT64's
+`VI::visible()` goes false and the presenter clears instead of drawing. Three
+call sites are now bridged. `osViFade` stays verbatim (the runtime has no
+implementation — `update_vi` still carries the `TODO implement osViFade`, so
+fades snap instead of ramping; not needed for this fix).
+
+Verified: the previously noisy presents 276-278 are now the correct still (a
+dim fade-in) and the whole publisher sequence — N64 logo → black → Licensed →
+ATLUS → QUEST → story intro — has no noise frames.
+
 ## 2. Result
 
 | check | session 31 | now |
@@ -110,10 +139,11 @@ alone only opens the `debug_trace_vi()` gate.)
 | "Licensed by Nintendo" | top-left quarter, stretched | full 640x480 still, 4:3 pillarboxed — `docs/proofs/native-licensed-screen.png` |
 | ATLUS | quarter / noisy | beige full-frame with centred logo — `docs/proofs/native-atlus-screen.png` |
 | QUEST | quarter | white full-frame with the QUEST logo — `docs/proofs/native-quest-screen.png` |
+| mode-switch noise | ~0.2-0.5s of colour static before each still | gone (the game's `osViBlack` blank is honoured) |
 | intro / title | correct | unchanged |
-| 15s run | 395 dl at 14232ms | exit 0, **400 dl at 14266ms** (~28fps) |
-| 8s / 20s runs | exit 0 | exit 0 (200 dl / 540 dl) |
-| `make recomp` | 24 `redirected into`, 1726 `Fall-through` | 24 `redirected into`, **1723** `Fall-through` (3 fewer: `__osViSwapContext`'s body is no longer compiled) |
+| 15s run | 395 dl at 14232ms | exit 0, **400 dl at 14233ms** (~28fps) |
+| 8s / 20s runs | exit 0 | exit 0 (200 dl / 550 dl) |
+| `make recomp` | 24 `redirected into`, 1726 `Fall-through` | 24 `redirected into`, **1720** `Fall-through` (fewer because `__osViSwapContext`'s and `osViBlack`'s bodies are no longer compiled) |
 | `build-null`, `build-wasm` | clean | clean |
 
 Capture recipe (unchanged; do **not** use `OGRE_PRESENT_ALWAYS`, it captures
@@ -193,7 +223,8 @@ Unattended-run numbers after the VI fix: exit 134 at **t≈94.8s, display list
 
 ## 5. Files changed (this session)
 
-* `symbol_addrs.txt` — `osViSetMode = 0x800955C0`, `__osViSwapContext = 0x80095820`.
+* `symbol_addrs.txt` — `osViSetMode = 0x800955C0`, `__osViSwapContext = 0x80095820`,
+  `osViBlack = 0x80095B30`.
 * `tools/N64Recomp/src/symbol_lists.cpp` — `__osViSwapContext` reimplemented.
 * `tools/N64ModernRuntime/librecomp/src/vi.cpp` — `__osViSwapContext_recomp` no-op.
 * `tools/N64ModernRuntime/librecomp/src/overlays.cpp` — stub/null call-chain dump.
@@ -202,7 +233,9 @@ Unattended-run numbers after the VI fix: exit 134 at **t≈94.8s, display list
 * `app/src/renderer.cpp` — `OGRE_DL_DECODE`.
 * `asm/*.s` (re-split symbol renames only), `n64recomp-ob64.patch`,
   `n64modernruntime-ob64.patch`, `PLAN.md`, `docs/DECISIONS.md`, this file.
-* `docs/proofs/native-{licensed,atlus,quest}-screen.png`.
+* `docs/proofs/native-{licensed,atlus,quest}-screen.png`, and
+  `docs/proofs/native-modeswitch-noise-before-after.png` (presents 276-279,
+  before/after the `osViBlack` bridge).
 
 ## 6. Next
 
@@ -213,8 +246,15 @@ Unattended-run numbers after the VI fix: exit 134 at **t≈94.8s, display list
    in `librecomp/src/pi.cpp` (`set_pi_request_queue`), so a bank switch can be
    driven from the DMA (dest, size) rather than from the game's (unlinked)
    loader code. Overlay C and the next overlay overlap in RAM, so this cannot be
-   done with fixed-address segments in one ELF.
+   done with fixed-address segments in one ELF — `load_overlays`/`unload_overlays`
+   plus `RELOC_HI16`/`LO16` already exist in the runtime and are the intended
+   mechanism.
 2. Then re-run the unattended 170s run and find the next wall.
-3. Open from sessions 29–31: the runtime must not block the game start thread on
+3. **`osViFade` is still not emulated** (`func_80095780` is compiled verbatim;
+   `update_vi` has `TODO implement osViFade`). The game calls it via
+   `func_80089BE4` with 0.8/1.0 before every `osViBlack`. Today fades snap; if a
+   fade is visibly wrong, bridge it (it needs a runtime implementation — the
+   `reimplemented_funcs` entry exists but there is no `osViFade_recomp`).
+4. Open from sessions 29–31: the runtime must not block the game start thread on
    `SDL_OpenAudioDevice` (`OGRE_NO_AUDIO=1` is the workaround), and the
    idle-stall oddity in session 31 §3 (not reproduced in any run this session).

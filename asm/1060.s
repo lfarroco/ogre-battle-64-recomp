@@ -29541,7 +29541,7 @@ glabel func_80089BE4
     /* 1A024 80089C24 0C0255E0 */  jal        func_80095780
     /* 1A028 80089C28 00000000 */   nop
   .L80089C2C:
-    /* 1A02C 80089C2C 0C0256CC */  jal        func_80095B30
+    /* 1A02C 80089C2C 0C0256CC */  jal        osViBlack
     /* 1A030 80089C30 320400FF */   andi      $a0, $s0, 0xFF
     /* 1A034 80089C34 8FBF0014 */  lw         $ra, 0x14($sp)
     /* 1A038 80089C38 8FB00010 */  lw         $s0, 0x10($sp)
@@ -41296,7 +41296,7 @@ glabel func_80093CB0
     /* 24154 80093D54 2442A7E0 */  addiu      $v0, $v0, %lo(D_800AA7E0)
     /* 24158 80093D58 0C025570 */  jal        osViSetMode
     /* 2415C 80093D5C 00822021 */   addu      $a0, $a0, $v0
-    /* 24160 80093D60 0C0256CC */  jal        func_80095B30
+    /* 24160 80093D60 0C0256CC */  jal        osViBlack
     /* 24164 80093D64 24040001 */   addiu     $a0, $zero, 0x1
     /* 24168 80093D68 24040004 */  addiu      $a0, $zero, 0x4
     /* 2416C 80093D6C 02402821 */  addu       $a1, $s2, $zero
@@ -41737,7 +41737,7 @@ glabel func_800942C0
     /* 24714 80094314 8C42A77C */  lw         $v0, %lo(D_800AA77C)($v0)
     /* 24718 80094318 10400005 */  beqz       $v0, .L80094330
     /* 2471C 8009431C 00000000 */   nop
-    /* 24720 80094320 0C0256CC */  jal        func_80095B30
+    /* 24720 80094320 0C0256CC */  jal        osViBlack
     /* 24724 80094324 00002021 */   addu      $a0, $zero, $zero
     /* 24728 80094328 3C01800B */  lui        $at, %hi(D_800AA77C)
     /* 2472C 8009432C AC20A77C */  sw         $zero, %lo(D_800AA77C)($at)
@@ -43534,9 +43534,9 @@ endlabel __osViSwapContext
     /* 25F28 80095B28 00000000 */  nop
     /* 25F2C 80095B2C 00000000 */  nop
 
-nonmatching func_80095B30, 0x5C
+nonmatching osViBlack, 0x5C
 
-glabel func_80095B30
+glabel osViBlack
     /* 25F30 80095B30 27BDFFE8 */  addiu      $sp, $sp, -0x18
     /* 25F34 80095B34 AFB00010 */  sw         $s0, 0x10($sp)
     /* 25F38 80095B38 AFBF0014 */  sw         $ra, 0x14($sp)
@@ -43562,7 +43562,7 @@ glabel func_80095B30
     /* 25F80 80095B80 8FB00010 */  lw         $s0, 0x10($sp)
     /* 25F84 80095B84 03E00008 */  jr         $ra
     /* 25F88 80095B88 27BD0018 */   addiu     $sp, $sp, 0x18
-endlabel func_80095B30
+endlabel osViBlack
     /* 25F8C 80095B8C 00000000 */  nop
 
 nonmatching func_80095B90, 0x30C

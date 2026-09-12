@@ -372,6 +372,14 @@ hardware. RT64 remains the primary native renderer throughout. See
     `docs/proofs/native-atlus-screen.png`,
     `docs/proofs/native-quest-screen.png`. See
     `docs/HANDOFF-2026-09-12-session32.md`.
+  - ✅ **The mode-switch noise is gone (session 32)**: the 320x240 → 640x480
+    switch showed ~0.2-0.5s of colour static before each still, because the VI
+    went hi-res while the new framebuffer was only partly drawn and the game's
+    blank (`osViBlack`, `func_80095B30`) was not bridged. With
+    `osViBlack = 0x80095B30` the runtime honours the blank (`update_vi` sets
+    `hStart = 0`, so RT64 clears instead of scanning out stale RDRAM). `osViFade`
+    (`func_80095780`) is still unemulated, so fades snap. See
+    `docs/HANDOFF-2026-09-12-session32.md` §1d.
   - ⬜ **The late crash is an overlay *bank swap*, confirmed (session 32)**: an
     unattended ~95s run reaches display list 2770, then
     `streamed function stub called @ 0x801AD5C0 (not yet loaded)` and
