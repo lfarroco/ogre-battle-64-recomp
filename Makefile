@@ -74,7 +74,7 @@ recomp: $(ELF)
 #   make bank        -> build/bank<U>.elf
 #   make bank-recomp -> Bank<U>Funcs/ + app/src/bank_funcs.inc
 # ---------------------------------------------------------------------------
-BANK_UNITS := A C
+BANK_UNITS := A C D E
 BANK_ELFS  := $(addprefix build/bank,$(addsuffix .elf,$(BANK_UNITS)))
 BANK_LDS   := $(addprefix build/bank,$(addsuffix .ld,$(BANK_UNITS)))
 

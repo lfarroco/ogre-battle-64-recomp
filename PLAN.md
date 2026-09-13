@@ -422,9 +422,22 @@ hardware. RT64 remains the primary native renderer throughout. See
     title. New debug knobs: `OGRE_SPEED=<n>` (scale the emulated clock),
     `OGRE_FORCE_SCENE=<hex>` (switch to a scene without waiting out the attract
     loop), `OGRE_CAPTURE_EVERY=<n>` (frame-sampling captures).
-  - ⬜ **Remaining uncompiled streamed records**: 0, 1, 4, 5, 14, 16, 18, plus
-    each record's arena modules (overlay C/record 15 and units A/C are done).
-    Records 0/1/17 all load at `0x80197B90` and so need units of their own.
+  - ⬜ **The title menu (New Game / Tutorial) still crashes on a cross-bank
+    *direct* call (session 33)**: pressing Start reaches scene `0x18`, which
+    asks for **record 1** (`mask 0x2`), and scene `0x02` (New Game / Tutorial)
+    asks for **records 0 and 14** (`mask 0x4001`). All three are now compiled
+    (record 1 = unit D, record 0 = unit E, record 14 in unit C; the app arms 12
+    records / 1398 functions), but the crash persists: N64Recomp compiles a
+    `jal` to a known function as a **direct** call, so overlay B's calls into a
+    swappable bank range run overlay C's compiled body while a different bank is
+    resident (lldb: `func_801989AC + 1062`; 58 such call edges, 53 targets).
+    Fix: route calls that cross into a bank-swappable range through
+    `get_function` (post-step over `RecompiledFuncs/*.c`, or move overlay C out
+    of the main ELF), and seed each bank unit with the cross-bank targets as
+    function entries. The attract loop (lore + unit-info) is unaffected.
+  - ⬜ **Remaining uncompiled streamed records**: 4, 5, 16, 17, 18, plus each
+    record's arena modules (overlay C/record 15 and units A/C/D/E are done).
+    Record 17 loads at `0x80197B90` and needs a unit of its own.
   - ⬜ **19 more splat split symbols in overlay C (session 30)**: the same class
     of bug (a symbol cut out of the middle of a logical function makes the
     compiled function return without unwinding its frame, clobbering the

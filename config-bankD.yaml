@@ -1,0 +1,62 @@
+# Secondary splat config: streamed-overlay bank unit D (Phase 4).
+#
+# Unit A holds records 2, 3, 6 (the "lore" bank). Pressing Start on the title
+# screen enters scene 0x18 (the New Game / Tutorial menu), whose descriptor
+# requests **record 1** (mask 0x00000002). Record 1 loads at the same RAM as
+# record 2 (0x80197B90), so it cannot live in unit A; it gets its own unit here.
+#
+#   rec1 ROM 0x6E680 (0x2C20) -> RAM 0x80197B90
+#     code 0x2810 (-> 0x8019A3A0), data 0x410 (-> 0x8019A7B0), bss 0x10
+#
+# See config-bankA.yaml for the model, and docs/DECISIONS.md (session 33).
+
+name: Ogre Battle 64 - streamed overlay bank unit D
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankD
+  target_path: assets/ogre64.z64
+  elf_path: build/bankD.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankD/asm
+  build_path: build/bankD
+  asset_path: build/bankD/assets
+  ld_script_path: build/bankD.ld
+  undefined_syms_auto_path: build/bankD/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankD/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlD_$VRAM"
+  symbol_name_format_no_rom: "ovlD_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Bank record 1.
+  - name: bankRec1
+    type: code
+    start: 0x6E680
+    vram: 0x80197B90
+    subsegments:
+      - [0x6E680, asm]
+      - [0x70E90, data]
+
+  # Rest of the ROM: records 0, 17 (both also at 0x80197B90, so they need their
+  # own units) and later record sets are not part of this unit.
+  - [0x712A0]

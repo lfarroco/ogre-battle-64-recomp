@@ -139,5 +139,21 @@ segments:
       - [0x275820, asm]
       - [0x279D80, data]
 
-  # Remaining records (16, 14) are not part of this unit.
-  - [0x279FF0]
+  # Bank record 16 (ROM 0x279FF0..0x281830) is not compiled; skip it as a bin so
+  # record 14 can follow.
+  - type: bin
+    start: 0x279FF0
+    vram: 0x279FF0
+
+  # Bank record 14: code 0x4E90 (-> 0x8022A740), data 0x4E0 (-> 0x8022AC20),
+  # bss 0x90 (-> 0x8022ACB0). It shares scene 0x02's record mask (0x4001) with
+  # record 0 (see config-bankE.yaml) and is RAM-disjoint from unit C's records.
+  - name: bankRec14
+    type: code
+    start: 0x281830
+    vram: 0x802258B0
+    subsegments:
+      - [0x281830, asm]
+      - [0x2866C0, data]
+
+  - [0x286BA0]

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,25 @@
 
 namespace ogre {
 namespace {
+
+#if !defined(__EMSCRIPTEN__)
+// A cross-bank crash (a bank loaded over another bank's RAM, with a stale or
+// compile-time-bound function still running) dies with a raw SIGSEGV, where the
+// recompiled call stack is lost because the build omits frame pointers. The
+// runtime keeps a shadow per-thread call chain, so print it here.
+void on_fatal_signal(int sig) {
+    uint8_t* rdram = ultramodern::get_rdram_base();
+    PTR(OSThread) self = (rdram != nullptr) ? ultramodern::this_thread() : (PTR(OSThread))0;
+    const int tid = (self != 0) ? TO_PTR(OSThread, self)->id : -1;
+    fprintf(stderr, "[crash] signal %d on N64 thread %d\n", sig, tid);
+    fflush(stderr);
+    ultramodern::debug_dump_call_chain(tid, "crash");
+    fflush(stdout);
+    fflush(stderr);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+#endif
 
 struct BankRecord {
     uint32_t rom_start;
@@ -36,8 +56,8 @@ struct StreamedRecord {
 };
 
 static const StreamedRecord kAllStreamedRecords[] = {
-    { 0x066E30u, (int32_t)0x80197B90u, 0x002AF0u, false },  //  0
-    { 0x06E680u, (int32_t)0x80197B90u, 0x002C20u, false },  //  1
+    { 0x066E30u, (int32_t)0x80197B90u, 0x002AF0u, true  },  //  0 (bank unit E)
+    { 0x06E680u, (int32_t)0x80197B90u, 0x002C20u, true  },  //  1 (bank unit D)
     { 0x0E4910u, (int32_t)0x80197B90u, 0x0072C0u, true  },  //  2 (bank unit)
     { 0x0EBBD0u, (int32_t)0x8019EE70u, 0x00E440u, true  },  //  3 (bank unit)
     { 0x0FA010u, (int32_t)0x8019EE70u, 0x0005E0u, false },  //  4
@@ -50,7 +70,7 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x24BC70u, (int32_t)0x801F7100u, 0x0131F0u, true  },  // 11 (bank unit C)
     { 0x25EE60u, (int32_t)0x8020A300u, 0x0169C0u, true  },  // 12 (bank unit C)
     { 0x275820u, (int32_t)0x802210E0u, 0x0047D0u, true  },  // 13 (bank unit C)
-    { 0x281830u, (int32_t)0x802258B0u, 0x005370u, false },  // 14
+    { 0x281830u, (int32_t)0x802258B0u, 0x005370u, true  },  // 14 (bank unit C)
     { 0x1CE040u, (int32_t)0x80197B90u, 0x0229C0u, true  },  // 15 (main unit, overlay C)
     { 0x279FF0u, (int32_t)0x802258B0u, 0x007840u, false },  // 16
     { 0x069920u, (int32_t)0x80197B90u, 0x004D60u, false },  // 17
@@ -187,6 +207,11 @@ void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) 
 }  // namespace
 
 void register_bank_overlays() {
+#if !defined(__EMSCRIPTEN__)
+    std::signal(SIGSEGV, on_fatal_signal);
+    std::signal(SIGBUS, on_fatal_signal);
+    std::signal(SIGABRT, on_fatal_signal);
+#endif
     recomp::overlays::set_streamed_dma_hook(on_streamed_dma);
 
     size_t total_functions = 0;

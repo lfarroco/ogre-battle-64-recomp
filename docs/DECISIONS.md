@@ -191,6 +191,51 @@ Waiting ~6 minutes for scene `0x0C` made this slow, so two knobs were added:
 Scene `0x0C` is reached at t≈42s wall with `OGRE_SPEED=8 OGRE_FORCE_SCENE=0x0C`
 instead of t≈360s, which is what made the arena modules findable in one session.
 
+### Finding: the title menu (New Game / Tutorial) asks for records 1, 0 and 14
+
+Pressing Start opens the menu; selecting an item crashed (SIGSEGV). With
+`OGRE_TAP_MS` the diagnostic names both scenes: scene `0x18` (the menu) asks for
+**record 1** (`mask 0x2`, descriptor `{2,1}`) and scene `0x02` (New Game /
+Tutorial) asks for **records 0 and 14** (`mask 0x4001`, descriptor `{0,14}`).
+All three are now compiled — record 1 is **bank unit D**, record 0 is **bank
+unit E** (both load at `0x80197B90` like record 2, so each needs its own unit),
+and record 14 joined unit C (RAM-disjoint). The app arms 12 records / 1398
+functions across units A, C, D, E.
+
+### Finding: N64Recomp binds cross-bank `jal`s at build time
+
+Compiling those records did not stop the crash. lldb shows the fault inside
+**overlay C's** recompiled `func_801989AC` while a different bank is resident at
+that address. N64Recomp compiles a `jal` to a known function as a *direct* C
+call, so resident code that calls into a swappable bank's address range is bound
+to the main unit's overlay C body:
+
+```
+RecompiledFuncs/funcs_1.c:  func_80178920 (overlay B)
+    // 0x8017892C: jal 0x80198D28
+    func_801989AC(rdram, ctx);      <- overlay C, not the resident bank
+```
+
+The main unit's generated C has **58 such call edges (53 distinct targets)**
+into `[0x80197B90, 0x801BA550)`. In the real game the callee is whatever bank is
+resident, so these must go through `get_function`. Patching that one call to
+`LOOKUP_FUNC` moved the crash, confirming the mechanism (the lookup returned the
+stub because record 1's disassembly has no entry at `0x80198D28` — splat merged
+it into `func_ovlD_80198A6C`).
+
+**Fix to apply** (not yet done): (a) a post-step over `RecompiledFuncs/*.c` that
+rewrites calls crossing into a bank-swappable range as
+`LOOKUP_FUNC(addr)(rdram, ctx)` (or move overlay C out of the main ELF into a
+bank unit, which removes the bindings by construction); and (b) seed each bank
+unit's disassembly with those cross-bank targets as `func_<vram>` entries via a
+generated `symbol_addrs`, so `get_function` can resolve them. Until then scene
+`0x18`/`0x02` still segfault; the attract loop is unaffected.
+
+A `SIGSEGV`/`SIGBUS`/`SIGABRT` handler now dumps the runtime's shadow call chain
+on a crash (`app/src/bank_overlays.cpp`), because a raw segfault otherwise loses
+the recompiled stack (the Release build omits frame pointers, so lldb shows only
+frame #0).
+
 ### Outcome
 
 | run | session 32 | session 33 (unit A) | session 33 + unit C + arena |

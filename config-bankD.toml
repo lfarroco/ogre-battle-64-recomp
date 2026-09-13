@@ -1,0 +1,12 @@
+# N64Recomp config for streamed-overlay bank unit D (Phase 4).
+# See config-bankA.toml for the model; this unit holds record 1 (scene 0x18,
+# the title screen's New Game / Tutorial menu).
+
+[input]
+output_func_path = "BankDFuncs"
+elf_path = "build/bankD.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100

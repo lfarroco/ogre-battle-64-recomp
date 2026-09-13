@@ -283,3 +283,89 @@ Waiting ~6 minutes for scene `0x0C` made iteration painful, so:
 2. Records 0, 1, 4, 5, 14, 16, 17, 18 and their arena modules are still
    uncompiled (0/1/17 share `0x80197B90` and need units of their own).
 
+---
+
+# Addendum 2 — New Game / Tutorial (scene `0x18` and `0x02`)
+
+Pressing Start on the title screen opens the New Game / Tutorial menu; selecting
+either crashed the game (SIGSEGV). This is **partly** the unmapped banks, and
+partly a second, structural problem.
+
+## 13. Which banks the menu path asks for
+
+`OGRE_TAP_MS=700` (a Start tap) reaches it in seconds with `OGRE_SPEED=8`, and
+the uncompiled-record diagnostic named both scenes:
+
+```
+[bank] UNCOMPILED streamed record 1: rom=0x06E680 ram=0x80197B90 size=0x2C20
+[bank]   scene=0x0018 descriptor=0x8018FDC0 record mask=0x00000002
+...
+[bank] UNCOMPILED streamed record 0:  rom=0x066E30 ram=0x80197B90 size=0x2AF0
+[bank]   scene=0x0002 descriptor=0x8018FC50 record mask=0x00004001
+[bank] UNCOMPILED streamed record 14: rom=0x281830 ram=0x802258B0 size=0x5370
+```
+
+* scene `0x18` (the title menu) → **record 1** (descriptor id 0, `{2,1}`)
+* scene `0x02` (New Game / Tutorial) → **records 0 and 14** (descriptor id 3,
+  `{0,14}`)
+
+Both are now compiled: **bank unit D** (record 1) and **bank unit E** (record 0)
+— they load at `0x80197B90` like record 2, so each needs its own unit — and
+record 14 joined unit C (RAM-disjoint from its records). The app now arms
+**12 records / 1398 functions** across units A, C, D, E.
+
+A debug aid added here: installing `SIGSEGV`/`SIGBUS`/`SIGABRT` handlers that
+dump the runtime's shadow call chain, because a cross-bank crash dies with a raw
+segfault and the Release build omits frame pointers (lldb's `bt` shows only
+frame #0).
+
+## 14. The crash that remains: compile-time-bound cross-bank calls
+
+Compiling records 0/1/14 was necessary but not sufficient. lldb shows the fault
+inside **overlay C's** recompiled body while a *different* bank is resident:
+
+```
+* thread #54, name = 'N64 Thread 3', stop reason = EXC_BAD_ACCESS (address=0x8fded000)
+    frame #0: ogrebattle64`func_801989AC + 1062
+```
+
+`func_801989AC` belongs to the **main unit's overlay C** (`streamedC`). N64Recomp
+compiles a `jal` to a function it knows to a *direct* C call, so a call from
+resident code (overlay B, or main) into overlay C's address range is bound at
+build time to C's body:
+
+```
+RecompiledFuncs/funcs_1.c:  func_80178920 (overlay B)
+    // 0x8017892C: jal 0x80198D28
+    func_801989AC(rdram, ctx);      <- bound to overlay C, not the resident bank
+```
+
+Scanning the main unit's generated C for calls from outside
+`[0x80197B90, 0x801BA550)` (overlay C's range) into it gives **58 call edges to
+53 distinct targets** — every one of them must dispatch at runtime, because the
+function at that address depends on which bank is resident. Patching that one
+`jal 0x80198D28` call to `LOOKUP_FUNC` moved the crash (to a display-list write
+in `func_800737A0`), confirming the mechanism: the runtime lookup returned the
+stub because record 1's disassembly has no entry at `0x80198D28` (splat merged it
+into `func_ovlD_80198A6C`).
+
+So two things are needed to finish the menu path:
+
+1. **Route calls in the main unit that cross into a swappable bank range through
+   `get_function`.** A post-step over `RecompiledFuncs/*.c` (like
+   `tools/fix_cross_overlay_labels.sh`) can rewrite
+   `func_XXXXXXXX(rdram, ctx)` → `LOOKUP_FUNC(0xXXXXXXXX)(rdram, ctx)` when the
+   callee is in a bank-swappable range and the caller is not in the same bank.
+   The alternative — moving `streamedC` (and A/B) out of the main ELF into bank
+   units — removes the bindings by construction but is a larger change.
+2. **Seed each bank unit's disassembly with the cross-bank entry points**, so
+   every target of those 53 edges is a real function entry in whichever bank can
+   be resident there. A per-unit `symbol_addrs` file generated from the main
+   unit's cross-bank targets does this; splat then emits `func_<vram>` entries
+   that N64Recomp registers, and `get_function` resolves them.
+
+Until then, scene `0x18`/`0x02` still segfault, but the attract loop (lore and
+unit-info) is unaffected: a 130 s `OGRE_SPEED=4` run is exit 0 with 0 stubs and
+0 crashes.
+
+
