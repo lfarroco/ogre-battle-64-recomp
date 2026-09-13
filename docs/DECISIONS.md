@@ -5,6 +5,160 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-12 (session 34, addendum) — the missing intro smoke and logo characters
+
+Reported after the cross-bank work: the opening soldiers' attack had no "smoke",
+and the 3D characters in the "Ogre Battle" logo did not show. Both were the same
+bug, and neither was caused by the bank work — they are session 31/32 leftovers.
+
+### Finding: the main unit's linker script was stale, so overlay C was never loaded
+
+`build/ogrebattle64.elf`'s section table placed overlay C at ROM `0x0E4910`
+instead of `0x1CE040`. `0xE4910` is bank record 2's ROM start, so the script still
+described the abandoned "bank records inside the main unit" layout. As a result
+`load_overlays(0x1CE040, 0x80197B90, 0x22A00)` matched **zero** sections: overlay
+C's function-map entries never existed at all, and the game's lookups into its
+tail returned the generic stub. In a 45 s run that is 5140 stub calls from exactly
+two addresses — `func_8019E588` (the smoke puffs, identified in session 29) and
+`func_801A34FC` (the logo's 3D characters).
+
+`make` never re-runs `splat split` for the main unit, so nothing regenerated the
+script: `ogrebattle64.ld` and `config.yaml` had identical timestamps.
+
+**Fix:** remove the generated `ogrebattle64.ld` and the stale `assets/*.bin`,
+re-run `tools/venv/bin/splat split config.yaml`, then rebuild. The map now shows
+`streamedC` at `0x1CE040` and `load_overlays` matches 1 section.
+
+**Lesson for the build:** any change to `config.yaml`'s segments needs an explicit
+re-split; `make` alone will silently link against the previous layout.
+
+### Decision: a partial bank swap must not drop the evicted overlay's whole map
+
+`recomp::overlays::unload_overlapping_overlays` erased **every** function-map
+entry of a section it evicted. A bank record is usually much narrower than the
+overlay it replaces (record 2 is `0x72C0` bytes of overlay C's `0x229C0`) and the
+RAM above it is not overwritten, so the overlay's code there still runs. The
+over-broad erase is what made the effects vanish *after* the first bank swap (and
+what made the cross-bank target space look far larger than it is).
+
+**Fix:** erase only the entries the incoming load actually covers, for both real
+sections and registered function banks. `n64modernruntime-ob64.patch` regenerated.
+
+### Outcome
+
+| check | before | after |
+|---|---|---|
+| intro stubs, 45 s | 5140 | **0** |
+| `load_overlays` matches for overlay C | 0 | 1 |
+| `OGRE_SPEED=4` 120 s attract run | — | exit 0, 0 stubs, 0 crashes, 9000+ display lists |
+
+---
+
+## 2026-09-12 (session 34) — cross-bank `jal` routing: mechanism built, blocked on the recompiler
+
+Session 33 left one task: route the main unit's cross-bank calls through
+`get_function` and seed each bank unit with the cross-bank entry points, because
+N64Recomp binds a `jal` to a known function as a *direct C call*. This session
+built the mechanism (`tools/cross_bank.py`), fixed two real defects in the bank
+build, and found why the routing cannot ship yet. **The default build keeps
+session 33's behaviour**; the routing is an opt-in experiment
+(`make cross-bank-dispatch`). The attract loop is unchanged and scene
+`0x18`/`0x02` is still open.
+
+### Finding: the bank build silently linked stale objects
+
+`build/bank<U>.elf` used to depend only on the generated `build/bank<U>.ld`, and
+its recipe discovered the `.o` files by **globbing**. `splat` rewrites an `.s`
+file whenever it re-splits but only rewrites the `.ld` when the *layout* changes,
+so a re-split that changed the code (exactly what added symbols do) left `make`
+thinking the ELF was up to date: the change was compiled into `.s`, never
+assembled, and the ELF kept the old code. Two session-34 experiments reported
+"seeds applied" while the ELF contained none of them.
+
+**Fix (kept):** the ELF now depends on the config (not the `.ld`), with
+`build/bank%.ld` order-only, so any config or source change re-assembles and
+re-links every unit.
+
+### Finding: the dispatch address must be the `jal` source address, not the callee
+
+Turning a cross-bank `jal` into `LOOKUP_FUNC(<callee address>)` is wrong for a
+**size-overridden** function: N64Recomp emits `jal 0x80198D28` (an address inside
+`func_801989AC`) as a call to `func_801989AC`, deliberately, so the continuation
+the caller meant to reach runs. Rewriting it to `LOOKUP_FUNC(0x801989AC)` broke
+overlay B's menu path. The generated C's `// 0xADDR: jal 0xTARGET` comment is the
+authoritative source address; the rewrite keys on it.
+
+### Finding: a call is only cross-bank when the caller and callee can differ
+
+Two addresses inside the same *overlapped group* (the intersection of two regions
+that can occupy the same RAM) belong to the same resident bank, because a bank's
+records are loaded and evicted as one. The first version used the *merged*
+swappable spans, which made a record-3 caller and a record-2 callee look like a
+cross-bank call and mis-rewrote ~320 harmless call sites.
+
+### Finding (the blocker): most cross-bank targets are body interiors in the bank
+
+The mechanism needs the target address to be a function entry in the bank that is
+resident when the call runs. Of the 67 distinct cross-bank `jal` targets the main
+unit has, only **9** are entry points the bank units' own disassembly found (and
+9 seed symbols per unit are not enough to matter). The other **58** are body
+interiors in *every* bank that covers the address — record 1's `0x80198D28` is
+the session-33 case (`splat` merged it into `func_ovlD_80198A6C`).
+
+The same gap from the other side: **62 of the 67 function entries in overlay C
+have no bank registration at all** (only 1395 addresses are registered across all
+four units). With session 33's bindings, a 130 s `OGRE_SPEED=4` run still makes
+5140 stub calls, from two addresses only (`0x8019E588` 2024 times, `0x801A34FC`
+3116 times) — both reachable only from a resident bank's code, so the same class
+of failure as the menu crash.
+
+**Diagnostic that is now automatic:** `tools/cross_bank.py` refuses to seed an
+address whose code does not open like a function (a stack frame, a jump-table
+dispatch, or a bare `jr $ra`), so a bad seed is a printed warning rather than a
+fragment-compiling failure.
+
+Forcing splat to split at a body interior does not work: N64Recomp then compiles
+the fragment with `goto after_4;` whose label lives in the sibling fragment, and
+the app does not compile:
+
+```
+BankDFuncs/funcs_0.c:3843:14: error: use of undeclared label 'after_4'
+```
+
+Rewriting only the 9 resolvable targets and leaving the rest bound still crashes
+the boot (SIGBUS before the first present, `bank loads: 0`), so the dispatch does
+not merely under-deliver — it is not yet correct. It stays off.
+
+### State after this session
+
+| item | result |
+|---|---|
+| `cross_bank.py report` | 67 cross-bank `jal` targets; 9 with a bank entry, 58 without |
+| `make bank-recomp` + app build | clean, session-33 function table (1398 bank functions) |
+| attract loop, scene `0x0C` | unchanged (session 33's behaviour) |
+| scene `0x18`/`0x02` | still open |
+| `make cross-bank-dispatch` | experiment only; breaks the boot today |
+
+### Next: make the 58 targets entry points *by detection*
+
+Both routes are in the bank units' own configuration rather than new runtime
+code:
+
+1. Give each unit's disassembly the addresses explicitly (a `functions`/
+   `function_sizes` list in `config-bank<U>.toml`, like the main `config.toml`
+   already carries, or a splat symbol with the right attributes), so they are
+   function entries by detection and the seeds are pure renames again. This is
+   the minimal, in-model fix and should also remove the `after_N` failure.
+2. Move overlay C out of the main ELF into a bank unit, which removes the
+   cross-bank bindings by construction (session 33 §14's alternative). Larger,
+   and it touches the working attract loop.
+
+Keep the invariant the tool prints: `cross_bank.py` always reports exactly which
+targets are dispatched and which are still bound, so a run shows the remaining
+work by name.
+
+---
+
 ## 2026-09-12 (session 33) — Phase 4: streamed-overlay banks swap on the game's DMA
 
 ### Finding: the streamed-overlay *segment table* and *bank descriptors* are now decoded

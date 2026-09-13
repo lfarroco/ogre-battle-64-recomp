@@ -181,7 +181,7 @@ index 0f7de83..6bbe537 100644
  #   error "Unsupported architecture"
  #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..d2a7d11 100644
+index 8c8e5d1..2cca2d9 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,10 @@
@@ -231,7 +231,7 @@ index 8c8e5d1..d2a7d11 100644
  static std::unordered_map<std::string, recomp_func_t*> base_exports{};
  static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
  static std::unordered_map<std::string, size_t> base_events;
-@@ -271,8 +297,119 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+@@ -271,8 +297,139 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
      }
  }
  
@@ -263,8 +263,21 @@ index 8c8e5d1..d2a7d11 100644
 +        const int64_t section_hi = section_lo + (int64_t)section.size;
 +
 +        if (section_lo < hi && lo < section_hi) {
++            // Only the entries the new bank actually covers are gone. A bank
++            // record is usually narrower than the overlay it replaces (record 2
++            // is 0x72C0 bytes of overlay C's 0x229C0), and the RAM above it is
++            // not overwritten, so that overlay's code there still runs. Dropping
++            // its function-map entries too made every call into that tail hit the
++            // generic stub — that is what removed the intro's smoke puffs
++            // (`func_8019E588`) and the "Ogre Battle" logo's 3D characters.
++            const int64_t keep_below = (lo > section_lo) ? lo : section_lo;
++            const int64_t keep_above = (hi < section_hi) ? hi : section_hi;
 +            for (size_t func_index = 0; func_index < section.num_funcs; func_index++) {
-+                func_map.erase((int32_t)(section.funcs[func_index].offset + it->loaded_ram_addr));
++                const int64_t func_addr =
++                    (int64_t)section.funcs[func_index].offset + (int64_t)it->loaded_ram_addr;
++                if (func_addr >= keep_below && func_addr < keep_above) {
++                    func_map.erase((int32_t)func_addr);
++                }
 +            }
 +            section_addresses[section.index] = section.ram_addr;
 +            it = loaded_sections.erase(it);
@@ -278,8 +291,15 @@ index 8c8e5d1..d2a7d11 100644
 +        const int64_t bank_hi = bank_lo + (int64_t)it->size;
 +
 +        if (bank_lo < hi && lo < bank_hi) {
++            // Same rule as above: a bank that is only partly covered keeps the
++            // entries in the RAM this load does not touch.
++            const int64_t keep_below = (lo > bank_lo) ? lo : bank_lo;
++            const int64_t keep_above = (hi < bank_hi) ? hi : bank_hi;
 +            for (size_t i = 0; i < it->count; i++) {
-+                func_map.erase(it->funcs[i].ram_addr);
++                const int64_t func_addr = (int64_t)it->funcs[i].ram_addr;
++                if (func_addr >= keep_below && func_addr < keep_above) {
++                    func_map.erase((int32_t)func_addr);
++                }
 +            }
 +            it = loaded_function_banks.erase(it);
 +        } else {
@@ -351,7 +371,7 @@ index 8c8e5d1..d2a7d11 100644
      section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
  
      // Sort the executable sections by rom address
-@@ -361,14 +498,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +518,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
