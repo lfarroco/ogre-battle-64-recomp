@@ -186,3 +186,100 @@ cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release && cmake --build build-app 
 4. Still open from sessions 29–32: `osViFade` unemulated (fades snap), the
    runtime blocking the game start thread on `SDL_OpenAudioDevice` on some hosts
    (`OGRE_NO_AUDIO=1`), and the session-31 idle-stall oddity.
+
+---
+
+# Addendum — the attract loop's second variant (the "unit info" screen)
+
+The attract loop the user described is title → "lore" story movie → title → a
+*variant* screen; the current run happens to pick "unit info". Unattended, that
+variant was **bouncing straight back to the title**. This addendum covers finding
+and fixing it.
+
+## 8. Scene `0x0C`: what the game asked for
+
+The scene dispatcher (asm/1060.s @0x80075E50) stores the scene id at
+`D_800E810E` and the scene descriptor at `D_800E8294`; the descriptor's `+0x10`
+word is the record mask handed to the loader `func_800761E4`.
+`app/src/bank_overlays.cpp` now dumps all three the first time it meets an
+uncompiled record:
+
+```
+[bank] UNCOMPILED streamed record 10: rom=0x1F0A00 ram=0x801AD5C0 size=0x230E0
+[bank]   scene=0x000C descriptor=0x8018FB58 record mask=0x00003C00
+... records 11, 12, 13 ...
+[overlays] streamed function stub called @ 0x801E6FD0 (not yet loaded)
+[overlays] streamed function stub called @ 0x801EE3E8 (not yet loaded)
+[overlays] streamed function stub called @ 0x801EE600 (not yet loaded)
+[overlays] streamed function stub called @ 0x801EE4A0 (not yet loaded)
+```
+
+`mask=0x3C00` = records **10, 11, 12, 13**; `func_80076430` matches it to
+descriptor id 2 (`{0,2,4,10,11,12,13,14}`). Those four are now **bank unit C**
+(`config-bankC.yaml`, `BankCFuncs/`, 848 functions).
+
+## 9. The second streaming mechanism: a per-record code *arena*
+
+Registering 10–13 was not enough — the same four calls still stubbed. Two
+diagnostics settled it:
+
+* the stub path now dumps the first words at the address, and they were **real
+  MIPS code** (`lui/addiu/jr $ra`, function prologues);
+* a DMA trace filtered to the arena showed the code arriving by PI DMA:
+  `dram=0x801E6FD0 dev=0x0023B1F0 size=0x200`.
+
+So a segment-table record is only the **resident part** of an overlay. The
+record's `ram_end` word (`+0x04`) is much larger than code+data+bss: the space
+above the record is an arena the game fills on demand from code modules in the
+ROM gap between that record's `rom_end` and the next record's `rom_start`. For
+record 10:
+
+| module | ROM | size | RAM |
+|---|---|---|---|
+| table record 10 | `0x1F0A00` | `0x230E0` | `0x801AD5C0` |
+| `bankRec10a` | `0x213AE0` | `0x16770` | `0x801D0860` |
+| `bankRec10b` | `0x23B1F0` | `0x09580` | `0x801E6FD0` |
+
+All four stubs are in `bankRec10b`. Both modules are plain 0x200-chunk copies, so
+they are compiled as ordinary RAM-disjoint sections of unit C (147 + 90
+functions) and registered by the same DMA hook. `tools/gen_bank_syms.py` handles
+splat leaving 361 `D_ovlC_*` data labels referenced-but-undefined in those `asm`
+sections (absolute linker definitions; the name encodes the VRAM).
+
+Two latent bugs were fixed on the way:
+
+* `is_function_bank_loaded` keyed on the RAM address, but records 6 and 10 (and
+  7, 10) load at the *same* `0x801AD5C0` — record 10 was being skipped as
+  "already loaded". It is keyed on ROM start now.
+* the diagnostics now know overlays C (record 15) and units A/C are compiled, so
+  they only report genuinely uncompiled records.
+
+## 10. Debugging knobs (new)
+
+Waiting ~6 minutes for scene `0x0C` made iteration painful, so:
+
+| knob | effect |
+|---|---|
+| `OGRE_SPEED=<n>` | scales the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64). A timed attract sequence completes in `1/n` of the wall time. `OGRE_SPEED=8` reaches scene `0x0C` in ~42s wall instead of ~360s. |
+| `OGRE_FORCE_SCENE=<hex>` (+ `OGRE_FORCE_SCENE_AFTER_MS`, default 3000) | pokes the attract scene id `*(u16*)(D_800C4BBC+4)` until `D_800E810E` reports the scene active, so a run switches to that scene as soon as the scene's own state machine allows. |
+| `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, captures only every nth present — a long run becomes a slideshow instead of one 3 MB PPM per frame. |
+
+## 11. Result
+
+| check | before | now |
+|---|---|---|
+| scene `0x0C` stubs | 4 | **0** |
+| unit-info screen | bounced to the title | **renders and advances** — `docs/proofs/native-unit-info-dragon-tamer.png`, `docs/proofs/native-unit-info-griffin.png` |
+| records armed | 7 / 1052 functions | **9 / 1289 functions** |
+| natural unattended loop | — | `OGRE_SPEED=4`, 280 s wall ≈ 1100 s game: **exit 0, 29080 display lists, 13 bank/arena loads, 0 stubs**, and the unit-info screen comes up on its own — `docs/proofs/native-unit-info-fighter-natural.png` |
+| `build-null`, `build-wasm` | clean | clean |
+
+## 12. Next after this addendum
+
+1. The arena modules mean **compiling a table record is not enough**: each
+   record's arena modules (ROM gap to the next record) must be compiled too.
+   The DMA hook already registers them; the `[bank] loading overlay record …`
+   logs name them, and `kAllStreamedRecords` names uncompiled table records.
+2. Records 0, 1, 4, 5, 14, 16, 17, 18 and their arena modules are still
+   uncompiled (0/1/17 share `0x80197B90` and need units of their own).
+

@@ -102,32 +102,37 @@ target_compile_options(ogrebattle64_recomp PRIVATE
     -Wno-implicit-function-declaration
 )
 
-# --- Streamed-overlay bank unit (Phase 4) -----------------------------------
-# A second, independent recompilation (config-bank.yaml / config-bank.toml, built
-# by `make bank-recomp`) for the streamed overlay records the game loads into
-# overlay C's RAM from a different bank. They cannot share overlay C's VMAs in
-# one ELF, so their symbols are prefixed `ovl_` (config-bank.yaml) and they are
-# registered at runtime by src/bank_overlays.cpp.
-file(GLOB BANK_RECOMP_C_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../BankFuncs/*.c)
+# --- Streamed-overlay bank units (Phase 4) ----------------------------------
+# Independent recompilations (config-bank<U>.yaml / .toml, built by
+# `make bank-recomp`) for the streamed overlay records the game loads into RAM
+# that overlay C also uses. They cannot share overlay C's VMAs in one ELF, so
+# each unit namespaces its symbols (`ovl<U>_`) and they are registered at runtime
+# by src/bank_overlays.cpp. One static library per unit: each unit's sources must
+# include their own funcs.h.
+file(GLOB BANK_UNIT_DIRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../Bank*Funcs)
 
-add_library(ogrebattle64_bank STATIC ${BANK_RECOMP_C_SOURCES})
+set(OGRE_BANK_LIBS)
+foreach(BANK_UNIT_DIR ${BANK_UNIT_DIRS})
+    get_filename_component(BANK_UNIT_LIB ${BANK_UNIT_DIR} NAME)
+    file(GLOB BANK_UNIT_SOURCES CONFIGURE_DEPENDS ${BANK_UNIT_DIR}/*.c)
 
-# BankFuncs/ first: the bank objects must include the bank unit's own funcs.h.
-target_include_directories(ogrebattle64_bank PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../BankFuncs
-    ${OGRE_TOOLS}/N64ModernRuntime/N64Recomp/include
-    ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
-    ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
-)
-
-target_compile_options(ogrebattle64_bank PRIVATE
-    -fno-strict-aliasing
-    -Wno-unused-variable
-    -Wno-unused-parameter
-    -Wno-unused-function
-    -Wno-unused-but-set-variable
-    -Wno-implicit-function-declaration
-)
+    add_library(${BANK_UNIT_LIB} STATIC ${BANK_UNIT_SOURCES})
+    target_include_directories(${BANK_UNIT_LIB} PRIVATE
+        ${BANK_UNIT_DIR}
+        ${OGRE_TOOLS}/N64ModernRuntime/N64Recomp/include
+        ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
+        ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
+    )
+    target_compile_options(${BANK_UNIT_LIB} PRIVATE
+        -fno-strict-aliasing
+        -Wno-unused-variable
+        -Wno-unused-parameter
+        -Wno-unused-function
+        -Wno-unused-but-set-variable
+        -Wno-implicit-function-declaration
+    )
+    list(APPEND OGRE_BANK_LIBS ${BANK_UNIT_LIB})
+endforeach()
 
 # --- The app --------------------------------------------------------------
 # Native: SDL-based entry + platform callbacks. Web: no-SDL entry + no-op
@@ -183,7 +188,7 @@ endif()
 
 target_link_libraries(ogrebattle64 PRIVATE
     ogrebattle64_recomp
-    ogrebattle64_bank
+    ${OGRE_BANK_LIBS}
     librecomp
     ultramodern
 )

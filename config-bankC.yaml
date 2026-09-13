@@ -1,0 +1,143 @@
+# Secondary splat config: streamed-overlay bank unit C (Phase 4).
+#
+# Unit A (config-bankA.yaml) compiles the records of the bank the game swaps in
+# after the title song (records 2, 3, 6). Unit C compiles the records the game
+# swaps in for the *next* attract screen (records 10, 11, 12, 13 — observed at
+# t≈360s, where the scene then called into a stubbed address and bounced).
+#
+# A unit can only hold records whose RAM ranges are mutually disjoint, because
+# all of them are linked at their true RAM addresses in one ELF. Records that
+# overlap (they are banks of the same RAM) must go in different units; the
+# runtime does not care which unit a record came from — it registers a record's
+# functions when the game DMA's it. Unit C's records tile disjointly:
+#
+#   rec10 ROM 0x1F0A00 -> RAM 0x801AD5C0 (0x230E0)
+#   rec11 ROM 0x24BC70 -> RAM 0x801F7100 (0x131F0)
+#   rec12 ROM 0x25EE60 -> RAM 0x8020A300 (0x169C0)
+#   rec13 ROM 0x275820 -> RAM 0x802210E0 (0x047D0)
+#
+# See config-bankA.yaml for the model, and docs/DECISIONS.md (session 33).
+
+name: Ogre Battle 64 - streamed overlay bank unit C
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankC
+  target_path: assets/ogre64.z64
+  elf_path: build/bankC.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankC/asm
+  build_path: build/bankC
+  asset_path: build/bankC/assets
+  ld_script_path: build/bankC.ld
+  undefined_syms_auto_path: build/bankC/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankC/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  # Unit C's records share RAM addresses with unit A's and overlay C's, so every
+  # generated symbol carries this unit's namespace (the addresses stay the real
+  # RAM addresses; only the names are namespaced).
+  symbol_name_format: "ovlC_$VRAM"
+  symbol_name_format_no_rom: "ovlC_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Bank record 10: code 0x212F0 (-> 0x801CE8B0), data 0x1DF0 (-> 0x801D06A0),
+  # bss 0x1C0 (-> 0x801D0860).
+  - name: bankRec10
+    type: code
+    start: 0x1F0A00
+    vram: 0x801AD5C0
+    subsegments:
+      - [0x1F0A00, asm]
+      - [0x211CF0, data]
+
+  # Record 10's *arena continuation*: the segment table entry 10 only describes
+  # the resident part (ROM 0x1F0A00..0x213AE0 -> RAM 0x801AD5C0..0x801D08 60);
+  # the game streams more code into record 10's reserved arena
+  # (RAM up to 0x801F7100, i.e. record 10's `ram_end` word) from ROM modules that
+  # live in the gap before record 11's ROM start. Two such modules are loaded for
+  # the scene that asks for mask 0x3C00 (see docs/DECISIONS.md):
+  #
+  #   ROM 0x213AE0 (0x16770) -> RAM 0x801D0860
+  #   ROM 0x23B1F0 (0x09580) -> RAM 0x801E6FD0
+  #
+  # The four stubbed calls that made that scene bounce all land in the second
+  # module (0x801E6FD0, 0x801EE3E8, 0x801EE600, 0x801EE4A0). The modules are
+  # contiguous code, streamed by 0x200-byte DMA chunks, so they are compiled as
+  # ordinary (RAM-disjoint) sections of this unit and registered by the same
+  # DMA-driven mechanism.
+  - name: bankRec10a
+    type: code
+    start: 0x213AE0
+    vram: 0x801D0860
+    subsegments:
+      - [0x213AE0, asm]
+
+  # Gap: not loaded for this scene.
+  - type: bin
+    start: 0x22A250
+    vram: 0x22A250
+
+  - name: bankRec10b
+    type: code
+    start: 0x23B1F0
+    vram: 0x801E6FD0
+    subsegments:
+      - [0x23B1F0, asm]
+
+  # Gap: records 18 (ROM 0x1BA020) and 15/overlay C (ROM 0x1CE040..0x1F0A00) are
+  # not part of this unit.
+  - type: bin
+    start: 0x244770
+    vram: 0x244770
+
+  # Bank record 11: code 0x12620 (-> 0x80209720), data 0xBD0 (-> 0x8020A2F0),
+  # bss 0x10.
+  - name: bankRec11
+    type: code
+    start: 0x24BC70
+    vram: 0x801F7100
+    subsegments:
+      - [0x24BC70, asm]
+      - [0x25E290, data]
+
+  # Bank record 12: code 0x15170 (-> 0x8021F470), data 0x1850 (-> 0x80220CC0),
+  # bss 0x420 (-> 0x802210E0).
+  - name: bankRec12
+    type: code
+    start: 0x25EE60
+    vram: 0x8020A300
+    subsegments:
+      - [0x25EE60, asm]
+      - [0x273FD0, data]
+
+  # Bank record 13: code 0x4560 (-> 0x80225640), data 0x270 (-> 0x802258B0).
+  - name: bankRec13
+    type: code
+    start: 0x275820
+    vram: 0x802210E0
+    subsegments:
+      - [0x275820, asm]
+      - [0x279D80, data]
+
+  # Remaining records (16, 14) are not part of this unit.
+  - [0x279FF0]

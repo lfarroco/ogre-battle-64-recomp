@@ -10,7 +10,7 @@
 # game DMA's them to.
 #
 # The result is linked into its own ELF (build/ogrebank.elf), recompiled by
-# N64Recomp with config-bank.toml into BankFuncs/, and registered by
+# N64Recomp with config-bankA.toml into BankFuncs/, and registered by
 # app/src/bank_overlays.cpp when the game DMA's a record. The records are
 # pre-linked with absolute RAM pointers (the game does no relocation), so no
 # runtime relocations are needed: the bank sections are deliberately NOT in
@@ -21,20 +21,20 @@
 name: Ogre Battle 64 - streamed overlay bank records
 sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
 options:
-  basename: ogrebank
+  basename: ogrebankA
   target_path: assets/ogre64.z64
-  elf_path: build/ogrebank.elf
+  elf_path: build/bankA.elf
   base_path: .
   platform: n64
   compiler: KMC
 
   # Keep every output out of the main unit's tree.
-  asm_path: build/bank/asm
-  build_path: build/bank
-  asset_path: build/bank/assets
-  ld_script_path: build/ogrebank.ld
-  undefined_syms_auto_path: build/bank/undefined_syms_auto.txt
-  undefined_funcs_auto_path: build/bank/undefined_funcs_auto.txt
+  asm_path: build/bankA/asm
+  build_path: build/bankA
+  asset_path: build/bankA/assets
+  ld_script_path: build/bankA.ld
+  undefined_syms_auto_path: build/bankA/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankA/undefined_funcs_auto.txt
 
   find_file_boundaries: True
   header_encoding: ASCII
@@ -46,8 +46,8 @@ options:
   # every generated symbol needs a namespace prefix to avoid colliding with
   # overlay C's symbols when both units are linked into the app binary. (The
   # prefix is only about names; the addresses are the real RAM addresses.)
-  symbol_name_format: "ovl_$VRAM"
-  symbol_name_format_no_rom: "ovl_$VRAM"
+  symbol_name_format: "ovlA_$VRAM"
+  symbol_name_format_no_rom: "ovlA_$VRAM"
 
   extensions_path: tools/splat_ext
   rodata_string_guesser_level: 2

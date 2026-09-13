@@ -59,45 +59,50 @@ recomp: $(ELF)
 	$(N64RECOMP) config.toml
 
 # ---------------------------------------------------------------------------
-# Streamed-overlay bank unit (Phase 4). A *second*, independent splat + link +
-# N64Recomp run for the streamed overlay records that are loaded into overlay
-# C's RAM by a different bank (see config-bank.yaml). Kept separate because
+# Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
+# runs for the streamed overlay records the game loads into RAM that overlay C
+# also uses (see config-bankA.yaml / config-bankC.yaml). Kept separate because
 # their VMAs overlap overlay C's and one ELF cannot hold both; the main unit is
-# left untouched. Small enough to rebuild from scratch every time.
+# left untouched.
 #
-#   make bank        -> build/ogrebank.elf
-#   make bank-recomp -> BankFuncs/ (registered by app/src/bank_overlays.cpp)
+# A unit can only hold records whose RAM ranges are mutually disjoint: records
+# that overlap are different banks of the same RAM. The runtime does not care
+# which unit a record came from — app/src/bank_overlays.cpp registers a record's
+# functions when the game DMA's it — so new records can be added to whichever
+# unit has a free RAM range.
+#
+#   make bank        -> build/bank<U>.elf
+#   make bank-recomp -> Bank<U>Funcs/ + app/src/bank_funcs.inc
 # ---------------------------------------------------------------------------
-BANKCFG    := config-bank.yaml
-BANKLD     := build/ogrebank.ld
-BANKELF    := build/ogrebank.elf
-BANKRECOMP := BankFuncs
+BANK_UNITS := A C
+BANK_ELFS  := $(addprefix build/bank,$(addsuffix .elf,$(BANK_UNITS)))
+BANK_LDS   := $(addprefix build/bank,$(addsuffix .ld,$(BANK_UNITS)))
 
-bank-split: $(BANKLD)
+bank-split: $(BANK_LDS)
 
-$(BANKLD): $(BANKCFG)
+build/bank%.ld: config-bank%.yaml
 	@mkdir -p build
-	tools/venv/bin/splat split $(BANKCFG)
+	tools/venv/bin/splat split $<
 
-bank: $(BANKELF)
+bank: $(BANK_ELFS)
 
 # The ld script names the object files next to their sources, so assemble in
-# place (build/bank/asm/...).
-$(BANKELF): $(BANKLD) $(wildcard build/bank/asm/*.s) $(wildcard build/bank/asm/data/*.s) \
-            $(wildcard build/bank/assets/*.bin)
-	@for f in build/bank/asm/*.s build/bank/asm/data/*.s; do \
+# place (build/bank<U>/asm/...).
+build/bank%.elf: build/bank%.ld
+	@for f in build/bank$*/asm/*.s build/bank$*/asm/data/*.s; do \
 	    $(AS) $(ASFLAGS) -o $${f%.s}.o $$f || exit 1; \
 	done
-	@for f in build/bank/assets/*.bin; do \
+	@for f in build/bank$*/assets/*.bin; do \
 	    $(OBJCOPY) -I binary -O elf32-tradbigmips -B mips:3000 $$f $${f%.bin}.o || exit 1; \
 	done
-	$(LD) --emit-relocs -T $(BANKLD) -T build/bank/undefined_syms_auto.txt \
-		-T build/bank/undefined_funcs_auto.txt -o $@ \
-		build/bank/asm/*.o build/bank/asm/data/*.o build/bank/assets/*.o
-	@echo "==> linked $(BANKELF)"
+	@python3 tools/gen_bank_syms.py $*
+	$(LD) --emit-relocs -T $< -T build/bank$*/undefined_syms_auto.txt \
+		-T build/bank$*/undefined_funcs_auto.txt -T build/bank$*/extra_syms.txt -o $@ \
+		build/bank$*/asm/*.o build/bank$*/asm/data/*.o build/bank$*/assets/*.o
+	@echo "==> linked $@"
 
-bank-recomp: $(BANKELF)
-	$(N64RECOMP) config-bank.toml
+bank-recomp: $(BANK_ELFS)
+	@for u in $(BANK_UNITS); do $(N64RECOMP) config-bank$$u.toml || exit 1; done
 	python3 tools/gen_bank_funcs.py
 
 .PHONY: all clean recomp bank bank-split bank-recomp

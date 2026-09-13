@@ -387,8 +387,8 @@ hardware. RT64 remains the primary native renderer throughout. See
     banks at ROM `0x38AB8`, pointer array at `0x38AFC`) are now decoded, and the
     records the game swaps in at t≈95s are entries 2, 3 and 6. Because their
     RAM ranges overlap overlay C's, they are recompiled in a **separate unit**
-    (`config-bank.yaml` → `build/ogrebank.elf` → `config-bank.toml` →
-    `BankFuncs/`) linked at their true RAM addresses with an `ovl_` symbol
+    (`config-bankA.yaml` → `build/bankA.elf` → `config-bankA.toml` →
+    `BankAFuncs/`) linked at their true RAM addresses with an `ovlA_` symbol
     prefix; `app/src/bank_overlays.cpp` registers a record's functions when the
     game DMA's it and drops whatever bank occupied that RAM. The runtime gained
     `notify_rom_read` (called from `recomp::do_rom_read`), `unload_overlapping_overlays`
@@ -397,6 +397,34 @@ hardware. RT64 remains the primary native renderer throughout. See
     proof `docs/proofs/native-post-bankswap-present2805.png` (a rendered night
     castle scene at present 2805, after the swap). See
     `docs/HANDOFF-2026-09-12-session33.md`.
+  - ✅ **The next attract scene's bank is identified (session 33)**: the attract
+    loop is title → "lore" story movie → title → a variant screen; the second
+    transition (t≈360.7s) runs scene `0x0C`, whose descriptor at `0x8018FB58`
+    carries **record mask `0x3C00` = records 10, 11, 12, 13**. Uncompiled, its
+    entry returned through the streamed stub and the scene bounced back to the
+    title. Those four records are now **bank unit C** (`config-bankC.yaml`,
+    `BankCFuncs/`, 848 functions). Units are partitioned by *RAM*, not by game
+    bank: records whose RAM ranges overlap cannot share an ELF.
+  - ✅ **Overlays stream more code into a per-record arena (session 33)**: a
+    segment-table record is only the resident part. The record's `ram_end` word
+    (`+0x04`) covers an arena the game fills on demand from code modules in the
+    ROM gap before the next record. Record 10's arena modules
+    (`bankRec10a` ROM `0x213AE0`→RAM `0x801D0860`, `bankRec10b` ROM
+    `0x23B1F0`→RAM `0x801E6FD0`) hold the four functions scene `0x0C` called;
+    they are compiled into unit C (147 + 90 functions) and registered by the
+    same DMA hook. `tools/gen_bank_syms.py` defines the `D_ovlC_*` data labels
+    splat leaves undefined in those `asm` sections.
+  - ✅ **The unit-info screen renders (session 33)**: with records 10–13 and
+    their arena modules armed (9 records / 1289 functions) scene `0x0C` has
+    **zero stub calls** and draws the unit stat screens
+    (`docs/proofs/native-unit-info-dragon-tamer.png`,
+    `docs/proofs/native-unit-info-griffin.png`), instead of bouncing to the
+    title. New debug knobs: `OGRE_SPEED=<n>` (scale the emulated clock),
+    `OGRE_FORCE_SCENE=<hex>` (switch to a scene without waiting out the attract
+    loop), `OGRE_CAPTURE_EVERY=<n>` (frame-sampling captures).
+  - ⬜ **Remaining uncompiled streamed records**: 0, 1, 4, 5, 14, 16, 18, plus
+    each record's arena modules (overlay C/record 15 and units A/C are done).
+    Records 0/1/17 all load at `0x80197B90` and so need units of their own.
   - ⬜ **19 more splat split symbols in overlay C (session 30)**: the same class
     of bug (a symbol cut out of the middle of a logical function makes the
     compiled function return without unwinding its frame, clobbering the

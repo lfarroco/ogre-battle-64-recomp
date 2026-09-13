@@ -1,6 +1,6 @@
 # N64Recomp config for the streamed-overlay bank unit (Phase 4).
 #
-# Input is the secondary ELF built by `make bank` (config-bank.yaml), which
+# Input is the secondary ELF built by `make bank` (config-bankA.yaml), which
 # recompiles the streamed-overlay records the game loads into overlay C's RAM.
 # Their sections are linked at their true RAM addresses and are NOT relocatable
 # (the game pre-links them with absolute pointers), so no
@@ -12,8 +12,8 @@
 # registers the functions when the game DMA's a record.
 
 [input]
-output_func_path = "BankFuncs"
-elf_path = "build/ogrebank.elf"
+output_func_path = "BankAFuncs"
+elf_path = "build/bankA.elf"
 rom_file_path = "assets/ogre64.z64"
 use_absolute_symbols = true
 uses_mips3_float_mode = true

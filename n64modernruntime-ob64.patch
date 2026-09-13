@@ -28,10 +28,10 @@ index 37556bd..eefe64b 100644
  };
  
 diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
-index 35703bd..8a15e5c 100644
+index 35703bd..0363904 100644
 --- a/librecomp/include/librecomp/overlays.hpp
 +++ b/librecomp/include/librecomp/overlays.hpp
-@@ -45,6 +45,41 @@ namespace recomp {
+@@ -45,6 +45,43 @@ namespace recomp {
  
          void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
  
@@ -53,8 +53,10 @@ index 35703bd..8a15e5c 100644
 +            recomp_func_t* func;
 +        };
 +
-+        void load_function_bank(int32_t ram_addr, uint32_t size, const BankFunctionEntry* funcs, size_t count);
-+        bool is_function_bank_loaded(int32_t ram_addr);
++        void load_function_bank(uint32_t rom_start, int32_t ram_addr, uint32_t size, const BankFunctionEntry* funcs, size_t count);
++        // Keyed by ROM start, not RAM: different records are different banks of
++        // the same RAM and must be able to replace each other.
++        bool is_function_bank_loaded(uint32_t rom_start);
 +
 +        // Unload every loaded code section *and* function bank whose RAM extent
 +        // overlaps [ram_addr, ram_addr + size). Unlike unload_overlays() this
@@ -179,7 +181,7 @@ index 0f7de83..6bbe537 100644
  #   error "Unsupported architecture"
  #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..a909854 100644
+index 8c8e5d1..d2a7d11 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,10 @@
@@ -208,7 +210,7 @@ index 8c8e5d1..a909854 100644
  static SectionTableEntry* patch_code_sections = nullptr;
  size_t num_patch_code_sections = 0;
  static std::vector<char> patch_data;
-@@ -37,6 +49,19 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
+@@ -37,6 +49,20 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
  static std::unordered_map<uint32_t, uint16_t> patch_code_sections_by_rom{};
  static std::vector<LoadedSection> loaded_sections{};
  static std::unordered_map<int32_t, recomp_func_t*> func_map{};
@@ -218,6 +220,7 @@ index 8c8e5d1..a909854 100644
 +// this ELF (their VMAs overlap another bank's, so they live in a separate
 +// recompilation unit — see app/src/bank_overlays.cpp).
 +struct LoadedFunctionBank {
++    uint32_t rom_start;
 +    int32_t ram_addr;
 +    uint32_t size;
 +    const recomp::overlays::BankFunctionEntry* funcs;
@@ -228,7 +231,7 @@ index 8c8e5d1..a909854 100644
  static std::unordered_map<std::string, recomp_func_t*> base_exports{};
  static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
  static std::unordered_map<std::string, size_t> base_events;
-@@ -271,8 +296,119 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+@@ -271,8 +297,119 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
      }
  }
  
@@ -285,17 +288,17 @@ index 8c8e5d1..a909854 100644
 +    }
 +}
 +
-+void recomp::overlays::load_function_bank(int32_t ram_addr, uint32_t size, const BankFunctionEntry* funcs, size_t count) {
++void recomp::overlays::load_function_bank(uint32_t rom_start, int32_t ram_addr, uint32_t size, const BankFunctionEntry* funcs, size_t count) {
 +    unload_overlapping_overlays(ram_addr, size);
 +    for (size_t i = 0; i < count; i++) {
 +        func_map[funcs[i].ram_addr] = funcs[i].func;
 +    }
-+    loaded_function_banks.push_back({ ram_addr, size, funcs, count });
++    loaded_function_banks.push_back({ rom_start, ram_addr, size, funcs, count });
 +}
 +
-+bool recomp::overlays::is_function_bank_loaded(int32_t ram_addr) {
++bool recomp::overlays::is_function_bank_loaded(uint32_t rom_start) {
 +    for (const auto& bank : loaded_function_banks) {
-+        if (bank.ram_addr == ram_addr) {
++        if (bank.rom_start == rom_start) {
 +            return true;
 +        }
 +    }
@@ -348,7 +351,7 @@ index 8c8e5d1..a909854 100644
      section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
  
      // Sort the executable sections by rom address
-@@ -361,14 +497,49 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +498,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
@@ -382,7 +385,16 @@ index 8c8e5d1..a909854 100644
 +    if ((a >= 0x8016A000 && a < 0x80400000) || (a >= 0x84000000 && a < 0x84200000)) {
 +        last_streamed_stub_addr.store(a);
 +        // Temporary diagnostic: dump the calling thread's recompiled call chain
-+        // so a stub call can be attributed to the exact game function.
++        // so a stub call can be attributed to the exact game function, plus the
++        // first words at the address — real overlay code there means the game
++        // copied a bank in that was not registered, zeros/garbage means the
++        // pointer itself is stale.
++        uint8_t* rdram = ultramodern::get_rdram_base();
++        if (rdram != nullptr) {
++            fprintf(stderr, "[overlays]   @0x%08X: %08X %08X %08X %08X\n", a,
++                    (uint32_t)MEM_W(0x0, (gpr)(int32_t)a), (uint32_t)MEM_W(0x4, (gpr)(int32_t)a),
++                    (uint32_t)MEM_W(0x8, (gpr)(int32_t)a), (uint32_t)MEM_W(0xC, (gpr)(int32_t)a));
++        }
 +        dump_caller_chain("streamed-stub");
 +        return streamed_stub_generic;
 +    }
@@ -3319,3 +3331,48 @@ index 6e3ed18..cc81239 100644
  extern "C" void osDestroyThread(RDRAM_ARG PTR(OSThread) t_) {
      if (t_ == NULLPTR) {
          t_ = thread_self;
+diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
+index ee26c45..455b1af 100644
+--- a/ultramodern/src/timer.cpp
++++ b/ultramodern/src/timer.cpp
+@@ -1,6 +1,7 @@
+ #include <thread>
+ #include <variant>
+ #include <set>
++#include <cstdlib>
+ #include "blockingconcurrentqueue.h"
+ 
+ #include "ultramodern/ultra64.h"
+@@ -15,10 +16,29 @@
+ static std::chrono::high_resolution_clock::time_point start_time = std::chrono::high_resolution_clock::now();
+ // Offset of the duration since program start used to calculate the value for osGetTime. 
+ static int64_t ostime_offset = 0;
+-// Game speed multiplier (1 means no speedup)
+-constexpr uint32_t speed_multiplier = 1;
++// Game speed multiplier (1 means no speedup). OGRE_SPEED=<n> speeds the whole
++// emulated machine up: the CPU counter advances n times faster and the VI
++// thread schedules retraces n times faster, so timed sequences (attract mode,
++// songs) complete in 1/n of the wall-clock time. Debug aid for iterating on a
++// scene that only comes up minutes into a run.
++static uint32_t read_speed_multiplier() {
++    const char* env = getenv("OGRE_SPEED");
++    if (env == nullptr) {
++        return 1;
++    }
++    long value = strtol(env, nullptr, 10);
++    if (value < 1) {
++        value = 1;
++    }
++    if (value > 64) {
++        value = 64;
++    }
++    return static_cast<uint32_t>(value);
++}
++
++static const uint32_t speed_multiplier = read_speed_multiplier();
+ // N64 CPU counter ticks per millisecond
+-constexpr uint32_t counter_per_ms = 46'875 * speed_multiplier;
++static const uint32_t counter_per_ms = 46'875 * speed_multiplier;
+ 
+ struct OSTimer {
+     PTR(OSTimer) unused1;

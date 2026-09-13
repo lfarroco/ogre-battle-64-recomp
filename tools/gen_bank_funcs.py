@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Generate app/src/bank_funcs.inc from the bank unit's recomp_overlays.inl.
+"""Generate app/src/bank_funcs.inc from the bank units' recomp_overlays.inl files.
 
-The bank unit (see config-bank.yaml / config-bank.toml) recompiles streamed
-overlay records at their true RAM addresses. Its `recomp_overlays.inl` already
-contains the per-record function tables, but the app cannot include it directly:
-it defines `section_table`/`num_sections`, which the main unit's copy also
-defines.
+Each bank unit (config-bank<U>.yaml / .toml, built by `make bank-recomp`)
+recompiles a set of streamed-overlay records at their true RAM addresses, with
+its own `ovl<U>_` symbol namespace so the units can be linked alongside each
+other and the main unit.
 
-Instead this script flattens it into a minimal, self-contained table:
+The app cannot include a unit's `recomp_overlays.inl` directly: it defines
+`section_table`/`num_sections`, which the main unit's copy also defines. Instead
+this script flattens every `Bank*Funcs/recomp_overlays.inl` into one
+self-contained table:
 
-    static const recomp::overlays::BankFunctionEntry kBank<Name>Functions[] = {
-        { <absolute ram address>, func_ovl_<ram address> }, ...
+    extern "C" void <function>(uint8_t*, recomp_context*);      // declarations
+    static const recomp::overlays::BankFunctionEntry k<U>_<seg>Functions[] = {
+        { <absolute ram address>, <function> }, ...
     };
     static const BankRecord kBankRecords[] = {
-        { <rom start>, <ram start>, <size>, kBank<Name>Functions, N }, ...
+        { <rom start>, <ram start>, <size>, k<U>_<seg>Functions, N }, ...
     };
 
-which app/src/bank_overlays.cpp uses to register a record's functions when the
-game DMA's it, and to drop them when another bank overwrites that RAM.
+app/src/bank_overlays.cpp uses it to register a record's functions when the game
+DMA's it, and to drop them when another bank overwrites that RAM.
 """
 
 from __future__ import annotations
@@ -35,14 +38,6 @@ FUNC_ENTRY_RE = re.compile(
     r"\s*\.rom_size\s*=\s*0x([0-9A-Fa-f]+)\s*\}"
 )
 FUNCS_ARRAY_RE = re.compile(r"static FuncEntry (\w+)\[\]\s*=\s*\{")
-
-
-def table_name(funcs_array: str) -> str:
-    """section_2_bankRec2_funcs -> kBankRec2Functions"""
-    suffix = re.sub(r"^section_\d+_", "", funcs_array)
-    suffix = re.sub(r"_funcs$", "", suffix)
-    suffix = re.sub(r"^bank", "", suffix)
-    return f"kBank{suffix}Functions"
 
 
 def parse_func_arrays(text: str) -> dict[str, list[tuple[str, int]]]:
@@ -68,46 +63,69 @@ def parse_func_arrays(text: str) -> dict[str, list[tuple[str, int]]]:
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    inl_path = root / "BankFuncs" / "recomp_overlays.inl"
     out_path = root / "app" / "src" / "bank_funcs.inc"
 
-    if not inl_path.exists():
-        print(f"gen_bank_funcs: {inl_path} not found (run `make bank-recomp`)", file=sys.stderr)
+    unit_dirs = sorted(p for p in root.glob("Bank*Funcs") if p.is_dir())
+    if not unit_dirs:
+        print("gen_bank_funcs: no Bank*Funcs/ dirs (run `make bank-recomp`)", file=sys.stderr)
         return 1
 
-    text = inl_path.read_text()
-    arrays = parse_func_arrays(text)
-
+    # rom, ram, size, table name
     records: list[tuple[int, int, int, str]] = []
-    for m in SECTION_TABLE_RE.finditer(text):
-        rom, ram, size, funcs = int(m.group(1), 16), int(m.group(2), 16), int(m.group(3), 16), m.group(4)
-        if funcs not in arrays:
-            print(f"gen_bank_funcs: missing function array {funcs}", file=sys.stderr)
+    declarations: dict[str, None] = {}
+    tables: list[str] = []
+    total_funcs = 0
+
+    for unit_dir in unit_dirs:
+        inl = unit_dir / "recomp_overlays.inl"
+        if not inl.exists():
+            print(f"gen_bank_funcs: {inl} missing", file=sys.stderr)
             return 1
-        records.append((rom, ram, size, funcs))
+
+        # BankAFuncs -> A
+        unit = re.sub(r"Funcs$", "", re.sub(r"^Bank", "", unit_dir.name))
+
+        text = inl.read_text()
+        arrays = parse_func_arrays(text)
+
+        for m in SECTION_TABLE_RE.finditer(text):
+            rom = int(m.group(1), 16)
+            ram = int(m.group(2), 16)
+            size = int(m.group(3), 16)
+            funcs = m.group(4)
+            if funcs not in arrays:
+                print(f"gen_bank_funcs: {inl}: missing function array {funcs}", file=sys.stderr)
+                return 1
+
+            seg = re.sub(r"_funcs$", "", re.sub(r"^section_\d+_", "", funcs))
+            table = f"k{unit}_{seg}Functions"
+
+            tables.append(f"static const recomp::overlays::BankFunctionEntry {table}[] = {{")
+            for sym, offset in arrays[funcs]:
+                declarations.setdefault(
+                    sym, f'extern "C" void {sym}(uint8_t* rdram, recomp_context* ctx);'
+                )
+                tables.append(f"    {{ (int32_t)0x{ram + offset:08X}u, {sym} }},")
+            tables.append("};")
+            tables.append("")
+
+            records.append((rom, ram, size, table))
+            total_funcs += len(arrays[funcs])
 
     if not records:
-        print("gen_bank_funcs: no sections found in recomp_overlays.inl", file=sys.stderr)
+        print("gen_bank_funcs: no sections found", file=sys.stderr)
         return 1
 
     out: list[str] = [
-        "// GENERATED by tools/gen_bank_funcs.py from BankFuncs/recomp_overlays.inl.",
+        "// GENERATED by tools/gen_bank_funcs.py from Bank*Funcs/recomp_overlays.inl.",
         "// Do not edit by hand; run `make bank-recomp`.",
         "",
+        *sorted(declarations.values()),
+        "",
+        *tables,
+        "static const BankRecord kBankRecords[] = {",
     ]
-
-    for rom, ram, size, funcs in records:
-        # section_<elf index>_<segment name>_funcs -> kBank<SegmentName>Functions
-        table = table_name(funcs)
-        out.append(f"static const recomp::overlays::BankFunctionEntry {table}[] = {{")
-        for sym, offset in arrays[funcs]:
-            out.append(f"    {{ (int32_t)0x{ram + offset:08X}u, {sym} }},")
-        out.append("};")
-        out.append("")
-
-    out.append("static const BankRecord kBankRecords[] = {")
-    for rom, ram, size, funcs in records:
-        table = table_name(funcs)
+    for rom, ram, size, table in records:
         out.append(
             f"    {{ 0x{rom:08X}u, (int32_t)0x{ram:08X}u, 0x{size:08X}u, "
             f"{table}, ARRLEN({table}) }},"
@@ -116,10 +134,9 @@ def main() -> int:
     out.append("")
 
     out_path.write_text("\n".join(out))
-    total = sum(len(arrays[f]) for _, _, _, f in records)
     print(
-        "gen_bank_funcs: wrote %s (%d record(s), %d function(s))"
-        % (out_path.relative_to(root), len(records), total)
+        "gen_bank_funcs: wrote %s (%d unit(s), %d record(s), %d function(s))"
+        % (out_path.relative_to(root), len(unit_dirs), len(records), total_funcs)
     )
     return 0
 

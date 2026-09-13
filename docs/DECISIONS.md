@@ -91,20 +91,128 @@ function pointer in overlay B. The check must be "is this section loaded at
 all" (`is_section_loaded`), and the load address must be the section base, not
 the chunk destination.
 
+### Finding: the next attract scene asks for records {10,11,12,13}
+
+The attract loop is title → "lore" (the story movie) → title → the next variant
+screen. A 430s unattended run reached that second transition at t≈360.7s and
+recorded the scene's own request. The scene dispatcher (asm/1060.s @0x80075E50)
+stores the scene id at `D_800E810E` and its descriptor at `D_800E8294`; the
+descriptor's `+0x10` word is the mask handed to the record loader
+`func_800761E4`. `app/src/bank_overlays.cpp` now dumps it when it first sees an
+uncompiled record:
+
+```
+[bank] UNCOMPILED streamed record 10: rom=0x1F0A00 ram=0x801AD5C0 size=0x230E0
+[bank]   scene=0x000C descriptor=0x8018FB58 record mask=0x00003C00
+[bank] UNCOMPILED streamed record 11: rom=0x24BC70 ram=0x801F7100 size=0x131F0
+[bank] UNCOMPILED streamed record 12: rom=0x25EE60 ram=0x8020A300 size=0x169C0
+[bank] UNCOMPILED streamed record 13: rom=0x275820 ram=0x802210E0 size=0x47D0
+[overlays] streamed function stub called @ 0x801E6FD0 (not yet loaded)
+[overlays] streamed function stub called @ 0x801EE3E8 (not yet loaded)
+[overlays] streamed function stub called @ 0x801EE600 (not yet loaded)
+[overlays] streamed function stub called @ 0x801EE4A0 (not yet loaded)
+```
+
+`mask=0x3C00` is bits 10,11,12,13; `func_80076430` matches it to descriptor id 2
+(`{0,2,4,10,11,12,13,14}`), and only the masked records are copied. That is why
+the scene bounced: its code was never recompiled, so the entry returned through
+the generic stub, and the four calls that follow (all in record 7's address
+range, i.e. a different bank's layout) also hit the stub. Records 2,3,6 were
+re-loaded afterwards, i.e. the game fell back to the previous attract scene.
+
+### Decision: bank units are partitioned by RAM, not by game bank
+
+One ELF cannot link two records whose RAM ranges overlap — they are different
+banks of the same RAM. `make bank-recomp` therefore loops over `BANK_UNITS`,
+each a `config-bank<U>.yaml` + `.toml` compiling a **RAM-disjoint** record set:
+
+| unit | records | RAM |
+|---|---|---|
+| A | 2, 3, 6 | `0x80197B90` / `0x8019EE70` / `0x801AD5C0` |
+| C | 10, 11, 12, 13 | `0x801AD5C0` / `0x801F7100` / `0x8020A300` / `0x802210E0` |
+
+Records that overlap go in different units. The partition is invisible to the
+runtime: `app/src/bank_overlays.cpp` registers whichever record the game DMA's,
+so a new record can be added to any unit with a free range. Each unit namespaces
+its symbols (`ovlA_`, `ovlC_`) so the units can be linked beside each other and
+the main unit; `tools/gen_bank_funcs.py` merges every
+`Bank*Funcs/recomp_overlays.inl` into one `app/src/bank_funcs.inc`. Unit C adds
+848 functions (records 10–13); the app now arms 7 records / 1052 functions.
+
+### Finding: overlays stream *more code into their reserved arena* at runtime
+
+Registering records 10–13 did not fix scene `0x0C`: the same four calls
+(`0x801E6FD0`, `0x801EE3E8`, `0x801EE600`, `0x801EE4A0`) still hit the streamed
+stub. A stub-path diagnostic that dumps the first words at the address showed
+**real MIPS code** there, and a DMA trace (filtered to the arena) showed where it
+came from:
+
+```
+[pi] inline DMA dram=0x801E6FD0 dev=0x0023B1F0 size=0x200   <- the stub address
+[pi] inline DMA dram=0x801EE3D0 dev=0x002425F0 size=0x200
+[pi] inline DMA dram=0x801EE5D0 dev=0x002427F0 size=0x200
+```
+
+So a segment-table record is only the **resident part** of an overlay. The
+record's `ram_end` word (`+0x04`) is much larger than its code+data+bss because
+the space above the record is an **arena** the game fills on demand with further
+code modules from the ROM gap between that record's `rom_end` and the next
+record's `rom_start`. For record 10:
+
+| module | ROM | size | RAM |
+|---|---|---|---|
+| table record 10 | `0x1F0A00` | `0x230E0` | `0x801AD5C0` |
+| `bankRec10a` | `0x213AE0` | `0x16770` | `0x801D0860` |
+| `bankRec10b` | `0x23B1F0` | `0x09580` | `0x801E6FD0` |
+
+All four stubs land in `bankRec10b`. Both modules are plain 0x200-byte-chunk DMA
+copies (constant rom→ram delta), so they are compiled as ordinary RAM-disjoint
+sections of unit C and registered by the same DMA hook — no new runtime
+mechanism was needed. One wrinkle: as `asm` sections, splat sometimes references
+a data label inside them without emitting its definition;
+`tools/gen_bank_syms.py` turns every referenced-but-undefined `D_ovl<U>_<vram>`
+into an absolute linker definition (the name encodes the VRAM, and the unit links
+at true RAM addresses).
+
+**Consequence for future banks:** a record is not "done" when its table entry is
+compiled — the arena modules in the following ROM gap must be compiled too. The
+app's DMA hook already registers them, and `[bank] loading overlay record …`
+lines name them.
+
+### Decision: debug knobs for iterating on a scene that is minutes away
+
+Waiting ~6 minutes for scene `0x0C` made this slow, so two knobs were added:
+
+| knob | what |
+|---|---|
+| `OGRE_SPEED=<n>` (`ultramodern/src/timer.cpp`) | multiplies the emulated clock: the CPU counter *and* the VI retrace schedule run `n`× faster, so a timed attract sequence completes in `1/n` of the wall time (clamped to 64). Semantics are unchanged because every timer scales together (audio is off in these runs). |
+| `OGRE_FORCE_SCENE=<hex>` (+ `OGRE_FORCE_SCENE_AFTER_MS`, `app/src/bank_overlays.cpp`) | pokes the attract scene id (`*(u16*)(D_800C4BBC + 4)`) until `D_800E810E` reports the scene active, so a run switches to the wanted scene as soon as the scene's own state machine allows. |
+
+Scene `0x0C` is reached at t≈42s wall with `OGRE_SPEED=8 OGRE_FORCE_SCENE=0x0C`
+instead of t≈360s, which is what made the arena modules findable in one session.
+
 ### Outcome
 
-| run | session 32 | now |
-|---|---|---|
-| 5s | exit 0 | exit 0 |
-| 170s unattended | exit 134, dl 2770 at t≈94.8s | **exit 0, dl 4850 at t≈168s** |
-| bank swap | `streamed function stub called @ 0x801AD5C0` | `[bank] loading overlay record …` ×3 at t≈95.1s |
-| render after swap | — | `docs/proofs/native-post-bankswap-present2805.png` (night castle scene) |
-| `build-null`, `build-wasm` | clean | clean |
+| run | session 32 | session 33 (unit A) | session 33 + unit C + arena |
+|---|---|---|---|
+| 5s | exit 0 | exit 0 | exit 0 |
+| 170s unattended | exit 134, dl 2770 at t≈94.8s | **exit 0, dl 4850 at t≈168s** | — |
+| 430s unattended | — | exit 0, but scene `0x0C` stubbed at t≈360s | **scene `0x0C` runs** |
+| bank swap | `streamed function stub called @ 0x801AD5C0` | `[bank] loading overlay record …` ×3 at t≈95.1s | + ×4 (records 10-13) + ×2 (arena modules) |
+| stubs at scene `0x0C` | — | 4 (`0x801E6FD0` …) | **0** |
+| unit-info screen | — | bounced to the title | `docs/proofs/native-unit-info-{dragon-tamer,griffin}.png` |
+| natural unattended loop (`OGRE_SPEED=4`, 280s wall ≈ 1100s game) | — | — | **exit 0, 29080 display lists, 13 bank/arena loads, 0 stubs**; the unit-info screen comes up on its own (`docs/proofs/native-unit-info-fighter-natural.png`) |
+| `build-null`, `build-wasm` | clean | clean | clean |
 
-Open from here: banks `{0,1}` and `{0,2,3,7,8,9}` etc. still fall to the stub
-when first loaded (any bank whose records are not compiled shows the old
-`streamed function stub` behaviour); the remaining 16 records can be added to
-`config-bank.yaml` and `make bank-recomp` the same way.
+The app arms **9 records / 1289 functions** (unit A: records 2,3,6; unit C:
+records 10,11,12,13 + arena modules `bankRec10a`/`bankRec10b`).
+
+Remaining uncompiled records: 0, 1, 4, 5, 14, 16, 17, 18 (plus their arena
+modules). They overlap records already placed, so each needs a unit with a free
+RAM range (0/1/17 all share `0x80197B90` with record 2, so they need further
+units); `kAllStreamedRecords` in `app/src/bank_overlays.cpp` names whichever one
+an unattended run asks for, together with the scene id and mask that requested
+it.
 
 ---
 
