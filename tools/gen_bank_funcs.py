@@ -16,8 +16,15 @@ self-contained table:
         { <absolute ram address>, <function> }, ...
     };
     static const BankRecord kBankRecords[] = {
-        { <rom start>, <ram start>, <size>, k<U>_<seg>Functions, N }, ...
+        { <rom start>, <ram start>, <size>, <ram end>, k<U>_<seg>Functions, N },
+        ...
     };
+
+    <ram end> is the record's RAM end (exclusive) from the game's segment table
+    (ROM 0x387C0, 0x28-byte entries); the loader zeroes [ram start + size,
+    ram end) as BSS on every load. Records that are not segment-table entries
+    (explicit chunk DMAs like bankRec10a/10b/14a/14b) have no BSS: ram end is
+    ram start + size for those (see RAM_END, which defaults that way).
 
 app/src/bank_overlays.cpp uses it to register a record's functions when the game
 DMA's it, and to drop them when another bank overwrites that RAM.
@@ -59,6 +66,28 @@ def parse_func_arrays(text: str) -> dict[str, list[tuple[str, int]]]:
         if m:
             arrays[current].append((m.group(1), int(m.group(2), 16)))
     return arrays
+
+
+# RAM end (exclusive) per segment-table record, parsed from the game's segment
+# table at ROM 0x387C0 (0x28-byte entries {ram start, ram end, rom start,
+# rom end, ...}). The record loader zeroes [ram start + rom size, ram end) as
+# BSS on every load, and the port must do the same: game code in scene 0x0D
+# reads those ranges as empty lists/tables and walks stale bytes as pointers
+# otherwise. Keyed by ROM start; records absent here are explicit chunk DMAs
+# with no BSS (ram end = ram start + size).
+RAM_END: dict[int, int] = {
+    0x066E30: 0x8019A690,  #  0 (unit E)
+    0x06E680: 0x801F1530,  #  1 (unit D)
+    0x0E4910: 0x8019EE70,  #  2
+    0x0EBBD0: 0x801AD5C0,  #  3 (unit A)
+    0x0FA010: 0x8019F450,  #  4 (unit C)
+    0x0FA600: 0x801B4D60,  #  6 (unit A)
+    0x1F0A00: 0x801F7100,  # 10 (unit C)
+    0x24BC70: 0x8020A300,  # 11 (unit C)
+    0x25EE60: 0x802210E0,  # 12 (unit C)
+    0x275820: 0x802258B0,  # 13 (unit C)
+    0x281830: 0x80243DD0,  # 14 (unit C)
+}
 
 
 def main() -> int:
@@ -126,9 +155,17 @@ def main() -> int:
         "static const BankRecord kBankRecords[] = {",
     ]
     for rom, ram, size, table in records:
+        ram_end = RAM_END.get(rom, ram + size)
+        if ram_end < ram + size:
+            print(
+                f"gen_bank_funcs: record rom=0x{rom:X} has ram_end below "
+                f"ram+size; using ram+size",
+                file=sys.stderr,
+            )
+            ram_end = ram + size
         out.append(
             f"    {{ 0x{rom:08X}u, (int32_t)0x{ram:08X}u, 0x{size:08X}u, "
-            f"{table}, ARRLEN({table}) }},"
+            f"(int32_t)0x{ram_end:08X}u, {table}, ARRLEN({table}) }},"
         )
     out.append("};")
     out.append("")

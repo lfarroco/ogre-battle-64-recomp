@@ -411,6 +411,19 @@ hardware. RT64 remains the primary native renderer throughout. See
     reproducible with no input at 1× speed. `OGRE_NO_AUDIO=1` separately
     crashes in early boot (queue-snapshot diagnostic). See
     `docs/HANDOFF-2026-09-14-session37.md`.
+  - ✅ **Scene 0x0D init: two more dispatches, record-BSS zeroing, and the
+    residue wall (session 38)**: the forced new-game run died in stale
+    overlay-C code (`jal 0x801AFC2C` → `func_801AFAF4` while record 10 owns
+    the address) — dispatched to bank unit C's real entry, same for
+    `jal 0x801980A0` (fragment → unit E's real entry). Record loads now zero
+    their segment-table BSS (the port never did; `0x0D`'s list anchors live
+    in record 10's BSS). The remaining forced-`0x0D` crash is missing
+    pre-state, proven by flag lifecycle probes: `0x0D` reads init flag
+    `0x8019F794 == 0` because `0x02`'s single-frame writer never runs, while
+    natural boot leaves that region nonzero — so the natural path
+    (title → menu → `0x02` → `0x0D`) is required, and it is blocked at menu
+    `0x18`'s pre-existing unit-D crash. See
+    `docs/HANDOFF-2026-09-14-session38.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

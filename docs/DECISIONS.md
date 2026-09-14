@@ -5,6 +5,57 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-14 (session 38) — two more cross-bank dispatches, record-BSS zeroing, and why the forced new-game path stops in scene 0x0D's init
+
+Session 37's `0x0D` wall moved twice. First, the forced run died right after
+record 10a loaded in main-unit `func_801AFAF4` — the same bug class as session
+37 (resident `jal 0x801AFC2C` bound to a containing overlay-C body while bank
+unit C's record 10 owns the address). Dispatching `0x801AFC2C` (2 sites, same
+tail-call repair) moved execution into real bank code, where it died one asset
+later: `func_8007A110` (decompress) storing to N64 `0x0` after the allocator
+legitimately refused a 1.2 GB request parsed from a wrongly-selected asset.
+Probes (temporary, reverted) traced the wrong asset id (`0x148`) to scene
+`0x0D`'s init reading flag `0x8019F794 == 0`, which scene `0x02`'s record-0
+code never wrote: `0x02`'s loader entry runs once and never reaches its writer
+branch. A natural-boot RDRAM dump shows the flag region (and the record-3
+state the `0x02` entry branches on) is nonzero after the intro, i.e. the flag
+is residue built by scenes the forced jump skips. The forced `0x0D` crash is
+missing pre-state, not wrong code or wrong bytes (every transfer verified
+byte-correct against the ROM). The natural path — title → menu → `0x02` →
+`0x0D` — is blocked at menu `0x18`'s pre-existing unit-D crash, unchanged.
+
+### Decision: dispatch `0x801AFC2C` and `0x801980A0` in the default build
+
+`make recomp` now runs `dispatch --only 0x80198D28,0x801AFC2C,0x801980A0`
+(idempotent, verified). `0x801980A0` is the same class again: two resident
+call sites bound to the overlay-C fragment `func_801980A0` (no prologue) while
+bank unit E (record 0, resident in scene `0x02`) owns the real entry
+`func_ovlE_801980A0`; both sites are already call-and-continue, so no tail
+repair. Regression battery (boot + five forced scenes exit 0, zero stubs;
+menu still crashes at its known unit-D site) shows no new breakage.
+
+### Decision: zero record BSS on streamed load, from the segment table
+
+The hardware loader zeroes `[ram_start + rom_size, ram_end)` (BSS). The port
+never did: `load_function_bank` only registers map entries while `do_rom_read`
+copies just the ROM bytes, so game code read stale bytes as empty
+lists/tables (scene `0x0D`'s list anchors live in record 10's BSS; record 14's
+BSS holds the arena slots and the gap session 37 found). `ram_end` comes from
+the game's segment table at ROM `0x387C0` via a static map in
+`tools/gen_bank_funcs.py` (chunk-DMA records like 10a/10b/14a/14b default to
+no BSS); the hook zeroes the span and evicts overlapping map entries, the
+same as the ROM span. Verified: record-14 BSS reads back zero after load.
+
+### Decision: crash handler reports the N64 fault address and dumps RDRAM
+
+`on_fatal_signal` is now a `sigaction` handler: it prints the host fault, the
+rdram base, and their difference, which reads back as the faulting N64
+address for word accesses (half/byte accesses xor the low bits — see
+`recomp_mem_addr`), plus per-thread last functions. `OGRE_DUMP_RDRAM=<path>`
+also works on the crash path (same whole-image dump as the exit path), so a
+crash's data pointers can be followed offline. These three lines located both
+of this session's walls. See `docs/HANDOFF-2026-09-14-session38.md`.
+
 ## 2026-09-14 (session 37) — New Game plays into scene 0x0D: first targeted cross-bank dispatch, plus that scene's arena banks
 
 The title → Start → New Game crash was the session-34 canonical case firing

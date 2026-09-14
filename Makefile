@@ -73,7 +73,7 @@ build/assets/%.o: assets/%.bin
 
 recomp: $(ELF)
 	$(N64RECOMP) config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0
 
 # ---------------------------------------------------------------------------
 # Cross-bank call routing (Phase 4).
@@ -86,19 +86,34 @@ recomp: $(ELF)
 # unit's layout is a body interior in the bank's, and forcing splat to split
 # there makes the recompiler emit fragments with undefined `goto` labels.
 #
-# One target is dispatched in the default build (the line in `recomp` above):
+# Three targets are dispatched in the default build (the line in `recomp` above):
 # 0x80198D28, scene 0x02's loader entry. The recompiler binds its single call
 # site (func_80178920) to the containing overlay-C body func_801989AC — which
 # dereferences $a0+3 with $a0 unset and dies — while bank unit E (record 0,
 # resident in that scene) provides the real entry func_ovlE_80198D28. The
 # dispatch also repairs the recompiler's tail-call emission at that site (an
 # early `return` that abandons the caller's epilogue) back to call-and-continue.
-# A lookup that misses the map is a no-op stub, so the boot/attract scenes that
-# never call it are unaffected. `make recomp` re-applies this after every
+# 0x801AFC2C, scene 0x0D's worker. The recompiler binds its two call sites
+# (func_80177754 @0x80177964, func_80178568 @0x80178834 — the latter is scene
+# 0x0D's update, reached via the dispatcher) to the containing overlay-C body
+# func_801AFAF4, which runs stale overlay-C bytes while bank unit C's record 10
+# (RAM 0x801AD5C0, resident in that scene) owns the address; the stale body
+# faults on a wild halfword load. Bank unit C provides the real entry
+# func_ovlC_801AFC2C. Same tail-call repair at both sites.
+# 0x801980A0, scene 0x02's init worker. The recompiler binds its two call
+# sites (func_801776EC @0x801776F4, func_80177720 @0x80177728) to the
+# overlay-C fragment func_801980A0 (no prologue: it reads $s0/$t9 the callers
+# never set), while bank unit E (record 0, resident in scene 0x02) provides
+# the real entry func_ovlE_801980A0, whose contract takes the callers' $a0
+# (-1/0x29). Scene 0x0D's init reads a flag this worker writes (0x8019F794);
+# without the dispatch the flag stays zero and 0x0D walks the wrong init
+# path. Both sites are already call-and-continue, so no tail repair.
+# A lookup that misses the map is a no-op stub, so the scenes that never load
+# the owning record are unaffected. `make recomp` re-applies this after every
 # regen; with no bank data at all the step warns and leaves the tree alone.
-# The remaining 66 targets stay on the recompiler's bindings (session 33's
-# behaviour); dispatching the other 8 resolvable ones is still an opt-in
-# experiment. See docs/DECISIONS.md (sessions 34, 37).
+# The remaining targets stay on the recompiler's bindings (session 33's
+# behaviour); dispatching the other resolvable ones is still an opt-in
+# experiment. See docs/DECISIONS.md (sessions 34, 37, 38).
 # ---------------------------------------------------------------------------
 cross-bank-report:
 	python3 tools/cross_bank.py report
