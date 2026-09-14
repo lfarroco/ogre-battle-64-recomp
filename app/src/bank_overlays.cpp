@@ -77,69 +77,135 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x1BA020u, (int32_t)0x80220F60u, 0x0092B0u, false },  // 18
 };
 
-// Debug aid: OGRE_FORCE_SCENE=0x0C jumps straight to a scene instead of waiting
-// out the attract loop (which takes minutes). The attract scene dispatcher
-// (asm/1060.s @0x80075DB8) uses the u16 at *(u16*)(D_800C4BBC + 4) as the
-// current scene id every frame and derives everything else — the per-scene
-// update function and the bank it loads — from it, so poking that word makes
-// the game load and run the scene normally. The poke repeats until the scene is
-// actually active (D_800E810E), and only starts after
-// OGRE_FORCE_SCENE_AFTER_MS (default 3000) so boot/init can settle.
-void maybe_force_scene() {
-    static const bool enabled = (getenv("OGRE_FORCE_SCENE") != nullptr);
-    if (!enabled) {
+// Boot straight into a screen.
+//
+// `OGRE_SCENE=<name|hex>` (or the original `OGRE_FORCE_SCENE=<hex>`) jumps to a
+// scene instead of waiting out the attract loop (which takes minutes). The
+// attract scene dispatcher (asm/1060.s @0x80075DB8) uses the u16 at
+// `*(u16*)(D_800C4BBC + 4)` as the current scene id every frame and derives
+// everything else -- the per-scene update function and the bank it loads --
+// from it, so poking that word makes the game load and run the scene normally.
+// The poke repeats until `D_800E810E` reports the scene active, and only starts
+// after `OGRE_SCENE_AFTER_MS` (default 3000) so boot/init can settle.
+//
+// The names are the scenes this project has identified so far; a hex id can
+// always be given instead. `OGRE_SCENE_TRACE=1` logs every scene change
+// (`[scene] id=0x.. descriptor=0x.. mask=0x..`), which is how new names are
+// found: run the attract loop and read the log.
+struct SceneName {
+    const char* name;
+    uint16_t id;
+};
+
+// Scene ids verified against a run (see docs/HANDOFF-2026-09-12-session33.md
+// and docs/HANDOFF-2026-09-14-session35.md).
+static const SceneName kScenes[] = {
+    { "title", 0x000C },     // attract title screen (clouds + logo)
+    { "menu", 0x0018 },      // title menu (New Game / Tutorial / Stereo)
+    { "new-game", 0x0002 },  // New Game / Tutorial path
+};
+
+static bool scene_lookup(const char* spec, uint16_t& id, const char*& name) {
+    for (const SceneName& scene : kScenes) {
+        if (strcmp(spec, scene.name) == 0) {
+            id = scene.id;
+            name = scene.name;
+            return true;
+        }
+    }
+    char* end = nullptr;
+    const unsigned long value = strtoul(spec, &end, 16);
+    if ((end != spec) && (*end == '\0') && (value <= 0xFFFFu)) {
+        id = (uint16_t)value;
+        name = nullptr;
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+// The poke itself, run from the streamed-DMA hook: scene loads are the
+// moment the dispatcher is about to read the id.
+void force_scene_on_load() {
+    const char* spec = []() -> const char* {
+        const char* scene = getenv("OGRE_SCENE");
+        return (scene != nullptr) ? scene : getenv("OGRE_FORCE_SCENE");
+    }();
+    if (spec == nullptr) {
         return;
     }
-    static const uint16_t forced_scene =
-        (uint16_t)strtoul(getenv("OGRE_FORCE_SCENE"), nullptr, 16);
-    static const int64_t after_ms = []() -> int64_t {
-        const char* env = getenv("OGRE_FORCE_SCENE_AFTER_MS");
-        return (env != nullptr) ? strtoll(env, nullptr, 10) : 3000;
-    }();
+    uint16_t forced_scene = 0;
+    const char* name = nullptr;
+    if (!scene_lookup(spec, forced_scene, name)) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr,
+                    "[scene] unknown scene '%s' (use a name from the table or a hex id)\n", spec);
+        }
+        return;
+    }
+    if (forced_scene == 0) {
+        return;
+    }
+    // The runtime's MEM_* macros read through a local `rdram`.
+    uint8_t* rdram = ultramodern::get_rdram_base();
+    if (rdram == nullptr) {
+        return;
+    }
+    uint32_t scene_state = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x800C4BBC);
+    if (scene_state == 0) {
+        return;
+    }
+    MEM_H(0x4, (gpr)(int32_t)scene_state) = forced_scene;
     static bool announced = false;
-    static bool active = false;
+    if (!announced) {
+        announced = true;
+        printf("[scene] forcing scene 0x%02X\n", forced_scene);
+        fflush(stdout);
+    }
+}
 
-    if (active) {
+// OGRE_SCENE_LOG=1: log every scene change. This is how the names in kScenes
+// are found and verified.
+void poll_scene() {
+    static const bool trace = (getenv("OGRE_SCENE_LOG") != nullptr);
+    if (!trace) {
         return;
     }
     uint8_t* rdram = ultramodern::get_rdram_base();
     if (rdram == nullptr) {
         return;
     }
-    int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             ultramodern::time_since_start())
-                             .count();
-    if (elapsed_ms < after_ms) {
+    static uint16_t last = 0;
+    static bool first = true;
+    const uint16_t now = MEM_H(0x0000, (gpr)(int32_t)0x800E810E);
+    if (!first && (now == last)) {
         return;
     }
-
-    uint16_t current = MEM_H(0x0000, (gpr)(int32_t)0x800E810E);
-    if (current == forced_scene) {
-        active = true;
-        printf("[bank] forced scene 0x%02X active (t=%lldms)\n", forced_scene,
-               (long long)elapsed_ms);
-        fflush(stdout);
-        return;
-    }
-
-    uint32_t scene_state = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x800C4BBC);
-    if (scene_state == 0) {
-        return;
-    }
-    MEM_H(0x4, (gpr)(int32_t)scene_state) = forced_scene;
-
-    if (!announced) {
-        announced = true;
-        printf("[bank] forcing scene 0x%02X (was 0x%02X) at t=%lldms\n", forced_scene,
-               current, (long long)elapsed_ms);
-        fflush(stdout);
-    }
+    first = false;
+    last = now;
+    const uint32_t descriptor = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x800E8294);
+    const uint32_t mask = (descriptor != 0) ? (uint32_t)MEM_W(0x10, (gpr)(int32_t)descriptor) : 0;
+    fprintf(stderr, "[scene] t=%lldms id=0x%04X descriptor=0x%08X mask=0x%08X\n",
+            (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                ultramodern::time_since_start())
+                .count(),
+            now, descriptor, mask);
+    fflush(stderr);
 }
+
+namespace {
 
 // The game copies a record in 0x200-byte chunks; register it once, on the first
 // chunk. The runtime keeps the authoritative "is this RAM resident" state.
 void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) {
-    maybe_force_scene();
+    // Scene loads are the moments the dispatcher is guaranteed to be looking at
+    // the id, so the poke lives here (the original behaviour). Poking every
+    // frame instead corrupts the scene state machine: the game rewrites the id
+    // itself and a running scene then sees a state that does not match it.
+    force_scene_on_load();
 
     for (const BankRecord& record : kBankRecords) {
         if (rom_offset < record.rom_start || rom_offset >= record.rom_start + record.size) {

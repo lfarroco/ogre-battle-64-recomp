@@ -1,14 +1,17 @@
-# Session 35 — the title screen's white band: a zero-area texture tile
+# Session 35 — the title screen's fog: a zero-area texture tile
 
 Goal: fix the reported visual regression on the title screen — a solid **white
 band across the middle of the scene** where the retail game shows scrolling
-clouds behind the "Ogre Battle 64" logo.
+clouds behind the "Ogre Battle 64" logo, and then restore the **very faint white
+fog** that moves over those clouds.
 
-Done: the band is gone. It was not a shader or a 3D/2D compositing problem; the
-game draws six texture rectangles with a **tile that covers zero texels**, and
-RT64 was synthesising a one-texel image for them. `RDP::drawTexRect` (and the
-browser renderer's `draw_texrect`) now skip such rectangles, which is what the
-hardware does.
+Done: the band is gone and the fog is drawn. Neither was a shader or a 3D/2D
+compositing problem. The game draws six texture rectangles with a **tile that
+covers zero texels**; RT64 synthesised a one-texel image for them (an opaque
+white band), and the fix is a two-part one: `RDP::drawTexRect` skips such a
+rectangle, and an app-side `OGRE_FOG` pass rewrites the texture setup it
+inherits so it samples the fog layer's own 64x64 image (which is what the
+retail title screen shows).
 
 ## 0. State at the start and at the end
 
@@ -21,7 +24,9 @@ OGRE_TAP_MS=4000 OGRE_CAPTURE_PRESENT=/tmp/title OGRE_CAPTURE_AFTER=20 \
 
 | check | before | after |
 |---|---|---|
-| title screen rows 64-128 | opaque white | clouds (retail) |
+| title screen rows 64-128 | opaque white | clouds + the faint fog (retail) |
+| `OGRE_FOG_TRACE=1` | — | `layer 0 image=0x801D2F88 64x64 siz=1 fmt=4 line=8`, `layer 2 image=0x801D51E8 ...` |
+| boot into a screen | hex scene id only | `OGRE_SCENE=title\|menu\|new-game` (+ hex) |
 | `OGRE_SPEED=4`, 130 s attract run | exit 0 | **exit 0**, 1457 display lists, **0 streamed stubs** |
 | `make`/`cmake --build build-app`, `build-null`, `build-wasm` | clean | clean |
 | smoke / 3D logo characters (session 34) | present | present (unchanged) |
@@ -216,3 +221,144 @@ git -C tools/RT64 apply ../../rt64-ob64.patch
 4. **Optional:** the same zero-texel tile guard has not been exercised in a
    browser build (the wasm variant builds, but this session did not run the
    probes). `docs/guides/web-probes.md` has the harness.
+
+## 7. Addendum — the missing fog (same rectangles, the other half of the bug)
+
+The band fix alone left the title screen missing the **very faint white fog**
+that moves over the retail's clouds. It is the same six rectangles: they are the
+layer's horizontally scrolling "wrap" (a 64x64 image, mirror-sampled 1:1 and
+repeated across the width), drawn with the white combiner
+(`FCFFFFFF FFFF73B9` = `RGB ONE, ALPHA TEXEL0`), so the image's own intensity
+becomes a faint white overlay.
+
+### Where the image is
+
+`func_8019C5D4(0)` (overlay C, 0x8019C5D4) is the wrap pass for layer 0 of the
+game's *effect* layer table and intends to upload that layer's image before
+drawing it; the upload is skipped in the display lists the port sees, so the
+rectangles inherit the layer-2 loop's stale, zero-area tile instead. The image
+is nevertheless reachable through the game's own table:
+
+```
+D_801B80E0                     -> layer table pointer (0x801BA770 in the title scene)
+table + 0xFC + i*0x24          -> layer i's record
+record[0]                      -> image record
+image record: +8 = the data, +4/+6 = height/width, byte 3 = siz, byte 2 = fmt
+```
+
+For the title screen, layer 0 is **`0x801D2F88`, a 64x64 8-bit intensity image**
+(mean intensity 0.051 — "very faint", matching the retail), and layer 2 is the
+same kind of image at `0x801D51E8`.
+
+### The repair
+
+`app/src/renderer.cpp`'s `OGRE_FOG` pass (on by default, `OGRE_FOG=0` to
+disable) reuses the proven `OGRE_NOP_RECT` walker: whenever a `G_TEXRECT` is
+about to sample a zero-area tile while the white combiner is active, it rewrites
+the last `SETTIMG` / `SETTILE t7` / `LOADTILE` / `SETTILE t0` /
+`SETTILESIZE t0` in the list so the rectangle samples the layer's own image.
+`OGRE_FOG_TRACE=1` prints each repair. Verified with `OGRE_RECT_STATE=64-128`:
+the rectangles now reach RT64 as `fmt=4 siz=1 line=8 uls=0 ult=0 lrs=63 lrt=63`
+— the 64x64 fog image — and the band region shows the fog
+(`docs/proofs/native-title-fog.png`, and `native-title-fog-vs-band.png` for the
+fog / no-fog / old-white-band comparison).
+
+## 8. Addendum — booting straight into a screen
+
+`OGRE_SCENE=<name|hex>` (app/src/bank_overlays.cpp) replaces the hex-only
+`OGRE_FORCE_SCENE`. The dispatcher (`asm/1060.s @0x80075DB8`) runs the per-scene
+update function of `u16(D_800C4BBC + 4)` and stores it in `D_800E810E`, so
+poking that word enters the scene. Known names:
+
+| name | id | screen |
+|---|---|---|
+| `title` | 0x0C | attract title (clouds + logo + fog) |
+| `menu` | 0x18 | title menu (New Game / Tutorial / Stereo) |
+| `new-game` | 0x02 | New Game / Tutorial path |
+
+`OGRE_SCENE_LOG=1` logs every scene change with its descriptor and record mask —
+how the ids are found. The poke is deliberately on the streamed-DMA path (scene
+loads), not per frame: poking every frame fights the scene state machine and
+crashes it. `OGRE_SCENE_AFTER_MS` (default 3000) delays the first poke; poking
+before ~2 s crashes the boot.
+
+**Caveat:** scenes `0x18`/`0x02` still rely on the unfinished cross-bank work
+(sessions 33/34), so forcing them can still abort; the attract-loop scenes
+(`0x0C`) are the safe ones.
+
+
+## 9. Addendum — the bottom-of-screen fog (the `©1999 QUEST` region)
+
+The user reports the fog is most visible around the `©1999 QUEST` copyright line
+(N64 rows ~185-206, x ~186-254), i.e. the **bottom sweep**, not the logo band.
+That sweep is a *different* draw from the logo-area fog: 448 one-screen-row-tall
+`G_TEXRECT`s (offsets 0x29A4D8.., white combiner `FCFFFFFF FFFF73B9`) whose `t`
+advances one texel per row and whose `s` walks from 2752 down to 0 while the
+x-extent grows — a diagonal cloud wipe. It inherits the layer-3 loop's stale,
+zero-area tile (`uls=0 ult=636 lrs=1276 lrt=636`), and its `s` range (86 texels)
+does **not** fit the 64-texel layer image, so it is not the layer-image pass.
+
+What the port does now (after the session-35 fog work):
+
+* the **logo-area** group (the first white group of the frame, `s` = 63..0) is
+  rewritten to sample the layer's own 64x64 image (the faint fog);
+* the **bottom sweep** keeps the game's tile and only gets a one-texel height,
+  so RT64 decodes exactly the stale row out of TMEM and draws the wipe the way
+  the hardware does, instead of skipping it.
+
+Verified in the `©1999 QUEST` window: the region now shows **moving** content
+(six consecutive title frames in
+`docs/proofs/native-title-fog-quest-region.png`), and its mean brightness
+(42.2) matches the retail reference (42.8) more closely than the previous
+skip-everything build (46.2).
+
+Known limitation: that pass is *meant* to sample a 320-wide cloud texture at a
+diagonal scroll, but only three of its rows fit in TMEM and the upload never
+appears in the display lists, so no renderer can reconstruct the intended cloud
+shape; the sweep therefore reads as smooth moving bands rather than wispy
+clouds. Reconstructing it properly needs the app to synthesise the missing
+per-strip uploads (it knows the texture address from the `SETTIMG` the rects
+inherit).
+
+Diagnostics used for this: `OGRE_FOG_TRACE=1` (per-group repair report with the
+rectangle's `s`/`t`), `OGRE_FOG=alternate` (applies the repair on every other
+display list, so two consecutive presents differ by exactly what it draws) and
+`OGRE_RECT_STATE=<y0>-<y1>` (RT64's view of the tile a rectangle ends up with).
+
+
+## 10. Addendum — measuring the fog, and how strong it is
+
+Runs of the attract loop do not line up frame-for-frame, so comparing two runs
+("fog on" vs "fog off") is dominated by which scenes each run happened to
+capture. `OGRE_FOG=alternate` removes that: the repair is applied on every other
+display list, so **two consecutive presents in one run** differ by exactly what
+the fog draws. Over 293 consecutive pairs (skipping pairs whose control region
+moved, i.e. scene cuts), the fog band (rows 64-128) differs by a median of 0.63
+and up to **17/255**, while a control region (rows 150-230) stays under 2. So the
+logo-area fog really is drawn, and its magnitude matches the retail's excess in
+that band (retail 132.2 vs 117 without the fog).
+
+`docs/proofs/native-title-fog-isolation.png` shows the strongest such pair:
+the band with the fog off, the same band one frame later with it on, and the
+difference amplified 6x — the fog's wispy shape is plainly visible there.
+
+`OGRE_FOG_SCALE=<percent>` scales the image's intensity when it is staged in
+scratch RDRAM (the last 64 KiB, which OB64 leaves untouched). At 1000 the
+visible contribution saturates at ~18, i.e. the fog covers most of what the
+unoccluded rows can show; the default 100 is already the right order of
+magnitude, so use the knob only to taste.
+
+## 11. What is still open (for a fresh session, not a quick fix)
+
+The **bottom sweep** (the `©1999 QUEST` band, offsets 0x29A4D8..) is *meant* to
+sample the 320-wide layer-3 cloud texture at a diagonal scroll. Only three rows
+of that texture fit in TMEM at a time, and the display list contains no per-row
+upload, so no renderer can reconstruct the intended cloud shape from what the
+game submits: the port draws the stale row the way the hardware does. Its mean
+brightness in that window (42.2) already matches the retail (42.8), so
+reconstructing the uploads is speculative work, and it needs the app to
+synthesise per-strip `SETTIMG`/`LOADTILE` sequences (the texture address is
+available from the `SETTIMG` the rectangles inherit). A second, more likely
+candidate for any remaining difference is RT64 adding `G_TX_CLAMP` to every tile
+whose `masks`/`maskt` are 0 (`State::loadDrawState`), where the hardware treats
+`mask == 0` as "no masking" and reads on through TMEM.

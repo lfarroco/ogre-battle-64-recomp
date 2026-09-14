@@ -168,6 +168,14 @@ ultramodern::renderer::GraphicsApi map_graphics_api(RT64::UserConfiguration::Gra
 //
 // Every skipped rectangle is logged with its decoded parameters so a run says
 // exactly what was removed.
+// Defined after nop_rect's walker (which drives it): repair one stale-tile
+// fog group. See the OGRE_FOG comment below.
+namespace fog {
+bool repair(uint8_t* rdram, uint32_t layer, uint32_t settimg, uint32_t settile7,
+            uint32_t loadtile, uint32_t settile0, uint32_t tilesize, uint32_t uls, uint32_t ult,
+            uint32_t lrs, uint32_t lrt, int rect_s, int rect_t, bool verbose);
+}
+
 namespace nop_rect {
 
 struct Selector {
@@ -200,6 +208,16 @@ struct Walker {
     uint32_t index = 0;
     uint32_t removed = 0;
     uint32_t budget = 200000;
+    // OGRE_FOG: when set, the walker also repairs OB64's stale-tile fog pieces
+    // (see the fog namespace): the fog layer's own image replaces the texture
+    // setup the rectangle inherits.
+    bool fog_fix = false;
+    uint32_t fog_fixed = 0;
+    uint32_t fog_layer = 0;
+    uint32_t fog_settimg = 0, fog_settile7 = 0, fog_loadtile = 0, fog_settile0 = 0,
+             fog_tilesize = 0;
+    uint32_t fog_uls = 0, fog_ult = 0, fog_lrs = 0, fog_lrt = 0;
+    bool fog_white = false;
 
     uint32_t resolve(uint32_t addr) const {
         return (segments[(addr >> 24) & 0xFu] + (addr & 0x00FFFFFFu)) & 0x1FFFFFFFu;
@@ -235,8 +253,34 @@ struct Walker {
 
             if (op == 0xFD) {  // G_SETTIMG
                 timg = w1;
+                if (fog_fix) {
+                    fog_settimg = off;
+                }
                 off += 8;
                 continue;
+            }
+            if (fog_fix) {
+                if (op == 0xF5) {  // G_SETTILE
+                    if (p0(w1, 24, 3) == 7) {
+                        fog_settile7 = off;
+                    } else if (p0(w1, 24, 3) == 0) {
+                        fog_settile0 = off;
+                    }
+                } else if (op == 0xF4 || op == 0xF3) {  // G_LOADTILE / G_LOADBLOCK
+                    fog_loadtile = off;
+                } else if (op == 0xF2) {  // G_SETTILESIZE
+                    if (p0(w1, 24, 3) == 0) {
+                        fog_tilesize = off;
+                        fog_uls = p0(w0, 12, 12);
+                        fog_ult = p0(w0, 0, 12);
+                        fog_lrs = p0(w1, 12, 12);
+                        fog_lrt = p0(w1, 0, 12);
+                    }
+                } else if (op == 0xFC) {  // G_SETCOMBINE
+                    fog_white = (w1 == 0xFFFF73B9u);
+                } else if (op == 0xFD) {  // G_SETTIMG (handled just below too)
+                    fog_settimg = off;
+                }
             }
             if (op == 0xDB) {  // G_MOVEWORD: segment registers
                 if (((w0 >> 16) & 0xFF) == 0x06) {
@@ -273,6 +317,17 @@ struct Walker {
                         skip = true;
                         break;
                     }
+                }
+                if (fog_fix && fog_white) {
+                    const int rect_s = int16_t(p0(rd32(rdram + off + 12), 16, 16)) / 32;
+                    const int rect_t = int16_t(p0(rd32(rdram + off + 12), 0, 16)) / 32;
+                    if (fog::repair(rdram, fog_layer, fog_settimg, fog_settile7, fog_loadtile,
+                                    fog_settile0, fog_tilesize, fog_uls, fog_ult, fog_lrs, fog_lrt,
+                                    rect_s, rect_t, verbose)) {
+                        ++fog_fixed;
+                        fog_layer = (fog_layer == 0) ? 2 : fog_layer + 1;
+                    }
+                    fog_white = false;  // the combiner applies to one group
                 }
                 if (skip && off + 24 <= 0x20000000u) {
                     if (verbose) {
@@ -334,6 +389,210 @@ inline std::vector<Selector> parse(const char* spec) {
 }
 
 }  // namespace nop_rect
+
+// --- OGRE_FOG: repair the stale-tile fog pieces ---------------------------
+//
+// OB64 draws each scrolling fog/cloud layer as a wrapped "layer image": a set
+// of `G_TEXRECT`s that mirror-sample a 64x64 image with the *white* combiner
+// (`FCFFFFFF FFFF73B9` = RGB ONE, ALPHA TEXEL0), so the image's own intensity
+// becomes a faint white overlay. The draw assumes the layer's image has been
+// uploaded into TMEM by the layer's loop, but that loop leaves a tile behind
+// that covers **no texels** (`SETTILESIZE t0 uls=0 ult=420 lrs=1276 lrt=420`
+// at the end of the 105-row cloud layer), so the sample collapses onto one
+// stale row - and RT64 paints an opaque white band instead of the fog (the
+// band this port showed on the title screen until session 35).
+//
+// The intended image is reachable: the game keeps its layer table at
+// `D_801B80E0`; `+0xFC + i*0x24` is layer `i`'s record, whose first word
+// points at an image record (`+8` = the image data; height above it, then
+// width, then the siz/fmt code bytes). This pass rewrites the texture setup
+// the rectangle inherits (the last `SETTIMG` / `SETTILE t7` / `LOADTILE` /
+// `SETTILE t0` / `SETTILESIZE t0` before it) so the pieces sample the layer's
+// own image. `OGRE_FOG=0` disables it; `OGRE_FOG_TRACE=1` reports repairs.
+namespace fog {
+
+constexpr uint32_t kLayerTable = 0x801B80E0;  // D_801B80E0: layer table pointer
+
+inline uint32_t rd32(const uint8_t* p) {
+    uint32_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+inline uint32_t p0(uint32_t w, uint8_t pos, uint8_t bits) {
+    return (w >> pos) & ((1u << bits) - 1u);
+}
+
+inline void put32(uint8_t* rdram, uint32_t off, uint32_t w) {
+    std::memcpy(rdram + off, &w, sizeof(w));
+}
+
+struct Image {
+    uint32_t address = 0;
+    uint32_t size = 0;
+    uint32_t width = 0, height = 0;
+    uint32_t siz = 0, fmt = 0;
+};
+
+// The image record the game's layer `index` draws, or 0 when it is not usable.
+inline bool layer_image(uint8_t* rdram, uint32_t index, uint32_t& rec) {
+    const uint32_t table = rd32(rdram + (kLayerTable - 0x80000000u));
+    if (table < 0x80000000u || table >= 0x80800000u) {
+        return false;
+    }
+    const uint32_t entry = (table - 0x80000000u) + 0xFCu + index * 0x24u;
+    if (entry + 8 > 0x20000000u) {
+        return false;
+    }
+    rec = rd32(rdram + entry);
+    return rec >= 0x80000000u && rec < 0x80800000u;
+}
+
+// The record's fields, read the way the game reads them (the runtime stores
+// each word byte-reversed, so a byte field at logical offset `o` lives at
+// `o ^ 3` and a 16-bit field at `o` lives at the two bytes starting at `o ^ 2`).
+inline bool read_image(uint8_t* rdram, uint32_t rec, Image& img) {
+    const uint32_t o = rec - 0x80000000u;
+    if (o + 8 > 0x20000000u) {
+        return false;
+    }
+    const uint8_t* p = rdram + o;
+    img.siz = p[3 ^ 3];              // logical byte 3
+    img.fmt = p[2 ^ 3];              // logical byte 2
+    img.height = p[(4 ^ 2)] | (p[(5 ^ 2)] << 8);
+    img.width = p[(6 ^ 2)] | (p[(7 ^ 2)] << 8);
+    img.address = rec + 8;
+    if (img.siz > 3 || img.fmt > 4 || img.width == 0 || img.height == 0 || img.width > 256 ||
+        img.height > 256 || img.address >= 0x80800000u) {
+        return false;
+    }
+    // Bits per texel for the G_IM_SIZ_* codes (0 = 4b, 1 = 8b, 2 = 16b, 3 = 32b).
+    const uint32_t bits = 4u << img.siz;
+    const uint32_t bytes_per_row = (img.width * bits) / 8u;
+    img.size = bytes_per_row * img.height;
+    return img.size != 0 && img.address + img.size <= 0x80800000u;
+}
+
+// OGRE_FOG_SCALE=<percent>: stage a copy of the layer's image in scratch RDRAM
+// with its intensity scaled, so the fog can be made more or less prominent than
+// the raw asset (whose mean intensity is only 0.05). The copy lives in the last
+// 64 KiB of RDRAM, which OB64 leaves untouched (its data ends at 4 MiB and this
+// port runs with the 8 MiB expansion); the first use reports it if that area is
+// not zero, since a game that grew into 8 MiB would collide here.
+inline uint32_t stage_scaled_image(uint8_t* rdram, const Image& img, uint32_t scale) {
+    constexpr uint32_t kScratch = 0x007F0000u;
+    constexpr uint32_t kScratchBytes = 0x4000u;  // 16 KiB: room for a 256x256 8b image
+    if (img.size == 0 || img.size > kScratchBytes) {
+        return img.address;
+    }
+    static bool checked = false;
+    if (!checked) {
+        checked = true;
+        bool dirty = false;
+        for (uint32_t i = 0; i < kScratchBytes; ++i) {
+            if (rdram[kScratch + i] != 0) {
+                dirty = true;
+                break;
+            }
+        }
+        if (dirty) {
+            fprintf(stderr,
+                    "[fog] scratch area 0x%06X is not zero; OGRE_FOG_SCALE cannot be used "
+                    "safely in this scene (using the unscaled image)\n",
+                    kScratch);
+            fflush(stderr);
+            return img.address;
+        }
+    }
+    const uint32_t src = img.address - 0x80000000u;
+    for (uint32_t i = 0; i < img.size; ++i) {
+        const uint32_t v = (uint32_t(rdram[src + i]) * scale + 50u) / 100u;
+        rdram[kScratch + i] = uint8_t(v > 255u ? 255u : v);
+    }
+    return kScratch + 0x80000000u;
+}
+
+// Rewrite the texture setup a zero-area rectangle inherits so it samples the
+// fog layer's own image. Returns true when a repair was applied.
+inline bool repair(uint8_t* rdram, uint32_t layer, uint32_t settimg, uint32_t settile7,
+                   uint32_t loadtile, uint32_t settile0, uint32_t tilesize, uint32_t uls,
+                   uint32_t ult, uint32_t lrs, uint32_t lrt, int rect_s, int rect_t, bool verbose) {
+    // A zero-area tile is the marker: a one-texel tile is `lrs == uls + 4`.
+    if (!(lrs == uls || lrt == ult)) {
+        return false;
+    }
+    if (settimg == 0 || settile7 == 0 || loadtile == 0 || settile0 == 0 || tilesize == 0) {
+        return false;
+    }
+    uint32_t rec = 0;
+    Image img;
+    if (!layer_image(rdram, layer, rec) || !read_image(rdram, rec, img)) {
+        return false;
+    }
+    // Only the *first* white group of the frame is the fog layer whose image
+    // the table points at; the later ones are cloud wipes that sample the
+    // current texture with a scroll (the bottom-of-screen sweep walks `s` to 86
+    // texels, past a 64-texel image). For those, leave the game's tile alone
+    // and only make it a valid one-row tile: RT64 then reads that one stale row
+    // out of TMEM, which is what the hardware does, and because those rows
+    // carry the cloud's own per-column alpha the result is a soft cloudy wipe
+    // rather than a flat block.
+    if ((layer != 0) || (rect_s < 0) || (rect_t < 0) || (rect_s >= (int)img.width) ||
+        (rect_t >= (int)img.height)) {
+        // Keep the row the loop left behind and give it a one-texel height, so
+        // RT64 decodes exactly that row out of TMEM.
+        const uint32_t oneRow = 0xF2000000u | (uls << 12) | ult;
+        const uint32_t oneRowLr = ((lrs > uls ? lrs : uls) << 12) | (ult + 4);
+        put32(rdram, tilesize, oneRow);
+        put32(rdram, tilesize + 4, oneRowLr);
+        return false;
+    }
+    const uint32_t bytes_per_row = (img.width * (4u << img.siz)) / 8u;
+    const uint32_t line = std::max(bytes_per_row / 8u, 1u);  // SETTILE `line` in 64-bit words
+    const uint32_t last = ((img.width - 1) << 12) | (img.height - 1);
+
+    // OGRE_FOG_SCALE=<percent> (default 100): 0 disables the repair, values
+    // above 100 make the fog more prominent than the raw asset.
+    static const uint32_t scale = [] {
+        const char* v = getenv("OGRE_FOG_SCALE");
+        return (v != nullptr) ? uint32_t(strtoul(v, nullptr, 10)) : 100u;
+    }();
+    const uint32_t image_address =
+        (scale == 100u) ? img.address : stage_scaled_image(rdram, img, scale);
+    if (getenv("OGRE_FOG_TRACE") != nullptr) {
+        fprintf(stderr, "[fog] scale=%u src=0x%08X staged=0x%08X size=%u\n", scale, img.address,
+                image_address, img.size);
+        fflush(stderr);
+    }
+    // G_SETTIMG: fmt/siz/width + the image address.
+    put32(rdram, settimg, 0xFD000000u | (img.fmt << 21) | (img.siz << 19) | (img.width - 1));
+    put32(rdram, settimg + 4, image_address);
+    // G_SETTILE for the load tile (7) and the draw tile (0): same image at
+    // TMEM offset 0, no mask (the game's own tiles use none either).
+    const uint32_t tile_w0 =
+        0xF5000000u | (img.fmt << 21) | (img.siz << 19) | (line << 9);
+    put32(rdram, settile7, tile_w0);
+    put32(rdram, settile7 + 4, 7u << 24);
+    put32(rdram, settile0, tile_w0);
+    put32(rdram, settile0 + 4, 0u);
+    // G_LOADTILE: the whole image into the load tile (uls/ult = 0,0).
+    put32(rdram, loadtile, 0xF4000000u);
+    put32(rdram, loadtile + 4, (7u << 24) | last);
+    // G_SETTILESIZE for the draw tile: the rectangle's texture coordinates are
+    // tile-relative, so the tile spans the whole image.
+    put32(rdram, tilesize, 0xF2000000u);
+    put32(rdram, tilesize + 4, last);
+    if (verbose) {
+        fprintf(stderr,
+                "[fog] layer %u image=0x%08X %ux%u siz=%u fmt=%u line=%u rect s=%d t=%d -> "
+                "repaired a zero-area group\n",
+                layer, img.address, img.width, img.height, img.siz, img.fmt, line, rect_s, rect_t);
+        fflush(stderr);
+    }
+    return true;
+}
+
+}  // namespace fog
 
 // --- RT64Renderer ---------------------------------------------------------
 
@@ -543,6 +802,38 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
             fprintf(stderr, "[nop-rect] dl=%u walked=%u removed=%u\n", dl_count_, walker.index,
                     walker.removed);
             fflush(stderr);
+        }
+
+        // OGRE_FOG: repair OB64's stale-tile fog/cloud "wrap" pieces (see the
+        // helper above). Runs on the game's own display list, before RT64
+        // parses it; OGRE_FOG=0 turns it off.
+        {
+            // OGRE_FOG=alternate applies the repair on even display lists only,
+            // so two consecutive presents differ by exactly what the repair
+            // draws (a phase-matched A/B for a single run).
+            static const int fogMode = [] {
+                const char* v = getenv("OGRE_FOG");
+                if (v == nullptr) return 1;
+                if (strcmp(v, "0") == 0) return 0;
+                if (strcmp(v, "alternate") == 0) return 2;
+                return 1;
+            }();
+            const bool fogEnabled =
+                (fogMode == 1) || ((fogMode == 2) && (((dl_count_ / 2) % 2) == 0));
+            if (fogEnabled) {
+                static const bool fogVerbose = (getenv("OGRE_FOG_TRACE") != nullptr);
+                static const std::vector<nop_rect::Selector> noSelectors;
+                static uint32_t fogFrames = 0;
+                ++fogFrames;
+                nop_rect::Walker walker{app_->core.RDRAM, &noSelectors, fogVerbose, {}, 0, 0, 200000};
+                walker.fog_fix = true;
+                walker.walk(task->t.data_ptr & 0x1FFFFFFF, 1);
+                if ((walker.fog_fixed != 0) && (fogFrames <= 2)) {
+                    fprintf(stderr, "[fog] dl=%u repaired %u group(s)\n", dl_count_,
+                            walker.fog_fixed);
+                    fflush(stderr);
+                }
+            }
         }
 
         // GBI selection note (2026-08-29): OB64's gfx ucode is "RSP Gfx ucode

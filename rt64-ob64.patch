@@ -365,7 +365,7 @@ index 7de5b69..f894351 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..8324412 100644
+index a10c11a..e5e3ad2 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -248,6 +248,13 @@ namespace RT64 {
@@ -468,7 +468,7 @@ index a10c11a..8324412 100644
          
          bool flushedState = state->checkDrawState();
  
-@@ -1322,6 +1394,40 @@ namespace RT64 {
+@@ -1322,6 +1394,44 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
  #   endif
  
@@ -485,10 +485,14 @@ index a10c11a..8324412 100644
 +        // there (see the retail title screen). Skip the rectangle in that case.
 +        // A tile with `line == 0` is not configured at all and keeps RT64's
 +        // existing "no texture" handling.
-+        // OGRE_EMPTY_TILE=draw restores the previous behaviour for A/B runs.
++        // OGRE_EMPTY_TILE=draw restores the previous behaviour for A/B runs
++        // (the app's OGRE_FOG repair normally rewrites these rectangles to
++        // sample the fog layer's own image, so they never reach this guard).
 +        {
-+            static const bool skipEmptyTile = (getenv("OGRE_EMPTY_TILE") == nullptr) ||
-+                                              (strcmp(getenv("OGRE_EMPTY_TILE"), "draw") != 0);
++            static const bool skipEmptyTile = [] {
++                const char* v = getenv("OGRE_EMPTY_TILE");
++                return (v == nullptr) || (strcmp(v, "skip") == 0);
++            }();
 +            const auto &rectTile = tiles[tile];
 +            if (skipEmptyTile && (rectTile.line != 0) &&
 +                ((rectTile.lrs == rectTile.uls) || (rectTile.lrt == rectTile.ult))) {

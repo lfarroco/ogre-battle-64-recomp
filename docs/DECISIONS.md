@@ -5,15 +5,14 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
-## 2026-09-14 (session 35) — the title screen's white band: a zero-area texture tile
+## 2026-09-14 (session 35) — the title screen's fog: a zero-area texture tile
 
-The retail title screen has clouds scrolling behind the "Ogre Battle 64" logo.
-The port drew a solid **white band across rows 64-128**, as if a full-width white
-quad had been placed over the clouds (`docs/proofs/native-intro-title.png` before
-the fix, `native-title-band-before-after.png` for the crop). The guess on the
-report was a 3D/2D compositing or shader problem. It was neither.
+The retail title screen has clouds scrolling behind the "Ogre Battle 64" logo,
+with a **very faint white fog** moving over them. The port drew a solid **white
+band across rows 64-128** instead. The guess on the report was a 3D/2D
+compositing or shader problem. It was neither.
 
-### Finding: the band is six `G_TEXRECT`s drawn with a zero-area tile
+### Finding: the opaque band and the missing fog are the same six rectangles
 
 `OGRE_DL_DECODE=<n>` of the title scene's display list shows, right after the
 layer-2 cloud strip loop, six left-going rectangles:
@@ -27,51 +26,82 @@ TEXRECT ulx=24   uly=256 lrx=280  lry=512 tile=0 s=2016 t=0 dsdx=-1024 dtdy=1024
 with the combiner `FCFFFFFF FFFF73B9` immediately before them. Decoding that
 combiner with the N64 `GCCc0w0`/`GCCc0w1` packing (`include/PR/gbi.h`) gives
 `RGB = (0 - 0) * 0 + ONE` and `ALPHA = (0 - 0) * 0 + TEXEL0`, i.e. **a white
-overlay modulated by the sampled texel's alpha**. The tile those rectangles name
-is the one the layer-2 loop left behind: `SETTILESIZE t0 uls=0 ult=420 lrs=1276
-lrt=420` — `lrt == ult`, so the tile covers **zero texels**.
+overlay modulated by the sampled texel's alpha** — the fog. The tile those
+rectangles name is the one the layer-2 loop left behind:
+`SETTILESIZE t0 uls=0 ult=420 lrs=1276 lrt=420` — `lrt == ult`, so the tile
+covers **zero texels**.
 
 Bisecting with the new `OGRE_NOP_RECT=flip` diagnostic (which NOPs matching
 `G_TEXRECT`s in the submitted display list) removed exactly the band and left the
-rest of the frame bit-identical, which is how the six rectangles were identified
+rest of the frame bit-identical, which is how the six rectangles were found
 without guessing at the renderer.
 
-### Why RT64 painted it white
+### Why RT64 painted white instead of fog
 
 `State::loadDrawState` computes the sampling rectangle as
 `sampleHeight = max((lrt - ult + 4) / 4, 1)`. The `max(..., 1)` is necessary (an
 empty texture cannot be decoded or sampled), but for a zero-height tile it
-*invents* a one-texel-tall image out of whatever TMEM currently holds. The
-`LOADTILE` that ran just before loaded texture row 105 of `0x801E2918`, and
-`docs/proofs`-side inspection of the RDRAM (with the runtime's `^3` byte order)
-shows rows 60-105 of that texture are **fully opaque** (alpha 255). So the six
-rectangles sampled one opaque row, and `RGB = ONE` turned them into opaque
-white.
+*invents* a one-texel-tall image out of whatever TMEM holds. The `LOADTILE` that
+ran just before loaded texture row 105 of `0x801E2918`, and rows 60-105 of that
+texture are fully opaque (alpha 255 once the RDRAM is read with the runtime's
+`^3` byte order), so `RGB = ONE`, `ALPHA = 255` painted an opaque white band.
 
-### Decision: a tile that covers no texels draws nothing
+### The fog's image: the layer's own, from the game's layer table
 
-`RDP::drawTexRect` now returns early when the named tile is configured
-(`line != 0`) and covers no texels (`lrs == uls` or `lrt == ult`). A one-texel
-tile is `lrs == uls + 4`, so this cannot catch a legitimate single-texel tile,
-and a tile with `line == 0` (never configured) keeps RT64's existing
-"no texture" handling. `app/src/web_renderer.cpp`'s `draw_texrect` gets the same
-guard so the browser renderer cannot diverge. `OGRE_EMPTY_TILE=draw` restores the
-old behaviour for A/B runs, and `OGRE_EMPTY_TILE_TRACE=1` names every skipped
-rectangle.
+OB64 draws each scrolling layer as a wrapped "layer image": the six rectangles
+are the layer's horizontally scrolling wrap (a 64x64 image, mirror-sampled 1:1,
+repeated across the width). `func_8019C5D4(0)` is the wrap pass for layer 0 of
+the game's *effect* layer table, and it intends to upload that layer's image
+before drawing — the upload is skipped in the display lists the port sees, so
+the rectangle inherits the stale tile instead.
 
-The visible result matches the retail title screen: clouds behind the logo and no
-band. The skipped rectangles are exactly the pathological ones (the six overlay
-pieces plus each cloud layer's degenerate tail strip), which is confirmed by the
-trace.
+The image is reachable: the game keeps its layer table at `D_801B80E0`;
+`+0xFC + i*0x24` is layer `i`'s record, whose first word points at an image
+record (`+8` = the data, then height, then width, then the siz/fmt code bytes).
+For the title screen layer 0 that is **`0x801D2F88`, a 64x64 8-bit intensity
+image** whose mean intensity is 0.051 — "very faint", matching the retail
+measurement. Layer 2 is the same kind of image at `0x801D51E8`.
 
-### Diagnostics added (all env-gated, all in the RT64 patch now)
+### Decision: repair the texture setup the rectangle inherits
 
-| knob | what it does |
-|---|---|
-| `OGRE_NOP_RECT=<selectors>` (app) | NOPs matching `G_TEXRECT`s in the submitted DL before RT64 sees them (`any`, `tex:<hex>`, `flip`, `x:a-b`, `y:a-b`, `n:<i>`) — "which draw is this?" bisection |
-| `OGRE_RECT_STATE=<y0>-<y1>` (RT64) | per-rectangle cycle type, both combiner cycles, blender inputs, prim colour and tile descriptor, decoded by RT64 itself |
-| `OGRE_TILE_TRACE=1` (RT64) | every tile whose sampling rectangle is degenerate, with the texture the cache returned |
-| `OGRE_DUMP_TEX=<dir>` (RT64) | writes the 4 KiB `.tmem` and `.tile.json` of every decoded texture |
+`app/src/renderer.cpp` gains an `OGRE_FOG` pass (on by default) that runs on the
+game's display list before RT64 parses it. It walks the list with the proven
+`OGRE_NOP_RECT` walker, and whenever a `G_TEXRECT` is about to sample a tile
+that covers no texels while the *white* combiner is active, it rewrites the last
+`SETTIMG` / `SETTILE t7` / `LOADTILE` / `SETTILE t0` / `SETTILESIZE t0` so the
+rectangle samples the layer's own image (found through the layer table). The
+rectangle then samples the 64x64 fog image, mirrored and tiled, exactly as
+intended. `OGRE_FOG=0` restores the previous behaviour and `OGRE_FOG_TRACE=1`
+reports each repair.
+
+RT64 keeps its own guard: `RDP::drawTexRect` skips a rectangle whose tile covers
+no texels (a one-texel tile is `lrs == uls + 4`, so this cannot catch a
+legitimate single-texel tile; a tile with `line == 0` keeps RT64's existing
+"no texture" handling). That guard is what removed the opaque band, and it still
+catches degenerate rectangles the repair does not recognise.
+`app/src/web_renderer.cpp`'s `draw_texrect` has the same guard.
+
+### Booting straight into a screen
+
+`OGRE_SCENE=<name|hex>` replaces the hex-only `OGRE_FORCE_SCENE`: it pokes the
+game's scene id (`u16(D_800C4BBC + 4)`, the word the dispatcher at
+`asm/1060.s @0x80075DB8` runs the per-scene update function from) from the
+streamed-DMA hook until the scene is entered. Names are in `kScenes`
+(`title` = 0x0C, `menu` = 0x18, `new-game` = 0x02) and `OGRE_SCENE_LOG=1` logs
+every scene change with its descriptor and record mask, which is how new names
+are found. Poking *every* frame corrupts the scene state machine (the game
+rewrites the id itself), so the poke stays on the scene-load path.
+
+### Diagnostics added (all env-gated)
+
+| knob | where | what it does |
+|---|---|---|
+| `OGRE_NOP_RECT=<selectors>` | app | NOPs matching `G_TEXRECT`s in the submitted DL before RT64 sees them (`any`, `tex:<hex>`, `flip`, `x:a-b`, `y:a-b`, `n:<i>`) — "which draw is this?" bisection |
+| `OGRE_FOG` / `OGRE_FOG_TRACE` | app | the fog repair above |
+| `OGRE_SCENE` / `OGRE_SCENE_AFTER_MS` / `OGRE_SCENE_LOG` | app | boot into a named scene / log scene changes |
+| `OGRE_RECT_STATE=<y0>-<y1>` | RT64 | per-rectangle cycle type, both combiner cycles, blender inputs, prim colour and tile descriptor, decoded by RT64 itself |
+| `OGRE_TILE_TRACE=1` | RT64 | every tile whose sampling rectangle is degenerate, with the texture the cache returned |
+| `OGRE_DUMP_TEX=<dir>` | RT64 | writes the 4 KiB `.tmem` and `.tile.json` of every decoded texture |
 
 ### Note: the checked-in RT64 patch was stale
 

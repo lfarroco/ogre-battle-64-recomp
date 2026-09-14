@@ -35,6 +35,9 @@ Platform g_platform;
 }
 
 static void update_gfx(void*) {
+    // OGRE_SCENE=<name|hex>: boot straight into a screen (see bank_overlays.cpp).
+    // Polled here because this callback runs once per frame.
+    ogre::poll_scene();
     bool quit = false;
     ogre::pump_sdl_events(ogre::g_platform, &quit);
     if (quit) {
