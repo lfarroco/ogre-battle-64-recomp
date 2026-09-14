@@ -311,6 +311,21 @@ static uint16_t automation_buttons() {
     if (phase >= kTapHoldMs) {
         return 0;
     }
+    // `OGRE_TAP_MAX=<n>`: stop tapping after tap number n (tap 0 is the boot
+    // window). Lets a run press Start through the title and then go silent so
+    // later taps can't abort a loading scene mid-init (session 40: a Start
+    // during 0x0D init aborts to 0x02 and the instant re-entry crashes on
+    // torn-down state). 0 or unset = tap forever.
+    {
+        static long tap_max = -1;
+        if (tap_max < 0) {
+            tap_max = 0;
+            if (const char* v = getenv("OGRE_TAP_MAX")) tap_max = atol(v);
+        }
+        if (tap_max > 0 && tap > (uint64_t)tap_max) {
+            return 0;
+        }
+    }
     // Log once per press so a run's stderr shows the taps landed.
     static uint64_t logged_taps = 0;
     if (tap != logged_taps && tap > 0) {

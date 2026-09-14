@@ -22,9 +22,15 @@ functions_per_output_file = 100
 # N64Recomp sees zero in-function table entries and fails outright.
 function_sizes = [
     { name = "func_ovlC_8022EA08", size = 0x4CC },
-    # Mid-flow piece ending in the 0x8023BDBC call; the shared epilogue piece
-    # func_ovlC_8023BDC8 follows, then the real entry func_ovlC_8023BDFC.
-    { name = "func_ovlC_8023BDA8", size = 0x54 },
+    # func_ovlC_8023BDA8 must NOT be extended over func_ovlC_8023BDC8
+    # (session 39): BDC8 is a genuine shared-epilogue shim with its own
+    # callers (jal from 0x80229138; the 0x8023BD80 jump to its BDD0 label),
+    # and BDA8 is a genuine malloc-tail head with its own jal callers.
+    # Extending BDA8 to 0x54 redirected both into the head: the epilogue
+    # jump re-ran malloc/memcpy/800712C4 with stale s-regs (0x0D list-unlink
+    # crash, N64 0x28B0) and the shim callers ran the head instead of the
+    # two-move epilogue. Split, BDA8 falls through into BDC8 via tail-call
+    # and the epilogue jump compiles to a static duplicate.
     # Mid-flow piece ending in the 0x8023CA08 call; real entry at 0x8023CA1C.
     { name = "func_ovlC_8023C9F4", size = 0x28 },
     # Real entry (prologue) ending in the 0x8023A180 call; the 0x8023A184

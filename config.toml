@@ -42,7 +42,13 @@ function_sizes = [
     { name = "func_801AFAF4", size = 0x5E0 },
     { name = "func_801B00D0", size = 0x544 },
     { name = "func_801B7F14", size = 0x154 },
-    { name = "func_8019C5D4", size = 0x5D8 },
+    # func_8019C5D4 must NOT be extended over func_8019C69C (session 39):
+    # 0x8019C69C is a genuine alternate entry with its own caller
+    # (func_8017BB28's jal, the menu 0x18 path), entered with the caller's
+    # registers/frame. Extending 0x8019C5D4 to 0x5D8 made N64Recomp redirect
+    # that jal into the head, which derives s0 from a0 via D_801B80E0 and
+    # faults at N64 0xFC. Split, the head reaches the shared tail through
+    # static tail-calls and the direct jal lands on the real entry.
     { name = "func_801AB568", size = 0x1E0 },
     { name = "func_801AB740", size = 0x30 },
     { name = "func_801AFC2C", size = 0x4A8 },

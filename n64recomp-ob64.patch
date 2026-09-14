@@ -295,7 +295,7 @@ index 669c4a1..869b7df 100644
                      }
  
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..17d96c4 100644
+index c228433..ad0c6b8 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
 @@ -1,5 +1,6 @@
@@ -722,7 +722,7 @@ index c228433..17d96c4 100644
  
      if (context.trace_mode) {
          fmt::print(output_file,
-@@ -864,6 +1140,76 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+@@ -864,6 +1140,85 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
              // Advance the vram address by the size of one instruction
              vram += 4;
          }
@@ -772,6 +772,15 @@ index c228433..17d96c4 100644
 +                    if (const auto named_find = context.functions_by_name.find(static_target); named_find != context.functions_by_name.end()) {
 +                        target_index = named_find->second;
 +                    }
++                }
++                // A trailing call-and-continue (a jal/jalr as the body's last
++                // instruction) already emitted `goto after_N`, but there is no
++                // following instruction to anchor the label. Plant it here so
++                // the fall-through tail call below is its target (session 39:
++                // func_ovlC_8023BDA8 ends in jal once the 0x54 merge is gone).
++                if (needs_link_branch) {
++                    fmt::print(output_file, "    ");
++                    generator.emit_label(fmt::format("after_{}", num_link_branches));
 +                }
 +                if (target_index != static_cast<size_t>(-1)) {
 +                    fmt::print("[Info] Fall-through in {} into function 0x{:08X}\n", func.name, fallthrough_vram);
