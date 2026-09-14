@@ -73,9 +73,10 @@ build/assets/%.o: assets/%.bin
 
 recomp: $(ELF)
 	$(N64RECOMP) config.toml
+	python3 tools/cross_bank.py dispatch --only 0x80198D28
 
 # ---------------------------------------------------------------------------
-# Cross-bank call routing (Phase 4) — EXPERIMENT, not part of the default build.
+# Cross-bank call routing (Phase 4).
 #
 # N64Recomp binds a `jal` to a function it knows as a *direct C call*, so a call
 # from resident code into RAM that a bank record can also occupy runs the main
@@ -83,10 +84,21 @@ recomp: $(ELF)
 # analyses that (see `make cross-bank-report`) and can dispatch the calls, but
 # its seeds are not usable yet: an address that is only a function in the main
 # unit's layout is a body interior in the bank's, and forcing splat to split
-# there makes the recompiler emit fragments with undefined `goto` labels. The
-# default build therefore leaves the recompiler's bindings alone; session 33's
-# behaviour (attract loop green, scene 0x18/0x02 open) is the last known-good
-# state. See docs/DECISIONS.md (session 34).
+# there makes the recompiler emit fragments with undefined `goto` labels.
+#
+# One target is dispatched in the default build (the line in `recomp` above):
+# 0x80198D28, scene 0x02's loader entry. The recompiler binds its single call
+# site (func_80178920) to the containing overlay-C body func_801989AC — which
+# dereferences $a0+3 with $a0 unset and dies — while bank unit E (record 0,
+# resident in that scene) provides the real entry func_ovlE_80198D28. The
+# dispatch also repairs the recompiler's tail-call emission at that site (an
+# early `return` that abandons the caller's epilogue) back to call-and-continue.
+# A lookup that misses the map is a no-op stub, so the boot/attract scenes that
+# never call it are unaffected. `make recomp` re-applies this after every
+# regen; with no bank data at all the step warns and leaves the tree alone.
+# The remaining 66 targets stay on the recompiler's bindings (session 33's
+# behaviour); dispatching the other 8 resolvable ones is still an opt-in
+# experiment. See docs/DECISIONS.md (sessions 34, 37).
 # ---------------------------------------------------------------------------
 cross-bank-report:
 	python3 tools/cross_bank.py report

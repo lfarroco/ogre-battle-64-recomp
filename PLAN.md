@@ -398,6 +398,19 @@ hardware. RT64 remains the primary native renderer throughout. See
     `docs/proofs/native-title-fog-quest-region.png`,
     `docs/proofs/native-title-band-isolation.png`. See
     `docs/HANDOFF-2026-09-14-session36.md`.
+  - ✅ **New Game no longer crashes; the game reaches scene 0x0D (session 37)**:
+    title → Start → New Game died in scene `0x02`'s update (`jal 0x80198D28`
+    bound to the containing overlay-C body, reading N64 address 3 with `$a0`
+    unset). That one call site is now dispatched through the bank map
+    (`cross_bank.py dispatch --only`, wired into `make recomp`, plus a repair
+    of the recompiler's tail-call emission at the site), resolving to bank
+    unit E's real entry. Scene `0x0D`'s record 4 and record 14's two arena
+    modules are newly compiled into unit C (five `function_sizes`), so the
+    scene loads 9 bank records with zero stub calls. It then dies in list
+    management (`func_80071950`) on a wild data pointer — the next wall,
+    reproducible with no input at 1× speed. `OGRE_NO_AUDIO=1` separately
+    crashes in early boot (queue-snapshot diagnostic). See
+    `docs/HANDOFF-2026-09-14-session37.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

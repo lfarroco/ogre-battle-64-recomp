@@ -5,6 +5,60 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-14 (session 37) — New Game plays into scene 0x0D: first targeted cross-bank dispatch, plus that scene's arena banks
+
+The title → Start → New Game crash was the session-34 canonical case firing
+for real: scene `0x02`'s update `func_80178920` does `jal 0x80198D28`, which
+N64Recomp binds to the containing overlay-C body `func_801989AC` — whose
+prologue reads `3($a0)` with `$a0` unset (NULL), i.e. a read of N64 address 3.
+Bank unit E (record 0, resident in that scene) owns the real entry, so the
+single call site is now dispatched through the bank map. The game reaches
+scene `0x0D` with all of that scene's code resident (record 4 and record 14's
+two arena modules are newly compiled into unit C) and dies there in list
+management on a wild data pointer — the next wall.
+
+### Decision: dispatch `0x80198D28` only, in the default build
+
+`tools/cross_bank.py dispatch --only ADDR` rewrites just the named targets
+(67 exist, 9 resolvable, 58 blocked — only this one is dispatched). An
+`--only` target with no bank entry or no call site is a hard error; with no
+bank data at all it warns and leaves the tree alone; re-runs are no-ops. The
+`recomp` Makefile target applies it after every regen, because
+`RecompiledFuncs/` is generated and a hand edit would be wiped. A lookup that
+misses the map is a no-op stub, and the call site only executes in scene
+`0x02`, so boot/attract/title are unaffected (verified exit 0).
+
+### Decision: repair the tail-call emission at the dispatched site
+
+N64Recomp emits a `jal` to a body-interior target as a call to the containing
+body followed by an early `return`, abandoning the caller's epilogue (here
+including the `D_800C4C26 = 0x800D` store). `dispatch` converts that shape to
+the standard call-and-continue (`goto after_N` over the duplicated delay
+slot) whenever the premature return plus the duplicate are present; a true
+tail call at a function's end has no duplicate and keeps its `return`.
+
+### Decision: `revert` never restores a call to a same-address fragment
+
+Reverting an experimental dispatch invented a third binding at our site:
+`func_80198D28` names a splat fragment (`and` first op), never the original
+call. `revert` now restores only definitions that open like a function and
+leaves fragment targets dispatched (`func_80198D28`, `func_801AB740`); `make
+recomp` regenerates pristine C. This also protects the 58 blocked targets'
+future dispatches.
+
+### Decision: scene 0x0D's record 4 and record-14 arena go in unit C
+
+Record 4 (all code, overlaps record 3's RAM so it cannot live in unit A) and
+the two arena modules the PI-DMA trace showed scene `0x0D` streaming above
+record 14 (`bankRec14a/b`) join unit C; five `function_sizes` in
+`config-bankC.toml` extend splat-capped pieces past their switch/cut points
+(N64Recomp redirects swallowed symbols into the extended body, so no map
+entry is lost). Next session starts at the `0x0D` list-unlink wild pointer
+(`func_80071950` via `func_800712C4` ← arena code), which reproduces with no
+input, at 1× speed, with zero stub calls — and separately at the
+`OGRE_NO_AUDIO=1` early-boot crash in the queue-snapshot diagnostic. See
+`docs/HANDOFF-2026-09-14-session37.md`.
+
 ## 2026-09-14 (session 36) — scene jumps that work, and the title fog repair
 
 Two reports: `docs/proofs/native-title-fog-isolation.png` is a crop of the

@@ -60,7 +60,7 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x06E680u, (int32_t)0x80197B90u, 0x002C20u, true  },  //  1 (bank unit D)
     { 0x0E4910u, (int32_t)0x80197B90u, 0x0072C0u, true  },  //  2 (bank unit)
     { 0x0EBBD0u, (int32_t)0x8019EE70u, 0x00E440u, true  },  //  3 (bank unit)
-    { 0x0FA010u, (int32_t)0x8019EE70u, 0x0005E0u, false },  //  4
+    { 0x0FA010u, (int32_t)0x8019EE70u, 0x0005E0u, true  },  //  4 (bank unit C)
     { 0x0FA5F0u, (int32_t)0x8019EE70u, 0x000010u, false },  //  5
     { 0x0FA600u, (int32_t)0x801AD5C0u, 0x007700u, true  },  //  6 (bank unit)
     { 0x101D00u, (int32_t)0x801AD5C0u, 0x043530u, false },  //  7

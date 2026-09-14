@@ -3,7 +3,9 @@
 # Unit A (config-bankA.yaml) compiles the records of the bank the game swaps in
 # after the title song (records 2, 3, 6). Unit C compiles the records the game
 # swaps in for the *next* attract screen (records 10, 11, 12, 13 — observed at
-# t≈360s, where the scene then called into a stubbed address and bounced).
+# t≈360s, where the scene then called into a stubbed address and bounced) plus
+# the records scene 0x0D (new game) loads: record 4 and record 14's arena
+# continuation (see below).
 #
 # A unit can only hold records whose RAM ranges are mutually disjoint, because
 # all of them are linked at their true RAM addresses in one ELF. Records that
@@ -11,10 +13,17 @@
 # runtime does not care which unit a record came from — it registers a record's
 # functions when the game DMA's it. Unit C's records tile disjointly:
 #
+#   rec4  ROM 0x0FA010 -> RAM 0x8019EE70 (0x005E0, all code per segment table)
 #   rec10 ROM 0x1F0A00 -> RAM 0x801AD5C0 (0x230E0)
 #   rec11 ROM 0x24BC70 -> RAM 0x801F7100 (0x131F0)
 #   rec12 ROM 0x25EE60 -> RAM 0x8020A300 (0x169C0)
 #   rec13 ROM 0x275820 -> RAM 0x802210E0 (0x047D0)
+#   rec14 ROM 0x281830 -> RAM 0x802258B0 (0x05370)
+#   rec14a ROM 0x29A490 -> RAM 0x8022ACB0 (0x0E860, arena, all asm)
+#   rec14b ROM 0x2AE390 -> RAM 0x802395E0 (0x0A7E0, arena, all asm)
+#
+# Record 4 overlaps record 3's RAM (both start at 0x8019EE70), so it cannot
+# live in unit A with it; it is disjoint from everything else here.
 #
 # See config-bankA.yaml for the model, and docs/DECISIONS.md (session 33).
 
@@ -59,6 +68,22 @@ segments:
   - type: bin
     start: 0x0
     vram: 0x0
+
+  # Bank record 4: all code 0x5E0 (-> 0x8019F450), no data, no bss (per the
+  # segment table at ROM 0x387C0). Scene 0x0D's mask includes it. It overlaps
+  # record 3's RAM, so it lives here instead of unit A.
+  - name: bankRec4
+    type: code
+    start: 0x0FA010
+    vram: 0x8019EE70
+    subsegments:
+      - [0x0FA010, asm]
+
+  # Gap: record 6 (ROM 0x0FA600, unit A) and overlay C (ROM 0x1CE040..0x1F0A00)
+  # are not part of this unit.
+  - type: bin
+    start: 0x0FA5F0
+    vram: 0x0FA5F0
 
   # Bank record 10: code 0x212F0 (-> 0x801CE8B0), data 0x1DF0 (-> 0x801D06A0),
   # bss 0x1C0 (-> 0x801D0860).
@@ -156,4 +181,38 @@ segments:
       - [0x281830, asm]
       - [0x2866C0, data]
 
-  - [0x286BA0]
+  # Record 14's *arena continuation* for scene 0x0D (mask 0x40007C14): the
+  # segment table entry 14 only describes the resident part (ROM ..0x286BA0 ->
+  # RAM ..0x8022AC20, bss ..0x8022ACB0); the game streams two more code modules
+  # above it, observed as contiguous 0x200-byte DMA runs in scene 0x0D:
+  #
+  #   ROM 0x29A490 (0x0E860) -> RAM 0x8022ACB0
+  #   ROM 0x2AE390 (0x0A7E0) -> RAM 0x802395E0
+  #
+  # (Same shape as record 10's bankRec10a/b above.) The four per-frame stub
+  # calls that lobotomized scene 0x0D all land in these two modules
+  # (0x8022D1CC, 0x80230E70, 0x80237640, 0x8023A1D8).
+  - type: bin
+    start: 0x286BA0
+    vram: 0x286BA0
+
+  - name: bankRec14a
+    type: code
+    start: 0x29A490
+    vram: 0x8022ACB0
+    subsegments:
+      - [0x29A490, asm]
+
+  # Gap between the two arena modules' ROM.
+  - type: bin
+    start: 0x2A82F0
+    vram: 0x2A82F0
+
+  - name: bankRec14b
+    type: code
+    start: 0x2AE390
+    vram: 0x802395E0
+    subsegments:
+      - [0x2AE390, asm]
+
+  - [0x2B8B70]

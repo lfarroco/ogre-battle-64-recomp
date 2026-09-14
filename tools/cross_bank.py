@@ -34,7 +34,17 @@ touching this file); the main side comes from the linker map.
 
 Usage:
     tools/cross_bank.py write-seeds     # -> build/bank<U>/symbol_addrs.txt
-    tools/cross_bank.py rewrite         # -> edits RecompiledFuncs/*.c in place
+    tools/cross_bank.py dispatch        # -> edits RecompiledFuncs/*.c in place
+    tools/cross_bank.py dispatch --only 0xADDR[,0xADDR...]
+                                        # dispatch just these targets (repeatable
+                                        # --only); an --only target with no bank
+                                        # entry or no call site is a hard error
+                                        # (with no bank data at all it warns and
+                                        # leaves the tree alone instead)
+    tools/cross_bank.py revert          # undo `dispatch` for entry targets; an
+                                        # interior (`--only`) target keeps its
+                                        # lookup — `make recomp` regenerates the
+                                        # pristine direct call instead
     tools/cross_bank.py report          # analysis only, writes nothing
 """
 
@@ -62,6 +72,9 @@ FUNC_DEF_RE = re.compile(
 TRACE_RE = re.compile(r"recomp_trace_entry\(rdram, 0x([0-9A-Fa-f]{8}),")
 CALL_RE = re.compile(r"^(\s*)(\w+)\(rdram, ctx\);$")
 LOOKUP_RE = re.compile(r"^\s*LOOKUP_FUNC\(0x([0-9A-Fa-f]{8})\)\(rdram, ctx\);$")
+TRACE_RETURN_RE = re.compile(r"^(\s*)recomp_trace_return\(rdram, \d+\);$")
+RETURN_RE = re.compile(r"^(\s*)return;$")
+AFTER_LABEL_RE = re.compile(r"^\s*after_(\d+):$")
 JAL_COMMENT_RE = re.compile(r"^\s*// 0x([0-9A-Fa-f]{8}): jal\s+0x([0-9A-Fa-f]{8})")
 FUNC_VRAM_RE = re.compile(r"^func_(?:ovl[A-Z]+_)?([0-9A-Fa-f]{8})$")
 GLABEL_RE = re.compile(r"^(?:glabel|alabel)\s+(\w+)", re.M)
@@ -455,6 +468,36 @@ def defined_functions() -> set[str]:
     return names
 
 
+FIRST_OP_RE = re.compile(r"^\s*// 0x[0-9A-Fa-f]{8}:\s+(\w+)")
+
+# A main-unit definition is only a revertible direct-call target when it opens
+# like a function (same prologue set as `entry_looks_real`). A same-address
+# fragment (`func_80198D28`, `func_801AB740`: first op `and`/`andi`) is never
+# what the recompiler originally emitted for the `jal`, so restoring a direct
+# call to it would invent a third binding — neither the original nor the
+# dispatch. Those lookups are left in place (see the size-override note in
+# `rewrite_main`); `make recomp` regenerates the pristine call instead.
+ENTRY_OPS = {"addiu", "daddiu", "lui", "jr", "j", "sw", "sd"}
+
+
+def def_first_ops() -> dict[str, str]:
+    """Defined function name -> its first MIPS op (fragment detection)."""
+    ops: dict[str, str] = {}
+    for path in sorted(RECOMP_DIR.glob("*.c")):
+        cur: str | None = None
+        for line in path.read_text().splitlines():
+            m = FUNC_DEF_RE.match(line)
+            if m:
+                cur = m.group(1)
+                continue
+            if cur is not None:
+                op = FIRST_OP_RE.match(line)
+                if op is not None:
+                    ops.setdefault(cur, op.group(1))
+                    cur = None
+    return ops
+
+
 def revert_main() -> int:
     """Undo `rewrite` by turning lookup calls back into their direct calls.
 
@@ -463,9 +506,13 @@ def revert_main() -> int:
     original code (see the size-override note in `rewrite_main`) and is left
     alone. The restored direct call names the address's function; `get_function`
     and a direct call reach the same body whenever the address is registered,
-    which is the only case the rewrite creates.
+    which is the only case the rewrite creates. A same-address fragment
+    definition is not a valid restore target and is left dispatched.
     """
+    defined = defined_functions()
+    first_ops = def_first_ops()
     reverted = 0
+    skipped: list[int] = []
     changed = 0
     for path in sorted(RECOMP_DIR.glob("*.c")):
         lines = path.read_text().splitlines(keepends=True)
@@ -479,21 +526,26 @@ def revert_main() -> int:
             m = LOOKUP_RE.match(line)
             if (m is not None and jal_target is not None
                     and int(m.group(1), 16) == jal_target
-                    and f"func_{m.group(1)}" in defined_functions()):
-                out.append(f"    func_{m.group(1)}(rdram, ctx);\n")
-                reverted += 1
-                dirty = True
+                    and f"func_{m.group(1)}" in defined):
+                if first_ops.get(f"func_{m.group(1)}") in ENTRY_OPS:
+                    out.append(f"    func_{m.group(1)}(rdram, ctx);\n")
+                    reverted += 1
+                    dirty = True
+                    jal_target = None
+                    continue
+                skipped.append(jal_target)
                 jal_target = None
-                continue
             out.append(line)
         if dirty:
             path.write_text("".join(out))
             changed += 1
     print(f"cross_bank: revert: {reverted} lookup call(s) in {changed} file(s) restored")
+    for addr in sorted(set(skipped)):
+        print(f"cross_bank: revert: 0x{addr:08X} kept dispatched (same-address fragment, not a revertible entry)")
     return reverted
 
 
-def rewrite_main(regions) -> int:
+def rewrite_main(regions, only: set[int] | None = None) -> int:
     """Emit a runtime dispatch for every cross-bank `jal` in the main unit.
 
     A call is left alone when the caller and the callee can be resident
@@ -507,6 +559,11 @@ def rewrite_main(regions) -> int:
     comment's address), and only targets some bank unit registers are rewritten;
     the rest keep their direct call. That gate is what keeps the rewrite from
     replacing a working binding with a lookup that would miss the function map.
+
+    `only` restricts the rewrite to an explicit target set (single-target
+    dispatch): an `--only` address with no bank entry is a hard error instead of
+    a kept binding, so a targeted fix can never silently stay on the crashing
+    direct call. Targets outside the set are left alone.
     """
     swap_ranges = swappable_ranges(regions)
     groups = [(o["lo"], o["hi"]) for o in overloaded(regions)]
@@ -518,23 +575,66 @@ def rewrite_main(regions) -> int:
     for _unit, entry_set in bank_function_entries().items():
         resolvable |= entry_set
 
+    if only and not resolvable:
+        # Fresh checkout that never ran the bank targets: no bank data at all,
+        # so there is nothing to dispatch to. Warn and leave the recompiler's
+        # bindings alone instead of failing the build.
+        print(
+            "cross_bank: rewrite: no bank entries registered yet "
+            "(`make bank-recomp` not run); leaving --only target(s) undispatched"
+        )
+        return None
+    if only:
+        missing = sorted(a for a in only if a not in resolvable)
+        if missing:
+            raise ToolError(
+                "target(s) have no bank entry: "
+                + ", ".join(f"0x{a:08X}" for a in missing)
+                + " (re-run after `make bank-recomp`)"
+            )
+
     changed_files = 0
     replaced = 0
+    repaired = 0
     unresolved: dict[int, int] = {}
     per_target: dict[int, int] = {}
+    already: dict[int, int] = {}
 
     for path in sorted(RECOMP_DIR.glob("*.c")):
         lines = path.read_text().splitlines(keepends=True)
+        # Labels are function-scoped, so a file-wide used set can only
+        # over-approximate: the fresh label can never collide in its function.
+        file_labels = set()
+        for text in lines:
+            lm = AFTER_LABEL_RE.match(text)
+            if lm is not None:
+                file_labels.add(int(lm.group(1)))
         cur_name = None
         cur_addr = None
         jal_target = None
+        jal_line = -1
         out_lines = []
         dirty = False
-        for line in lines:
+        i = 0
+        while i < len(lines):
+            line = lines[i]
             m = FUNC_DEF_RE.match(line)
             if m:
                 cur_name, cur_addr = m.group(1), None
+                jal_target = None
                 out_lines.append(line)
+                i += 1
+                continue
+            lk = LOOKUP_RE.match(line)
+            if lk is not None and jal_target is not None and int(lk.group(1), 16) == jal_target:
+                # The `jal`'s call is already a lookup (a previous dispatch, or
+                # the recompiler's own dynamic call): consume the `jal` so a
+                # later direct call cannot steal it, and record the target as
+                # dispatched for the `--only` check.
+                already[jal_target] = already.get(jal_target, 0) + 1
+                jal_target = None
+                out_lines.append(line)
+                i += 1
                 continue
             if cur_name is not None and cur_addr is None:
                 t = TRACE_RE.search(line)
@@ -543,27 +643,65 @@ def rewrite_main(regions) -> int:
             j = JAL_COMMENT_RE.match(line)
             if j is not None:
                 jal_target = int(j.group(2), 16)
-            if jal_target is None or cur_addr is None or CALL_RE.match(line) is None:
+                jal_line = len(out_lines)
+            call = CALL_RE.match(line) if (jal_target is not None and cur_addr is not None) else None
+            if call is None:
                 out_lines.append(line)
+                i += 1
                 continue
             caller_inside = any(
                 lo <= jal_target < hi and lo <= cur_addr < hi for lo, hi in groups
             )
-            if in_ranges(jal_target, swap_ranges) and not caller_inside:
-                indent = CALL_RE.match(line).group(1)
-                if jal_target in resolvable:
-                    out_lines.append(f"{indent}LOOKUP_FUNC(0x{jal_target:08X})(rdram, ctx);\n")
-                    replaced += 1
-                    per_target[jal_target] = per_target.get(jal_target, 0) + 1
-                else:
-                    # No bank entry: keep the binding the recompiler chose.
-                    out_lines.append(line)
-                    unresolved[jal_target] = unresolved.get(jal_target, 0) + 1
+            if not (in_ranges(jal_target, swap_ranges) and not caller_inside):
+                out_lines.append(line)
+                jal_target = None
+                i += 1
+                continue
+            if only is not None and jal_target not in only:
+                out_lines.append(line)
+                jal_target = None
+                i += 1
+                continue
+            indent = call.group(1)
+            if jal_target not in resolvable:
+                # No bank entry: keep the binding the recompiler chose.
+                out_lines.append(line)
+                unresolved[jal_target] = unresolved.get(jal_target, 0) + 1
                 dirty = True
                 jal_target = None
+                i += 1
                 continue
-            out_lines.append(line)
+            out_lines.append(f"{indent}LOOKUP_FUNC(0x{jal_target:08X})(rdram, ctx);\n")
+            replaced += 1
+            per_target[jal_target] = per_target.get(jal_target, 0) + 1
+            dirty = True
+            # A `jal` to a size-overridden (body-interior) target is emitted by
+            # the recompiler as a call to the containing body followed by an
+            # early `return`, abandoning the caller's epilogue — on the hardware
+            # the callee returns to the instruction after the delay slot. When
+            # that shape is present (early return + the delay-slot emission
+            # duplicated after it), repair it to the standard call-and-continue
+            # shape; a lookup that misses the map is a no-op stub, so falling
+            # through is safe either way. A true tail call at the function's end
+            # has no duplicated delay slot and keeps its `return`.
+            if (i + 2 < len(lines) and TRACE_RETURN_RE.match(lines[i + 1]) is not None
+                    and RETURN_RE.match(lines[i + 2]) is not None):
+                delay = out_lines[jal_line + 1 : -1]
+                dup = lines[i + 3 : i + 3 + len(delay)]
+                if dup == delay and delay:
+                    fresh = 0
+                    while fresh in file_labels:
+                        fresh += 1
+                    file_labels.add(fresh)
+                    out_lines.append(f"{indent}    goto after_{fresh};\n")
+                    out_lines.extend(dup)
+                    out_lines.append(f"{indent}after_{fresh}:\n")
+                    i += 3 + len(delay)
+                    repaired += 1
+                    jal_target = None
+                    continue
             jal_target = None
+            i += 1
         if dirty:
             path.write_text("".join(out_lines))
             changed_files += 1
@@ -575,6 +713,11 @@ def rewrite_main(regions) -> int:
     print(
         f"cross_bank: rewrite: {len(per_target)} distinct target(s) dispatched"
     )
+    if repaired:
+        print(
+            f"cross_bank: rewrite: {repaired} tail-call site(s) repaired to "
+            f"call-and-continue"
+        )
     if unresolved:
         print(
             f"cross_bank: rewrite: {len(unresolved)} target(s) have no bank entry yet "
@@ -582,7 +725,13 @@ def rewrite_main(regions) -> int:
         )
         for addr in sorted(unresolved):
             print(f"cross_bank:   pending 0x{addr:08X} ({unresolved[addr]} call site(s))")
-    return replaced
+    if only:
+        for addr in sorted(only):
+            if addr in per_target:
+                continue
+            if addr in already:
+                print(f"cross_bank: rewrite: 0x{addr:08X} already dispatched ({already[addr]} site(s))")
+    return per_target, already
 
 
 # ---------------------------------------------------------------------------
@@ -613,8 +762,25 @@ def report(regions, swap_ranges) -> None:
     )
 
 
+def parse_only(argv: list[str]) -> set[int] | None:
+    """`--only ADDR[,ADDR...]` (repeatable): restrict `dispatch` to targets."""
+    only: set[int] = set()
+    args = argv
+    while args:
+        flag, args = args[0], args[1:]
+        if flag != "--only" or not args:
+            raise ToolError(f"usage: cross_bank.py dispatch [--only 0xADDR[,0xADDR...]]")
+        addrs, args = args[0], args[1:]
+        for part in addrs.split(","):
+            try:
+                only.add(int(part.strip(), 16))
+            except ValueError:
+                raise ToolError(f"bad address '{part.strip()}' (want hex like 0x80198D28)")
+    return only or None
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in ("write-seeds", "dispatch", "revert", "report"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("write-seeds", "dispatch", "revert", "report"):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     cmd = sys.argv[1]
@@ -624,13 +790,30 @@ def main() -> int:
         if not swap_ranges:
             raise ToolError("no swappable RAM ranges; check the region model")
         if cmd == "write-seeds":
+            if len(sys.argv) != 2:
+                raise ToolError("usage: cross_bank.py write-seeds")
             n = write_seeds(regions, swap_ranges)
             print(f"cross_bank: wrote {n} seed symbol(s)")
         elif cmd == "dispatch":
-            rewrite_main(regions)
+            only = parse_only(sys.argv[2:])
+            result = rewrite_main(regions, only)
+            if result is None:
+                return 0
+            per_target, already = result
+            if only:
+                missing = sorted(a for a in only if a not in per_target and a not in already)
+                if missing:
+                    raise ToolError(
+                        "target(s) matched no call site: "
+                        + ", ".join(f"0x{a:08X}" for a in missing)
+                    )
         elif cmd == "revert":
+            if len(sys.argv) != 2:
+                raise ToolError("usage: cross_bank.py revert")
             revert_main()
         else:
+            if len(sys.argv) != 2:
+                raise ToolError("usage: cross_bank.py report")
             report(regions, swap_ranges)
     except ToolError as exc:
         print(f"cross_bank: error: {exc}", file=sys.stderr)
