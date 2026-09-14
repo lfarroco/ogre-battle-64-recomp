@@ -151,6 +151,190 @@ ultramodern::renderer::GraphicsApi map_graphics_api(RT64::UserConfiguration::Gra
     return ultramodern::renderer::GraphicsApi::Auto;
 }
 
+// --- OGRE_NOP_RECT: neutralise selected G_TEXRECT commands ----------------
+//
+// Bisect aid for "which draw produces this rectangle on screen". The submitted
+// display list is patched in RDRAM before RT64 parses it: every G_TEXRECT that
+// matches one of the selectors is replaced (together with its RDPHALF_1 /
+// RDPHALF_2 pair) by G_SPNOOP, so the draw disappears and the layers under it
+// show through. Selectors (comma separated):
+//
+//   any           every texture rectangle
+//   tex:<hex>     the SETTIMG address in effect (e.g. tex:801E2918)
+//   flip          dsdx < 0 (a right-to-left rectangle)
+//   y:<a>-<b>     the rectangle's screen rows overlap [a,b)
+//   x:<a>-<b>     the rectangle's screen columns overlap [a,b)
+//   n:<index>     the nth texture rectangle of the list
+//
+// Every skipped rectangle is logged with its decoded parameters so a run says
+// exactly what was removed.
+namespace nop_rect {
+
+struct Selector {
+    enum Kind { Any, Tex, Flip, Rows, Cols, Index } kind;
+    uint32_t value = 0;
+    int lo = 0, hi = 0;
+};
+
+inline uint32_t rd32(const uint8_t* p) {
+    uint32_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+inline uint32_t p0(uint32_t w, uint8_t pos, uint8_t bits) {
+    return (w >> pos) & ((1u << bits) - 1u);
+}
+
+inline void write_op(uint8_t* rdram, uint32_t off, uint8_t op) {
+    uint32_t w = rd32(rdram + off);
+    w = (w & 0x00FFFFFFu) | (uint32_t(op) << 24);
+    std::memcpy(rdram + off, &w, sizeof(w));
+}
+
+struct Walker {
+    uint8_t* rdram;
+    const std::vector<Selector>* selectors;
+    bool verbose = false;
+    uint32_t segments[16] = {};
+    uint32_t index = 0;
+    uint32_t removed = 0;
+    uint32_t budget = 200000;
+
+    uint32_t resolve(uint32_t addr) const {
+        return (segments[(addr >> 24) & 0xFu] + (addr & 0x00FFFFFFu)) & 0x1FFFFFFFu;
+    }
+
+    bool matches(const Selector& s, uint32_t timg, int16_t dsdx, int x0, int y0, int x1,
+                 int y1) const {
+        switch (s.kind) {
+            case Selector::Any:  return true;
+            case Selector::Tex:  return timg == s.value;
+            case Selector::Flip: return dsdx < 0;
+            case Selector::Rows: return (y0 < s.hi) && (y1 > s.lo);
+            case Selector::Cols: return (x0 < s.hi) && (x1 > s.lo);
+            case Selector::Index: return index == s.value;
+        }
+        return false;
+    }
+
+    void walk(uint32_t off, int depth) {
+        if (depth > 32) {
+            return;
+        }
+        uint32_t timg = 0;
+        for (;;) {
+            if (budget == 0 || off + 8 > 0x20000000u) {
+                return;
+            }
+            --budget;
+            const uint8_t* p = rdram + off;
+            const uint32_t w0 = rd32(p);
+            const uint32_t w1 = rd32(p + 4);
+            const uint8_t op = uint8_t(w0 >> 24);
+
+            if (op == 0xFD) {  // G_SETTIMG
+                timg = w1;
+                off += 8;
+                continue;
+            }
+            if (op == 0xDB) {  // G_MOVEWORD: segment registers
+                if (((w0 >> 16) & 0xFF) == 0x06) {
+                    segments[(w0 >> 2) & 0xF] = w1;
+                }
+                off += 8;
+                continue;
+            }
+            if (op == 0xDE) {  // G_DL
+                const uint32_t target = resolve(w1);
+                const bool push = ((w0 >> 16) & 1) == 0;
+                if (push) {
+                    walk(target, depth + 1);
+                    off += 8;
+                } else {
+                    off = target;
+                }
+                continue;
+            }
+            if (op == 0xDF) {  // G_ENDDL
+                return;
+            }
+            if (op == 0xE4 || op == 0xE5) {  // G_TEXRECT / G_TEXRECTFLIP
+                const int16_t uls = int16_t(p0(rd32(rdram + off + 8 + 4), 16, 16));
+                const int16_t ult = int16_t(p0(rd32(rdram + off + 8 + 4), 0, 16));
+                const int16_t dsdx = int16_t(p0(rd32(rdram + off + 16 + 4), 16, 16));
+                (void)uls;
+                (void)ult;
+                const int x0 = int(p0(w1, 12, 12)) / 4, y0 = int(p0(w1, 0, 12)) / 4;
+                const int x1 = int(p0(w0, 12, 12)) / 4, y1 = int(p0(w0, 0, 12)) / 4;
+                bool skip = false;
+                for (const Selector& s : *selectors) {
+                    if (matches(s, timg, dsdx, x0, y0, x1, y1)) {
+                        skip = true;
+                        break;
+                    }
+                }
+                if (skip && off + 24 <= 0x20000000u) {
+                    if (verbose) {
+                        fprintf(stderr,
+                                "[nop-rect] removed #%u @0x%05X x %d..%d y %d..%d dsdx=%d tex=0x%08X\n",
+                                index, off, x0, x1, y0, y1, (int)dsdx, timg);
+                    }
+                    write_op(rdram, off, 0xE0);
+                    write_op(rdram, off + 8, 0xE0);
+                    write_op(rdram, off + 16, 0xE0);
+                    ++removed;
+                }
+                ++index;
+                off += 24;
+                continue;
+            }
+            // G_BRANCH_Z is the only 16-byte command in F3DEX2.
+            off += (op == 0x04) ? 16 : 8;
+        }
+    }
+};
+
+inline std::vector<Selector> parse(const char* spec) {
+    std::vector<Selector> out;
+    std::string s(spec);
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        const size_t comma = s.find(',', pos);
+        std::string tok = s.substr(pos, (comma == std::string::npos) ? std::string::npos : comma - pos);
+        pos = (comma == std::string::npos) ? s.size() + 1 : comma + 1;
+        if (tok.empty()) {
+            continue;
+        }
+        Selector sel;
+        if (tok == "any") {
+            sel.kind = Selector::Any;
+        } else if (tok == "flip") {
+            sel.kind = Selector::Flip;
+        } else if (tok.rfind("tex:", 0) == 0) {
+            sel.kind = Selector::Tex;
+            sel.value = (uint32_t)strtoul(tok.c_str() + 4, nullptr, 16);
+        } else if (tok.rfind("n:", 0) == 0) {
+            sel.kind = Selector::Index;
+            sel.value = (uint32_t)strtoul(tok.c_str() + 2, nullptr, 10);
+        } else if ((tok.rfind("y:", 0) == 0) || (tok.rfind("x:", 0) == 0)) {
+            sel.kind = (tok[0] == 'y') ? Selector::Rows : Selector::Cols;
+            const char* rest = tok.c_str() + 2;
+            sel.lo = (int)strtol(rest, (char**)&rest, 10);
+            if (*rest == '-') {
+                sel.hi = (int)strtol(rest + 1, nullptr, 10);
+            }
+        } else {
+            fprintf(stderr, "[nop-rect] unknown selector '%s' (ignored)\n", tok.c_str());
+            continue;
+        }
+        out.push_back(sel);
+    }
+    return out;
+}
+
+}  // namespace nop_rect
+
 // --- RT64Renderer ---------------------------------------------------------
 
 class RT64Renderer final : public ultramodern::renderer::RendererContext {
@@ -255,6 +439,12 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
 
         app_->setFullScreen(cur_config.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
+        // OGRE_DUMP_TEX=<dir>: make RT64 dump every texture it decodes (a 4 KiB
+        // .tmem plus its .tile.json) into <dir>. Used to inspect what the
+        // renderer actually samples for a suspect tile.
+        if (const char* texdir = getenv("OGRE_DUMP_TEX")) {
+            app_->state->dumpingTexturesDirectory = texdir;
+        }
         // stderr, not stdout: stdout is block-buffered when the app is piped and
         // this line was being lost, which made a successful RT64 setup look like
         // a silent failure.
@@ -340,6 +530,19 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                         dl_count_, (unsigned long long)ultramodern::trace_millis(),
                         (unsigned long long)delta, task->t.type, task->t.ucode, task->t.data_ptr);
             }
+        }
+
+        // OGRE_NOP_RECT=<selectors>: bisect aid, see the helper above.
+        if (const char* nop = getenv("OGRE_NOP_RECT")) {
+            static const std::vector<nop_rect::Selector> selectors = nop_rect::parse(nop);
+            static uint32_t patched = 0;
+            const bool verbose = (patched < 2);
+            ++patched;
+            nop_rect::Walker walker{app_->core.RDRAM, &selectors, verbose, {}, 0, 0, 200000};
+            walker.walk(task->t.data_ptr & 0x1FFFFFFF, 1);
+            fprintf(stderr, "[nop-rect] dl=%u walked=%u removed=%u\n", dl_count_, walker.index,
+                    walker.removed);
+            fflush(stderr);
         }
 
         // GBI selection note (2026-08-29): OB64's gfx ucode is "RSP Gfx ucode

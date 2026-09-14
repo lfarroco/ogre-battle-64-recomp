@@ -2977,6 +2977,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             st.active_tile = saved_tile;
             return;  // empty rectangle: the RDP draws nothing (see draw_fill_rect)
         }
+        // A tile with no texels cannot be sampled. `lrs == uls` or `lrt == ult`
+        // means the tile covers zero texels (a one-texel-wide tile is
+        // `lrs == uls + 4`), so the rectangle has nothing to fetch; decoding it
+        // as a one-texel image samples a stale row instead. Ogre Battle 64
+        // leaves exactly such a tile behind at the end of its title-screen
+        // cloud-layer loops and then draws six right-to-left rectangles with
+        // it, which renders as an opaque white band across the scene. This
+        // mirrors the same guard in RT64 `RDP::drawTexRect`. A tile with
+        // `line == 0` is not configured at all and keeps the existing
+        // "no texture" handling.
+        {
+            const TileState& texTile = st.tiles[st.active_tile & (kMaxTiles - 1)];
+            if ((texTile.line != 0) &&
+                ((texTile.lrs == texTile.uls) || (texTile.lrt == texTile.ult))) {
+                st.active_tile = saved_tile;
+                return;
+            }
+        }
         const int16_t s0 = static_cast<int16_t>((ctx->rdp_half1 >> 16) & 0xFFFF);
         const int16_t t0 = static_cast<int16_t>(ctx->rdp_half1 & 0xFFFF);
         const int16_t dsdx = static_cast<int16_t>((ctx->rdp_half2 >> 16) & 0xFFFF);

@@ -112,6 +112,12 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_VI_TRACE=1` | `[vi]` trace of the decoded VI RT64 is about to present |
 | `OGRE_SCHED_TRACE=1` | enable the scheduler traces and, at exit, dump the race-free scheduler event ring (`[sched-ring]`): every insert/pop/remove/resume/park/wake/swap with a global sequence number and the running queue after it. This is how a thread that yielded and was never resumed is read off a run |
 | `OGRE_SCHED_TRACE_TID=<tid>` | with `OGRE_SCHED_TRACE`, filter the ring dump to events involving thread `<tid>` |
+| `OGRE_NOP_RECT=<selectors>` | app-side bisect aid: walk the display list before RT64 parses it and replace matching `G_TEXRECT`s (and their `RDPHALF_1`/`RDPHALF_2` pair) with `G_SPNOOP`, so a suspected draw disappears and the layers under it show. Selectors: `any`, `tex:<hex>` (the current `SETTIMG` address), `flip` (`dsdx < 0`), `x:<a>-<b>`, `y:<a>-<b>`, `n:<index>` |
+| `OGRE_EMPTY_TILE=draw` | restore the pre-session-35 behaviour of drawing rectangles whose tile covers zero texels (`lrs == uls` or `lrt == ult`) instead of skipping them. The skip is what fixes the title screen's white band |
+| `OGRE_EMPTY_TILE_TRACE=1` | name every rectangle skipped because its tile covers no texels |
+| `OGRE_RECT_STATE=<y0>-<y1>` | per-rectangle render state for rectangles contained in rows `[y0,y1)`: cycle type, both combiner cycles (decoded by RT64's own `ColorCombiner::cycleColorText`/`cycleAlphaText`), the blender inputs, the primitive colour and the tile descriptor it samples |
+| `OGRE_TILE_TRACE=1` | every tile whose sampling rectangle is degenerate (`sampleHeight <= 1`), with the texture the cache returned (`hash`, index, dimensions, `tcScale`, `rawTMEM`) |
+| `OGRE_DUMP_TEX=<dir>` | write RT64's decoded-texture dump (a 4 KiB `.tmem` plus `.tile.json` per texture) into `<dir>` instead of opening its file dialog |
 
 ```sh
 # a bounded run with taps, and the per-thread call chains

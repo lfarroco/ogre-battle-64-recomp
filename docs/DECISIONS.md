@@ -5,6 +5,82 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-14 (session 35) — the title screen's white band: a zero-area texture tile
+
+The retail title screen has clouds scrolling behind the "Ogre Battle 64" logo.
+The port drew a solid **white band across rows 64-128**, as if a full-width white
+quad had been placed over the clouds (`docs/proofs/native-intro-title.png` before
+the fix, `native-title-band-before-after.png` for the crop). The guess on the
+report was a 3D/2D compositing or shader problem. It was neither.
+
+### Finding: the band is six `G_TEXRECT`s drawn with a zero-area tile
+
+`OGRE_DL_DECODE=<n>` of the title scene's display list shows, right after the
+layer-2 cloud strip loop, six left-going rectangles:
+
+```
+TEXRECT ulx=0    uly=256 lrx=24   lry=512 tile=0 s=160  t=0 dsdx=-1024 dtdy=1024
+TEXRECT ulx=24   uly=256 lrx=280  lry=512 tile=0 s=2016 t=0 dsdx=-1024 dtdy=1024
+...                                         (six pieces tiling the full width)
+```
+
+with the combiner `FCFFFFFF FFFF73B9` immediately before them. Decoding that
+combiner with the N64 `GCCc0w0`/`GCCc0w1` packing (`include/PR/gbi.h`) gives
+`RGB = (0 - 0) * 0 + ONE` and `ALPHA = (0 - 0) * 0 + TEXEL0`, i.e. **a white
+overlay modulated by the sampled texel's alpha**. The tile those rectangles name
+is the one the layer-2 loop left behind: `SETTILESIZE t0 uls=0 ult=420 lrs=1276
+lrt=420` — `lrt == ult`, so the tile covers **zero texels**.
+
+Bisecting with the new `OGRE_NOP_RECT=flip` diagnostic (which NOPs matching
+`G_TEXRECT`s in the submitted display list) removed exactly the band and left the
+rest of the frame bit-identical, which is how the six rectangles were identified
+without guessing at the renderer.
+
+### Why RT64 painted it white
+
+`State::loadDrawState` computes the sampling rectangle as
+`sampleHeight = max((lrt - ult + 4) / 4, 1)`. The `max(..., 1)` is necessary (an
+empty texture cannot be decoded or sampled), but for a zero-height tile it
+*invents* a one-texel-tall image out of whatever TMEM currently holds. The
+`LOADTILE` that ran just before loaded texture row 105 of `0x801E2918`, and
+`docs/proofs`-side inspection of the RDRAM (with the runtime's `^3` byte order)
+shows rows 60-105 of that texture are **fully opaque** (alpha 255). So the six
+rectangles sampled one opaque row, and `RGB = ONE` turned them into opaque
+white.
+
+### Decision: a tile that covers no texels draws nothing
+
+`RDP::drawTexRect` now returns early when the named tile is configured
+(`line != 0`) and covers no texels (`lrs == uls` or `lrt == ult`). A one-texel
+tile is `lrs == uls + 4`, so this cannot catch a legitimate single-texel tile,
+and a tile with `line == 0` (never configured) keeps RT64's existing
+"no texture" handling. `app/src/web_renderer.cpp`'s `draw_texrect` gets the same
+guard so the browser renderer cannot diverge. `OGRE_EMPTY_TILE=draw` restores the
+old behaviour for A/B runs, and `OGRE_EMPTY_TILE_TRACE=1` names every skipped
+rectangle.
+
+The visible result matches the retail title screen: clouds behind the logo and no
+band. The skipped rectangles are exactly the pathological ones (the six overlay
+pieces plus each cloud layer's degenerate tail strip), which is confirmed by the
+trace.
+
+### Diagnostics added (all env-gated, all in the RT64 patch now)
+
+| knob | what it does |
+|---|---|
+| `OGRE_NOP_RECT=<selectors>` (app) | NOPs matching `G_TEXRECT`s in the submitted DL before RT64 sees them (`any`, `tex:<hex>`, `flip`, `x:a-b`, `y:a-b`, `n:<i>`) — "which draw is this?" bisection |
+| `OGRE_RECT_STATE=<y0>-<y1>` (RT64) | per-rectangle cycle type, both combiner cycles, blender inputs, prim colour and tile descriptor, decoded by RT64 itself |
+| `OGRE_TILE_TRACE=1` (RT64) | every tile whose sampling rectangle is degenerate, with the texture the cache returned |
+| `OGRE_DUMP_TEX=<dir>` (RT64) | writes the 4 KiB `.tmem` and `.tile.json` of every decoded texture |
+
+### Note: the checked-in RT64 patch was stale
+
+Regenerating `rt64-ob64.patch` picked up `OGRE_CAPTURE_EVERY` (added in session
+33/34 and documented in `guides/app-build.md`) which the patch file did not
+carry. The patch is now current with the working tree.
+
+---
+
 ## 2026-09-12 (session 34, addendum) — the missing intro smoke and logo characters
 
 Reported after the cross-bank work: the opening soldiers' attack had no "smoke",

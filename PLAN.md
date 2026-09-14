@@ -356,6 +356,22 @@ hardware. RT64 remains the primary native renderer throughout. See
     screen), both swap-chain readbacks
     (`OGRE_CAPTURE_PRESENT=… OGRE_CAPTURE_AFTER=…`). Confirmed by eye: soldiers,
     falling block, block → N64 logo, title screen.
+  - ✅ **The title screen's white band is fixed (session 35)**: the retail title
+    screen has slowly scrolling clouds behind the logo; the port drew a solid
+    white band across rows 64-128. The band was not a shader or a 3D/2D
+    compositing bug: the game ends each cloud-layer strip loop with a tile that
+    covers **zero texels** (`SETTILESIZE uls=0 ult=420 lrs=1276 lrt=420`, i.e.
+    `lrt == ult`) and then draws six right-to-left `G_TEXRECT`s with the
+    `RGB = ONE, ALPHA = TEXEL0` combiner (`FCFFFFFF FFFF73B9`). RT64 has to
+    round an empty sampling rectangle up to one texel (an empty texture cannot
+    be decoded), so those rectangles sampled one stale TMEM row - fully opaque
+    in the layer-2 texture - and composited as opaque white. `RDP::drawTexRect`
+    (and the browser renderer's `draw_texrect`) now skip a rectangle whose
+    configured tile covers no texels, which is what the hardware shows: the
+    retail title screen has clouds there and no band. Proofs:
+    `docs/proofs/native-title-band-before-after.png` (crop) and the refreshed
+    `docs/proofs/native-intro-title.png`. See
+    `docs/HANDOFF-2026-09-14-session35.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

@@ -1,8 +1,8 @@
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..313dd27 100644
+index 7de5b69..f894351 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
-@@ -4,12 +4,44 @@
+@@ -4,12 +4,48 @@
  
  #include "rt64_present_queue.h"
  
@@ -26,7 +26,10 @@ index 7de5b69..313dd27 100644
 +    // OGRE diagnostic state for OGRE_CAPTURE_PRESENT / OGRE_CAPTURE_TARGET:
 +    // GPU readback of (a) the swap chain texture being presented and (b) the
 +    // render target the VI renderer sampled. OGRE_CAPTURE_AFTER=<n> skips the
-+    // first n presents so the capture lands after boot.
++    // first n presents so the capture lands after boot; OGRE_CAPTURE_EVERY=<n>
++    // then keeps only every nth present, so a multi-minute unattended run can be
++    // sampled as a slideshow (files stay numbered by present index) instead of
++    // writing one 3 MB PPM per frame.
 +    struct OgreCaptureState {
 +        std::unique_ptr<RenderBuffer> presentBuffer;
 +        uint32_t presentWidth = 0;
@@ -37,6 +40,7 @@ index 7de5b69..313dd27 100644
 +        RenderFormat targetFormat = RenderFormat::UNKNOWN;
 +        uint32_t count = 0;
 +        uint32_t after = 0;
++        uint32_t every = 0;
 +        bool afterRead = false;
 +        bool thisFrame = false;
 +        const char *presentPath = nullptr;
@@ -47,7 +51,7 @@ index 7de5b69..313dd27 100644
      // PresentQueue
  
      PresentQueue::PresentQueue() {
-@@ -93,6 +125,20 @@ namespace RT64 {
+@@ -93,6 +129,24 @@ namespace RT64 {
      }
  
      void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
@@ -60,15 +64,19 @@ index 7de5b69..313dd27 100644
 +                if (const char *afterEnv = getenv("OGRE_CAPTURE_AFTER")) {
 +                    ogreCapture.after = uint32_t(strtoul(afterEnv, nullptr, 10));
 +                }
++                if (const char *everyEnv = getenv("OGRE_CAPTURE_EVERY")) {
++                    ogreCapture.every = uint32_t(strtoul(everyEnv, nullptr, 10));
++                }
 +            }
 +            ogreCapture.count++;
 +            ogreCapture.thisFrame = ((ogreCapture.presentPath != nullptr) || (ogreCapture.targetPath != nullptr)) &&
-+                                    (ogreCapture.count > ogreCapture.after);
++                                    (ogreCapture.count > ogreCapture.after) &&
++                                    ((ogreCapture.every == 0) || ((ogreCapture.count % ogreCapture.every) == 0));
 +        }
          FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
-@@ -146,6 +192,14 @@ namespace RT64 {
+@@ -146,6 +200,14 @@ namespace RT64 {
                  viFb = fbManager.find(present.screenVI.fbAddress());
              }
  
@@ -83,7 +91,7 @@ index 7de5b69..313dd27 100644
              Framebuffer *presentFb = viFb;
              
              // Show the framebuffer the debugger has requested instead.
-@@ -221,6 +275,46 @@ namespace RT64 {
+@@ -221,6 +283,46 @@ namespace RT64 {
              else {
                  uint32_t fbAddress = present.screenVI.fbAddress();
  
@@ -130,7 +138,7 @@ index 7de5b69..313dd27 100644
                  // Use a scratch framebuffer to upload the RAM to the render target.
                  scratchFb.addressStart = fbAddress;
                  scratchFb.width = fbSize.x;
-@@ -254,6 +348,7 @@ namespace RT64 {
+@@ -254,6 +356,7 @@ namespace RT64 {
                  if (!present.paused && (viHistory.top().vi != present.screenVI)) {
                      viHistory.pushVI(present.screenVI, fbSize.x);
                  }
@@ -138,7 +146,7 @@ index 7de5b69..313dd27 100644
              }
          }
  
-@@ -266,6 +361,36 @@ namespace RT64 {
+@@ -266,6 +369,36 @@ namespace RT64 {
                  swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
              }
          }
@@ -175,7 +183,7 @@ index 7de5b69..313dd27 100644
          
          for (int32_t i = 0; i < framesToPresent; i++) {
              uint32_t frameCountersNextPresented = 0;
-@@ -342,11 +467,97 @@ namespace RT64 {
+@@ -342,11 +475,97 @@ namespace RT64 {
                  }
                  
                  commandList->setFramebuffer(swapChainFramebuffer);
@@ -275,7 +283,7 @@ index 7de5b69..313dd27 100644
                  }
  
                  RenderHookDraw *drawHook = GetRenderHookDraw();
-@@ -354,6 +565,28 @@ namespace RT64 {
+@@ -354,6 +573,28 @@ namespace RT64 {
                      drawHook(commandList, swapChainFramebuffer);
                  }
  
@@ -304,7 +312,7 @@ index 7de5b69..313dd27 100644
                  {
                      const std::scoped_lock lock(inspectorMutex);
                      if (inspector != nullptr) {
-@@ -367,6 +600,51 @@ namespace RT64 {
+@@ -367,6 +608,51 @@ namespace RT64 {
                      RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                      ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                      ext.presentGraphicsWorker->wait();
@@ -357,7 +365,7 @@ index 7de5b69..313dd27 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..f0e1d03 100644
+index a10c11a..8324412 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -248,6 +248,13 @@ namespace RT64 {
@@ -389,7 +397,60 @@ index a10c11a..f0e1d03 100644
          // Filter out incorrect rectangles.
          if ((lrx < ulx) || (lry < uly)) {
              return;
-@@ -1222,6 +1237,17 @@ namespace RT64 {
+@@ -1197,6 +1212,52 @@ namespace RT64 {
+             return;
+         }
+ 
++        // OGRE diagnostic: OGRE_RECT_STATE=<y0>-<y1> prints everything RT64 has
++        // decoded for each rectangle whose screen rows overlap [y0,y1): the
++        // cycle type, both combiner cycles, the blender inputs and the primitive
++        // colour. This is how a "why is this rectangle the wrong colour"
++        // question is answered from the renderer's own decode.
++        if (const char* rs = getenv("OGRE_RECT_STATE")) {
++            static const int filterLo = (int)strtol(rs, nullptr, 10);
++            static const int filterHi = [](const char* s) {
++                const char* dash = strchr(s, '-');
++                return (dash != nullptr) ? (int)strtol(dash + 1, nullptr, 10) : 100000;
++            }(rs);
++            const int py0 = uly >> 2, py1 = lry >> 2;
++            if ((py0 >= filterLo) && (py1 <= filterHi) && ((py1 - py0) >= (filterHi - filterLo))) {
++                const interop::ColorCombiner &cc = colorCombinerStack[colorCombinerStackSize - 1];
++                const interop::OtherMode &om = state->rdp->otherMode;
++                const uint32_t blInputs = om.blenderInputs();
++                static const char* pmNames[] = { "CC", "FB", "BLEND", "FOG" };
++                static const char* aNames[] = { "CC_A", "FOG_A", "SHADE_A", "ZERO" };
++                static const char* bNames[] = { "1-A", "FB_A", "ONE", "ZERO" };
++                const bool second = (om.cycleType() == G_CYC_2CYCLE);
++                const char* P = pmNames[interop::Blender::decodeInputP(blInputs, second)];
++                const char* A = aNames[interop::Blender::decodeInputA(blInputs, second)];
++                const char* M = pmNames[interop::Blender::decodeInputM(blInputs, second)];
++                const char* B = bNames[interop::Blender::decodeInputB(blInputs, second)];
++                const hlslpp::float4 &pc = primColorStack[primColorStackSize - 1];
++                const auto &tile = state->rdp->tiles[state->drawCall.textureTile];
++                static uint32_t rectTrace = 0;
++                if (++rectTrace <= 40) {
++                    fprintf(stderr,
++                            "[rect-state] n=%u rect %d,%d..%d,%d cycle=%u ccL=%08X ccH=%08X prim=%.3f,%.3f,%.3f,%.3f "
++                            "blend(P=%s A=%s M=%s B=%s) texOn=%u tile=%u fmt=%u siz=%u line=%u tmem=%u "
++                            "uls=%u ult=%u lrs=%u lrt=%u\n"
++                            "[rect-state]   cc0 rgb %s\n[rect-state]   cc0 a   %s\n"
++                            "[rect-state]   cc1 rgb %s\n[rect-state]   cc1 a   %s\n",
++                            rectTrace, (int)ulx, (int)uly, (int)lrx, (int)lry, (unsigned)om.cycleType(),
++                            (unsigned)cc.L, (unsigned)cc.H, pc.x, pc.y, pc.z, pc.w, P, A, M, B,
++                            (unsigned)state->drawCall.textureOn, (unsigned)state->drawCall.textureTile,
++                            (unsigned)tile.fmt, (unsigned)tile.siz, (unsigned)tile.line, (unsigned)tile.tmem,
++                            (unsigned)tile.uls, (unsigned)tile.ult, (unsigned)tile.lrs, (unsigned)tile.lrt,
++                            cc.cycleColorText(0).c_str(), cc.cycleAlphaText(0).c_str(),
++                            cc.cycleColorText(1).c_str(), cc.cycleAlphaText(1).c_str());
++                    fflush(stderr);
++                }
++            }
++        }
++
+         // Check if framebuffer pair must be changed.
+         checkFramebufferPair();
+ 
+@@ -1222,6 +1283,17 @@ namespace RT64 {
                  }
              }
          }
@@ -407,6 +468,47 @@ index a10c11a..f0e1d03 100644
          
          bool flushedState = state->checkDrawState();
  
+@@ -1322,6 +1394,40 @@ namespace RT64 {
+         RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
+ #   endif
+ 
++        // OGRE: a tile with no texels cannot be sampled. `lrs == uls` or
++        // `lrt == ult` means the tile covers zero texels (a one-texel-wide tile
++        // is `lrs == uls + 4`), so the rectangle has nothing to fetch. RT64's
++        // tile setup must round the sampling size up to at least one texel
++        // (an empty texture cannot be decoded), which turns such a rectangle
++        // into a solid block of whatever the stale TMEM row happens to hold.
++        // Ogre Battle 64 leaves exactly such a tile behind at the end of its
++        // title-screen cloud-layer loops and then draws six right-to-left
++        // rectangles with it: the fabricated one-texel tile renders as an
++        // opaque white band across the scene, while the hardware shows nothing
++        // there (see the retail title screen). Skip the rectangle in that case.
++        // A tile with `line == 0` is not configured at all and keeps RT64's
++        // existing "no texture" handling.
++        // OGRE_EMPTY_TILE=draw restores the previous behaviour for A/B runs.
++        {
++            static const bool skipEmptyTile = (getenv("OGRE_EMPTY_TILE") == nullptr) ||
++                                              (strcmp(getenv("OGRE_EMPTY_TILE"), "draw") != 0);
++            const auto &rectTile = tiles[tile];
++            if (skipEmptyTile && (rectTile.line != 0) &&
++                ((rectTile.lrs == rectTile.uls) || (rectTile.lrt == rectTile.ult))) {
++                if (getenv("OGRE_EMPTY_TILE_TRACE") != nullptr) {
++                    static uint32_t emptyTrace = 0;
++                    if (++emptyTrace <= 20) {
++                        fprintf(stderr, "[empty-tile] skipped rect %d,%d..%d,%d tile=%u uls=%u ult=%u lrs=%u lrt=%u\n",
++                                (int)ulx, (int)uly, (int)lrx, (int)lry, (unsigned)tile,
++                                (unsigned)rectTile.uls, (unsigned)rectTile.ult, (unsigned)rectTile.lrs,
++                                (unsigned)rectTile.lrt);
++                        fflush(stderr);
++                    }
++                }
++                return;
++            }
++        }
++
+         // Check if the texture needs to be updated.
+         DrawCall &drawCall = state->drawCall;
+         if (!drawCall.textureOn || (drawCall.textureTile != tile) || (drawCall.textureLevels != 1)) {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
 index 2970e71..df481c8 100644
 --- a/src/hle/rt64_state.cpp
@@ -475,10 +577,38 @@ index 5a331aa..14a8715 100644
                  if (!fbPair.drawColorRect.isEmpty()) {
                      colorFb = nullptr;
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index 9fae0d4..24ae5b9 100644
+index 9fae0d4..d510d49 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
-@@ -1318,6 +1318,16 @@ namespace RT64 {
+@@ -260,6 +260,27 @@ namespace RT64 {
+                 bool shiftedByHalf = false;
+                 textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
+ 
++                // OGRE diagnostic: OGRE_TILE_TRACE=1 reports every tile whose
++                // sampling rectangle is degenerate (a zero-height tile such as
++                // `ult == lrt`), together with the texture the cache handed back
++                // and how the sampler will scale it. textureIndex 0 means the
++                // hash was not in the cache and the draw samples the fallback.
++                if ((getenv("OGRE_TILE_TRACE") != nullptr) && (callTile.sampleHeight <= 1)) {
++                    static uint32_t tileTrace = 0;
++                    if (++tileTrace <= 40) {
++                        fprintf(stderr,
++                                "[gpu-tile] n=%u hash=%016llX tmemHash=%016llX idx=%u dims=%.0fx%.0f "
++                                "tcScale=%.4f,%.4f sample=%ux%u rawTMEM=%d copy=%d valid=%d replaced=%d\n",
++                                tileTrace, (unsigned long long)callTile.tmemHashOrID,
++                                (unsigned long long)callTile.tmemHashOrID, textureIndex,
++                                gpuTile.textureDimensions.x, gpuTile.textureDimensions.y,
++                                gpuTile.tcScale.x, gpuTile.tcScale.y, (unsigned)callTile.sampleWidth,
++                                (unsigned)callTile.sampleHeight, (int)callTile.rawTMEM,
++                                (int)callTile.tileCopyUsed, (int)callTile.valid, (int)textureReplaced);
++                        fflush(stderr);
++                    }
++                }
++
+                 // Describe the GPU tile for a regular texture.
+                 gpuTile.ulScale.x = gpuTile.tcScale.x;
+                 gpuTile.ulScale.y = gpuTile.tcScale.y;
+@@ -1318,6 +1339,16 @@ namespace RT64 {
  
      void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
          assert(p.fbStorage != nullptr);
@@ -495,7 +625,7 @@ index 9fae0d4..24ae5b9 100644
          
          // Setup framebuffer pair data and descriptor set.
          const FramebufferPair &fbPair = p.curWorkload->fbPairs[p.fbPairIndex];
-@@ -1452,6 +1462,15 @@ namespace RT64 {
+@@ -1452,6 +1483,15 @@ namespace RT64 {
          RenderViewport viewportClip;
          for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
              const Projection &proj = fbPair.projections[pr];
@@ -511,7 +641,7 @@ index 9fae0d4..24ae5b9 100644
              if (proj.scissorRect.isNull()) {
                  continue;
              }
-@@ -1508,6 +1527,17 @@ namespace RT64 {
+@@ -1508,6 +1548,17 @@ namespace RT64 {
  
              for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
                  const GameCall &call = proj.gameCalls[d];
@@ -529,7 +659,7 @@ index 9fae0d4..24ae5b9 100644
                  renderIndices.instanceIndex = call.callDesc.callIndex;
                  renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
                  renderIndices.rdpTileIndex = call.callDesc.tileIndex;
-@@ -1517,6 +1547,17 @@ namespace RT64 {
+@@ -1517,6 +1568,17 @@ namespace RT64 {
  
                  uint32_t cycleType = call.callDesc.otherMode.cycleType();
                  if (cycleType == G_CYC_FILL) {
