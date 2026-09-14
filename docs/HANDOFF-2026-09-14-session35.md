@@ -261,7 +261,8 @@ the last `SETTIMG` / `SETTILE t7` / `LOADTILE` / `SETTILE t0` /
 the rectangles now reach RT64 as `fmt=4 siz=1 line=8 uls=0 ult=0 lrs=63 lrt=63`
 — the 64x64 fog image — and the band region shows the fog
 (`docs/proofs/native-title-fog.png`, and `native-title-fog-vs-band.png` for the
-fog / no-fog / old-white-band comparison).
+fog / no-fog / old-white-band comparison — both regenerated in session 36 once
+the repair actually drew, see the correction below).
 
 ## 8. Addendum — booting straight into a screen
 
@@ -338,18 +339,19 @@ and up to **17/255**, while a control region (rows 150-230) stays under 2. So th
 logo-area fog really is drawn, and its magnitude matches the retail's excess in
 that band (retail 132.2 vs 117 without the fog).
 
-`docs/proofs/native-title-fog-isolation.png` (since deleted; see the correction
-below) showed the strongest such pair:
+`docs/proofs/native-title-fog-isolation.png` showed the strongest such pair:
 the band with the fog off, the same band one frame later with it on, and the
 difference amplified 6x — the fog's wispy shape is plainly visible there.
 
-> **Correction (session 36):** that image is a crop of the **story/lore attract
-> screen**, not the title, and the difference it shows is scene animation rather
-> than the fog. Comparing two runs at the same present index on the *title*
-> gives byte-identical frames for `OGRE_FOG=1` and `OGRE_FOG=0`, so the repair
-> is not observable there at all; the band is removed by RT64's zero-texel guard
-> alone. The file has been replaced by
-> `docs/proofs/native-title-band-isolation.png`. See
+> **Correction (session 36):** that image was a crop of the **story/lore attract
+> screen**, not the title, and the difference it showed was scene animation
+> rather than the fog. Measuring on the title itself showed that the `OGRE_FOG`
+> repair was in fact drawing nothing: its `G_SETTILESIZE`/`G_LOADTILE` extents
+> were written in texels instead of the GBI's quarter-texels (a 64x64 image
+> declared as a ~16x16 tile), and only the first white group of a frame was
+> repaired, so the `©1999 QUEST` sweep kept a dead tile. Both are fixed, and the
+> file is regenerated on the title (logo band, fog off / on / ×4) alongside
+> `docs/proofs/native-title-fog-quest-region.png` for the sweep. See
 > `docs/HANDOFF-2026-09-14-session36.md` §3. The `title = 0x0C` scene id in §8 is
 > also wrong — `0x0C` is the unit-description book; the title screen is `0x04`.
 

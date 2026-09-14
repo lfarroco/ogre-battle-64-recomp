@@ -372,7 +372,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     `docs/proofs/native-title-band-before-after.png` (crop) and the refreshed
     `docs/proofs/native-intro-title.png`. See
     `docs/HANDOFF-2026-09-14-session35.md`.
-  - ✅ **Scene jumps work, and the title "fog" is corrected (session 36)**:
+  - ✅ **Scene jumps work, and the title fog is fixed (session 36)**:
     `OGRE_SCENE=<name|hex>` now actually enters a screen. It had been a silent
     no-op — the poke has to land before the boot enters its first scene
     (~1.1 s), but `OGRE_SCENE_AFTER_MS` defaulted to 3000 — and
@@ -381,12 +381,21 @@ hardware. RT64 remains the primary native renderer throughout. See
     `OGRE_SCENE_TRACE=1`), and the scene table is now verified by capture:
     `title` = `0x04` (logo + PRESS START over the clouds), `intro` = `0x09`,
     `publishers` = `0x0A`, `story` = `0x0B`, `unit-info` = `0x0C`; `0x18`/`0x02`
-    still crash on the unfinished cross-bank work. The reported
-    `native-title-fog-isolation.png` turned out to be a crop of the story screen,
-    and the fog it claimed to isolate is not measurable on the title: at aligned
-    presents `OGRE_FOG=1` and `OGRE_FOG=0` frames are byte-identical, while
-    `OGRE_EMPTY_TILE=draw` differs by 39.6/255 in the band. The band fix is
-    RT64's zero-texel guard alone; the new proof is
+    still crash on the unfinished cross-bank work. With the title reachable, the
+    reported `native-title-fog-isolation.png` (a crop of the story screen) could
+    be re-measured, and the `OGRE_FOG` repair turned out to be drawing nothing:
+    its `G_SETTILESIZE`/`G_LOADTILE` extents were in texels rather than the GBI's
+    quarter-texels (a 64x64 image declared as a ~16x16 tile), and only the first
+    white group per frame was repaired, so the `©1999 QUEST` bottom sweep kept a
+    dead tile. A follow-up round fixed the fog blinking (the sweep's scroll ran
+    past the 64-texel image and the group was dropped; the draw tile now wraps).
+    The fog's level is the game's own asset: the combiner is
+    `RGB=ONE, ALPHA=TEXEL0`, so the overlay is white modulated by the layer
+    image's intensity (5.1% mean / 20.4% peak) and `OGRE_FOG_SCALE` defaults to
+    100 — a retail emulator capture measures the port at 113% of the retail fog
+    contribution in the clean `©1999 QUEST` cloud region. Proofs:
+    `docs/proofs/native-title-fog-isolation.png`,
+    `docs/proofs/native-title-fog-quest-region.png`,
     `docs/proofs/native-title-band-isolation.png`. See
     `docs/HANDOFF-2026-09-14-session36.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the

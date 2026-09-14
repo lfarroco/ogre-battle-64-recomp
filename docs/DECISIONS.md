@@ -5,11 +5,13 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
-## 2026-09-14 (session 36) — scene jumps that work, and the title fog is not what session 35 thought
+## 2026-09-14 (session 36) — scene jumps that work, and the title fog repair
 
 Two reports: `docs/proofs/native-title-fog-isolation.png` is a crop of the
 story/lore screen rather than the title, and testing needs a way to jump
-straight into the title screen. Chasing them produced three corrections.
+straight into the title screen. The second report led into the first: with the
+title reachable the fog could actually be measured, and the repair turned out to
+be drawing nothing at all.
 
 ### Decision: `OGRE_SCENE` pokes early, and its default delay becomes 0
 
@@ -39,35 +41,89 @@ Each id was forced with `OGRE_SCENE=<hex> OGRE_SCENE_AFTER_MS=0` and captured:
 book, `0x18`/`0x02` still SIGSEGV (cross-bank work). Session 35's
 `title = 0x0C` was the book, not the title.
 
-### Finding: the `OGRE_FOG` repair is not observable
+### Fix: the `OGRE_FOG` repair wrote tile extents in the wrong units
 
-Session 35 §7/§10 measured the fog with `OGRE_FOG=alternate`, but that method
-cannot tell which screen a pair is on, and its strongest pairs are on the
-animated story screens — the reported image. Directly comparing two runs at the
-same present index, at indices where a third `OGRE_EMPTY_TILE=draw` run proves
-the two are in lockstep, `OGRE_FOG=1` and `OGRE_FOG=0` title frames are
-byte-identical in the fog band as well (`|diff| = 0.000`; the pre-fix run
-differs by 39.6 there). `OGRE_FOG=alternate` on the static title produces zero
-band difference (no display-list change to toggle), and `OGRE_FOG_SCALE=100000`
-— which stages an all-white image and would paint an *opaque* band if the
-rectangles drew — leaves the band at the default brightness. `OGRE_RECT_STATE`
-shows the repair reaching RT64 with the expected tile (`fmt=4 siz=1 line=8
-uls=0 ult=0 lrs=63 lrt=63`, `RGB ONE / ALPHA TEXEL0`), so the draw is lost after
-`drawTexRect`, not before it.
+`G_SETTILESIZE` and `G_LOADTILE` carry `uls/ult/lrs/lrt` in **quarter-texel**
+units, not texels — the game's own tiles use `lrs = (width - 1) * 4` (320 texels
+→ `lrs = 1276`). The repair wrote `((width - 1) << 12) | (height - 1)`, so a
+64x64 layer image was declared as a ~16x16 tile; the six logo-band rectangles
+sample `s = 63..0`, outside that tile, and RT64 clamped them onto a transparent
+corner. The pass rewrote the display list and then drew nothing, which is why
+`OGRE_FOG=1` and `OGRE_FOG=0` frames were byte-identical. `OGRE_RECT_STATE`
+showed the wrong tile (`lrs=63 lrt=63`) and session 35 read it as correct.
 
-What the session-35 work actually ships is RT64's empty-tile guard (and the same
-guard in `web_renderer.cpp`): the fabricated one-texel tile painted an opaque
-white band (band mean 172 with `OGRE_EMPTY_TILE=draw`), and skipping the
-rectangle leaves the clouds (119). The `OGRE_FOG` pass stays (harmless, and its
-layer-table lookup may still be needed for the bottom sweep), but the fog itself
-is unverified.
+### Fix: every white group is repaired, not just the first
+
+The walker cleared `fog_white` after the first white group, on the theory that
+later white groups are cloud wipes that do not fit the layer image. But the title
+has two: the layer wrap behind the logo (`s = 63..0`) and the **bottom sweep** —
+64 one-screen-row-tall rectangles at N64 rows 176-239 with `s = 288..1920`,
+`t = 0..2016`, the `©1999 QUEST` fog the report was about. The sweep inherits the
+cloud loop's zero-area tail tile (row 159 of the *cloud* texture); the old
+one-texel fallback let RT64 read that dead row, which draws nothing. Both groups'
+scroll fits a 64x64 layer image, so the repair now runs for every white group
+whose scroll fits, and only falls back to a one-row tile when it does not.
+
+Measured on the title, fog on vs off at the same present (runs verified in
+lockstep outside the fog bands):
+
+| region | before | after |
+|---|---|---|
+| logo band (N64 rows 64-128) | `0.00` | mean 4.6, max 41 |
+| `©1999 QUEST` band (rows 176-216) | `0.00` | mean 3.1, max 37 |
+
+The `©1999 QUEST` band now also *moves* (consecutive title frames differ by mean
+1.0-2.0, max 24-36), matching the emulator captures above the copyright line.
+
+The sweep is repaired to the layer image rather than the 320-wide cloud texture
+its `SETTIMG` names: a 320x64 RGBA32 texture does not fit in 4 KB of TMEM, so the
+original per-strip uploads cannot be replayed verbatim. The result is the right
+kind of moving haze in the right place; the exact wisp shape is the layer
+image's. Synthesising a per-rectangle `LOADTILE` for the cloud-texture row each
+sweep rectangle names would close that gap.
+
+### Fix: the sweep blinked because its scroll ran off the image
+
+The first version of the repair refused any group whose first rectangle's `s`
+passed the image width and fell back to the dead one-row tile. The sweep walks
+`s` from 0 to ~118 texels (it is written against a 320-wide cloud texture), so
+every time `s` crossed 64 the `©1999 QUEST` fog disappeared for a few frames.
+`OGRE_FOG_SUMMARY=1` shows the sweep group reporting `used=0x00000000` on exactly
+those frames. The draw tile now **wraps** (`masks`/`maskt` = log2 of the image
+size, 6 for 64x64) and only a negative coordinate falls back. After the fix the
+band is flat to within 0.84/255 across the title (it alternated 63.8/67.5
+before).
+
+### Decision: the fog's level is the game's own asset (no port constant)
+
+The opacity is not a number the port picks. The combiner the game uses for every
+white fog group is `RGB = ONE, ALPHA = TEXEL0`, alpha compare is off and the
+blend colour alpha is 0 (`othermode_l = 0x00504240`), so the overlay is white
+modulated by the sampled texel's alpha — and for the layer table's 64x64
+`G_IM_FMT_I` images that alpha is the image's intensity (mean 12.9/255 = 5.1%,
+peak 52/255 = 20.4%). `OGRE_FOG_SCALE=100` therefore means "the asset as
+authored" and is the default; the knob only stages a scaled copy in scratch RDRAM
+for A/B runs.
+
+That default is checked against a retail emulator capture of the lower half of
+the screen (just after the fade-in): fitting the emulator's brightness offset on
+the fog-free cloud band (N64 rows 129-175, which reproduces zero fog to ±0.02)
+and measuring the fog's contribution in the clean cloud region below the
+copyright (rows 214-236) gives retail **+8.1**, a 45% build **+3.2** and the
+100% build **+7.2**. Six phase-matched presents put the 45% build at 112-116% of
+the needed value, i.e. the raw asset. The 45% it briefly defaulted to was a
+port-side over-correction from comparing overall brightness rather than the
+fog's contribution; it is gone, and `OGRE_FOG_SCALE=45` remains as a taste
+option.
 
 ### Proofs
 
-* `docs/proofs/native-title-band-isolation.png` (new): the title band, pre-fix
-  white band / fixed / difference ×4, from two runs at the same present.
-* `docs/proofs/native-title-fog-isolation.png` (deleted): wrong screen, and the
-  thing it claimed to isolate is not measurable.
+* `docs/proofs/native-title-fog-isolation.png`: the title logo band with the fog
+  off, on, and the difference ×4.
+* `docs/proofs/native-title-fog-quest-region.png`: the `©1999 QUEST` sweep, same
+  treatment.
+* `docs/proofs/native-title-band-isolation.png`: the zero-texel band fix,
+  pre-fix white band / fixed / difference ×4.
 
 ---
 
