@@ -338,9 +338,20 @@ and up to **17/255**, while a control region (rows 150-230) stays under 2. So th
 logo-area fog really is drawn, and its magnitude matches the retail's excess in
 that band (retail 132.2 vs 117 without the fog).
 
-`docs/proofs/native-title-fog-isolation.png` shows the strongest such pair:
+`docs/proofs/native-title-fog-isolation.png` (since deleted; see the correction
+below) showed the strongest such pair:
 the band with the fog off, the same band one frame later with it on, and the
 difference amplified 6x — the fog's wispy shape is plainly visible there.
+
+> **Correction (session 36):** that image is a crop of the **story/lore attract
+> screen**, not the title, and the difference it shows is scene animation rather
+> than the fog. Comparing two runs at the same present index on the *title*
+> gives byte-identical frames for `OGRE_FOG=1` and `OGRE_FOG=0`, so the repair
+> is not observable there at all; the band is removed by RT64's zero-texel guard
+> alone. The file has been replaced by
+> `docs/proofs/native-title-band-isolation.png`. See
+> `docs/HANDOFF-2026-09-14-session36.md` §3. The `title = 0x0C` scene id in §8 is
+> also wrong — `0x0C` is the unit-description book; the title screen is `0x04`.
 
 `OGRE_FOG_SCALE=<percent>` scales the image's intensity when it is staged in
 scratch RDRAM (the last 64 KiB, which OB64 leaves untouched). At 1000 the

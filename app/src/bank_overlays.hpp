@@ -16,13 +16,17 @@ void register_bank_overlays();
 
 // Boot straight into a screen. `OGRE_SCENE=<name|hex>` (see kScenes in
 // bank_overlays.cpp for the names) pokes the game's attract scene id
-// (`*(u16*)(D_800C4BBC + 4)`) until the dispatcher reports that scene active
-// (`D_800E810E`), which is how the game's own scene state machine is entered
-// without waiting out the attract loop. Called once per frame from the app's
-// `update_gfx`; `OGRE_SCENE_AFTER_MS` (default 3000) delays the first poke so
-// boot can settle. `OGRE_FORCE_SCENE`/`OGRE_FORCE_SCENE_AFTER_MS` are the
-// original hex-only spellings and still work. `OGRE_SCENE_LOG=1` logs every
-// scene change with its descriptor and record mask.
+// (`*(u16*)(*(u32*)D_800C4BBC + 4)` and the pending word `D_800E8214`) until the
+// dispatcher reports that scene active (`D_800E810E`), which is how the game's
+// own scene state machine is entered without waiting out the attract loop.
+//
+// The poke only takes effect *early*: after the boot enters its first real
+// scene (~1 s) the running scene owns the state block and overwrites it. So
+// `OGRE_SCENE_AFTER_MS` defaults to 0 — a delay makes the jump silently do
+// nothing. `OGRE_FORCE_SCENE`/`OGRE_FORCE_SCENE_AFTER_MS` are the original
+// hex-only spellings and still work. `OGRE_SCENE_LOG=1` logs every scene change
+// with its descriptor and record mask; `OGRE_SCENE_TRACE=1` logs the forcing
+// state.
 void poll_scene();
 
 }  // namespace ogre

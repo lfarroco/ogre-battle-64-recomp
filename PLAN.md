@@ -372,6 +372,23 @@ hardware. RT64 remains the primary native renderer throughout. See
     `docs/proofs/native-title-band-before-after.png` (crop) and the refreshed
     `docs/proofs/native-intro-title.png`. See
     `docs/HANDOFF-2026-09-14-session35.md`.
+  - ✅ **Scene jumps work, and the title "fog" is corrected (session 36)**:
+    `OGRE_SCENE=<name|hex>` now actually enters a screen. It had been a silent
+    no-op — the poke has to land before the boot enters its first scene
+    (~1.1 s), but `OGRE_SCENE_AFTER_MS` defaulted to 3000 — and
+    `OGRE_SCENE_LOG=1` SIGBUSed on a stale scene-descriptor word at ~1 s. Both
+    are fixed (`OGRE_SCENE_AFTER_MS` default 0, descriptor validated, new
+    `OGRE_SCENE_TRACE=1`), and the scene table is now verified by capture:
+    `title` = `0x04` (logo + PRESS START over the clouds), `intro` = `0x09`,
+    `publishers` = `0x0A`, `story` = `0x0B`, `unit-info` = `0x0C`; `0x18`/`0x02`
+    still crash on the unfinished cross-bank work. The reported
+    `native-title-fog-isolation.png` turned out to be a crop of the story screen,
+    and the fog it claimed to isolate is not measurable on the title: at aligned
+    presents `OGRE_FOG=1` and `OGRE_FOG=0` frames are byte-identical, while
+    `OGRE_EMPTY_TILE=draw` differs by 39.6/255 in the band. The band fix is
+    RT64's zero-texel guard alone; the new proof is
+    `docs/proofs/native-title-band-isolation.png`. See
+    `docs/HANDOFF-2026-09-14-session36.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

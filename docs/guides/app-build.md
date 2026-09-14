@@ -113,13 +113,14 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_SCHED_TRACE=1` | enable the scheduler traces and, at exit, dump the race-free scheduler event ring (`[sched-ring]`): every insert/pop/remove/resume/park/wake/swap with a global sequence number and the running queue after it. This is how a thread that yielded and was never resumed is read off a run |
 | `OGRE_SCHED_TRACE_TID=<tid>` | with `OGRE_SCHED_TRACE`, filter the ring dump to events involving thread `<tid>` |
 | `OGRE_NOP_RECT=<selectors>` | app-side bisect aid: walk the display list before RT64 parses it and replace matching `G_TEXRECT`s (and their `RDPHALF_1`/`RDPHALF_2` pair) with `G_SPNOOP`, so a suspected draw disappears and the layers under it show. Selectors: `any`, `tex:<hex>` (the current `SETTIMG` address), `flip` (`dsdx < 0`), `x:<a>-<b>`, `y:<a>-<b>`, `n:<index>` |
-| `OGRE_FOG=0` | disable the session-35 repair that makes OB64's fog/cloud "wrap" rectangles sample the layer's own image (found through the game's layer table at `D_801B80E0`). On by default; without it those rectangles inherit a zero-texel tile and are skipped |
+| `OGRE_FOG=0` | disable the session-35 repair that rewrites OB64's fog/cloud "wrap" rectangles to sample the layer's own image (found through the game's layer table at `D_801B80E0`). On by default. **It is not currently observable**: on the title's logo band `OGRE_FOG=1` and `OGRE_FOG=0` frames are byte-identical once two runs are aligned, while `OGRE_EMPTY_TILE=draw` differs by 39.6/255 there. The band fix is RT64's zero-texel guard alone (see `docs/HANDOFF-2026-09-14-session36.md` §3) |
 | `OGRE_FOG_TRACE=1` | report each repaired fog rectangle group (layer, image address, dimensions and the rectangle's `s`/`t`) |
-| `OGRE_FOG_SCALE=<percent>` | scale the fog image's intensity when it is staged for the fog group (default 100 = the raw asset). The copy lives in the last 64 KiB of RDRAM, which OB64 leaves untouched; the first use reports it if that area is not zero |
-| `OGRE_FOG=alternate` | apply the repair on every other display list, so two consecutive presents differ by exactly what the fog draws. This is how the fog's contribution was measured: mean band difference 3.5 with max 17 out of 255, against 0.75 in a control region (`docs/proofs/native-title-fog-isolation.png`) |
-| `OGRE_SCENE=<name\|hex>` | boot straight into a screen: `title` (0x0C), `menu` (0x18), `new-game` (0x02), or any hex scene id (`OGRE_FORCE_SCENE` still works). The poke runs on the streamed-DMA path, so the switch lands at the next scene load |
-| `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene poke (default 3000; poking earlier crashes the boot) |
+| `OGRE_FOG_SCALE=<percent>` | scale the fog image's intensity when it is staged for the fog group (default 100 = the raw asset). The copy lives in the last 64 KiB of RDRAM, which OB64 leaves untouched; the first use reports it if that area is not zero. `100000` stages an all-white image and is the fastest probe for "does the repaired rectangle draw at all?" |
+| `OGRE_FOG=alternate` | apply the repair on every other display list. On screens the game redraws every list this A/Bs the fog, but it cannot say *which* screen a pair is on (session 35's isolation image was the story screen), and on the static title it shows nothing because no display list changes |
+| `OGRE_SCENE=<name\|hex>` | boot straight into a screen: `title` (0x04: the attract title, logo + PRESS START over the clouds), `intro` (0x09), `publishers` (0x0A), `story` (0x0B), `unit-info` (0x0C), `menu` (0x18), `new-game` (0x02), or any hex id (`OGRE_FORCE_SCENE` still works). The poke is only seen **before the boot enters its first scene (~1.1 s)**, so it runs from the streamed-DMA hook and a per-frame retry and releases once `D_800E810E` reports the target. `menu`/`new-game` still SIGSEGV (unfinished cross-bank work) |
+| `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene poke (**default 0**). A delay past ~1500 ms makes the jump a silent no-op: the running scene re-establishes the state block every frame |
 | `OGRE_SCENE_LOG=1` | log every scene change with its descriptor and record mask — how the scene ids above were identified |
+| `OGRE_SCENE_TRACE=1` | the forcing state every 500 ms (`active`, `pending(D_800E8214)`, the state block and its id, and whether the target is active) — use this when a jump "does nothing" |
 | `OGRE_EMPTY_TILE=draw` | restore the pre-session-35 behaviour of drawing rectangles whose tile covers zero texels (`lrs == uls` or `lrt == ult`) instead of skipping them |
 | `OGRE_EMPTY_TILE_TRACE=1` | name every rectangle skipped because its tile covers no texels |
 | `OGRE_RECT_STATE=<y0>-<y1>` | per-rectangle render state for rectangles contained in rows `[y0,y1)`: cycle type, both combiner cycles (decoded by RT64's own `ColorCombiner::cycleColorText`/`cycleAlphaText`), the blender inputs, the primitive colour and the tile descriptor it samples |
@@ -139,6 +140,30 @@ OGRE_CHAIN_HISTORY=3 OGRE_EXIT_AFTER_MS=3000 ./build-app/ogrebattle64 2>&1 | \
 OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=1000 OGRE_SYNTH_PERIOD=30 \
   OGRE_EXIT_AFTER_MS=20000 ./build-app/ogrebattle64
 ```
+
+### Jumping straight into a screen
+
+The attract loop takes minutes at 1×. `OGRE_SCENE` enters a screen at the next
+scene load instead, and `OGRE_SPEED` compresses whatever waits inside it:
+
+```sh
+# boot into the attract title (logo + PRESS START over the clouds)
+OGRE_SCENE=title ./build-app/ogrebattle64
+
+# a bounded title-screen capture: the title arrives ~17 s in at 4× and lasts
+# ~10 s, so capture a window across it
+OGRE_SCENE=title OGRE_SPEED=4 OGRE_CAPTURE_PRESENT=/tmp/title \
+  OGRE_CAPTURE_AFTER=1700 OGRE_CAPTURE_EVERY=10 OGRE_EXIT_AFTER_MS=26000 \
+  ./build-app/ogrebattle64
+
+# if a jump "does nothing", this says whether the poke landed
+OGRE_SCENE=title OGRE_SCENE_TRACE=1 OGRE_EXIT_AFTER_MS=6000 ./build-app/ogrebattle64
+```
+
+The poke only counts before the boot enters its first scene (~1.1 s), so leave
+`OGRE_SCENE_AFTER_MS` at its 0 default. See
+`docs/HANDOFF-2026-09-14-session36.md` for the dispatcher path and the verified
+ids (`menu` 0x18 and `new-game` 0x02 still crash: unfinished cross-bank work).
 
 ### Capturing the native output
 

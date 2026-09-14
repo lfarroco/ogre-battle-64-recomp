@@ -5,6 +5,72 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-14 (session 36) — scene jumps that work, and the title fog is not what session 35 thought
+
+Two reports: `docs/proofs/native-title-fog-isolation.png` is a crop of the
+story/lore screen rather than the title, and testing needs a way to jump
+straight into the title screen. Chasing them produced three corrections.
+
+### Decision: `OGRE_SCENE` pokes early, and its default delay becomes 0
+
+The scene dispatcher `func_80075BC0` copies the pending id `D_800E8214` into the
+state block (`*(u16*)(*(u32*)D_800C4BBC + 4)`) at the top of every call and then
+runs `block->id`. A poke is therefore only seen while the boot still owns the
+block: once scene `0x09` is entered at ~1.1 s, the running scene's update
+function re-establishes the block every frame and the write is discarded.
+`OGRE_SCENE_AFTER_MS` was documented as 3000 with the claim that poking earlier
+crashes the boot — but 3000 is *after* the window, so `OGRE_SCENE` had been a
+silent no-op. The default is now **0**; the delayed behaviour is still available
+for A/B runs by setting it explicitly. Both the block id and `D_800E8214` are
+written, from the streamed-DMA hook and from a per-frame retry that stops as soon
+as `D_800E810E` reports the target active.
+
+The "poking before ~2 s crashes the boot" observation was the `OGRE_SCENE_LOG`
+bug: `poll_scene` dereferenced `D_800E8294 + 0x10` unconditionally, and before a
+scene exists that word holds a stale non-KSEG0 value, so the read went off the
+end of RDRAM (SIGBUS at ~1 s). The descriptor is now only dereferenced inside
+KSEG0/RDRAM.
+
+### Decision: the scene names in `kScenes` are its captured screens
+
+Each id was forced with `OGRE_SCENE=<hex> OGRE_SCENE_AFTER_MS=0` and captured:
+`0x04` title (logo + PRESS START, after its prologue text), `0x09` boot intro,
+`0x0A` publisher screens, `0x0B` world-map story, `0x0C` the unit-description
+book, `0x18`/`0x02` still SIGSEGV (cross-bank work). Session 35's
+`title = 0x0C` was the book, not the title.
+
+### Finding: the `OGRE_FOG` repair is not observable
+
+Session 35 §7/§10 measured the fog with `OGRE_FOG=alternate`, but that method
+cannot tell which screen a pair is on, and its strongest pairs are on the
+animated story screens — the reported image. Directly comparing two runs at the
+same present index, at indices where a third `OGRE_EMPTY_TILE=draw` run proves
+the two are in lockstep, `OGRE_FOG=1` and `OGRE_FOG=0` title frames are
+byte-identical in the fog band as well (`|diff| = 0.000`; the pre-fix run
+differs by 39.6 there). `OGRE_FOG=alternate` on the static title produces zero
+band difference (no display-list change to toggle), and `OGRE_FOG_SCALE=100000`
+— which stages an all-white image and would paint an *opaque* band if the
+rectangles drew — leaves the band at the default brightness. `OGRE_RECT_STATE`
+shows the repair reaching RT64 with the expected tile (`fmt=4 siz=1 line=8
+uls=0 ult=0 lrs=63 lrt=63`, `RGB ONE / ALPHA TEXEL0`), so the draw is lost after
+`drawTexRect`, not before it.
+
+What the session-35 work actually ships is RT64's empty-tile guard (and the same
+guard in `web_renderer.cpp`): the fabricated one-texel tile painted an opaque
+white band (band mean 172 with `OGRE_EMPTY_TILE=draw`), and skipping the
+rectangle leaves the clouds (119). The `OGRE_FOG` pass stays (harmless, and its
+layer-table lookup may still be needed for the bottom sweep), but the fog itself
+is unverified.
+
+### Proofs
+
+* `docs/proofs/native-title-band-isolation.png` (new): the title band, pre-fix
+  white band / fixed / difference ×4, from two runs at the same present.
+* `docs/proofs/native-title-fog-isolation.png` (deleted): wrong screen, and the
+  thing it claimed to isolate is not measurable.
+
+---
+
 ## 2026-09-14 (session 35) — the title screen's fog: a zero-area texture tile
 
 The retail title screen has clouds scrolling behind the "Ogre Battle 64" logo,
