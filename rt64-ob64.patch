@@ -1,3 +1,33 @@
+diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
+index ee8bc1f..46c1c29 100644
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -524,6 +524,10 @@ namespace RT64 {
+         state->updateScreen(core.decodeVI(), false);
+     }
+ 
++    void Application::syncFramebuffers() {
++        state->syncFramebuffers();
++    }
++
+     void Application::destroyShaderCache() {
+         workloadQueue->waitForWorkloadId(state->workloadId);
+         presentQueue->waitForPresentId(state->presentId);
+diff --git a/src/hle/rt64_application.h b/src/hle/rt64_application.h
+index 6c83fe0..70bb5e6 100644
+--- a/src/hle/rt64_application.h
++++ b/src/hle/rt64_application.h
+@@ -156,6 +156,10 @@ namespace RT64 {
+         SetupResult setup(uint32_t threadId);
+         void processDisplayLists(uint8_t *memory, uint32_t dlStartAddress, uint32_t dlEndAddress, bool isHLE);
+         void updateScreen();
++        // OGRE: see State::syncFramebuffers. Called by the recompiled game code
++        // through ogre_sync_framebuffers() before it reads a framebuffer with the
++        // CPU (the njpeg readback).
++        void syncFramebuffers();
+         void destroyShaderCache();
+         void updateMultisampling();
+         void end();
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
 index 7de5b69..f894351 100644
 --- a/src/hle/rt64_present_queue.cpp
@@ -365,13 +395,64 @@ index 7de5b69..f894351 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..e5e3ad2 100644
+index a10c11a..54084aa 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
-@@ -248,6 +248,13 @@ namespace RT64 {
+@@ -26,6 +26,14 @@
+ #endif
+ 
+ namespace RT64 {
++    // OGRE bridge: a scratch area in the last 64 KiB of RDRAM (which OB64 leaves
++    // untouched — verified in a live dump) that the RDP writes and the recompiled
++    // game reads, so the game can find the buffer its own njpeg draw landed in.
++    //   +0x00 u32  address of the current colour image (24-bit, masked)
++    //   +0x04 u32  "next colour image is a njpeg target" handshake
++    //   +0x08 u32  njpeg target: the colour image set right after a YUV texture image
++    static constexpr uint32_t OGRE_NJPEG_SCRATCH = 0x7FFC00;
++
+     // RDP
+     static uint8_t getCommandLength(uint32_t commandId) {
+         if (commandId == (G_TEXRECT & 0x3F) || commandId == (G_TEXRECTFLIP & 0x3F)) {
+@@ -248,9 +256,92 @@ namespace RT64 {
      }
  
      void RDP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
++        // OGRE diagnostic: OGRE_RDP_TRACE=2 reports a histogram of every colour-image
++        // address the game ever targets (session 47's trace only showed the
++        // first 20). This is the ground truth for "which buffers does the game
++        // actually render into".
++        if ((getenv("OGRE_RDP_TRACE") != nullptr) && (getenv("OGRE_RDP_TRACE")[0] == '2')) {
++            static uint32_t cimgHist[16];
++            static uint32_t cimgAddr[16];
++            static uint32_t cimgTotal = 0;
++            const uint32_t masked = maskAddress(address);
++            const bool isFb = (masked == 0x000400) || (masked == 0x025C00) || (masked == 0x04B400);
++            if (isFb) {
++                // OGRE diagnostic: the ordered framebuffer sequence (the njpeg macroblock
++                // draws and the game's own scene draws both land here).
++                static uint32_t fbSeq = 0;
++                if (++fbSeq <= 24 || (fbSeq % 64) == 0) {
++                    fprintf(stderr, "[cimgseq] n=%u addr=0x%06X fmt=%u siz=%u w=%u\n",
++                            fbSeq, masked, (unsigned)fmt, (unsigned)siz, (unsigned)width);
++                    fflush(stderr);
++                }
++            }
++            uint32_t slot = 16;
++            for (uint32_t i = 0; i < 16; i++) {
++                if (cimgAddr[i] == masked) { slot = i; break; }
++                if (cimgHist[i] == 0) { cimgAddr[i] = masked; slot = i; break; }
++            }
++            if (slot < 16) { cimgHist[slot]++; }
++            cimgTotal++;
++            if ((cimgTotal % 200) == 0) {
++                fprintf(stderr, "[cimg] n=%u", cimgTotal);
++                for (uint32_t i = 0; i < 16; i++) {
++                    if (cimgHist[i] != 0) { fprintf(stderr, " 0x%06X=%u", cimgAddr[i], cimgHist[i]); }
++                }
++                fprintf(stderr, "\n");
++                fflush(stderr);
++            }
++        }
 +        if (getenv("OGRE_RDP_TRACE") != nullptr) {
 +            static uint32_t cimgTrace = 0;
 +            if (++cimgTrace <= 20) {
@@ -382,7 +463,90 @@ index a10c11a..e5e3ad2 100644
          // Make sure the new color image is actually different. Some games will set the color image
          // multiple times despite setting the exact same parameters.
          const uint32_t newAddress = maskAddress(address);
-@@ -1035,6 +1042,14 @@ namespace RT64 {
++        // OGRE bridge: record where the *current* colour image is. The recompiled
++        // game reads this word from RDRAM to find the buffer its own draw went
++        // into (see the note in setTextureImage below). OGRE_NJPEG_TRACE=1 also
++        // reports the njpeg sequence.
++        {
++            static bool traceNjpeg = (getenv("OGRE_NJPEG_TRACE") != nullptr);
++            uint8_t* scratch = state->RDRAM;
++            if (scratch != nullptr) {
++                const uint32_t cimgSignal = scratch[OGRE_NJPEG_SCRATCH + 4] | (scratch[OGRE_NJPEG_SCRATCH + 5] << 8) |
++                                            (scratch[OGRE_NJPEG_SCRATCH + 6] << 16) | (scratch[OGRE_NJPEG_SCRATCH + 7] << 24);
++                scratch[OGRE_NJPEG_SCRATCH + 0] = (uint8_t)(newAddress & 0xFF);
++                scratch[OGRE_NJPEG_SCRATCH + 1] = (uint8_t)((newAddress >> 8) & 0xFF);
++                scratch[OGRE_NJPEG_SCRATCH + 2] = (uint8_t)((newAddress >> 16) & 0xFF);
++                scratch[OGRE_NJPEG_SCRATCH + 3] = (uint8_t)((newAddress >> 24) & 0xFF);
++                // The three buffers the game's njpeg readback can legitimately
++                // copy from (framebuffer table 0x800A8204). Track the most recent
++                // one by identity: that is the buffer its draw last landed in.
++                const bool isGameFb = (newAddress == 0x000400) || (newAddress == 0x025C00) || (newAddress == 0x04B400);
++                if (isGameFb) {
++                    scratch[OGRE_NJPEG_SCRATCH + 12] = scratch[OGRE_NJPEG_SCRATCH + 0];
++                    scratch[OGRE_NJPEG_SCRATCH + 13] = scratch[OGRE_NJPEG_SCRATCH + 1];
++                    scratch[OGRE_NJPEG_SCRATCH + 14] = scratch[OGRE_NJPEG_SCRATCH + 2];
++                    scratch[OGRE_NJPEG_SCRATCH + 15] = scratch[OGRE_NJPEG_SCRATCH + 3];
++                }
++                if (cimgSignal != 0) {
++                    // The previous command was a YUV texture image, so this colour
++                    // image is the njpeg macroblock draw's target.
++                    scratch[OGRE_NJPEG_SCRATCH + 8] = scratch[OGRE_NJPEG_SCRATCH + 0];
++                    scratch[OGRE_NJPEG_SCRATCH + 9] = scratch[OGRE_NJPEG_SCRATCH + 1];
++                    scratch[OGRE_NJPEG_SCRATCH + 10] = scratch[OGRE_NJPEG_SCRATCH + 2];
++                    scratch[OGRE_NJPEG_SCRATCH + 11] = scratch[OGRE_NJPEG_SCRATCH + 3];
++                    scratch[OGRE_NJPEG_SCRATCH + 4] = 0; scratch[OGRE_NJPEG_SCRATCH + 5] = 0;
++                    scratch[OGRE_NJPEG_SCRATCH + 6] = 0; scratch[OGRE_NJPEG_SCRATCH + 7] = 0;
++                    if (traceNjpeg) {
++                        fprintf(stderr, "[njpeg] target=0x%06X (from the YUV texture image)\n", (unsigned)newAddress);
++                        fflush(stderr);
++                    }
++                }
++            }
++        }
+         if ((colorImage.fmt != fmt) ||
+             (colorImage.siz != siz) ||
+             (colorImage.width != width) ||
+@@ -281,12 +372,39 @@ namespace RT64 {
+     }
+ 
+     void RDP::setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
++        // OGRE diagnostic: report only the YUV texture images (the njpeg macroblock draw).
++        // The renderer is expected to receive them from the `0x800A5110` ucode;
++        // this says whether they arrive and with which geometry.
++        if ((fmt == G_IM_FMT_YUV) && (getenv("OGRE_YUV_TRACE") != nullptr)) {
++            static uint32_t yuvTrace = 0;
++            if (++yuvTrace <= 30) {
++                fprintf(stderr, "[yuv] setTextureImage fmt=%u siz=%u width=%u address=0x%08X (n=%u)\n",
++                        (unsigned)fmt, (unsigned)siz, (unsigned)width, (unsigned)address, yuvTrace);
++                fflush(stderr);
++            }
++        }
++        if ((fmt == G_IM_FMT_YUV) && (getenv("OGRE_YUV_TRACE") != nullptr)) {
++            fprintf(stderr, "[yuv-at] texaddr=0x%08X cimg=0x%08X fmt=%u\n", (unsigned)address, (unsigned)colorImage.address, (unsigned)colorImage.fmt);
++            fflush(stderr);
++        }
+         texture.fmt = fmt;
+         texture.siz = siz;
+         texture.width = width;
+         texture.address = maskAddress(address);
+         state->updateDrawStatusAttribute(DrawAttribute::Texture);
+ 
++        // OGRE bridge: a YUV texture image means the next colour image the game
++        // sets is the njpeg macroblock draw's target. Record it in the scratch
++        // word so the recompiled readback (func_ovlE_8019976C) can copy from the
++        // buffer its own draw landed in rather than from a stale pointer.
++        if ((fmt == G_IM_FMT_YUV) && (state->RDRAM != nullptr)) {
++            uint8_t* scratch = state->RDRAM;
++            scratch[OGRE_NJPEG_SCRATCH + 4] = 1;
++            scratch[OGRE_NJPEG_SCRATCH + 5] = 0;
++            scratch[OGRE_NJPEG_SCRATCH + 6] = 0;
++            scratch[OGRE_NJPEG_SCRATCH + 7] = 0;
++        }
++
+ #   ifdef LOG_TEXTURE_IMAGE_METHODS
+         RT64_LOG_PRINTF("RDP::setTextureImage(fmt %u, siz %u, width %u, address 0x%08X)", fmt, siz, width, address);
+ #   endif
+@@ -1035,6 +1153,14 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
  #   endif
  
@@ -397,7 +561,7 @@ index a10c11a..e5e3ad2 100644
          // Filter out incorrect rectangles.
          if ((lrx < ulx) || (lry < uly)) {
              return;
-@@ -1197,6 +1212,52 @@ namespace RT64 {
+@@ -1197,6 +1323,52 @@ namespace RT64 {
              return;
          }
  
@@ -450,7 +614,7 @@ index a10c11a..e5e3ad2 100644
          // Check if framebuffer pair must be changed.
          checkFramebufferPair();
  
-@@ -1222,6 +1283,17 @@ namespace RT64 {
+@@ -1222,6 +1394,17 @@ namespace RT64 {
                  }
              }
          }
@@ -468,7 +632,7 @@ index a10c11a..e5e3ad2 100644
          
          bool flushedState = state->checkDrawState();
  
-@@ -1322,6 +1394,44 @@ namespace RT64 {
+@@ -1322,6 +1505,44 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
  #   endif
  
@@ -514,10 +678,92 @@ index a10c11a..e5e3ad2 100644
          DrawCall &drawCall = state->drawCall;
          if (!drawCall.textureOn || (drawCall.textureTile != tile) || (drawCall.textureLevels != 1)) {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..df481c8 100644
+index 2970e71..0ff44e8 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
-@@ -1944,9 +1944,42 @@ namespace RT64 {
+@@ -616,6 +616,37 @@ namespace RT64 {
+         workload.fbPairSubmitted++;
+     }
+     
++    // OGRE: the game reads its own framebuffers with the CPU (the njpeg readback in
++    // func_ovlE_8019976C). The RDP's render target is authoritative, and the RDRAM
++    // copy lags behind because it is only written back when a workload is retired,
++    // so the CPU copy can see RDRAM as it was before the draw. Retire the pending
++    // workload and write the rendered framebuffers back first.
++    void State::syncFramebuffers() {
++        // Retire the most recently submitted workload so its draw calls have been
++        // rendered and the framebuffer writeback that runs when a workload is
++        // retired has put the pixels in RDRAM.
++        ext.workloadQueue->waitForWorkloadId(workloadId);
++
++        // Then write back every framebuffer that has rendered content. The CPU
++        // readback picks a source from the game's own framebuffer table, and that
++        // pointer can be stale by the time it runs, so make sure every candidate
++        // has its rendered pixels in RDRAM rather than only the one it names.
++        for (auto &entry : framebufferManager.framebuffers) {
++            Framebuffer &fb = entry.second;
++            if ((fb.width == 0) || (fb.height == 0) || (fb.modifiedBytes == 0)) {
++                continue;
++            }
++
++            const uint32_t rowBytes = fb.imageRowBytes(fb.width);
++            const uint32_t bytes = rowBytes * fb.height;
++            if ((entry.first + bytes) > (8 * 1024 * 1024)) {
++                continue;
++            }
++
++            fb.copyNativeToRAM(&RDRAM[entry.first], fb.width, 0, fb.height);
++        }
++    }
++
+     void State::checkRDRAM() {
+         if (!rdramCheckPending) {
+             return;
+@@ -1200,6 +1231,21 @@ namespace RT64 {
+                         depthRowEnd = fbPair.drawDepthRect.bottom(true);
+                     }
+ 
++                    // OGRE diagnostic: which framebuffer pairs RT64 renders and
++                    // (below) writes back to RDRAM. The njpeg YUV draws target
++                    // 0x80025C00; if that address never shows up here with a
++                    // non-empty rect, the draw is being dropped upstream.
++                    if (getenv("OGRE_FB_WRITEBACK") != nullptr) {
++                        static uint32_t fbwTrace = 0;
++                        if (++fbwTrace <= 40) {
++                            fprintf(stderr, "[fbpair] n=%u pair=%u addr=0x%06X siz=%u width=%u rows=%u..%u writeWidth=%u depthRead=%d depthWrite=%d\n",
++                                    fbwTrace, (unsigned)f, (unsigned)colorImg.address, (unsigned)colorImg.siz, (unsigned)colorImg.width,
++                                    (unsigned)colorRowStart, (unsigned)colorRowEnd, (unsigned)colorWriteWidth,
++                                    (int)fbPair.depthRead, (int)fbPair.depthWrite);
++                            fflush(stderr);
++                        }
++                    }
++
+                     return true;
+                 }
+                 else {
+@@ -1476,6 +1522,21 @@ namespace RT64 {
+                 pairCursor = framebufferPairCursor;
+                 while (pairCursor < maxFramebufferPair) {
+                     if (getFramebufferPairs(pairCursor)) {
++                        // OGRE diagnostic: the CPU-visible result of the RDP draw. If the
++                        // njpeg YUV draw (0x80025C00) is rendered this is where its
++                        // pixels must appear in RDRAM.
++                        if ((getenv("OGRE_FB_WRITEBACK") != nullptr) && ((colorFb->addressStart == 0x400) || (colorFb->addressStart == 0x25C00) || (colorFb->addressStart == 0x4B400))) {
++                            static uint32_t wbTrace = 0;
++                            if (++wbTrace <= 40) {
++                                const uint32_t off = colorFb->addressStart + 0x200 * 4;
++                                fprintf(stderr, "[fbwrite] n=%u addr=0x%06X width=%u rows=%u..%u firstPixels=%04X %04X %04X %04X\n",
++                                        wbTrace, (unsigned)colorFb->addressStart, (unsigned)colorWriteWidth,
++                                        (unsigned)colorRowStart, (unsigned)colorRowEnd,
++                                        (unsigned)((RDRAM[off] << 8) | RDRAM[off + 1]), (unsigned)((RDRAM[off + 2] << 8) | RDRAM[off + 3]),
++                                        (unsigned)((RDRAM[off + 4] << 8) | RDRAM[off + 5]), (unsigned)((RDRAM[off + 6] << 8) | RDRAM[off + 7]));
++                                fflush(stderr);
++                            }
++                        }
+                         colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+ 
+                         if (depthWriteWidth > 0) {
+@@ -1944,9 +2005,42 @@ namespace RT64 {
                  uint64_t newScreenHash = XXH3_64bits(present.storage.data(), screenFbBytes);
                  screenChangesMade = (newScreenHash != lastScreenHash);
                  lastScreenHash = newScreenHash;
@@ -560,6 +806,23 @@ index 2970e71..df481c8 100644
          // We only push a new present event to the timeline when it's necessary.
          if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
              // Push a new renderer event to the timeline for presenting this VI.
+diff --git a/src/hle/rt64_state.h b/src/hle/rt64_state.h
+index 7a8c13b..2592cc5 100644
+--- a/src/hle/rt64_state.h
++++ b/src/hle/rt64_state.h
+@@ -145,6 +145,12 @@ namespace RT64 {
+         void submitFramebufferPair(FramebufferPair::FlushReason flushReason);
+         void checkRDRAM();
+         void fullSync();
++        // OGRE: wait until the RDP has rendered the most recently submitted workload
++        // and copy the game's framebuffers back to RDRAM. Called from the recompiled
++        // code at the point where the game reads a framebuffer with the CPU (the
++        // njpeg readback). Without it the CPU sees RDRAM as it was before the draw,
++        // which is what made the New Game background black.
++        void syncFramebuffers();
+         void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
+         void listProcessBegin();
+         void listProcessEnd();
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
 index 5a331aa..14a8715 100644
 --- a/src/hle/rt64_workload_queue.cpp

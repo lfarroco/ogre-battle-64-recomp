@@ -13,7 +13,8 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
-| 2026-09-15 (48) | **The njpeg readback copies the buffer its own YUV draw landed in**, recorded by RT64 in an RDRAM scratch word; `tools/njpeg_readback.py` (run by `make bank-recomp`) patches the stage-3 copy source so it survives regeneration, and is a no-op on renderers that do not maintain the scratch word. The cathedral background renders | entry below; `docs/HANDOFF-2026-09-15-session48.md`; `docs/proofs/native-newgame-cathedral-background.png` |
+| 2026-09-15 (49) | **The cathedral background is still black.** A YUV16 decoder was written for RT64's `TextureDecoder.hlsli` (which does return black for `G_IM_FMT_YUV`) and **reverted**: it produced a corrupt blob, not the backdrop, so the hypothesis is unproven. The game's CPU readback copies a zero framebuffer, upstream of any decode. Next: check GLideN64 — the emulator upstream closed [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102) with | entry below; `docs/HANDOFF-2026-09-15-session49.md` §2/§7 |
+| 2026-09-15 (48) | **The njpeg readback copies the buffer its own YUV draw landed in**, recorded by RT64 in an RDRAM scratch word; `tools/njpeg_readback.py` (run by `make bank-recomp`) patches the stage-3 copy source so it survives regeneration, and is a no-op on renderers that do not maintain the scratch word. ~~The cathedral background renders~~ — **superseded by session 49**: harmless, but the readback source was never the wall | entry below (with its banner); `docs/HANDOFF-2026-09-15-session48.md` |
 | 2026-09-15 (48b) | The game's framebuffer table is at **guest `0x800A8204`** = `{0x80000400, 0x80025C00, 0x8004B400}` — **session 47 read `0x800B8204`, which is padding inside the data segment**. RT64 does draw the `0x800A5110` YUV macroblocks and does write framebuffers back to RDRAM; session 47's two candidate causes are disproved | `docs/HANDOFF-2026-09-15-session48.md` §1 |
 | 2026-09-15 (47) | **RSPRecomp's `text_address` is a label base, not an address**: it must be the RSP/IMEM DMA address the microcode was *assembled* for (masked `0x1FFF`), e.g. `0x1080` for a ucode the boot loader loads at IMEM `0x080`; getting it wrong rotates every `j` target by the difference and silently walks the wrong blocks. The njpg decoder is therefore **on by default** (`OGRE_NJPEG=0` forces the stub) | entry below; `docs/HANDOFF-2026-09-15-session47.md` §1-2 |
 | 2026-09-15 (46) | Non-gfx RSP microcode is recompiled with RSPRecomp (`make rsp-recomp` → `RspFuncs/`) and dispatched by ucode address in `app/src/rsp.cpp`; the gfx ucode still goes to RT64. ~~The M_NJPEGTASK decoder is **opt-in** (`OGRE_NJPEG=1`) until its output is correct~~ — **superseded by session 47**: the output is correct and it is on by default | entry below; `docs/HANDOFF-2026-09-15-session46.md` |
@@ -36,6 +37,51 @@ session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
 
 ---
+
+## 2026-09-15 (session 49) — the black cathedral background: a YUV16 decode was tried and reverted
+
+**Decision.** No fix. The background is still black.
+
+The njpeg backdrop is drawn as one 16x16 **YUV16** texture per macroblock
+(`SETTIMG fmt=1 siz=2`, verified) and RT64's `TextureDecoder.hlsli` does return
+`float4(0,0,0,1)` for `G_IM_FMT_YUV`, so "the renderer decodes it black" was a
+reasonable hypothesis. A decoder (`sampleTMEMYUV16`) was written, and it is
+**wrong**: an A/B against the pristine shader at the same forced-step timing shows
+the frame becomes a corrupt magenta/green blob (1 259 distinct values, 64 439 of
+76 800 near-black) instead of the backdrop, while the baseline is black (5
+distinct, 76 314 near-black). **The decoder was reverted**; the RT64 shader is
+back to its original state. The mid-session claim that the backdrop drew was based
+on bright pixels in a present capture that are actually the dialogue box and the
+sprites (RGBA16, always rendered) — not evidence.
+
+**What this session establishes instead:** the game's CPU readback
+(`func_ovlE_8019976C` stage-3, `0x80199884`) runs 4×, all in scene `0x02`, and
+every copy reads a **zero** framebuffer; the blit's source `0x80243E28` is zeros
+when sampled. That is **upstream of any decode**, so the renderer's YUV handling
+was never proven to be the wall. Session 48's scratch-word patch and
+`tools/njpeg_readback.py` are harmless but were not the wall either.
+
+**Next lead (before another decoder).** [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
+("Missing backgrounds in Ogre Battle 64 battles and also some cutscenes… a known
+issue with many emus") was closed in 2012 by Bobby Smiles' **RSP-side**
+`jpeg_decode_OB` — the half this port already has (sessions 46/47). If GLideN64
+renders this backdrop correctly, its renderer path is the reference to diff
+against RT64; and the readback/draw ordering question must be settled first. See
+`docs/HANDOFF-2026-09-15-session49.md` §2, §4 and §7.
+
+**Housekeeping (same session).** `rt64-ob64.patch` had drifted since session 47
+(it was missing the `OGRE_NJPEG_SCRATCH` bridge and the session-48 diagnostics), so
+the documented "apply the patch over a clean submodule" recipe would not reproduce
+the current port. It was regenerated from `git -C tools/RT64 diff` (excluding the
+`src/contrib/plume` submodule entry) and verified with `git apply --check`.
+
+---
+
+> **Superseded by session 49** (above): this entry's premise is wrong. The readback
+> source was *not* the wall — both the game's own index and the njpeg target resolve
+> to `0x000400` — and the shader's YUV16 decode is **not** the wall either (a
+> decoder was tried, produced a corrupt blob, and was reverted). The background is
+> still black. The patch below is harmless and still applied.
 
 ## 2026-09-15 (session 48) — the cathedral background renders: the njpeg readback was copying the wrong buffer
 

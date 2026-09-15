@@ -653,6 +653,14 @@ inline uint32_t repair(uint8_t* rdram, uint32_t layer, uint32_t settimg, uint32_
 
 class RT64Renderer final : public ultramodern::renderer::RendererContext {
   public:
+    // OGRE: bring RDRAM up to date with the RDP's render targets. Called by the
+    // recompiled game code before it copies a framebuffer with the CPU.
+    void sync_framebuffers() {
+        if (app_ != nullptr) {
+            app_->syncFramebuffers();
+        }
+    }
+
     RT64Renderer(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
         setup_result = ultramodern::renderer::SetupResult::Success;
         chosen_api = ultramodern::renderer::GraphicsApi::Auto;
@@ -1134,11 +1142,25 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
 
 }  // namespace
 
+// OGRE: set right after the renderer is created so the recompiled game code can
+// ask RT64 to bring RDRAM up to date before it reads a framebuffer with the CPU
+// (see RT64::State::syncFramebuffers and tools/njpeg_readback.py).
+static RT64Renderer* g_renderer = nullptr;
+
 std::unique_ptr<ultramodern::renderer::RendererContext> create_renderer(
     uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
-    return std::make_unique<RT64Renderer>(rdram, window_handle, developer_mode);
+    auto renderer = std::make_unique<RT64Renderer>(rdram, window_handle, developer_mode);
+    g_renderer = renderer.get();
+    return renderer;
+}
+
+// OGRE: C entry point for the recompiled game code (declared in the generated
+// funcs file by tools/njpeg_readback.py). On renderers that do not maintain RDP
+// render targets (the null renderer, the web renderer) the symbol is a no-op.
+extern "C" __attribute__((weak)) void ogre_sync_framebuffers() {
+    if (g_renderer != nullptr) {
+        g_renderer->sync_framebuffers();
+    }
 }
 
 }  // namespace ogre
-
-

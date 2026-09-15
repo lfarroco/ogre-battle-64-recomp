@@ -152,6 +152,13 @@ std::unique_ptr<ultramodern::renderer::RendererContext> create_renderer(
 
 extern "C" {
 
+// The njpeg readback asks the renderer to make its render targets visible in
+// RDRAM before the CPU copies a framebuffer (see tools/njpeg_readback.py). The
+// null renderer draws nothing, so there is nothing to write back; the game's own
+// RDRAM contents are already what the CPU should read.
+void ogre_sync_framebuffers() {
+}
+
 // Returns the accumulated graphics-workload summary (milestone 6). The buffer
 // is valid until the next call; the web shell copies it with UTF8ToString.
 const char* ogre_gfx_stats() {

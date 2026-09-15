@@ -3370,4 +3370,11 @@ int ogre_gfx_debug_tex_count() {
     return ogre::g_active_renderer->debug_texture_count();
 }
 
+// The njpeg readback asks the renderer to make its render targets visible in
+// RDRAM before the CPU copies a framebuffer (see tools/njpeg_readback.py). The
+// web renderer draws with WebGL and does not maintain RDP render targets, so
+// there is nothing to write back; the game's own RDRAM is what the CPU reads.
+void ogre_sync_framebuffers() {
+}
+
 }  // extern "C"

@@ -115,17 +115,23 @@ load-bearing:**
   are data (`0x0900060E` decodes as `j 0x1838`, and RSPRecomp emits a `goto` to
   a label that does not exist).
 
-The background renders (session 48). The game converts the YUV macroblocks to
-RGBA by drawing them (per-macroblock 16x16 YUV16 textures, a *second* gfx ucode
-`0x800A5110`), then copying the framebuffer back with the CPU. The wall was the
-**copy source**, not the decode or the renderer: `func_ovlE_8019976C`'s stage-3
-loop copies from `state[0x64]`, which `func_ovlE_80199A08` takes from the
-framebuffer table at guest `0x800A8204` by an index that defaults to entry 0 (a
-placeholder) when the display word `D_800C4BB8` matches no entry. RT64 records
-the colour image the YUV draw landed in at an RDRAM scratch word and
-`tools/njpeg_readback.py` (run by `make bank-recomp`) points the copy at it. See
-`docs/HANDOFF-2026-09-15-session48.md` (and `-session47.md` §4-5 for the
-superseded reading, including the wrong `0x800B8204` table address).
+The background is **still black** (session 49 re-verified; the RT64 build shows
+`0x000400` with 5 distinct 16-bit values, 76 314 of 76 800 near-black). The game
+converts the YUV macroblocks to RGBA by drawing them (per-macroblock 16x16
+**YUV16** textures, a *second* gfx ucode `0x800A5110`), then copying the
+framebuffer back with the CPU. **A YUV16 decoder was tried in RT64's
+`TextureDecoder.hlsli` and reverted**: the shader's `case G_IM_FMT_YUV:` does fall
+through to `float4(0,0,0,1)`, but adding a decoder turns the frame into a corrupt
+magenta/green blob rather than the backdrop, so the decode was wrong and the
+hypothesis unproven. The game's CPU readback
+(`func_ovlE_8019976C`'s stage-3 loop) runs 4×, all during scene `0x02`, and
+**every copy reads a zero framebuffer** — upstream of any decode.
+`tools/njpeg_readback.py` (run by `make bank-recomp`) calls
+`ogre_sync_framebuffers()` → RT64's `State::syncFramebuffers()` first; that is a
+readback-correctness improvement, not a fix. See
+`docs/HANDOFF-2026-09-15-session49.md` (§7 has the next lead: check GLideN64,
+which upstream fixed issue #102 with, before writing another decoder) and
+`-session48.md`/`-session47.md` §4-5 for the superseded readings.
 
 ## Audio ucode (still TBD)
 

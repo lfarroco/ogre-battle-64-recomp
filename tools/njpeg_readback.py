@@ -52,6 +52,17 @@ TARGET = ROOT / "BankEFuncs" / "funcs_0.c"
 # the copy source in func_ovlE_8019976C's stage-3 loop.
 ANCHOR = "    // 0x80199878: lw          $s0, 0x64($a0)\n    ctx->r16 = MEM_W(ctx->r4, 0X64);\n"
 
+# The CPU is about to copy a framebuffer here. RT64 renders into a Vulkan/Metal
+# target and only writes it back to RDRAM when a workload is retired, so the
+# readback would copy RDRAM as it was *before* the draw (the New Game background
+# was black for exactly this reason). Ask the renderer to retire the pending
+# workload and write its framebuffers back first. The symbol is a no-op on
+# renderers without render targets (null, web), so the null build is unchanged.
+SYNC = """
+    // njpeg readback: make the RDP's rendered pixels visible in RDRAM first.
+    ogre_sync_framebuffers();
+"""
+
 PATCH = """
     { // njpeg readback source: use the buffer the YUV macroblock draw landed in.
       // `state[0x64]` comes from the game's framebuffer-table index, which
@@ -71,11 +82,15 @@ PATCH = """
 """
 
 MARKER = "// njpeg readback source: use the buffer the YUV macroblock draw landed in."
+SYNC_MARKER = "// njpeg readback: make the RDP's rendered pixels visible in RDRAM first."
 
 # The block this patch inserts, matched by its marker through its closing brace,
 # so --revert can remove it from an already-patched file.
 APPLIED_RE = re.compile(
     r"\n    \{ " + re.escape(MARKER) + r".*?\n    \}\n", re.DOTALL
+)
+SYNC_APPLIED_RE = re.compile(
+    r"\n    " + re.escape(SYNC_MARKER) + r"\n    ogre_sync_framebuffers\(\);\n", re.DOTALL
 )
 
 
@@ -91,19 +106,35 @@ def apply() -> int:
             file=sys.stderr,
         )
         return 1
-    TARGET.write_text(src.replace(ANCHOR, ANCHOR + PATCH, 1))
+    # The C entry point lives in the app (app/src/renderer.cpp); declare it here
+    # so the generated unit can call it.
+    header = '#include "recomp.h"\n'
+    if header not in src:
+        print(f"njpeg_readback: error: no {header!r} in {TARGET.relative_to(ROOT)}", file=sys.stderr)
+        return 1
+    if SYNC_MARKER not in src:
+        src = src.replace(
+            header,
+            header
+            + "// njpeg readback: ask the renderer to write its render targets back to RDRAM.\n"
+            + "#ifdef __cplusplus\nextern \"C\" void ogre_sync_framebuffers();\n#else\nvoid ogre_sync_framebuffers();\n#endif\n",
+            1,
+        )
+    src = src.replace(ANCHOR, SYNC + ANCHOR + PATCH, 1)
+    TARGET.write_text(src)
     print(f"njpeg_readback: patched {TARGET.relative_to(ROOT)}")
     return 0
 
 
 def revert() -> int:
     src = TARGET.read_text()
-    new, n = APPLIED_RE.subn("\n", src)
-    if n == 0:
+    src, n1 = APPLIED_RE.subn("\n", src)
+    src, n2 = SYNC_APPLIED_RE.subn("\n", src)
+    if (n1 + n2) == 0:
         print("njpeg_readback: nothing to revert")
         return 0
-    TARGET.write_text(new)
-    print(f"njpeg_readback: reverted {n} block(s) in {TARGET.relative_to(ROOT)}")
+    TARGET.write_text(src)
+    print(f"njpeg_readback: reverted {n1 + n2} block(s) in {TARGET.relative_to(ROOT)}")
     return 0
 
 

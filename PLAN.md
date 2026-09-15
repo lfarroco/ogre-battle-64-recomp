@@ -590,29 +590,34 @@ hardware. RT64 remains the primary native renderer throughout. See
     happen (RDRAM `0x0..0x40` is zero after the run); the mirror is now
     unexercised on this path and should be A/B'd next session.
     See `docs/HANDOFF-2026-09-15-session45.md`.
-  - ✅ **The cathedral background renders — the njpeg readback copied the wrong
-    buffer (session 48)**: session 47's two candidate causes are **disproved**.
-    RT64 does receive and draw the `0x800A5110` YUV macroblock draws (a
-    colour-image histogram shows each of the game's three framebuffers
-    `0x000400`/`0x025C00`/`0x04B400` ending a run with ~2 500 distinct 16-bit
-    values), and it does write rendered framebuffers back to RDRAM. The wall was
-    the game's own copy: `func_ovlE_8019976C`'s stage-3 row loop
-    (`0x80199884`) copies from `state[0x64]`, which `func_ovlE_80199A08` takes
-    from the framebuffer table at **guest `0x800A8204`** =
-    `{0x80000400, 0x80025C00, 0x8004B400}`; when the display word `D_800C4BB8`
-    matches no entry — routine, the game also swaps the VI to non-framebuffer
-    targets (`0x80250800`) — the index defaults to 0, the table's placeholder
-    first entry, and the CPU copies a buffer the njpeg draw never landed in.
-    **Fix:** RT64 records the colour image the YUV draw landed in at an RDRAM
-    scratch word (`0x807FFC00`), and `tools/njpeg_readback.py` — run by `make
-    bank-recomp` after `gen_bank_funcs.py`, so it survives regeneration — points
-    the copy source at it (a no-op on renderers that do not maintain the scratch
-    word). The assembled image at `0x80243E28` goes from 2 distinct 16-bit values
-    to ~2 500. Proof: `docs/proofs/native-newgame-cathedral-background.png`
-    (Archbishop Odiron over the cathedral background).
-    **Corrections to session 47:** the table is `0x800A8204`, not `0x800B8204`
-    (which is alignment padding in the data segment). See
-    `docs/HANDOFF-2026-09-15-session48.md`.
+  - ❌ **A YUV16 decoder in RT64 was tried and reverted; the background is still
+    black (session 49)**: the njpeg macroblock draw does use `fmt=1 siz=2` YUV16
+    textures and `TextureDecoder.hlsli`'s `case G_IM_FMT_YUV:` does return
+    `float4(0,0,0,1)`, but a decoder written this session turns the frame into a
+    **corrupt magenta/green blob**, not the backdrop (A/B in
+    `docs/HANDOFF-2026-09-15-session49.md` §2; the shader working tree is back to
+    its original state). The mid-session claim that "the backdrop draws" was
+    wrong — its capture's bright pixels were the dialogue box and the sprites,
+    which are RGBA16 and always rendered. Session 48's "the background renders"
+    is also wrong; its buffer-selection patch was never the wall.
+    **Next lead:** check GLideN64 — the emulator upstream closed
+    [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
+    with — against RT64 before writing another decoder, and decide whether the
+    game's readback should be one scene-entry later.
+  - 🚧 **The game's CPU readback copies a zero framebuffer (session 49)**: the
+    readback (`0x80199884`) runs 4×, all in scene `0x02`, and every copy reads
+    zero (`probe52`, reverted: `src=0x80000400 fb0=0 fb1=… fb2=0`); the blit's
+    source `0x80243E28` is zeros when sampled. This is **upstream of any decode**.
+    A sync hook is in place (`ogre_sync_framebuffers()` →
+    `State::syncFramebuffers()`, retire the pending workload and write rendered
+    framebuffers back); it is a readback-correctness improvement, not a fix.
+  - 🚧 **Why the game's own frame index lands on the placeholder (session 48)**:
+    `D_800C4BB8` is the VI manager's "displayed buffer" word
+    (written by `func_8007307C`, which `func_80089540` — N64 Thread 5 — calls
+    from a message object; a `watch.sh --value` conditional watchpoint caught
+    it). Session 49 measured that both that index and the njpeg target resolve to
+    `0x000400`, so this is not the backdrop wall; the question is still open.
+    See `docs/HANDOFF-2026-09-15-session48.md` §4.
   - ✅ **Boot straight to a New Game step (`OGRE_STEP`, session 48)**: the opening's
     steps are the scene-script word `D_8018F1C0`, so
     `OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 ./build-app/ogrebattle64`
@@ -629,8 +634,8 @@ hardware. RT64 remains the primary native renderer throughout. See
     it). The fix uses the buffer the draw landed in rather than answering
     whether retail reaches the same mismatched state. See
     `docs/HANDOFF-2026-09-15-session48.md` §4.
-  - 🚧 **The cathedral scene's background (session 47's superseded reading)**:
-    the step-2 display list's first `G_TRI2`
+  - 🚧 **The cathedral scene's background pipeline (sessions 46/47; the renderer
+    half still open after session 49's reverted attempt, see above)**: the step-2 display list's first `G_TRI2`
     quads are a full-screen 320x240 RGBA16 blit from guest `0x80243E28`, and that
     buffer was uniform (`0x0843` in RT64, `0` in the null build). The image is an
     **N64 JPEG** (`'HU'` container holding `'HUFF'` + numMB, asset `0x00183352` =

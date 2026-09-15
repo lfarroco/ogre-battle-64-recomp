@@ -275,24 +275,23 @@ from here.
   register contract (session 45's step-2 wall). Find unknown modules by logging
   every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
   record table.
-- **The cathedral background renders; the njpeg readback was copying the wrong
-  buffer (session 48, superseding session 47's "readback is the open question").**
-  RT64 **does** draw the `0x800A5110` YUV macroblock draws and **does** write the
-  framebuffers back to RDRAM (verify with `OGRE_RDP_TRACE=2` →
-  `[cimg]`/`[cimgseq]`, and `OGRE_FB_WRITEBACK=1` → `[fbwrite]`). The copy is
-  `func_ovlE_8019976C`'s stage-3 row loop (`0x80199884`:
-  `memcpy(state[0x70], state[0x64], 2*width)` per row) and its source
-  `state[0x64]` comes from `func_ovlE_80199A08`, which indexes the game's
-  framebuffer table at **guest `0x800A8204` = `{0x80000400, 0x80025C00,
-  0x8004B400}`** (the ROM at `0x38604`; **not** `0x800B8204`, which is alignment
-  padding). When the display word `D_800C4BB8` matches no entry — routine, the
-  game also swaps the VI to non-framebuffer targets (`0x80250800`) — the index
-  defaults to 0, the placeholder first entry, and the CPU copies a buffer the
-  draw never landed in. The fix: RT64 records the colour image the YUV draw
-  landed in at an RDRAM scratch word (`0x807FFC00`, last 64 KiB, unused by the
-  game) and `tools/njpeg_readback.py` (run by `make bank-recomp`) points the copy
-  source at it. See `docs/HANDOFF-2026-09-15-session48.md` and
-  `docs/proofs/native-newgame-cathedral-background.png`.
+- **The cathedral background is still black; RT64's YUV16 decode was tried and
+  reverted (session 49, correcting session 48).** The YUV macroblock draws do
+  reach the renderer and do target colour image `0x000400` (`OGRE_RDP_TRACE=2` →
+  `[cimgseq]`, `OGRE_YUV_TRACE=1`), and the shader's `case G_IM_FMT_YUV:` does
+  fall through to `float4(0,0,0,1)` — but **do not add a YUV16 decoder on that
+  basis alone**: a decoder written this session turns the frame into a corrupt
+  magenta/green blob, not the backdrop, and was reverted. The game's CPU readback
+  (`func_ovlE_8019976C`'s stage-3 row loop `0x80199884`,
+  `memcpy(state[0x70], state[0x64], 2*width)` per row) runs 4×, all in scene
+  `0x02`, and **every copy reads a zero framebuffer** — upstream of any decode;
+  its source `state[0x64]` comes from the game's framebuffer table at **guest
+  `0x800A8204` = `{0x80000400, 0x80025C00, 0x8004B400}`** (ROM `0x38604`; **not**
+  `0x800B8204`, which is alignment padding). Session 48's scratch-word patch
+  (`0x807FFC00`) and `tools/njpeg_readback.py` are in place and harmless but were
+  never the wall. Before writing another decoder, check GLideN64 — the emulator
+  that upstream closed [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
+  with — against RT64. See `docs/HANDOFF-2026-09-15-session49.md` §2/§7.
 - **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables
@@ -305,6 +304,13 @@ from here.
   `RspFuncs/njpeg_ucode.cpp`) and **runs by default** (`OGRE_NJPEG=0` forces the
   stub); all `mbs` blocks decode in 0–1 ms.
   See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md`, superseded).
+  The **renderer** half is still open: session 49 tried a YUV16 decoder in
+  `TextureDecoder.hlsli` and reverted it (it produced a corrupt blob, not the
+  backdrop). [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
+  ("Missing backgrounds in Ogre Battle 64 battles and also some cutscenes") was
+  fixed upstream by the RSP-side `jpeg_decode_OB`, which this port already has;
+  check GLideN64's renderer path before writing another decoder. See
+  `docs/HANDOFF-2026-09-15-session49.md`.
 - **RSPRecomp's `text_address` is a label base, not an address.** It must equal
   the RSP **IMEM DMA address** the microcode was assembled for (masked `0x1FFF`)
   — `0x1080` for a ucode the game's boot loader loads at IMEM `0x080`
