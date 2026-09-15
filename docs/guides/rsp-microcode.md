@@ -63,15 +63,17 @@ that were considered and are NOT needed:
 
 </details>
 
-## Image-decode ucode: `M_NJPEGTASK` (type 4) — recompiled, opt-in (session 46)
+## Image-decode ucode: `M_NJPEGTASK` (type 4) — recompiled and correct (session 47)
 
 The New Game opening's full-screen backgrounds are decoded by a **type-4
-(`M_NJPEGTASK`) microcode**, not by the gfx ucode. Four tasks are submitted at
-the second `0x02` enter (the cathedral, scene `0x0D` step 2):
+(`M_NJPEGTASK`) microcode** (the SDK's `njpgdspMain`), not by the gfx ucode. Four
+tasks are submitted at the second `0x02` enter (the cathedral, scene `0x0D`
+step 2), one per image:
 
 ```
 type=4 ucode=0x8009ED80 ucode_size=0x7C0 ucode_data=0x800AC050 ucode_data_size=0xF0
-       boot=0x8009ECB0/0xD0 data_ptr=0x801D1030 data_size=0x12C
+       boot=0x8009ECB0/0xD0 data_ptr=<mbs*0x300 buffer> data_size=<mbs>
+       yield_data_size=<quantization scale, 0xFFFFFFFE = -2>
 ```
 
 | part | RDRAM | ROM (`vram - 0x80070C60 + 0x1060`) | size |
@@ -80,20 +82,43 @@ type=4 ucode=0x8009ED80 ucode_size=0x7C0 ucode_data=0x800AC050 ucode_data_size=0
 | main microcode | `0x8009ED80` | `0x2F180` | `0x7C0` |
 | Huffman/quant tables | `0x800AC050` | `0x3C450` | `0xF0` |
 
+The game drives the microcode directly (no `NJPEGDParam` indirection): the
+`data_size` field carries the macroblock count and `yield_data_size` the
+quantization scale. The CPU Huffman decode that must run first is the main
+segment's `func_8008B250(payload, buffer)` (called from `func_ovlE_80199A08`),
+not `func_ovlE_80197E5C` (session 46's guess). The manual is the N64 Programming
+Manual's JPEG chapter
+(<http://ultra64.ca/files/documentation/online-manuals/man-v5-1/ucode/jpeg/>):
+`"HUFF"` + `s16 numMB` entropy-coded payload in, 16-bit YUV macroblocks out
+(768 bytes each: 4x128 Y, 128 U, 128 V, 256 unused).
+
 The config is `rsp-njpeg.toml`; `make rsp-recomp` regenerates
 `RspFuncs/njpeg_ucode.cpp` (gitignored), which `app/CMakeLists.txt` builds into
 `ogrebattle64_rsp` (the generated code is C++ — it uses librecomp's `RSP` VU
-implementation). `app/src/rsp.cpp` dispatches on the ucode address. **Two
-constraints:**
+implementation). `app/src/rsp.cpp` dispatches on the ucode address and runs the
+decoder by default (`OGRE_NJPEG=0` forces the stub). **Two constraints, both
+load-bearing:**
 
+* **`text_address` is a label base, not an address.** RSPRecomp labels
+  instruction *i* with `(text_address + 4i) & 0x1FFF` and resolves branch targets
+  the same way, while the bytes come from `text_offset`. The value must therefore
+  be the RSP **IMEM DMA address** the microcode was assembled for — here
+  `0x1080`, because the game's boot loader loads the text at IMEM `0x080`
+  (`addi $7,$0,0x1080` / `mtc0 $7,SP_MEM_ADDR` / `jr $7` at ROM `0x2F0C0`) and
+  the ucode's own `j` targets are `0x1000`-based (`j 0x84001190`). Using the
+  text's RDRAM address (`0x8009ED80`, low 13 bits `0x0D80`) rotates every `j`
+  target by `0x300`: the decoder then walks the wrong blocks and writes a single
+  `0x300`-byte block per task (session 46's symptom). With `0x1080` it writes all
+  `mbs` blocks and returns `Broke` (session 47). Apply the same rule to any other
+  ucode recompiled here (a ucode loaded at IMEM `0x080` wants `0x1080`).
 * `text_size = 0x7B8`, not the declared `0x7C0`: the last 8 bytes of the region
   are data (`0x0900060E` decodes as `j 0x1838`, and RSPRecomp emits a `goto` to
   a label that does not exist).
-* The decoder is behind `OGRE_NJPEG=1` and the stub stays the default: the
-  recompiled microcode runs but writes only one `0x300`-byte block per task, the
-  scene then stops drawing, and the null build dies in the runtime's `do_recv`
-  (`osRecvMesg` with a null-derived queue `0x80000010`, `msgCount = 0`). See
-  `docs/HANDOFF-2026-09-15-session46.md` §4-5.
+
+The background is still not visible: the game converts the YUV macroblocks to
+RGBA by drawing them (per-macroblock 16x16 YUV16 textures, a *second* gfx ucode
+`0x800A5110`) and copying the framebuffer back with the CPU, and in the port that
+framebuffer is uniform. See `docs/HANDOFF-2026-09-15-session47.md` §4-5.
 
 ## Audio ucode (still TBD)
 

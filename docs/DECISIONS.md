@@ -13,7 +13,8 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
-| 2026-09-15 (46) | Non-gfx RSP microcode is recompiled with RSPRecomp (`make rsp-recomp` → `RspFuncs/`) and dispatched by ucode address in `app/src/rsp.cpp`; the gfx ucode still goes to RT64. The M_NJPEGTASK decoder is **opt-in** (`OGRE_NJPEG=1`) until its output is correct | entry below; `docs/HANDOFF-2026-09-15-session46.md` |
+| 2026-09-15 (47) | **RSPRecomp's `text_address` is a label base, not an address**: it must be the RSP/IMEM DMA address the microcode was *assembled* for (masked `0x1FFF`), e.g. `0x1080` for a ucode the boot loader loads at IMEM `0x080`; getting it wrong rotates every `j` target by the difference and silently walks the wrong blocks. The njpg decoder is therefore **on by default** (`OGRE_NJPEG=0` forces the stub) | entry below; `docs/HANDOFF-2026-09-15-session47.md` §1-2 |
+| 2026-09-15 (46) | Non-gfx RSP microcode is recompiled with RSPRecomp (`make rsp-recomp` → `RspFuncs/`) and dispatched by ucode address in `app/src/rsp.cpp`; the gfx ucode still goes to RT64. ~~The M_NJPEGTASK decoder is **opt-in** (`OGRE_NJPEG=1`) until its output is correct~~ — **superseded by session 47**: the output is correct and it is on by default | entry below; `docs/HANDOFF-2026-09-15-session46.md` |
 | 2026-09-15 (45) | A shared RAM range can hold **several records**: compile each one (units F/G) and keep them **out of the unit whose code calls into it**, so N64Recomp emits `LOOKUP_FUNC` and the game's DMA selects the resident module | entry below; `docs/HANDOFF-2026-09-15-session45.md` §2 |
 | 2026-09-15 (44) | Mirror the N64's low-window (KUSEG) RDRAM alias in `recomp_mem_addr` (`a < 0x80000000` → `a & 0x003FFFFF`); keep it narrow (4 MiB) — **justification weakened by session 45** (it masked a mis-binding); A/B it | entry below (see its session-45 banner) |
 | 2026-09-15 (44b) | Record hygiene: `DECISIONS.md` keeps a **durable-decisions table** at the top and a `> Superseded by …` banner on disproved entries; findings go in handoffs | `DECISIONS.md` top |
@@ -78,6 +79,43 @@ through a bridge unwinds to the guest caller; without it `bt` printed a single
 frame.
 
 Entry: `docs/HANDOFF-2026-09-15-session46.md`. Durable table row added.
+
+> **Superseded by session 47** on two points: the decoder's "writes only one
+> `0x300` block" was an **RSPRecomp label-base bug** (`text_address` must be the
+> IMEM DMA address `0x1080`, not the RDRAM address), and the decoder is now
+> **on by default** (`OGRE_NJPEG=0` forces the stub). Also: the task's input is
+> produced by `func_8008B250` (not `func_ovlE_80197E5C`), and `0x80243E28` is the
+> pixel field of an assembled image at `0x80243E10`, not the memcpy destination.
+
+---
+
+## 2026-09-15 (session 47) — RSPRecomp's `text_address` is a label base; the njpg decoder is correct (and on by default)
+
+**Decision.** `rsp-njpeg.toml` sets `text_address = 0x1080` — the RSP **IMEM DMA
+address** the microcode was assembled at, which is what RSPRecomp's
+`text_address & 0x1FFF` label base must equal — and `app/src/rsp.cpp` runs the
+decoder **by default** (`OGRE_NJPEG=0` forces the stub). `text_offset` (`0x2F180`)
+is what selects the ROM bytes; `text_address` only names labels.
+
+**Why.** The game's RSP boot loader (ROM `0x2F0C0`, vram `0x8009ECC0`) is
+`addi $7,$0,0x1080` / `mtc0 $7,SP_MEM_ADDR` / `ld`s the `0xF80` bytes at
+`task->ucode` / `jr $7`, so the text runs at **IMEM `0x080`**; the ucode's own
+`j` targets are `0x1000`-based (`j 0x84001190`). With the previous value
+(`0x8009ED80`, low 13 bits `0x0D80`) every target resolved **0x300 bytes late**:
+the loop's output-pointer path was never reached and the decoder wrote a single
+`0x300`-byte block per task, then diverged. With `0x1080` all `mbs` blocks are
+written for all four images and the task returns `Broke`; the scene no longer
+stalls, and the decode costs 0–1 ms per image (so default-on is free).
+
+**What it also establishes.** The full step-2 background pipeline: `'HU'`
+container → CPU Huffman decode `func_8008B250` → this microcode (YUV16 in place)
+→ a **second gfx ucode `0x800A5110`** drawing one 16x16 YUV16 texture per
+macroblock → CPU framebuffer readback → assembly of a `'B5'`-headed image at
+`0x80243E10` whose pixels (at `0x80243E28`) the step-2 blit reads. The background
+is still uniform because that readback source is uniform in the port — the next
+wall, and it is a renderer/readback question, not a decode one.
+
+Entry: `docs/HANDOFF-2026-09-15-session47.md`. Durable table row added.
 
 ---
 

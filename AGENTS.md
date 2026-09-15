@@ -275,19 +275,28 @@ from here.
   register contract (session 45's step-2 wall). Find unknown modules by logging
   every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
   record table.
-- **The cathedral scene's background is missing (session 46, open).** The step-2
-  display list's first 48 `G_TRI2` quads blit a full-screen 320x240 RGBA16 image
-  from guest `0x80243E28`, and that buffer is all zero — so this is not a
-  renderer bug. The image is decoded through **four RSP tasks of type 4
-  (`M_NJPEGTASK`)** submitted at the second `0x02` enter
-  (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables `0x800AC050`; asset
-  `0x00183352` = ROM `0x7175A2`, magic `'HU'` + `'HUFF'`), and
-  `app/src/rsp.cpp` **stubs every non-gfx RSP task**. The microcode is now
-  recompilable (`make rsp-recomp` → `RspFuncs/njpeg_ucode.cpp`) and dispatchable
-  behind `OGRE_NJPEG=1`, but the recompiled decoder writes only one `0x300`-byte
-  block per task, the scene then stops submitting display lists at the step-2
-  entry, and the null build dies in the runtime's `do_recv` (`osRecvMesg` with a
-  null-derived queue `0x80000010`, `msgCount = 0`). The stub is therefore the
-  default and the background is still black; the open question is why the
-  recompiled microcode stops after one block (and whether the skipped
-  `ucode_boot` matters). See `docs/HANDOFF-2026-09-15-session46.md`.
+- **The cathedral scene's background is still missing, but the decode is not
+  (session 47).** The step-2 display list blits a full-screen 320x240 RGBA16
+  image from guest `0x80243E28`, and that buffer is uniform (`0x0843` in RT64,
+  `0` in the null build). The image is an **N64 JPEG**: CPU Huffman decode
+  (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
+  place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables
+  `0x800AC050`; `data_size` = macroblocks, `yield_data_size` = quantization
+  scale; asset `0x00183352` = ROM `0x7175A2`, magic `'HU'` + `'HUFF'`) → a
+  **second gfx ucode `0x800A5110`** drawing one 16x16 YUV16 texture per macroblock
+  into `G_SETCIMG` → a **CPU framebuffer readback** → assembly of a
+  `'B5'`-headed image at `0x80243E10` whose pixels (at `0x80243E28`) the blit
+  reads. The microcode is recompiled (`make rsp-recomp` →
+  `RspFuncs/njpeg_ucode.cpp`) and **runs by default** (`OGRE_NJPEG=0` forces the
+  stub); all `mbs` blocks decode in 0–1 ms. **The open question is the readback**:
+  whether RT64 renders the `0x800A5110` YUV draw and whether a rendered
+  framebuffer can be written back to RDRAM for a *CPU* read.
+  See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md`, superseded).
+- **RSPRecomp's `text_address` is a label base, not an address.** It must equal
+  the RSP **IMEM DMA address** the microcode was assembled for (masked `0x1FFF`)
+  — `0x1080` for a ucode the game's boot loader loads at IMEM `0x080`
+  (`addi $7,$0,0x1080` / `mtc0 $7,SP_MEM_ADDR` at ROM `0x2F0C0`), *not* the
+  text's RDRAM address. The bytes come from `text_offset`. A wrong value rotates
+  every `j` target by the difference and the recompiled microcode silently walks
+  the wrong blocks (session 47: `0x8009ED80` → one `0x300`-byte block per task
+  instead of `mbs`; the same applies to any future ucode recompilation).

@@ -590,25 +590,29 @@ hardware. RT64 remains the primary native renderer throughout. See
     happen (RDRAM `0x0..0x40` is zero after the run); the mirror is now
     unexercised on this path and should be A/B'd next session.
     See `docs/HANDOFF-2026-09-15-session45.md`.
-  - 🚧 **The cathedral scene's background is missing: it is an RSP-decoded image
-    and the port stubs the microcode (session 46)**: the step-2 display list's
-    first 48 `G_TRI2` quads are a full-screen 320x240 RGBA16 blit from guest
-    `0x80243E28`, and that buffer stays **zero**. The image is assembled by
-    `func_ovlE_80199D30` (unit E) from a resource that the game decodes through
-    **four RSP tasks of type 4 (`M_NJPEGTASK`)** submitted at the second `0x02`
-    enter (`ucode=0x8009ED80`/`0x7C0`, boot `0x8009ECB0`/`0xD0`, tables
-    `0x800AC050`/`0xF0`; asset `0x00183352` = ROM `0x7175A2`, magic `'HU'` +
-    `'HUFF'`), and `app/src/rsp.cpp` stubs every non-gfx RSP task. The
-    microcode is now recompilable (`make rsp-recomp` → `RspFuncs/njpeg_ucode.cpp`,
-    `rsp-njpeg.toml`) and dispatchable behind **`OGRE_NJPEG=1`**, but the
-    recompiled decoder writes only one `0x300`-byte block (the game's assembler
-    then copies a zero resource), the scene stops submitting display lists at
-    the step-2 entry, and the null build dies in the runtime's `do_recv`
-    (`osRecvMesg` with `mq = 0x80000010`, `msgCount = 0`). So **the stub is the
-    default and the background is still black**; the next step is to find why
-    the recompiled microcode stops after one block (and whether the skipped
-    `ucode_boot` matters).
-    See `docs/HANDOFF-2026-09-15-session46.md`.
+  - 🚧 **The cathedral scene's background is missing: the decode is fixed, the
+    readback is not (sessions 46-47)**: the step-2 display list's first `G_TRI2`
+    quads are a full-screen 320x240 RGBA16 blit from guest `0x80243E28`, and that
+    buffer is uniform (`0x0843` in RT64, `0` in the null build). The image is an
+    **N64 JPEG** (`'HU'` container holding `'HUFF'` + numMB, asset `0x00183352` =
+    ROM `0x7175A2`), and the pipeline is: CPU Huffman decode `func_8008B250` →
+    **four `M_NJPEGTASK` (type 4) RSP tasks** (`ucode=0x8009ED80`/`0x7C0`, boot
+    `0x8009ECB0`/`0xD0`, tables `0x800AC050`/`0xF0`, `data_size = mbs`,
+    `yield_data_size = scale`) decoding **in place to 16-bit YUV** → a *second*
+    gfx ucode `0x800A5110` drawing one 16x16 YUV16 texture per macroblock into
+    `G_SETCIMG` → a CPU framebuffer readback → assembly of a `'B5'`-headed image
+    at `0x80243E10` whose pixels are `0x80243E28`. **Session 47 fixed the
+    decoder**: RSPRecomp's `text_address` is a *label base* and must be the RSP
+    IMEM DMA address `0x1080` (not `0x8009ED80`, whose low 13 bits rotated every
+    `j` target by `0x300`); each task now writes all `mbs` blocks, the scene no
+    longer stalls, and the decoder is **on by default** (`OGRE_NJPEG=0` forces the
+    stub). The background is still uniform because the readback source
+    (a framebuffer) is: the open question is whether RT64 renders the `0x800A5110`
+    YUV draw and whether it can write that rendered framebuffer back to RDRAM for
+    a **CPU** read (`OGRE_DL_DECODE=all` around those four DLs, `RT64
+    FramebufferManager::storeRAM`/`checkRAM`).
+    See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md` for the
+    superseded reading of the decoder bug).
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

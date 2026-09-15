@@ -3,14 +3,26 @@
 # (scene 0x0D steps >= 2). The port stubbed every non-gfx RSP task, so those
 # images decoded to nothing and the cathedral rendered over black.
 #
-#   RDRAM 0x8009ED80 (size 0x7C0)  ROM 0x2F180   main segment
-#                                  (`ROM = vram - 0x80070C60 + 0x1060`)
-#   RDRAM 0x800AC050 (size 0xF0)   ROM 0x3C450   Huffman/quant tables
+#   text bytes  RDRAM 0x8009ED80 (size 0x7C0)  ROM 0x2F180   main segment
+#                                              (`ROM = vram - 0x80070C60 + 0x1060`)
+#   ucode_data  RDRAM 0x800AC050 (size 0xF0)   ROM 0x3C450   Huffman/quant tables
+#
+# `text_address` is NOT the RDRAM address of the text: RSPRecomp uses it (masked
+# with 0x1FFF) as the address the microcode was *assembled* at, which for this
+# ucode is the RSP's IMEM DMA address 0x1080 — the boot loader the game ships
+# loads `ucode_size` bytes there (`addi $7, $zero, 0x1080` / `mtc0 $7,
+# SP_MEM_ADDR` / `jr $7` at ROM 0x2F0C0, i.e. IMEM 0x080). The ucode's own `j`
+# targets are 0x1000-based addresses in that same space (`j 0x84001190`), so a
+# text_address whose low 13 bits are 0x0D80 (the RDRAM address's) rotates every
+# `j` target by 0x300 and the recompiled decoder walks the wrong blocks: it
+# writes a single 0x300 block per task instead of all `mbs` of them (session 47).
+# Setting `text_offset` is what selects the ROM bytes; `text_address` only labels.
+# See docs/guides/rsp-microcode.md.
 #
 # Run `make rsp-recomp` after changing this file.
 text_offset = 0x2F180
 text_size = 0x7B8
-text_address = 0x8009ED80
+text_address = 0x1080
 rom_file_path = "assets/ogre64.z64"
 output_file_path = "RspFuncs/njpeg_ucode.cpp"
 output_function_name = "njpeg_ucode"

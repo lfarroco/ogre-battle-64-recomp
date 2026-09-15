@@ -11,35 +11,37 @@ extern RspExitReason njpeg_ucode(uint8_t* rdram, uint32_t ucode_addr);
 namespace ogre {
 
 // Stub RSP microcode: reports that the task "completed" (RspExitReason::Broke)
-// without doing any work. This keeps the game's task pipeline flowing during
-// bring-up. Replaced by RSPRecomp-generated microcode funcs (docs/guides/
-// rsp-microcode.md).
+// without doing any work. It is the fallback for every microcode the port has
+// not recompiled yet (notably the audio ucode).
 static RspExitReason stub_ucode(uint8_t* rdram, uint32_t ucode_addr) {
     return RspExitReason::Broke;
 }
 
 // OB64 submits the Nintendo-JPEG decoder for the full-screen background images
-// of the New Game opening sequence (scene 0x0D steps >= 2); with the stub the
-// decoded image stays zero and the cathedral renders over black. It is
-// identified by its RDRAM address: main segment 0x8009ED80, size 0x7C0 (boot
-// loader at 0x8009ECB0, Huffman/quantization tables at 0x800AC050).
+// of the New Game opening sequence (scene 0x0D steps >= 2). It is identified by
+// its RDRAM address: main segment 0x8009ED80, size 0x7C0 (boot loader at
+// 0x8009ECB0, Huffman/quantization tables at 0x800AC050). The game's CPU
+// Huffman decode (func_8008B250) has already produced the `mbs * 0x300`-byte
+// entropy-decoded buffer at `data_ptr`; the microcode reverse-zigzags,
+// dequantizes (scale = `yield_data_size`, -2 here) and inverse-DCTs it in place
+// into the 16-bit YUV macroblock layout that the game then draws.
 //
-// Status (session 46): the recompiled microcode runs, but it does not yet
-// reproduce the game's decode. Measured with a probe in the generated file:
-// task 0 loops its 0x12C iterations reading 0x300 bytes of input each time
-// (r28 advances) while writing every result back to the *same* address (r29
-// stays at data_ptr-0x300), and tasks 1..3 leave the loop before its head, so
-// all four collapse to one 0x300-byte block. With the decoder enabled the
-// game's decode state machine (D_8019A680 + 0x7e) then never advances, the
-// scene stops submitting display lists, and the null renderer dies in the
-// runtime's `do_recv` (osRecvMesg with a null-derived queue 0x80000010,
-// msgCount 0). Until that is resolved the stub stays the default and the
-// decoder is opt-in via OGRE_NJPEG=1.
-// See docs/HANDOFF-2026-09-15-session46.md.
+// The decoder is correct since session 47: RSPRecomp's `text_address` label base
+// was 0x0D80 (the RDRAM address's low 13 bits) instead of 0x1080 (the RSP IMEM
+// DMA address the game's boot loader loads the text at), which rotated every `j`
+// target by 0x300 and made the recompiled decoder write a single 0x300-byte
+// block per task.
+//
+// `OGRE_NJPEG=0` forces the stub (an A/B escape hatch); anything else, including
+// unset, runs the decoder, which costs 0-1 ms per image.
+// See docs/HANDOFF-2026-09-15-session47.md and docs/guides/rsp-microcode.md.
 constexpr uint32_t kNjpegUcodeAddr = 0x8009ED80u;
 
 static bool njpeg_enabled() {
-    static const bool enabled = getenv("OGRE_NJPEG") != nullptr;
+    static const bool enabled = [] {
+        const char* value = getenv("OGRE_NJPEG");
+        return value == nullptr || value[0] != '0';
+    }();
     return enabled;
 }
 
@@ -61,7 +63,7 @@ recomp::rsp::callbacks_t make_rsp_callbacks() {
                     printf("[rsp] task type %u submitted (njpeg microcode)\n", static_cast<unsigned>(task->t.type));
                     return njpeg_ucode;
                 }
-                printf("[rsp] task type %u submitted (njpeg microcode NOT enabled; stub)\n",
+                printf("[rsp] task type %u submitted (njpeg microcode disabled; stub)\n",
                        static_cast<unsigned>(task->t.type));
                 return stub_ucode;
             }
