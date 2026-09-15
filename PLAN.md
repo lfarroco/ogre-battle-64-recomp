@@ -424,6 +424,39 @@ hardware. RT64 remains the primary native renderer throughout. See
     (title → menu → `0x02` → `0x0D`) is required, and it is blocked at menu
     `0x18`'s pre-existing unit-D crash. See
     `docs/HANDOFF-2026-09-14-session38.md`.
+  - ✅ **New Game plays into 0x0D and the natural path loops cleanly (session
+    39)**: two more false merges fixed — `func_8019C5D4`'s `0x5D8` override
+    swallowed the alternate entry `func_8019C69C` (menu `0x18`), and
+    `func_ovlC_8023BDA8`'s `0x54` override merged a malloc-tail head with a
+    shared-epilogue shim (the `0x0D` list-unlink crash). Splitting the latter
+    exposed a latent N64Recomp bug (a body ending in `jal` with fall-through
+    dropped its `after_N` label); fixed in `recompilation.cpp` and the patch
+    regenerated. The natural tap path is now title → `0x02` → `0x0D` → `0x02`
+    → `0x0D`, 0 stub calls, stopping at a NULL into `func_800988A0`. See
+    `docs/HANDOFF-2026-09-14-session39.md`.
+  - ✅ **0x0D re-entry characterised, and scripted-run tooling (sessions 40/41)**:
+    the `0x0D` → `0x02` → `0x0D` re-entry and the ~28.7 s clean first visit are
+    the game's own scripted loop (`0x02`'s enter hardcodes next = `0x0D`,
+    `0x0D`'s leave – `func_80178B7C` – hardcodes next = `0x02`; the per-frame
+    update picks `0x02` when `func_801C8884() == 2`). No keyboard input changes
+    the visit length: `0x0D` is a fixed cutscene, not an interactive screen.
+    Added `OGRE_TAP_MAX` (stop tapping after tap n) and `OGRE_TAP_BUTTON`
+    (a per-press button schedule: press Start through the title, then A/B/Z/D-pad
+    without a human). Re-characterised the re-entry crash: `func_ovlC_802399AC`
+    is **not** a standalone function — it is the fall-through continuation of
+    `func_ovlC_80239874` (verified at instruction level in `build/bankC.elf`),
+    whose prologue is what stores the `a2` buffer at `sp+0x1EC`. The
+    `jal 0x802399AC` at `0x8022D218` (`func_ovlC_8022D1CC`, only taken when the
+    mode byte `D_8018FC39 == 2`) therefore enters mid-function with a 24-byte
+    frame, so that slot is never written and `func_800988A0` gets `a1 = NULL`.
+    Forcing the mode byte to 0 moves the crash (N64 `-8` in
+    `func_ovlC_8023C894`), so the re-entry lacks more than that one branch.
+    Two genuine mis-binding bugs were found and fixed on the way: the
+    `func_801AFC2C` size override ran 4 bytes past the start of `func_801B00D0`
+    (so the recompiler redirected every `jal 0x801B00D0` into it), and the
+    `jal 0x801B00D0` sites are now dispatched to bank unit C's real
+    `func_ovlC_801B00D0`. See `docs/HANDOFF-2026-09-14-session40.md` and
+    `docs/HANDOFF-2026-09-14-session41.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

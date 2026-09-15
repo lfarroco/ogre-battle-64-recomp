@@ -73,7 +73,7 @@ build/assets/%.o: assets/%.bin
 
 recomp: $(ELF)
 	$(N64RECOMP) config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0
 
 # ---------------------------------------------------------------------------
 # Cross-bank call routing (Phase 4).
@@ -108,12 +108,22 @@ recomp: $(ELF)
 # (-1/0x29). Scene 0x0D's init reads a flag this worker writes (0x8019F794);
 # without the dispatch the flag stays zero and 0x0D walks the wrong init
 # path. Both sites are already call-and-continue, so no tail repair.
+# 0x801B00D0, scene 0x0D's teardown. Its two call sites (func_801779FC
+# @0x801779FC, func_80178B7C @0x80178BB8 — the latter is 0x0D's leave callback)
+# sit in .streamedB and target .streamedC, where the main ELF only has a 4-byte
+# placeholder symbol, so N64Recomp redirected them into whichever size override
+# contained 0x801B00D0 (func_801AFC2C's 0x4A8, or func_801AFAF4's 0x5E0) — the
+# wrong function, so 0x0D's teardown never ran and the 0x02->0x0D re-entry
+# crashed in func_800988A0 on a NULL destination (sessions 40/41). Bank unit C's
+# record 10 provides the real entry func_ovlC_801B00D0, so the call is
+# dispatched like the others; both sites were the redirect/early-return shape
+# and both got the tail repair.
 # A lookup that misses the map is a no-op stub, so the scenes that never load
 # the owning record are unaffected. `make recomp` re-applies this after every
 # regen; with no bank data at all the step warns and leaves the tree alone.
 # The remaining targets stay on the recompiler's bindings (session 33's
 # behaviour); dispatching the other resolvable ones is still an opt-in
-# experiment. See docs/DECISIONS.md (sessions 34, 37, 38).
+# experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41).
 # ---------------------------------------------------------------------------
 cross-bank-report:
 	python3 tools/cross_bank.py report

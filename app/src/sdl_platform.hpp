@@ -29,10 +29,11 @@ struct Platform {
     // The native app has no equivalent of the web probes' `tap()`: a run that
     // is never given input sits on the boot blanking display list forever
     // (session 24), so every native measurement needed a human at the keyboard.
-    // OGRE_TAP_MS makes controller 0 press Start for one poll every N ms, and
-    // OGRE_EXIT_AFTER_MS makes the app request exit after N ms so a run is
-    // bounded and scriptable. Both default to 0 (off): interactive runs behave
-    // exactly as before.
+    // OGRE_TAP_MS makes controller 0 press one scripted button (Start by
+    // default; OGRE_TAP_BUTTON selects others/a schedule) for one poll every N
+    // ms, and OGRE_EXIT_AFTER_MS makes the app request exit after N ms so a run
+    // is bounded and scriptable. Both default to 0 (off): interactive runs
+    // behave exactly as before.
     uint32_t tap_ms = 0;
     uint32_t exit_after_ms = 0;
     uint64_t start_ticks = 0;
@@ -41,7 +42,8 @@ struct Platform {
 // Initializes SDL (video, audio, gamecontroller, events).
 bool init_sdl();
 
-// Reads OGRE_TAP_MS / OGRE_EXIT_AFTER_MS for scripted runs. Call after init_sdl.
+// Reads OGRE_TAP_MS / OGRE_TAP_BUTTON / OGRE_EXIT_AFTER_MS for scripted runs.
+// Call after init_sdl.
 void configure_automation(Platform& platform);
 
 // Creates the app window and returns the ultramodern window handle.

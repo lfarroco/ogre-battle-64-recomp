@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include <SDL.h>
 #if defined(__APPLE__)
@@ -58,6 +59,153 @@ enum N64Button : uint16_t {
     N64_BTN_C_UP = 0x0001,
 };
 
+namespace {
+
+// Names accepted inside `OGRE_TAP_BUTTON` slots. Matched case-insensitively.
+struct ButtonName {
+    const char* name;
+    uint16_t bit;
+};
+
+constexpr ButtonName kButtonNames[] = {
+    {"a", N64_BTN_A},         {"b", N64_BTN_B},
+    {"z", N64_BTN_Z},         {"start", N64_BTN_START},
+    {"l", N64_BTN_L},         {"r", N64_BTN_R},
+    {"up", N64_BTN_UP},       {"down", N64_BTN_DOWN},
+    {"left", N64_BTN_LEFT},   {"right", N64_BTN_RIGHT},
+    {"cu", N64_BTN_C_UP},     {"cd", N64_BTN_C_DOWN},
+    {"cl", N64_BTN_C_LEFT},   {"cr", N64_BTN_C_RIGHT},
+};
+
+// `OGRE_TAP_BUTTON` is a comma-separated schedule, one entry per synthetic
+// press, advanced once per press; the last entry sticks for the rest of the run
+// (so the default single `start` is Start forever, and
+// `start,start,start,start,start,a` is "press Start through the title, then
+// A"). Slot 0 is the boot window, the same index OGRE_TAP_MAX counts. An entry
+// is a button name or several names joined by '+' (e.g. `a`, `start`, `a+z`);
+// `none` is a silent slot. This is what lets a scripted run press Start through
+// the title (the only input that path wants) and then give a scene another
+// button without a human, and it is how session 41 proved scene 0x0D is a fixed
+// ~28.7 s cutscene that no button changes (a Start during it just drives the
+// same scripted leave to 0x02).
+constexpr size_t kMaxTapSlots = 64;
+
+struct TapSchedule {
+    uint16_t slots[kMaxTapSlots];
+    size_t count;
+};
+
+std::string lowercase(std::string text) {
+    for (char& c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return text;
+}
+
+std::string trim(const std::string& text) {
+    const size_t first = text.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const size_t last = text.find_last_not_of(" \t");
+    return text.substr(first, last - first + 1);
+}
+
+// One slot: '+' separates buttons that are held together.
+uint16_t parse_button_combo(const std::string& combo, bool& ok) {
+    ok = true;
+    uint16_t mask = 0;
+    size_t start = 0;
+    for (;;) {
+        const size_t plus = combo.find('+', start);
+        const std::string name = lowercase(trim(combo.substr(
+            start, plus == std::string::npos ? std::string::npos : plus - start)));
+        if (name != "none") {
+            bool found = false;
+            for (const ButtonName& button : kButtonNames) {
+                if (name == button.name) {
+                    mask |= button.bit;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                ok = false;
+            }
+        }
+        if (plus == std::string::npos) {
+            break;
+        }
+        start = plus + 1;
+    }
+    return mask;
+}
+
+TapSchedule parse_tap_schedule(const char* spec) {
+    TapSchedule schedule{{N64_BTN_START}, 1};
+    schedule.count = 0;
+    const std::string text(spec);
+    size_t start = 0;
+    for (;;) {
+        const size_t comma = text.find(',', start);
+        const std::string slot = text.substr(
+            start, comma == std::string::npos ? std::string::npos : comma - start);
+        bool ok = true;
+        uint16_t mask = parse_button_combo(slot, ok);
+        if (schedule.count >= kMaxTapSlots) {
+            fprintf(stderr, "[SDL] OGRE_TAP_BUTTON: more than %zu slots; rest ignored\n",
+                    kMaxTapSlots);
+            break;
+        }
+        if (!ok) {
+            fprintf(stderr, "[SDL] OGRE_TAP_BUTTON: unrecognised button in slot '%s'; using Start\n",
+                    trim(slot).c_str());
+            mask = N64_BTN_START;
+        }
+        schedule.slots[schedule.count++] = mask;
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (schedule.count == 0) {
+        schedule.slots[schedule.count++] = N64_BTN_START;
+    }
+    return schedule;
+}
+
+// Read once: a mid-run change should not move the schedule under the game.
+const TapSchedule& tap_schedule() {
+    static const TapSchedule schedule = [] {
+        const char* spec = getenv("OGRE_TAP_BUTTON");
+        if (spec == nullptr || spec[0] == '\0') {
+            return TapSchedule{{N64_BTN_START}, 1};
+        }
+        return parse_tap_schedule(spec);
+    }();
+    return schedule;
+}
+
+std::string describe_buttons(uint16_t mask) {
+    if (mask == 0) {
+        return "none";
+    }
+    std::string out;
+    for (const ButtonName& button : kButtonNames) {
+        if ((mask & button.bit) != 0) {
+            if (!out.empty()) {
+                out += '+';
+            }
+            out += button.name;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
 bool init_sdl() {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "[SDL] Failed to init: %s\n", SDL_GetError());
@@ -75,6 +223,14 @@ void configure_automation(Platform& platform) {
     if (platform.tap_ms != 0 || platform.exit_after_ms != 0) {
         fprintf(stderr, "[SDL] automation: tap_ms=%u exit_after_ms=%u\n",
                 platform.tap_ms, platform.exit_after_ms);
+    }
+    if (platform.tap_ms != 0) {
+        const TapSchedule& schedule = tap_schedule();
+        fprintf(stderr, "[SDL] tap schedule (%zu slots, last sticks):", schedule.count);
+        for (size_t i = 0; i < schedule.count; ++i) {
+            fprintf(stderr, " %s", describe_buttons(schedule.slots[i]).c_str());
+        }
+        fprintf(stderr, "\n");
     }
 }
 
@@ -292,7 +448,8 @@ void pump_sdl_events(Platform& platform, bool* quit) {
     }
 }
 
-// The synthetic Start press of a scripted run (`OGRE_TAP_MS`), or 0.
+// The synthetic press of a scripted run (`OGRE_TAP_MS` + `OGRE_TAP_BUTTON`),
+// or 0.
 //
 // This is the native equivalent of the web harness's `tap()`: one short press
 // per interval, so the game's title branch sees a button *up* after it. It
@@ -312,10 +469,9 @@ static uint16_t automation_buttons() {
         return 0;
     }
     // `OGRE_TAP_MAX=<n>`: stop tapping after tap number n (tap 0 is the boot
-    // window). Lets a run press Start through the title and then go silent so
-    // later taps can't abort a loading scene mid-init (session 40: a Start
-    // during 0x0D init aborts to 0x02 and the instant re-entry crashes on
-    // torn-down state). 0 or unset = tap forever.
+    // window). Lets a run press Start through the title and then go silent, so
+    // later taps cannot drive the scene's own scripted leave before the run has
+    // measured the visit. 0 or unset = tap forever.
     {
         static long tap_max = -1;
         if (tap_max < 0) {
@@ -327,13 +483,17 @@ static uint16_t automation_buttons() {
         }
     }
     // Log once per press so a run's stderr shows the taps landed.
+    const TapSchedule& schedule = tap_schedule();
+    const size_t slot = tap < schedule.count ? static_cast<size_t>(tap) : schedule.count - 1;
+    const uint16_t buttons = schedule.slots[slot];
     static uint64_t logged_taps = 0;
     if (tap != logged_taps && tap > 0) {
         logged_taps = tap;
-        fprintf(stderr, "[SDL] automation tap %llu at %llums\n",
-                (unsigned long long)tap, (unsigned long long)elapsed);
+        fprintf(stderr, "[SDL] automation tap %llu at %llums buttons=%s\n",
+                (unsigned long long)tap, (unsigned long long)elapsed,
+                describe_buttons(buttons).c_str());
     }
-    return N64_BTN_START;
+    return buttons;
 }
 
 static uint16_t keyboard_buttons() {

@@ -51,7 +51,14 @@ function_sizes = [
     # static tail-calls and the direct jal lands on the real entry.
     { name = "func_801AB568", size = 0x1E0 },
     { name = "func_801AB740", size = 0x30 },
-    { name = "func_801AFC2C", size = 0x4A8 },
+    # func_801AFC2C's real body ends at 0x801B00D0 (the next function's
+    # prologue); its ELF symbol size is 0x4A4. The extra 4 bytes made
+    # 0x801B00D0 fall *strictly inside* this override, so the recompiler's
+    # find_containing_size_override redirected every `jal 0x801B00D0` (scene
+    # 0x0D's leave, 0x80178BB8) into func_801AFC2C instead of the real entry.
+    # Trimmed to the ELF size; the call itself is still dispatched at run time
+    # (see the Makefile's 0x801B00D0 comment). Session 41.
+    { name = "func_801AFC2C", size = 0x4A4 },
     { name = "func_801B8068", size = 0x2C },
 ]
 
