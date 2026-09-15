@@ -532,6 +532,35 @@ hardware. RT64 remains the primary native renderer throughout. See
     session's single goal. Also: dialogue/subtitle text is LZ-compressed
     (`tools/ogrelz.py` decodes `func_8007A110`'s format).
     See `docs/HANDOFF-2026-09-15-session43.md`.
+  - 🚧 **Step 2 unblocked by restoring the N64's low-RDRAM (KUSEG) alias
+    (session 44)**: the New Game **step table** is decoded (`func_80227E64(n)`
+    → table asset `0x19A8804` at ROM `0x1F3CA54`, entry `n` = the step asset,
+    whose LZ block starts at `rom+4`; the command is the low byte of the
+    descriptor's last word). Steps 1..19: cmd `-7` (step 1, the movie), then
+    `-3`/`-10`/`-4`; **every step ≥ 2 selects selector 2**, so
+    `func_ovlC_8022D1CC`'s path B is normal code. Path B's `jal 0x802399AC`
+    targets the **tail of the function whose prologue is `0x80239874`** (no
+    `jr $ra` between them, raw ROM verified); the tail's last call is
+    `func_800988A0(a0=sp+0x190, a1=*(sp+0x1EC))`, which *writes* to `a1` — the
+    slot the prologue fills from its `a2`. The port reached it with
+    `*(sp+0x1EC)=0`, and behind it the descriptor interpreter
+    (`func_80227030` → `func_ovlC_802282D8`, first opcode `0x80000006`) called
+    the display-list emitter `func_ovlC_8023C894` with `a3 = 0` — two stores to
+    guest `0` and `8`. Tracing `a3` (queue slot `0x800E7A30` →
+    `func_80227FF8`'s relocated-tag leak `0x08880000` → `0xFFFFFFFF` → `0`
+    from `func_802329D0`) shows every value comes from *game* code, so retail
+    hits the same stores; retail runs the opening, so the low window must be
+    writable there. The R4300i's KUSEG is TLB-mapped and the boot ROM maps the
+    low RDRAM window into it; the port's `recomp_mem_addr` computed
+    `a - 0x80000000` and faulted ~2 GiB below the buffer. **Fix:** return
+    `a & 0x003FFFFF` for `a < 0x80000000` (recorded in
+    `n64modernruntime-n64recomp.patch`). Effect: the step-2 enter completes —
+    the null build runs the scene 110 s with no crash (it died in one frame
+    before), the movie still renders, Tutorial/attract unchanged. **Next wall:**
+    the RT64 build then dies in the runtime's queue bridge
+    (`do_sendP + 0xC4`, guest `0xFE6E2C89`), not hit by the null build.
+    `tools/ogrelz.py` gained `--asset` and the corrected block-start rule.
+    See `docs/HANDOFF-2026-09-15-session44.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

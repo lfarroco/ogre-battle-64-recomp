@@ -5,6 +5,90 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-15 (session 44) — step 2's crash is a shared-tail call, the step table is decoded, and an asset's LZ block starts at `rom+4`
+
+### Finding: the New Game step table, decoded from the ROM
+
+`func_80227E64(n)` resolves step `n` as: asset `0x19A8804` (ROM `0x1F3CA54`)
+is a table whose payload (at `rom+4`) is a u32 array; entry `n` is the step's
+asset id; the step asset's first word is its payload size and its LZ block
+starts at `rom+4`; the **low byte of the descriptor's last word** is the
+command opcode (`0xFF0000xx` → `jtbl_ovlC_8022ABE0[xx-1]`, ROM `0x286B60`).
+Steps 1..19 resolve to `-7, -3, -10, -10, -10, -10, -10, -10, -3, -4, -3, -3,
+-3, -10, -10, -10, -3, -3, -3`. The command handler table
+`jtbl_ovlC_8022ABA0` (ROM `0x286B20`) sends `-3`/`-10` to the same handler
+(`sel=2` + callback `80226110`) and only `-7` to `sel=0` (`80225A3C`), so
+**every step after the movie takes `func_ovlC_8022D1CC`'s path B** — it is
+normal code, not a debug branch. Full table:
+`docs/HANDOFF-2026-09-15-session44.md` §1. Entry 0 of the table
+(`0x019AA27C`) is unused: `n` is 1-based.
+
+### Decision: `tools/ogrelz.py` gets an `--asset` mode and the `rom+4` rule
+
+The decoder was previously pointed at `rom`, where every block begins
+`00 00 xx xx` and decodes nothing. `func_8009DBB8` copies the payload (first
+word = size) from `rom+4`, so the LZ block that `func_8007A110` reads starts
+there. `ogrelz.py --asset <rom> <id>...` encodes both steps of the resolution
+(`(id & 0x0FFFFFFF) + 0x594250`, then `+4`), so future sessions decode assets
+without re-deriving it.
+
+### Finding: step 2 fails on two shared-tail calls, both with unset state
+
+`0x802399AC` is the tail of the function whose prologue is `0x80239874` (no
+`jr $ra` between them; raw ROM verified). Its epilogue calls
+`func_800988A0(a0 = sp+0x190, a1 = *(sp+0x1EC))`, which *writes* 16 words to
+`a1`; `sp+0x1EC` is the slot the prologue fills from its `a2`. Path B reaches
+it with the slot 0 (and every word `sp+0x1DC..sp+0x218` zero), so the port
+faults writing guest address 0. Behind it, `func_80227030 → func_ovlC_802282D8`
+(the descriptor interpreter) reaches its first opcode (`0x80000006`) and calls
+`func_ovlC_8023C894` — another shared tail, a display-list emitter fragment
+that needs `a3` = the DL write pointer — with `a3 = 0`, faulting at guest
+address 8. A/B with one variable per run (skip path B; force the `a2` slot)
+shows both are independent: fixing path B lands on the second crash.
+
+### Finding: the zeros are the game's own, so retail must tolerate the stores
+
+`a3` was traced through the crashing frame (probes, reverted): the queue `jalr`
+leaves `0x800E7A30` (the copied slot), `func_80227FF8`'s descriptor relocation
+leaks its loop tag `0x08880000` (`0x80228138`-`0x8022817C` — a real ABI leak,
+never restored), the asset-load chain leaks `0xFFFFFFFF`, and
+`func_802329D0` (malloc + bzero) leaves `0`. All of those are *game* functions,
+so retail arrives at the display-list emitter with `a3 = 0` too, and the path-B
+call with `*(sp+0x1EC) = 0`. Retail runs the opening, so a store to guest `8`
+(and `0`) must be harmless there.
+
+### Decision: restore the N64's low-window (KUSEG) RDRAM alias in `recomp_mem_addr`
+
+The R4300i's KUSEG (`0x00000000-0x7FFFFFFF`) is TLB-mapped, and the boot ROM
+maps the low window of RDRAM into it — the alias N64 emulators implement by
+masking the top three bits. The game's own boot installs only two TLB entries
+(`func_8009AAA0` at `0xC0000000`, `func_8009AB00` clearing 0..30), so the low
+window is not the game's. The port's `recomp_mem_addr` computed
+`a - 0x80000000` for a low address, faulting ~2 GiB below the RDRAM buffer.
+`tools/N64ModernRuntime/N64Recomp/include/recomp.h` now returns
+`a & 0x003FFFFF` for `a < 0x80000000`; the change is recorded in
+`n64modernruntime-n64recomp.patch` (the submodule working tree is invisible to
+git).
+
+This is a hardware-fidelity fix argued from "retail runs the sequence and the
+zeros are the game's own code" (AGENTS §8), not from a hardware watchpoint. It
+is narrow (4 MiB) on purpose, and it means genuine null-pointer writes will now
+land in RDRAM `0..0x3FFFFF` instead of faulting. Effect: the step-2 enter
+completes — the null build runs the scene for 110 s with no crash (it died in
+one frame before), the movie still renders, and the Tutorial/attract runs are
+unchanged. The RT64 build then dies *in the runtime*
+(`do_sendP + 0xC4`, guest `0xFE6E2C89`), which is the next wall.
+
+### Decision: keep the crash handler's host-PC print
+
+`app/src/bank_overlays.cpp`'s SIGSEGV handler now prints the faulting host PC
+and `dladdr`'s symbol+offset. It is app code (not a probe in generated code),
+it localised all three crashes (`func_800988A0 + 0x166`,
+`func_ovlC_8023C894 + 0xCA`, `do_sendP + 0xC4`), and it costs one `fprintf` on
+the fatal path.
+
+---
+
 ## 2026-09-15 (session 43, correction) — the first `0x0D` visit IS the New Game movie; the wall is step 2
 
 ### Correction, from a capture rather than from code

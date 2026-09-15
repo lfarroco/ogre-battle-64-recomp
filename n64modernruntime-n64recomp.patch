@@ -158,10 +158,76 @@ index 0000000..9647d5a
 +
 +}  // namespace N64Recomp
 diff --git a/include/recomp.h b/include/recomp.h
-index 73f3e73..13ea02b 100644
+index 73f3e73..9bb80b7 100644
 --- a/include/recomp.h
 +++ b/include/recomp.h
-@@ -424,6 +424,8 @@ typedef struct {
+@@ -92,24 +92,58 @@ typedef uint64_t gpr;
+ #define SUB32(a, b) \
+     ((gpr)(int32_t)((a) - (b)))
+ 
++// MMIO / KSEG1 accesses (0xA0000000-0xC0000000: AI/SI/VI/PI registers, PIF,
++// cart). The recompiled code performs raw register access for hardware the
++// port reimplements in the runtime (audio DMA, SI, etc.); without a mapping
++// these would dereference rdram ~4.5 GiB past the buffer (fault in wasm,
++// memory corruption natively). Alias them into an 8 MiB scratch page at the
++// end of the rdram buffer (MMIO_SCRATCH_OFFSET, reserved by the heap init):
++// reads return zero (status registers read "idle/not busy"), writes go
++// nowhere. Runtime-bridged I/O (osCont*, osPi*, osVi*, osAi*) never goes
++// through these macros.
++#define MMIO_SCRATCH_OFFSET 0x1F800000u
++static inline uint64_t recomp_mem_addr(gpr addr) {
++    // N64 addresses flow through the recompiled code sign-extended to 64 bits
++    // (gpr values come from int32 registers), so normalize to the low 32 bits
++    // before the KSEG0/KUSEG/MMIO split.
++    uint64_t a = (uint64_t)(uint32_t)addr;
++    if ((a & 0xE0000000u) == 0xA0000000u) {
++        return (a & 0x7FFFFFu) | MMIO_SCRATCH_OFFSET;
++    }
++    // KUSEG (0x00000000-0x7FFFFFFF) is TLB-mapped on the R4300i, and the N64's
++    // boot ROM maps the first 4 MiB of RDRAM into that window (the address
++    // emulators implement by masking the top three bits). Without it a low
++    // address computes `a - 0x80000000` and faults ~2 GiB below the buffer.
++    // OB64 relies on the alias: on the New Game path the descriptor
++    // interpreter reaches its display-list emitter with a3 = 0 (traced through
++    // game code: 0x800E7A30 -> 0x08880000 -> 0xFFFFFFFF -> 0), which on retail
++    // writes into RDRAM offset 8 instead of faulting -- the game runs the whole
++    // opening. Mirror the low 4 MiB here so those stores land where the
++    // hardware puts them.
++    if (a < 0x80000000u) {
++        return a & 0x003FFFFFu;
++    }
++    return a - 0x80000000u;
++}
++
+ #define MEM_W(offset, reg) \
+-    (*(int32_t*)(rdram + ((((reg) + (offset))) - 0xFFFFFFFF80000000)))
++    (*(int32_t*)(rdram + recomp_mem_addr((gpr)(reg) + (offset))))
+ 
+ #define MEM_H(offset, reg) \
+-    (*(int16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(int16_t*)(rdram + (recomp_mem_addr((gpr)(reg) + (offset)) ^ 2)))
+ 
+ #define MEM_B(offset, reg) \
+-    (*(int8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(int8_t*)(rdram + (recomp_mem_addr((gpr)(reg) + (offset)) ^ 3)))
+ 
+ #define MEM_HU(offset, reg) \
+-    (*(uint16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(uint16_t*)(rdram + (recomp_mem_addr((gpr)(reg) + (offset)) ^ 2)))
+ 
+ #define MEM_BU(offset, reg) \
+-    (*(uint8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(uint8_t*)(rdram + (recomp_mem_addr((gpr)(reg) + (offset)) ^ 3)))
+ 
+ #define SD(val, offset, reg) { \
+-    *(uint32_t*)(rdram + ((((reg) + (offset) + 4)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 0); \
+-    *(uint32_t*)(rdram + ((((reg) + (offset) + 0)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 32); \
++    *(uint32_t*)(rdram + recomp_mem_addr((gpr)(reg) + (offset) + 4)) = (uint32_t)((gpr)(val) >> 0); \
++    *(uint32_t*)(rdram + recomp_mem_addr((gpr)(reg) + (offset) + 0)) = (uint32_t)((gpr)(val) >> 32); \
+ }
+ 
+ static inline uint64_t load_doubleword(uint8_t* rdram, gpr reg, gpr offset) {
+@@ -424,6 +458,8 @@ typedef struct {
      uint32_t* f_odd;
      uint32_t status_reg;
      uint8_t mips3_float_mode;
@@ -170,7 +236,7 @@ index 73f3e73..13ea02b 100644
  } recomp_context;
  
  // Checks if the target is an even float register or that mips3 float mode is enabled
-@@ -436,6 +438,11 @@ extern "C" {
+@@ -436,6 +472,11 @@ extern "C" {
  
  void cop0_status_write(recomp_context* ctx, gpr value);
  gpr cop0_status_read(recomp_context* ctx);
@@ -182,6 +248,45 @@ index 73f3e73..13ea02b 100644
  void switch_error(const char* func, uint32_t vram, uint32_t jtbl);
  void do_break(uint32_t vram);
  
+@@ -466,8 +507,38 @@ extern int32_t* section_addresses;
+ 
+ void recomp_syscall_handler(uint8_t* rdram, recomp_context* ctx, int32_t instruction_vram);
+ 
++// Debug: record the recompiled function a game thread is currently executing
++// (emitted at every recompiled function entry; read by the VI thread's
++// deadlock snapshot), and maintain the per-thread shadow call chain used by
++// debug_dump_call_chain. No-op on the native JIT path.
++//   recomp_trace_entry:  called from the prologue; `ra` is ctx->r31 (the
++//                        address in the caller this frame will return to).
++//   recomp_trace_return: called just before every return; pops this frame.
++void recomp_trace_entry(uint8_t *rdram, uint32_t func_vram, const char* func_name, uint32_t ra);
++void recomp_trace_return(uint8_t *rdram, size_t func_index);
++
+ void pause_self(uint8_t *rdram);
+ 
++void yield_self(uint8_t *rdram);
++
++// Session-18: serialize the game's heap allocator family (func_80070F30 /
++// func_800710DC / func_80071A3C / func_80071E74 / func_80071950 /
++// func_800719E8, plus the outer list-touching funcs func_800712C4 /
++// func_80071644 / func_80071C04 / func_80070C60 / func_80070D20 /
++// func_80071A74 / func_80071B9C). The game assumes cooperative threads (N64:
++// a call-free free-list walk is atomic), but the runtime runs game threads on
++// preemptive host threads, so a concurrent malloc/free can tear an in-flight
++// walk and livelock it with no pageerror. Recursive: the family nests
++// (malloc calls search/unlink/insert; insert recurses). Holders never block
++// (no syscalls inside the set), so no sleep-while-holding deadlock.
++void ogre_heap_lock(void);
++void ogre_heap_unlock(void);
++// RAII-for-C guard for the above (cleanup attribute; clang/GCC C mode).
++static inline void ogre_heap_guard_release(int *slot) {
++    (void)slot;
++    ogre_heap_unlock();
++}
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/include/recompiler/generator.h b/include/recompiler/generator.h
 index 145bcd0..69a2ff2 100644
 --- a/include/recompiler/generator.h

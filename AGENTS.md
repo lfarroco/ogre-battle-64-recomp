@@ -198,15 +198,29 @@ from here.
   scene `D_8018F1C2`, 16 script opcodes per visit. The attract loop is a
   different flow (`title ↔ story 0x0B / unit-info 0x0C`) and never enters
   `0x02`/`0x0D`.
-- **Known open walls** (as of session 43): command-mode step 2 — the New Game
+- **Known open walls** (as of session 44): command-mode step 2 — the New Game
   movie is step 1 and **already renders** (sepia courtyard cutscene, "I promise
   I'll make you proud."), and the scene after it is the cathedral dialogue
   `Archbishop Odiron` / "He who has learned the way of the sword and god's
-  teachings," = step 2, which dies in `func_ovlC_8022D1CC` path B
-  (`D_8018FC39 == 2` → `jal 0x802399AC` with `s0 = 0` and an unprimed frame);
-  the movie-engine branch (`F1C0 == 0`, gated by the word `0x80197794` — *not*
-  `0x8019F794`, see session 43) which no New Game step selects; menu `0x18`
-  natural entry; scene `0x12` = Load Game (needs save pre-state). Scene `0x17` =
-  the Tutorial and runs (bank unit B, records 17/18). Dialogue text is
-  LZ-compressed (`func_8007A110`, `tools/ogrelz.py`). Current status and
-  details: the newest `docs/HANDOFF-*.md` and `PLAN.md`.
+  teachings," = step 2. Steps 1..19 are now decoded
+  (`docs/HANDOFF-2026-09-15-session44.md` §1) and **every step ≥ 2 sets
+  `D_8018FC39 = 2`**, so `func_ovlC_8022D1CC`'s `jal 0x802399AC` is normal code:
+  it calls the **tail of the function whose prologue is `0x80239874`**, whose
+  last call `func_800988A0(a0=sp+0x190, a1=*(sp+0x1EC))` writes through the
+  `a2` slot that prologue would have filled, and the descriptor interpreter
+  (`func_ovlC_802282D8`, first opcode `0x80000006`) calls the display-list
+  emitter fragment `func_ovlC_8023C894` with `a3 = 0`. Both stores target guest
+  `0`/`8`, and every value feeding them is produced by *game* code (traced), so
+  retail hits them too and must tolerate them: the R4300i's KUSEG is TLB-mapped
+  and the boot ROM maps low RDRAM into it. **Fixed in
+  `recomp_mem_addr`** (`tools/N64ModernRuntime/N64Recomp/include/recomp.h`,
+  recorded in `n64modernruntime-n64recomp.patch`): `a < 0x80000000` →
+  `a & 0x003FFFFF`. Step 2's enter now completes (null build runs the scene with
+  no crash). The next wall is RT64-only: `do_sendP + 0xC4`, guest `0xFE6E2C89`.
+  Also open: the movie-engine branch (`F1C0 == 0`, gated by the word
+  `0x80197794` — *not* `0x8019F794`, see session 43) which no New Game step
+  selects; menu `0x18` natural entry; scene `0x12` = Load Game (needs save
+  pre-state). Scene `0x17` = the Tutorial and runs (bank unit B, records 17/18).
+  Dialogue text is LZ-compressed (`func_8007A110`,
+  `tools/ogrelz.py --asset`). Current status and details: the newest
+  `docs/HANDOFF-*.md` and `PLAN.md`.

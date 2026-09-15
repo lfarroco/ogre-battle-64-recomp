@@ -114,7 +114,49 @@ def scan(src: bytes, start: int, end: int, min_size: int = 0x40, max_size: int =
     return hits
 
 
+def asset_rom(asset_id: int) -> int:
+    """ROM offset of an asset's 4-byte size header.
+
+    `func_8009DAF4` computes exactly this (`(id & 0x0FFFFFFF) + 0x594250`, from
+    `lui v0,0x59` / `addiu v0,v0,0x4250` at `0x8009DB50`), reads the word there
+    and returns it. That word is the asset's *payload* size: the loader
+    (`func_8009DBB8`) copies `size` bytes starting at `rom + 4` into a buffer,
+    and the LZ block (`func_8007A7E0` size, `func_8007A110` decode) therefore
+    starts at **rom + 4**, not at rom. Session 44 measured this; starting the
+    decoder at rom decodes nothing (every block begins 00 00 xx xx).
+    """
+    return (asset_id & 0x0FFFFFFF) + 0x594250
+
+
+def decompress_asset(src: bytes, asset_id: int):
+    """Decompress one game asset by id -> (bytes, payload_size, lz_size)."""
+    rom = asset_rom(asset_id)
+    payload_size = int.from_bytes(src[rom:rom + 4], "big")
+    out, _ = decompress(src, rom + 4)
+    return out, payload_size, rom
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--asset":
+        rom = sys.argv[2]
+        src = open(rom, "rb").read()
+        for arg in sys.argv[3:]:
+            asset_id = int(arg, 16)
+            rom_off = asset_rom(asset_id)
+            try:
+                out, payload, _ = decompress_asset(src, asset_id)
+            except Exception as exc:
+                print("asset 0x%08X rom 0x%06X: %s" % (asset_id, rom_off, exc))
+                continue
+            print("=== asset 0x%08X rom 0x%06X payload 0x%X -> 0x%X bytes ==="
+                  % (asset_id, rom_off, payload, len(out)))
+            for m in TEXT_RE.finditer(out):
+                print("   %s" % m.group().decode("ascii", "replace"))
+            if not TEXT_RE.search(out):
+                line = " ".join("%02X" % b for b in out[:32])
+                print("   (no text; first 32 bytes: %s)" % line)
+        return 0
+
     rom, start = sys.argv[1], int(sys.argv[2], 16)
     size = int(sys.argv[3], 16) if len(sys.argv) > 3 else 0x20000
     src = open(rom, "rb").read()

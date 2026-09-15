@@ -4,6 +4,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__APPLE__)
+#define _XOPEN_SOURCE 700
+#include <ucontext.h>
+#include <dlfcn.h>
+#endif
 
 #include "recomp.h"
 #include "librecomp/overlays.hpp"
@@ -19,8 +24,26 @@ namespace {
 // compile-time-bound function still running) dies with a raw SIGSEGV, where the
 // recompiled call stack is lost because the build omits frame pointers. The
 // runtime keeps a shadow per-thread call chain, so print it here.
-void on_fatal_signal(int sig, siginfo_t* info, void* /*uctx*/) {
+void on_fatal_signal(int sig, siginfo_t* info, void* uctx) {
     uint8_t* rdram = ultramodern::get_rdram_base();
+#if defined(__APPLE__) && defined(__x86_64__)
+    if (uctx != nullptr) {
+        const ucontext_t* uc = (const ucontext_t*)uctx;
+        fprintf(stderr, "[crash] host rip=%p rsp=%p rbp=%p\n",
+                (void*)uc->uc_mcontext->__ss.__rip,
+                (void*)uc->uc_mcontext->__ss.__rsp,
+                (void*)uc->uc_mcontext->__ss.__rbp);
+        Dl_info dli{};
+        if (dladdr((void*)uc->uc_mcontext->__ss.__rip, &dli) != 0 && dli.dli_fbase != nullptr) {
+            fprintf(stderr, "[crash] host pc %s + 0x%llX\n",
+                    dli.dli_sname ? dli.dli_sname : "?",
+                    (unsigned long long)((uintptr_t)uc->uc_mcontext->__ss.__rip -
+                                         (uintptr_t)dli.dli_saddr));
+        }
+    }
+#else
+    (void)uctx;
+#endif
     PTR(OSThread) self = (rdram != nullptr) ? ultramodern::this_thread() : (PTR(OSThread))0;
     const int tid = (self != 0) ? TO_PTR(OSThread, self)->id : -1;
     const void* fault = (info != nullptr) ? info->si_addr : nullptr;
