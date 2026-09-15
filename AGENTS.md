@@ -83,13 +83,17 @@ wrong half of a function. Check these before blaming game logic:
 - **Size overrides** in `config.toml`/`config-bank*.yaml`: an override that runs
   past the next function's start makes the recompiler redirect every `jal` into
   it (session 41: `func_801AFC2C` `0x4A8` → `0x4A4`).
-- **Fall-through / merged tails**: `func_ovlC_802399AC` has no prologue — it is
-  the continuation of `func_ovlC_80239874`. A `jal` into it is real code with a
-  frame contract (`sp+0x1EC`, `s0`, the `f` regs) that the caller may not satisfy.
-  **Run `make midfunc` first**: it lists every such tail (67 today) with the
-  frame slots and registers the tail reads before writing, and the `jal` sites
-  that reach it. Session 44 lost hours to two of them that this report names in
-  seconds.
+- **Fall-through / merged tails**: `func_ovlC_802399AC` has no prologue — in
+  `bankRec14b` it is the continuation of `func_ovlC_80239874`, and a `jal` into
+  it runs a body with a frame contract (`sp+0x1EC`, `s0`, the `f` regs) the
+  caller does not satisfy. **Run `make midfunc` first**: it lists every such tail
+  (67 today) with the frame slots and registers the tail reads before writing,
+  and the `jal` sites that reach it.
+  *But check which bank is resident first* (session 45): in `bankRec14c` — the
+  module scene `0x0D` actually streams to that RAM for steps ≥ 2 —
+  `0x802399AC` and `0x80239C24` are ordinary function entries. A prologue-less
+  `jal` target in one bank is a hint that the call belongs to another bank, not
+  proof that the game calls a shared tail.
 - **Cross-bank fixed-address calls**: records overlap in RAM by design
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   *different* resident bank. `python3 tools/cross_bank.py report` lists sites;
@@ -189,7 +193,10 @@ from here.
   retail clearly does not" should send you to the **address map** (`recomp_mem_addr`:
   KSEG0, KSSEG/KSEG3 and the KUSEG low window) and to the **runtime bridges**
   (they translate guest pointers themselves and must agree with the macros)
-  before you suspect a game-logic bug. Session 44's step-2 wall was exactly this.
+  before you suspect a game-logic bug. (Session 45: the "retail must tolerate
+  the guest-`0` stores" conclusion of session 44 was *not* this — those stores
+  came from a call bound to the wrong bank. Check the bank map before concluding
+  a zero is retail behaviour.)
 - **Vocabulary and intent live in two docs**: `docs/symbols.md` (address →
   proposed name → evidence → confidence; read it before naming anything, and
   before calling a function "the X function") and `docs/scenes.md` (what each
@@ -215,33 +222,34 @@ from here.
   scene `D_8018F1C2`, 16 script opcodes per visit. The attract loop is a
   different flow (`title ↔ story 0x0B / unit-info 0x0C`) and never enters
   `0x02`/`0x0D`.
-- **Known open walls** (as of session 44): command-mode step 2 — the New Game
-  movie is step 1 and **already renders** (sepia courtyard cutscene, "I promise
-  I'll make you proud."), and the scene after it is the cathedral dialogue
-  `Archbishop Odiron` / "He who has learned the way of the sword and god's
-  teachings," = step 2. Steps 1..19 are now decoded
-  (`docs/HANDOFF-2026-09-15-session44.md` §1) and **every step ≥ 2 sets
-  `D_8018FC39 = 2`**, so `func_ovlC_8022D1CC`'s `jal 0x802399AC` is normal code:
-  it calls the **tail of the function whose prologue is `0x80239874`**, whose
-  last call `func_800988A0(a0=sp+0x190, a1=*(sp+0x1EC))` writes through the
-  `a2` slot that prologue would have filled, and the descriptor interpreter
-  (`func_ovlC_802282D8`, first opcode `0x80000006`) calls the display-list
-  emitter fragment `func_ovlC_8023C894` with `a3 = 0`. Both stores target guest
-  `0`/`8`, and every value feeding them is produced by *game* code (traced), so
-  retail hits them too and must tolerate them: the R4300i's KUSEG is TLB-mapped
-  and the boot ROM maps low RDRAM into it. **Fixed in
-  `recomp_mem_addr`** (`tools/N64ModernRuntime/N64Recomp/include/recomp.h`,
-  recorded in `n64modernruntime-n64recomp.patch`): `a < 0x80000000` →
-  `a & 0x003FFFFF`. Step 2's enter now completes (null build runs the scene with
-  no crash). The next wall is RT64-only: `do_send` SIGBUS, guest `0xFE6E2C89` — the
-  guest's PI state (`D_800AA400`/`D_800AA408`, never initialized because
-  `osCreatePiManager` is stubbed since session 6) holds garbage at the step-2
-  enter and `func_800998C0` feeds it to `osSendMesg` from the asset-load chain;
-  the null build does not hit it. Suspect a ROM DMA landing in the wrong place.
-  Also open: the movie-engine branch (`F1C0 == 0`, gated by the word
+- **Known open walls** (as of session 45): the New Game opening runs. Step 1
+  (the movie, sepia courtyard) renders, and **step 2 renders the cathedral
+  dialogue** (`Archbishop Odiron` / "He who has learned the way of the sword and
+  god's teachings,") on both renderers — `docs/proofs/native-newgame-cathedral.png`
+  — then waits for input. The wall that looked like step 2 was a **missing
+  streamed module**: scene `0x0D` streams `bankRec14c` (ROM `0x2A8CF0`, 0x56A0)
+  over `bankRec14b` at RAM `0x802395E0` for steps ≥ 2, and the port had only
+  rec14b, so unit C's 95 calls into that arena ran rec14b's prologue-less body
+  interiors (session 45; records now in units F/G, calls compile as
+  `LOOKUP_FUNC`). Steps 1..19 are decoded
+  (`docs/HANDOFF-2026-09-15-session44.md` §1); **every step ≥ 2 sets
+  `D_8018FC39 = 2`**. Session 44's reads of the same wall (`jal 0x802399AC` as a
+  "shared tail", the guest-`0`/`8` stores, the KUSEG mirror fix in
+  `recomp_mem_addr`) were symptoms of that mis-binding and are corrected — the
+  low-window stores no longer happen, so the mirror is unexercised and should be
+  A/B'd. Also open: the movie-engine branch (`F1C0 == 0`, gated by the word
   `0x80197794` — *not* `0x8019F794`, see session 43) which no New Game step
   selects; menu `0x18` natural entry; scene `0x12` = Load Game (needs save
-  pre-state). Scene `0x17` = the Tutorial and runs (bank unit B, records 17/18).
-  Dialogue text is LZ-compressed (`func_8007A110`,
-  `tools/ogrelz.py --asset`). Current status and details: the newest
-  `docs/HANDOFF-*.md` and `PLAN.md`.
+  pre-state); `OGRE_NO_AUDIO=1` early-boot crash; `osViFade`. Scene `0x17` = the
+  Tutorial and runs (bank unit B, records 17/18). Dialogue text is
+  LZ-compressed (`func_8007A110`, `tools/ogrelz.py --asset`). Current status and
+  details: the newest `docs/HANDOFF-*.md` and `PLAN.md`.
+- **A swappable RAM range must not be compiled into the unit whose code calls
+  into it.** If two records occupy the same RAM (banks of one arena), put
+  *both* in other units: then N64Recomp emits `LOOKUP_FUNC(addr)` for the call
+  sites and the runtime's DMA-driven bank map picks the resident module. If a
+  caller's unit also defines the range, the call is bound at build time to one
+  bank's bodies — and the other bank's callers run them with the wrong frame and
+  register contract (session 45's step-2 wall). Find unknown modules by logging
+  every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
+  record table.

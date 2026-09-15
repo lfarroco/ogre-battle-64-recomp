@@ -42,7 +42,7 @@ step table).
 | # | what the player sees | source | status |
 |---|---|---|---|
 | 1 | **the intro movie**: a multi-shot sepia cutscene in a castle courtyard, ending on the subtitle *"I promise I'll make you proud."* (~28.7 s) | dev (session 43), proof (`native-newgame-cutscene.png`, `native-newgame-cutscene-2.png`) | renders |
-| 2 | **cathedral**: the player's character walks to Archbishop Odiron; a few dialogue lines | dev (session 44) | crashes before drawing (RT64); the null build now enters and runs the step |
+| 2 | **cathedral**: a narrative card (`Ischka Military Academy / Graduation Ceremony`), then the player's character walks to Archbishop Odiron; a few dialogue lines | dev (session 44), proof (`native-newgame-academy-card.png`, `native-newgame-cathedral.png`) | renders (session 45): null and RT64 both draw the card and then the dialogue box (`Archbishop Odiron` / *"He who has learned the way of the sword and god's teachings,"*) with the advance quill, and wait for input |
 | 3 | Odiron asks the player's **name** → character-table entry form: a box with the typed name (`Magnus` in the capture) and a grid `A–Z` / `a–z` with `INS / BS / DEL / END` and a scrollbar | dev (session 44, screenshot) | unknown |
 | 4 | Odiron asks the **date of birth** → form: `BIRTHDAY` banner, `Jul. 25`, and a second row `Trueno 12` | dev (session 44, screenshot) | unknown |
 | 5 | **personality questions**: `"What dost thou hold within thy sword?"` with the choices `ardor / passion / vigor / talent / belief / hatred` over a live scene (characters in a hall); the answers decide the player's initial units and items | dev (session 44, screenshot) | unknown |
@@ -51,6 +51,13 @@ step table).
 The step table's commands suggest (unverified) that steps 2 and 9 (`-3`) are the
 dialogue parts, the `-10` steps (3–8, 14–16) the forms, and the single `-4`
 step 10 the closing movie. Confirm against the captures when those steps run.
+
+Session 45 got as far as step 2 (which renders and then waits: its dialogue is
+advanced with the button the quill prompts). Steps 3+ are still unvisited. The
+tap schedule that reaches the sequence without skipping the movie is
+`OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D`; a schedule that keeps
+pressing buttons inside `0x0D` advances the dialogue and the step
+(the "Ischka" card capture came from such a run).
 
 ## Tutorial (title menu → Tutorial)
 
@@ -67,7 +74,8 @@ is the one to look at when those steps are reached.
 * Scene `0x12` = Load Game (needs a save): what should it show with no save —
   hidden, greyed out, or an error? (Currently unreachable without a save.)
 * The `0x18` menu: which menu is it, and what should it list?
-* Does the opening skip the movie when Start is pressed during it? The port
-  appears to (a held Start at New Game confirmation ends visit 1 in ~1.5 s
-  instead of 28.7 s), and that is useful for iteration — but it may be a
-  side effect of one long press rather than a real "skip" feature.
+* Does the opening skip the movie when Start is pressed during it? Confirmed in
+  session 45: with taps gated to `OGRE_TAP_NOT_SCENE=new-game,0x0D` (no input
+  inside `0x0D`) visit 1 runs its full ~28.4 s; with taps that keep firing inside
+  `0x0D` it ends in ~1.4 s. So a Start press *does* skip the movie. Is that the
+  retail behaviour ("skip cutscene") and is it only Start, or any button?

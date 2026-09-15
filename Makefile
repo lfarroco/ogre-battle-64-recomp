@@ -148,7 +148,7 @@ cross-bank-dispatch:
 #   make bank        -> build/bank<U>.elf
 #   make bank-recomp -> Bank<U>Funcs/ + app/src/bank_funcs.inc
 # ---------------------------------------------------------------------------
-BANK_UNITS := A B C D E
+BANK_UNITS := A B C D E F G
 BANK_ELFS  := $(addprefix build/bank,$(addsuffix .elf,$(BANK_UNITS)))
 BANK_LDS   := $(addprefix build/bank,$(addsuffix .ld,$(BANK_UNITS)))
 
@@ -166,15 +166,17 @@ build/bank%.ld: config-bank%.yaml
 # touching the `.ld`.
 build/bank%.elf: config-bank%.yaml | build/bank%.ld
 	@for f in build/bank$*/asm/*.s build/bank$*/asm/data/*.s; do \
+	    [ -f "$$f" ] || continue; \
 	    $(AS) $(ASFLAGS) -o $${f%.s}.o $$f || exit 1; \
 	done
 	@for f in build/bank$*/assets/*.bin; do \
+	    [ -f "$$f" ] || continue; \
 	    $(OBJCOPY) -I binary -O elf32-tradbigmips -B mips:3000 $$f $${f%.bin}.o || exit 1; \
 	done
 	@python3 tools/gen_bank_syms.py $*
 	$(LD) --emit-relocs -T build/bank$*.ld -T build/bank$*/undefined_syms_auto.txt \
 		-T build/bank$*/undefined_funcs_auto.txt -T build/bank$*/extra_syms.txt -o $@ \
-		build/bank$*/asm/*.o build/bank$*/asm/data/*.o build/bank$*/assets/*.o
+		$$(ls build/bank$*/asm/*.o build/bank$*/asm/data/*.o build/bank$*/assets/*.o 2>/dev/null)
 	@echo "==> linked $@"
 
 # --- session bookkeeping helpers ---------------------------------------------

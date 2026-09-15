@@ -42,6 +42,8 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x800E810E` | `g_active_scene_id` | what the dispatcher is running; the app's `[scene]` log and `OGRE_TAP_SCENE` read it | high |
 | `0x800E8294` | `g_scene_descriptor` | scene manager stores the accessor's return here; words are enter/update/hook/leave/mask | high |
 | `0x8022A9A4/8/AC` | `g_render_matrix_*` | written by the `0x80239874` render tail and consumed by its callers | medium |
+| `0x802395E0` | `g_rec14_arena` (RAM range `0x802395E0..0x80243DC0`) | record 14's arena: the game streams **two banks** here, `bankRec14b` (ROM `0x2AE390`, 0xA7E0 — scene `0x0D` visit 1 / the movie) and `bankRec14c` (ROM `0x2A8CF0`, 0x56A0 — steps ≥ 2); unit F / unit G, and the reason the arena's call sites must be `LOOKUP_FUNC` | high |
+| `0x80239C24` | `func_ovlG_80239C24` (rec14c) | descriptor-interpreter opcode 42 calls it (`jal` at `0x80229004`) with `(6, 0x20, 0x20)`; a real function in rec14c (`addiu sp,sp,-0x60`), a body interior of `func_ovlC_80239874` in rec14b — session 45's wall | high |
 
 ## Functions worth naming
 

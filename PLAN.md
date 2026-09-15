@@ -566,6 +566,30 @@ hardware. RT64 remains the primary native renderer throughout. See
     the wrong place (`func_8008BC40_recomp`).
     `tools/ogrelz.py` gained `--asset` and the corrected block-start rule.
     See `docs/HANDOFF-2026-09-15-session44.md`.
+  - ✅ **Step 2 renders: the wall was a missing streamed module, not the PI
+    manager (session 45)**: the game streams a **second** record-14 arena module
+    (`bankRec14c`, ROM `0x2A8CF0` size `0x56A0`) to RAM `0x802395E0` — the RAM
+    `bankRec14b` already occupies — for scene `0x0D` steps ≥ 2. The port had only
+    rec14b, so N64Recomp bound unit C's 95 calls from records 14/14a into the
+    arena as direct calls to rec14b's **body interiors** (`0x80239C24` is a
+    mid-body point of rec14b's `func_ovlC_80239874`, no prologue; rec14c has a
+    real `addiu sp,sp,-0x60` function there). The step-descriptor interpreter's
+    opcode-42 `jal 0x80239C24` therefore ran a prologue-less body with its own
+    0x78-byte frame: `sp` leaked `+0x238`, `s3`/`s6` became 0, the interpreter
+    walked **guest 0** as its descriptor, read an out-of-bounds table word at
+    `base+0x40000` (null build: 0 → harmless; RT64: `0x00010001` → a ~2.5 GB ROM
+    DMA that overwrote `D_800AA400`/`D_800AA408` → the session-44 `do_send`
+    SIGBUS). **Fix:** rec14b moved out of unit C into **unit F**, rec14c compiled
+    as **unit G** (new splat/N64Recomp configs), so unit C's arena calls compile
+    as `LOOKUP_FUNC` and the runtime's DMA-driven bank switch picks the resident
+    module. Result: the movie visit runs 28.4 s, step 2 renders the **cathedral
+    dialogue with Archbishop Odiron** on both renderers
+    (`docs/proofs/native-newgame-cathedral.png`), exit 0, 0 stub calls.
+    **Correction:** session 44's KUSEG mirror fixed a *symptom* of this
+    mis-binding — with the calls dispatched the low-window stores no longer
+    happen (RDRAM `0x0..0x40` is zero after the run); the mirror is now
+    unexercised on this path and should be A/B'd next session.
+    See `docs/HANDOFF-2026-09-15-session45.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

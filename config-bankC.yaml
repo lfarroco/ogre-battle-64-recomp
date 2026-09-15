@@ -183,15 +183,23 @@ segments:
 
   # Record 14's *arena continuation* for scene 0x0D (mask 0x40007C14): the
   # segment table entry 14 only describes the resident part (ROM ..0x286BA0 ->
-  # RAM ..0x8022AC20, bss ..0x8022ACB0); the game streams two more code modules
+  # RAM ..0x8022AC20, bss ..0x8022ACB0); the game streams more code modules
   # above it, observed as contiguous 0x200-byte DMA runs in scene 0x0D:
   #
-  #   ROM 0x29A490 (0x0E860) -> RAM 0x8022ACB0
-  #   ROM 0x2AE390 (0x0A7E0) -> RAM 0x802395E0
+  #   ROM 0x29A490 (0x0E860) -> RAM 0x8022ACB0   (this unit, bankRec14a)
+  #   ROM 0x2AE390 (0x0A7E0) -> RAM 0x802395E0   (unit F, bankRec14b)
+  #   ROM 0x2A8CF0 (0x056A0) -> RAM 0x802395E0   (unit G, bankRec14c)
   #
   # (Same shape as record 10's bankRec10a/b above.) The four per-frame stub
-  # calls that lobotomized scene 0x0D all land in these two modules
+  # calls that lobotomized scene 0x0D all land in these three modules
   # (0x8022D1CC, 0x80230E70, 0x80237640, 0x8023A1D8).
+  #
+  # The two modules that share RAM 0x802395E0 are *banks* of one arena, so they
+  # live in units F and G, not here: a unit cannot hold overlapping records, and
+  # while bankRec14b was part of this unit N64Recomp bound this unit's 95 calls
+  # into the arena as direct calls to rec14b's bodies — which are a different
+  # layout from rec14c's (bodies, not entries) and run without a prologue. See
+  # config-bankF.yaml.
   - type: bin
     start: 0x286BA0
     vram: 0x286BA0
@@ -203,16 +211,11 @@ segments:
     subsegments:
       - [0x29A490, asm]
 
-  # Gap between the two arena modules' ROM.
+  # Gap: bankRec14c (ROM 0x2A8CF0, unit G) and bankRec14b (ROM 0x2AE390,
+  # unit F) are streamed here.
   - type: bin
     start: 0x2A82F0
     vram: 0x2A82F0
 
-  - name: bankRec14b
-    type: code
-    start: 0x2AE390
-    vram: 0x802395E0
-    subsegments:
-      - [0x2AE390, asm]
-
   - [0x2B8B70]
+

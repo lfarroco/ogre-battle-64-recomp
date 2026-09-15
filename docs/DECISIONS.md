@@ -13,7 +13,8 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
-| 2026-09-15 (44) | Mirror the N64's low-window (KUSEG) RDRAM alias in `recomp_mem_addr` (`a < 0x80000000` → `a & 0x003FFFFF`); keep it narrow (4 MiB) | entry below; `docs/HANDOFF-2026-09-15-session44.md` §3 |
+| 2026-09-15 (45) | A shared RAM range can hold **several records**: compile each one (units F/G) and keep them **out of the unit whose code calls into it**, so N64Recomp emits `LOOKUP_FUNC` and the game's DMA selects the resident module | entry below; `docs/HANDOFF-2026-09-15-session45.md` §2 |
+| 2026-09-15 (44) | Mirror the N64's low-window (KUSEG) RDRAM alias in `recomp_mem_addr` (`a < 0x80000000` → `a & 0x003FFFFF`); keep it narrow (4 MiB) — **justification weakened by session 45** (it masked a mis-binding); A/B it | entry below (see its session-45 banner) |
 | 2026-09-15 (44b) | Record hygiene: `DECISIONS.md` keeps a **durable-decisions table** at the top and a `> Superseded by …` banner on disproved entries; findings go in handoffs | `DECISIONS.md` top |
 | 2026-09-15 (44b) | Watch tools: `tools/midfunc.py` (`make midfunc`) for shared tails, `tools/rdram.py` for dump reads, `make handoffs`; synthetic taps can be scoped to a scene (`OGRE_TAP_SCENE` / `OGRE_TAP_NOT_SCENE`) | `docs/HANDOFF-2026-09-15-session44.md` addendum |
 | 2026-09-15 (43) | Records 17/18 live in **bank unit B** (they overlap every other unit's RAM); the movie-path word is **`0x80197794`**, not `0x8019F794` | entry below; handoff s43 |
@@ -29,6 +30,63 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-15 (session 45) — a shared RAM range can hold several records: compile every bank, and keep them out of the caller's unit
+
+### Finding: the step-2 wall was a missing streamed module (rec14c)
+
+Scene `0x0D` streams **two different modules** into record 14's arena at RAM
+`0x802395E0`: `bankRec14b` (ROM `0x2AE390`, first visit — the movie) and
+`bankRec14c` (ROM `0x2A8CF0` size `0x56A0`, steps ≥ 2). The port had only
+rec14b (session 37, unit C), so N64Recomp bound unit C's **95 calls** from
+records 14/14a into `0x802395E0+` as direct C calls to rec14b's bodies. The two
+modules have different layouts at those addresses: `0x80239C24` is a body
+interior of rec14b's `func_ovlC_80239874` (no prologue, restores `s0`-`s8` from
+the caller's frame, `sp += 0x238`) but a real function in rec14c
+(`addiu sp,sp,-0x60`). The step-descriptor interpreter's opcode-42 handler
+(`jal 0x80239C24` at `0x80229004`) ran rec14b's interior with the interpreter's
+0x78-byte frame, leaking `+0x238` of stack and clobbering `s3`/`s6` to 0; the
+interpreter then walked **guest address 0** as its descriptor, read an
+out-of-bounds word at `malloc_base + 0x40000` (null build 0; RT64 build
+`0x00010001`), and the RT64 build entered a ~2.5 GB ROM DMA that overwrote the
+PI globals (`D_800AA400`/`D_800AA408`) and produced session 44's `do_send`
+SIGBUS. Evidence: an lldb watchpoint on `rdram + 0xAA400` (the writer is
+`do_rom_read` in the runtime's PI lambda), the `func_80089F80` DMA log (the two
+builds are identical for 668 transfers), interpreter-frame probes, and the live
+RDRAM at `0x80239C24` matching ROM `0x2A9334` (rec14c) rather than rec14b's
+`0x2AE9D4`.
+
+### Decision: units F and G, and the "keep the bank out of the caller's unit" rule
+
+* `bankRec14b` moves out of unit C into **unit F**; `bankRec14c` is compiled as
+  **unit G**. Two records that occupy the same RAM cannot share an ELF, and
+  keeping **both** out of unit C is what makes unit C's arena calls compile as
+  `LOOKUP_FUNC(0xADDR)` — N64Recomp only emits a lookup when the target is not
+  defined in the unit's ELF.
+* The runtime needs no change: `load_function_bank` already calls
+  `unload_overlapping_overlays`, so the game's DMA of rec14c drops rec14b's
+  entries and `get_function` resolves to whichever bank is resident.
+* The general rule this session adds to the bank model (session 33): a
+  **swappable** RAM range must not be defined in the ELF of the code that calls
+  into it. Otherwise the call is bound at build time to one bank's layout, and
+  the other bank's callers run bodies with the wrong register/frame contract.
+* `Makefile`: `BANK_UNITS := A B C D E F G`, and the bank-ELF rule now tolerates
+  a unit with no `asm/data` or `assets` objects (the unmatched glob was passed
+  to `as`/`ld` literally and aborted the build).
+
+Superseded in part: session 44's read of the same crash (see the banner on that
+entry). Full evidence: `docs/HANDOFF-2026-09-15-session45.md`.
+
+### Decision: an unknown-module check is now part of the bring-up loop
+
+The module was found by logging every PI DMA destination in a run and diffing
+against `app/src/bank_funcs.inc`'s record table
+(`grep -o "dev=0x… dram=0x… size=0x…" | sort -u`). That is cheap and should be
+repeated for each new scene: a module-shaped DMA whose ROM range is not a record
+means a bank the port has not compiled, and the port will silently run a stale
+bank's bodies there.
 
 ---
 
@@ -75,6 +133,8 @@ before writing. It names all 67 today, including both of this session's
 to run it first.
 
 ## 2026-09-15 (session 44) — step 2's crash is a shared-tail call, the step table is decoded, and an asset's LZ block starts at `rom+4`
+
+> **Superseded in part by session 45.** The two low-address stores (guest `0`/`8`) were **not** the game's own zeros: they came from `jal`s into `bankRec14b`'s body interiors while the *other* bank of that arena (`bankRec14c`, ROM `0x2A8CF0`) was resident. With rec14c compiled and the calls dispatched (units F/G), the interpreter's frame stays intact, the stores do not happen, and RDRAM `0x0..0x40` is zero after a New Game run. The KUSEG mirror below therefore fixed a *symptom*; it is left in place but its justification is weak and it should be A/B'd. The step table, the `rom+4` LZ rule, and the command-handler decode all stand. See `docs/HANDOFF-2026-09-15-session45.md`.
 
 ### Finding: the New Game step table, decoded from the ROM
 

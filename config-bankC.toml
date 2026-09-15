@@ -1,5 +1,8 @@
 # N64Recomp config for streamed-overlay bank unit C (Phase 4).
-# See config-bankA.toml for the model; this unit holds records 10, 11, 12, 13.
+# See config-bankA.toml for the model; this unit holds records 10, 11, 12, 13,
+# record 4, record 14 and record 14's first arena module (bankRec14a). The two
+# arena modules that *share* RAM 0x802395E0 are units F (bankRec14b) and G
+# (bankRec14c) — see config-bankF.yaml.
 
 [input]
 output_func_path = "BankCFuncs"
@@ -9,35 +12,25 @@ use_absolute_symbols = true
 uses_mips3_float_mode = true
 bss_section_suffix = ".bss"
 functions_per_output_file = 100
-# splat carves bankRec14b's flow into pieces that N64Recomp cannot compile
-# alone: each piece below is capped (nonmatching size) in the middle of a
-# call-and-continue emission, so the `goto after_N` has no label and the build
-# fails with "use of undeclared label". The remedy is the same as config.toml's
-# function_sizes: extend each piece to the next real function entry (a stack
-# prologue). N64Recomp redirects calls to swallowed symbols into the extended
-# body (see resolve_jal/has_size_override), so no map entry is lost; the
-# swallowed pieces still compile separately as unreachable duplicates.
+# function_sizes extends a piece splat capped (nonmatching size) in the middle
+# of a call-and-continue emission — the `goto after_N` then has no label and the
+# build fails with "use of undeclared label". N64Recomp redirects calls to
+# swallowed symbols into the extended body (resolve_jal/has_size_override), so
+# no map entry is lost.
 # func_ovlC_8022EA08's switch (jr at 0x8022EB3C via the table at 0x80239270)
 # spans case labels to 0x8022EE64, past splat's 0x24C cap: with the cap
 # N64Recomp sees zero in-function table entries and fails outright.
+#
+# func_ovlC_8023BDA8 (rec14b) must NOT be extended over func_ovlC_8023BDC8
+# (session 39): BDC8 is a genuine shared-epilogue shim with its own callers
+# (jal from 0x80229138; the 0x8023BD80 jump to its BDD0 label), and BDA8 is a
+# genuine malloc-tail head with its own jal callers. Extending BDA8 to 0x54
+# redirected both into the head: the epilogue jump re-ran
+# malloc/memcpy/800712C4 with stale s-regs (0x0D list-unlink crash, N64 0x28B0)
+# and the shim callers ran the head instead of the two-move epilogue. Split,
+# BDA8 falls through into BDC8 via tail-call and the epilogue jump compiles to
+# a static duplicate. rec14b now lives in unit F, so that record's other three
+# overrides moved to config-bankF.toml with it (session 45).
 function_sizes = [
     { name = "func_ovlC_8022EA08", size = 0x4CC },
-    # func_ovlC_8023BDA8 must NOT be extended over func_ovlC_8023BDC8
-    # (session 39): BDC8 is a genuine shared-epilogue shim with its own
-    # callers (jal from 0x80229138; the 0x8023BD80 jump to its BDD0 label),
-    # and BDA8 is a genuine malloc-tail head with its own jal callers.
-    # Extending BDA8 to 0x54 redirected both into the head: the epilogue
-    # jump re-ran malloc/memcpy/800712C4 with stale s-regs (0x0D list-unlink
-    # crash, N64 0x28B0) and the shim callers ran the head instead of the
-    # two-move epilogue. Split, BDA8 falls through into BDC8 via tail-call
-    # and the epilogue jump compiles to a static duplicate.
-    # Mid-flow piece ending in the 0x8023CA08 call; real entry at 0x8023CA1C.
-    { name = "func_ovlC_8023C9F4", size = 0x28 },
-    # Real entry (prologue) ending in the 0x8023A180 call; the 0x8023A184
-    # fragment follows, then the real entry func_ovlC_8023A1D8 (which scene 0x0D
-    # calls: it must keep its own map entry, so the extension stops there).
-    { name = "func_ovlC_80239D68", size = 0x470 },
-    # Mid-flow piece ending in the 0x8023E2DC call; fragments follow until the
-    # real entry func_ovlC_8023E520.
-    { name = "func_ovlC_8023E070", size = 0x4B0 },
 ]
