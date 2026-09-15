@@ -59,6 +59,14 @@ tap schedule that reaches the sequence without skipping the movie is
 pressing buttons inside `0x0D` advances the dialogue and the step
 (the "Ischka" card capture came from such a run).
 
+**Shortcut (session 48):** `OGRE_SCENE=new-game OGRE_STEP=<n>` boots straight to
+step `n` of this sequence without playing the ones before it — the app holds
+`D_8018F1C0` at `n` (and `D_8018F1C2` at `0x8002`) while the selected scene runs,
+so e.g. `OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1
+./build-app/ogrebattle64` reaches the cathedral ~1.4 s after boot instead of
+after the 28.7 s movie. The hold releases as soon as the dispatcher leaves the
+scene. See `docs/guides/app-build.md` (`OGRE_STEP`).
+
 ## Tutorial (title menu → Tutorial)
 
 | what | scene | source | status |

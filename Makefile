@@ -206,6 +206,10 @@ bank-force: $(BANK_ELFS)
 bank-recomp: bank
 	@for u in $(BANK_UNITS); do $(N64RECOMP) config-bank$$u.toml || exit 1; done
 	python3 tools/gen_bank_funcs.py
+	@# The njpeg stage-3 readback has to copy the buffer its own YUV draw landed
+	@# in; the game's own pointer can be left at the framebuffer table's
+	@# placeholder entry. Regenerated above, so re-apply here (session 48).
+	python3 tools/njpeg_readback.py
 	@# Assert the invariant session 45's wall broke: a unit must never define a
 	@# RAM range another bank can own *and* call into it from another record (the
 	@# call would be bound at build time to the wrong bank's layout). See

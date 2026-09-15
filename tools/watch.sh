@@ -38,6 +38,7 @@ IGNORE=0
 HITS=4
 SIZE=8
 MODE="write"
+VALUE=""
 EXE="$ROOT/build-null/ogrebattle64"
 SCRIPT="/tmp/ogre-watch.$$.lldb"
 
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --ignore) IGNORE="$2"; shift 2 ;;
         --hits) HITS="$2"; shift 2 ;;
         --size) SIZE="$2"; shift 2 ;;
+        --value) VALUE="$2"; shift 2 ;;
         --read) MODE="read"; shift ;;
         --write) MODE="write"; shift ;;
         --exe) EXE="$2"; shift 2 ;;
@@ -83,6 +85,12 @@ fi
     echo "expr unsigned char* \$rdram = (unsigned char*)ultramodern_get_rdram_base()"
     echo "p/x (unsigned long)\$rdram"
     echo "watchpoint set expression -w $MODE -s $SIZE -- (void*)((unsigned long)\$rdram + 0x$(printf '%X' "$OFFSET"))"
+    if [[ -n "$VALUE" ]]; then
+        # Conditional watchpoint: only stop when the watched range holds VALUE.
+        # lldb 17+ supports `watchpoint modify -c`; the expression reads the
+        # guest word through RDRAM so it works for any endianness the app uses.
+        echo "watchpoint modify -c '*(unsigned int*)((unsigned long)\$rdram + 0x$(printf '%X' "$OFFSET")) == $VALUE'"
+    fi
     for ((i = 0; i < HITS; i++)); do
         echo "continue"
         echo "bt 12"
@@ -91,7 +99,7 @@ fi
 } > "$SCRIPT"
 
 echo "guest 0x$(printf '%08X' "$GUEST_DEC") -> rdram + 0x$(printf '%X' "$OFFSET")"
-echo "watching $MODE size $SIZE, after $AFTER (ignore $IGNORE), $HITS hit(s)"
+echo "watching $MODE size $SIZE, after $AFTER (ignore $IGNORE), $HITS hit(s)${VALUE:+, value $VALUE}"
 echo "lldb script: $SCRIPT"
 echo
 exec lldb -b -s "$SCRIPT" "$EXE"

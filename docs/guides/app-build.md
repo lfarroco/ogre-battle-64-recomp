@@ -37,6 +37,10 @@ make recomp
 # `BANK_UNITS` in the Makefile; add a unit there when a new bank record is
 # compiled (a range can hold several records, but two records that share RAM
 # must be in different units — see config-bankF.yaml).
+# bank-recomp also re-applies the two generated-code patches that must survive
+# regeneration: `cross_bank.py check-banks` (an invariant) and
+# `tools/njpeg_readback.py` (the njpeg stage-3 copy must read the buffer its own
+# YUV draw landed in — see docs/HANDOFF-2026-09-15-session48.md).
 make bank-recomp
 
 # optional: the full cross-bank audit (bank units fail, main-unit backlog is
@@ -127,8 +131,13 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_FOG_SCALE=<percent>` | scale the fog image's intensity when it is staged for the fog group (**default 100 = the game's own asset**, which is the right level: the combiner is `RGB=ONE, ALPHA=TEXEL0`, so the overlay is white modulated by the layer image's intensity, mean 5.1% / peak 20.4%). Lower values stage a scaled copy in the last 64 KiB of RDRAM, which OB64 leaves untouched (the first use reports it if that area is not zero); `45` gives a softer, non-retail look |
 | `OGRE_FOG_SUMMARY=1` | one `[fog-summary]` line per display list (groups repaired, layer/image used) plus one `[fog-group]` line per white group (`s`, `t`, the inherited tile, layer, image installed). This is how the `©1999 QUEST` blink was traced |
 | `OGRE_NJPEG=0` | force the **stub** for the Nintendo-JPEG decoder (`M_NJPEGTASK`, type 4: the New Game step ≥ 2 background decode). On by default since session 47, when the recompiled microcode was fixed (`text_address` is a label base — see `docs/guides/rsp-microcode.md`); it costs 0–1 ms per image |
+| `OGRE_NJPEG_TRACE=1` | `[njpeg]` lines: the colour image the YUV macroblock draw landed in (the buffer the readback should copy — see `tools/njpeg_readback.py` and `docs/HANDOFF-2026-09-15-session48.md`) |
+| `OGRE_YUV_TRACE=1` | `[yuv]` one line per `G_SETTIMG` with `fmt=YUV` (the njpeg macroblock texture image): confirms the `0x800A5110` draws reach RT64 at all |
+| `OGRE_FB_WRITEBACK=1` | `[fbpair]` (which framebuffer pairs RT64 renders, with their rows) and `[fbwrite]` (the CPU-visible RDP→RDRAM writeback, with the first pixels). This is how "does a rendered framebuffer reach RDRAM for a CPU read" is answered |
+| `OGRE_RDP_TRACE=2` | instead of the first-20 `[rdp]` lines, a `[cimg]` histogram of every colour-image address plus a `[cimgseq]` ordered list of the game's framebuffer targets — the ground truth for "which buffers does the game render into" |
 | `OGRE_FOG=alternate` | apply the repair on every other display list. On screens the game redraws every list this A/Bs the fog; it cannot say *which* screen a pair is on (session 35's isolation image was the story screen), and on the static title it shows nothing because no display list changes |
 | `OGRE_SCENE=<name\|hex>` | boot straight into a screen: `title` (0x04: the attract title — logo plus the New Game / Tutorial / Stereo menu over the clouds), `intro` (0x09), `publishers` (0x0A), `story` (0x0B), `unit-info` (0x0C), `tutorial` (0x17: Deneb's "Is this your first time here?" dialogue, the title's Tutorial entry), `menu` (0x18), `new-game` (0x02), or any hex id (`OGRE_FORCE_SCENE` still works). The poke is only seen **before the boot enters its first scene (~1.1 s)**, so it runs from the streamed-DMA hook and a per-frame retry and releases once `D_800E810E` reports the target. `menu`/`new-game` still SIGSEGV (unfinished cross-bank work) |
+| `OGRE_STEP=<n>` | hold the New Game opening's **step** at `n` while the `OGRE_SCENE` scene runs — the scene-script step lives in `D_8018F1C0` and scene `0x0D` branches on it, so the movie (step 1, ~28.7 s) can be skipped. `OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 ./build-app/ogrebattle64` lands in the cathedral ~1.4 s after boot (step table: `docs/HANDOFF-2026-09-15-session44.md` §1, what each step shows: `docs/scenes.md`) |
 | `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene poke (**default 0**). A delay past ~1500 ms makes the jump a silent no-op: the running scene re-establishes the state block every frame |
 | `OGRE_SCENE_LOG=1` | log every scene change with its descriptor and record mask — how the scene ids above were identified |
 | `OGRE_SCENE_TRACE=1` | the forcing state every 500 ms (`active`, `pending(D_800E8214)`, the state block and its id, and whether the target is active) — use this when a jump "does nothing" |
@@ -327,6 +336,13 @@ OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D \
 Arms an lldb watchpoint on `rdram + (guest - 0x80000000)` after a given guest
 symbol (skip its first `--ignore` hits to pick a later visit), and prints a
 backtrace per write.
+
+`--value <n>` makes it conditional: it keeps running until the watched word
+holds `<n>`, which is how a *specific* write is caught on an address that is
+written many times with different values (session 48 used
+`tools/watch.sh 0x800C4BB8 --value 0x80000400 --hits 2 --size 4` to catch the VI
+manager writing a placeholder into the display word, with the caller chain
+`func_8007307C ← func_80089540`).
 
 The app, the recompiled code and `librecomp`/`ultramodern` are built with
 `-fno-omit-frame-pointer` (RT64 is not), because the runtime's shadow *guest*

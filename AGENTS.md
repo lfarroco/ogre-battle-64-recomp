@@ -275,10 +275,25 @@ from here.
   register contract (session 45's step-2 wall). Find unknown modules by logging
   every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
   record table.
-- **The cathedral scene's background is still missing, but the decode is not
-  (session 47).** The step-2 display list blits a full-screen 320x240 RGBA16
-  image from guest `0x80243E28`, and that buffer is uniform (`0x0843` in RT64,
-  `0` in the null build). The image is an **N64 JPEG**: CPU Huffman decode
+- **The cathedral background renders; the njpeg readback was copying the wrong
+  buffer (session 48, superseding session 47's "readback is the open question").**
+  RT64 **does** draw the `0x800A5110` YUV macroblock draws and **does** write the
+  framebuffers back to RDRAM (verify with `OGRE_RDP_TRACE=2` →
+  `[cimg]`/`[cimgseq]`, and `OGRE_FB_WRITEBACK=1` → `[fbwrite]`). The copy is
+  `func_ovlE_8019976C`'s stage-3 row loop (`0x80199884`:
+  `memcpy(state[0x70], state[0x64], 2*width)` per row) and its source
+  `state[0x64]` comes from `func_ovlE_80199A08`, which indexes the game's
+  framebuffer table at **guest `0x800A8204` = `{0x80000400, 0x80025C00,
+  0x8004B400}`** (the ROM at `0x38604`; **not** `0x800B8204`, which is alignment
+  padding). When the display word `D_800C4BB8` matches no entry — routine, the
+  game also swaps the VI to non-framebuffer targets (`0x80250800`) — the index
+  defaults to 0, the placeholder first entry, and the CPU copies a buffer the
+  draw never landed in. The fix: RT64 records the colour image the YUV draw
+  landed in at an RDRAM scratch word (`0x807FFC00`, last 64 KiB, unused by the
+  game) and `tools/njpeg_readback.py` (run by `make bank-recomp`) points the copy
+  source at it. See `docs/HANDOFF-2026-09-15-session48.md` and
+  `docs/proofs/native-newgame-cathedral-background.png`.
+- **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables
   `0x800AC050`; `data_size` = macroblocks, `yield_data_size` = quantization
@@ -288,9 +303,7 @@ from here.
   `'B5'`-headed image at `0x80243E10` whose pixels (at `0x80243E28`) the blit
   reads. The microcode is recompiled (`make rsp-recomp` →
   `RspFuncs/njpeg_ucode.cpp`) and **runs by default** (`OGRE_NJPEG=0` forces the
-  stub); all `mbs` blocks decode in 0–1 ms. **The open question is the readback**:
-  whether RT64 renders the `0x800A5110` YUV draw and whether a rendered
-  framebuffer can be written back to RDRAM for a *CPU* read.
+  stub); all `mbs` blocks decode in 0–1 ms.
   See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md`, superseded).
 - **RSPRecomp's `text_address` is a label base, not an address.** It must equal
   the RSP **IMEM DMA address** the microcode was assembled for (masked `0x1FFF`)

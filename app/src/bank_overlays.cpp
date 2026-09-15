@@ -299,6 +299,63 @@ void force_scene_on_load() {
     }
 }
 
+// --- Scene-script step shortcut (OGRE_STEP) ---------------------------------
+//
+// The New Game opening is one scene (`0x0D`) run through many *steps*: the
+// scene-script VM `func_80170974` writes the step number into `D_8018F1C0`
+// (`sh $a0, 0($s5)` at `0x80170ADC`) and `0x8002` into `D_8018F1C2`, and scene
+// `0x0D`'s enter (`func_80178568`) branches on it. Step 1 is the ~28 s sepia
+// movie, step 2 is the cathedral dialogue — so reaching step 2 normally means
+// waiting out the movie.
+//
+// `OGRE_STEP=<n>` holds `D_8018F1C0` at `n` (and `D_8018F1C2` at `0x8002`, the
+// VM's own "next scene = 0x02" value) for as long as the active scene is the one
+// `OGRE_SCENE` selected, which drives the opening straight to that step. It is
+// released the moment the dispatcher leaves that scene. The step table (session
+// 44) has the whole opening: 1 movie, 2 cathedral dialogue, 3-15 the following
+// scenes, 16-19, with `D_8018FC39 = 2` for every step >= 2.
+//
+// Combine with `OGRE_SCENE`: `OGRE_SCENE=new-game OGRE_STEP=2` is the cathedral.
+struct ForcedStep {
+    bool configured = false;
+    uint16_t step = 0;
+    uint16_t scene = 0;
+};
+
+const ForcedStep& forced_step() {
+    static const ForcedStep forced = [] {
+        ForcedStep f;
+        const char* v = getenv("OGRE_STEP");
+        if (v == nullptr) {
+            return f;
+        }
+        f.step = (uint16_t)strtoul(v, nullptr, 0);
+        f.configured = true;
+        // Hold the step only while the selected scene runs; without OGRE_SCENE
+        // there is nothing to scope to, so any scene 0x0D visit qualifies.
+        const ForcedScene& scene = forced_scene();
+        f.scene = scene.configured ? scene.id : 0x000D;
+        return f;
+    }();
+    return forced;
+}
+
+// Poke the step without disturbing the rest of the state block. Returns true
+// while the game is running the target scene (i.e. while the hold applies).
+bool hold_step() {
+    const ForcedStep& step = forced_step();
+    if (!step.configured || (active_scene_id() != step.scene)) {
+        return false;
+    }
+    uint8_t* rdram = ultramodern::get_rdram_base();
+    if (rdram == nullptr) {
+        return false;
+    }
+    MEM_H(0x0, (gpr)(int32_t)0x8018F1C0) = step.step;
+    MEM_H(0x0, (gpr)(int32_t)0x8018F1C2) = 0x8002;
+    return true;
+}
+
 // OGRE_SCENE_LOG=1: log every scene change. This is how the names in kScenes
 // are found and verified. Also the retry half of the scene forcing above: the
 // streamed-DMA hook rarely fires inside the boot window, so the per-frame path
@@ -349,6 +406,20 @@ void poll_scene() {
     if (forced.configured && !forced_scene_active(forced) &&
         (scene_elapsed_ms() >= scene_after_ms())) {
         poke_scene(forced.id);
+    }
+
+    // OGRE_STEP=<n>: hold the scene-script step (see `forced_step`). The VM
+    // rewrites D_8018F1C0 on every visit, so this must be re-applied per frame,
+    // not once. Report the transition so a run says whether the hold engaged.
+    static bool step_announced = false;
+    const bool holding = hold_step();
+    if (getenv("OGRE_STEP") != nullptr) {
+        if (holding && !step_announced) {
+            step_announced = true;
+            fprintf(stderr, "[scene] holding step %u while scene 0x%02X runs\n",
+                    (unsigned)forced_step().step, (unsigned)forced_step().scene);
+            fflush(stderr);
+        }
     }
 
     // OGRE_SCENE_TRACE=1: the forcing state every ~500 ms: what the dispatcher

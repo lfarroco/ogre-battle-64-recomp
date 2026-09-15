@@ -13,6 +13,8 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-15 (48) | **The njpeg readback copies the buffer its own YUV draw landed in**, recorded by RT64 in an RDRAM scratch word; `tools/njpeg_readback.py` (run by `make bank-recomp`) patches the stage-3 copy source so it survives regeneration, and is a no-op on renderers that do not maintain the scratch word. The cathedral background renders | entry below; `docs/HANDOFF-2026-09-15-session48.md`; `docs/proofs/native-newgame-cathedral-background.png` |
+| 2026-09-15 (48b) | The game's framebuffer table is at **guest `0x800A8204`** = `{0x80000400, 0x80025C00, 0x8004B400}` — **session 47 read `0x800B8204`, which is padding inside the data segment**. RT64 does draw the `0x800A5110` YUV macroblocks and does write framebuffers back to RDRAM; session 47's two candidate causes are disproved | `docs/HANDOFF-2026-09-15-session48.md` §1 |
 | 2026-09-15 (47) | **RSPRecomp's `text_address` is a label base, not an address**: it must be the RSP/IMEM DMA address the microcode was *assembled* for (masked `0x1FFF`), e.g. `0x1080` for a ucode the boot loader loads at IMEM `0x080`; getting it wrong rotates every `j` target by the difference and silently walks the wrong blocks. The njpg decoder is therefore **on by default** (`OGRE_NJPEG=0` forces the stub) | entry below; `docs/HANDOFF-2026-09-15-session47.md` §1-2 |
 | 2026-09-15 (46) | Non-gfx RSP microcode is recompiled with RSPRecomp (`make rsp-recomp` → `RspFuncs/`) and dispatched by ucode address in `app/src/rsp.cpp`; the gfx ucode still goes to RT64. ~~The M_NJPEGTASK decoder is **opt-in** (`OGRE_NJPEG=1`) until its output is correct~~ — **superseded by session 47**: the output is correct and it is on by default | entry below; `docs/HANDOFF-2026-09-15-session46.md` |
 | 2026-09-15 (45) | A shared RAM range can hold **several records**: compile each one (units F/G) and keep them **out of the unit whose code calls into it**, so N64Recomp emits `LOOKUP_FUNC` and the game's DMA selects the resident module | entry below; `docs/HANDOFF-2026-09-15-session45.md` §2 |
@@ -32,6 +34,57 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-15 (session 48) — the cathedral background renders: the njpeg readback was copying the wrong buffer
+
+**Decision.** The New Game step-2 background (the New Game opening's cathedral
+scene) is an N64 JPEG whose decoded YUV macroblocks the game renders into a
+framebuffer and then **copies back with the CPU** (`func_ovlE_8019976C`'s stage-3
+row loop, `0x80199884`: `memcpy(state[0x70], state[0x64], 2*width)` per row). That
+copy's source, `state[0x64]`, is chosen by `func_ovlE_80199A08` from the game's
+framebuffer table at **guest `0x800A8204` = `{0x80000400, 0x80025C00, 0x8004B400}`**,
+using an index derived by comparing the display word `D_800C4BB8` against those
+entries — and when it matches none (routine: the game also swaps the VI to
+non-framebuffer targets, observed `0x80250800`) the index defaults to **0**, the
+table's placeholder first entry. The port therefore copies a buffer the njpeg draw
+never landed in, and the background comes out uniform (`0x0843`).
+
+The fix makes the readback copy **the buffer its own draw landed in**, which RT64
+knows (it sees the `G_SETCIMG` for the YUV macroblock draw):
+
+* RT64 maintains a scratch area in RDRAM's last 64 KiB (`0x807FFC00`, verified
+  untouched in a live dump): `+0x00` the current colour image, `+0x04` a "YUV
+  texture image seen" handshake, `+0x08` the colour image set right after that
+  handshake (the njpeg target), `+0x0C` the most recent of the three game
+  framebuffers.
+* `tools/njpeg_readback.py` rewrites the stage-3 copy source to that word (with
+  fallbacks), and `make bank-recomp` runs it right after `gen_bank_funcs.py` so
+  the window survives regeneration — the same model as `cross_bank.py dispatch`.
+  On a renderer that does not maintain the scratch word (the null build) the patch
+  is a no-op and the game's own value is used unchanged.
+
+**Corrections to session 47** (which this session verified at data level):
+the table is at `0x800A8204`, **not** `0x800B8204` (which is alignment padding
+inside the data segment, and reads as code-looking bytes / zero); RT64 **does**
+draw the `0x800A5110` YUV macroblock draws (colour-image histogram: each of the
+three buffers ends a run with ~2 500 distinct 16-bit values); and the framebuffer
+writeback **does** run (`OGRE_FB_WRITEBACK=1` fires for `0x025C00` with real
+pixels). Session 47's two candidate causes — "RT64 drops the YUV draw" and "the
+framebuffer never receives the draw" — are therefore both disproved.
+
+**Why the fix is at this layer, not in the game's index selection.** The game's
+choice is measured (a `-w` watchpoint on `0x800C4BB8` with `--value 0x80000400`
+caught `func_8007307C ← func_80089540`, the VI-manager command handler), but
+*why* the display word matches no table entry — and whether retail ever reaches
+that state — is not established. Making the readback use the buffer its own draw
+landed in is what the copy is for, and sidesteps the question.
+
+**Evidence.** `docs/HANDOFF-2026-09-15-session48.md`;
+`docs/proofs/native-newgame-cathedral-background.png` (the capture: Archbishop
+Odiron over the cathedral background). The assembled image at `0x80243E28` goes
+from 2 distinct 16-bit values (uniform `0x0843`) to ~2 500.
 
 ---
 

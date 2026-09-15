@@ -115,10 +115,17 @@ load-bearing:**
   are data (`0x0900060E` decodes as `j 0x1838`, and RSPRecomp emits a `goto` to
   a label that does not exist).
 
-The background is still not visible: the game converts the YUV macroblocks to
+The background renders (session 48). The game converts the YUV macroblocks to
 RGBA by drawing them (per-macroblock 16x16 YUV16 textures, a *second* gfx ucode
-`0x800A5110`) and copying the framebuffer back with the CPU, and in the port that
-framebuffer is uniform. See `docs/HANDOFF-2026-09-15-session47.md` §4-5.
+`0x800A5110`), then copying the framebuffer back with the CPU. The wall was the
+**copy source**, not the decode or the renderer: `func_ovlE_8019976C`'s stage-3
+loop copies from `state[0x64]`, which `func_ovlE_80199A08` takes from the
+framebuffer table at guest `0x800A8204` by an index that defaults to entry 0 (a
+placeholder) when the display word `D_800C4BB8` matches no entry. RT64 records
+the colour image the YUV draw landed in at an RDRAM scratch word and
+`tools/njpeg_readback.py` (run by `make bank-recomp`) points the copy at it. See
+`docs/HANDOFF-2026-09-15-session48.md` (and `-session47.md` §4-5 for the
+superseded reading, including the wrong `0x800B8204` table address).
 
 ## Audio ucode (still TBD)
 

@@ -590,10 +590,49 @@ hardware. RT64 remains the primary native renderer throughout. See
     happen (RDRAM `0x0..0x40` is zero after the run); the mirror is now
     unexercised on this path and should be A/B'd next session.
     See `docs/HANDOFF-2026-09-15-session45.md`.
-  - 🚧 **The cathedral scene's background is missing: the decode is fixed, the
-    readback is not (sessions 46-47)**: the step-2 display list's first `G_TRI2`
+  - ✅ **The cathedral background renders — the njpeg readback copied the wrong
+    buffer (session 48)**: session 47's two candidate causes are **disproved**.
+    RT64 does receive and draw the `0x800A5110` YUV macroblock draws (a
+    colour-image histogram shows each of the game's three framebuffers
+    `0x000400`/`0x025C00`/`0x04B400` ending a run with ~2 500 distinct 16-bit
+    values), and it does write rendered framebuffers back to RDRAM. The wall was
+    the game's own copy: `func_ovlE_8019976C`'s stage-3 row loop
+    (`0x80199884`) copies from `state[0x64]`, which `func_ovlE_80199A08` takes
+    from the framebuffer table at **guest `0x800A8204`** =
+    `{0x80000400, 0x80025C00, 0x8004B400}`; when the display word `D_800C4BB8`
+    matches no entry — routine, the game also swaps the VI to non-framebuffer
+    targets (`0x80250800`) — the index defaults to 0, the table's placeholder
+    first entry, and the CPU copies a buffer the njpeg draw never landed in.
+    **Fix:** RT64 records the colour image the YUV draw landed in at an RDRAM
+    scratch word (`0x807FFC00`), and `tools/njpeg_readback.py` — run by `make
+    bank-recomp` after `gen_bank_funcs.py`, so it survives regeneration — points
+    the copy source at it (a no-op on renderers that do not maintain the scratch
+    word). The assembled image at `0x80243E28` goes from 2 distinct 16-bit values
+    to ~2 500. Proof: `docs/proofs/native-newgame-cathedral-background.png`
+    (Archbishop Odiron over the cathedral background).
+    **Corrections to session 47:** the table is `0x800A8204`, not `0x800B8204`
+    (which is alignment padding in the data segment). See
+    `docs/HANDOFF-2026-09-15-session48.md`.
+  - ✅ **Boot straight to a New Game step (`OGRE_STEP`, session 48)**: the opening's
+    steps are the scene-script word `D_8018F1C0`, so
+    `OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 ./build-app/ogrebattle64`
+    reaches the cathedral ~1.4 s after boot instead of after the 28.7 s movie.
+    The hold is re-applied every frame while the selected scene runs (the VM
+    rewrites the word on each visit) and released when the dispatcher leaves it.
+    This also makes the background fix above reproducible without the flaky
+    title-tap timing. See `docs/guides/app-build.md` (`OGRE_STEP`) and
+    `docs/scenes.md`.
+  - 🚧 **Why the game's own frame index lands on the placeholder is open
+    (session 48)**: `D_800C4BB8` is the VI manager's "displayed buffer" word
+    (written by `func_8007307C`, which `func_80089540` — N64 Thread 5 — calls
+    from a message object; a `watch.sh --value` conditional watchpoint caught
+    it). The fix uses the buffer the draw landed in rather than answering
+    whether retail reaches the same mismatched state. See
+    `docs/HANDOFF-2026-09-15-session48.md` §4.
+  - 🚧 **The cathedral scene's background (session 47's superseded reading)**:
+    the step-2 display list's first `G_TRI2`
     quads are a full-screen 320x240 RGBA16 blit from guest `0x80243E28`, and that
-    buffer is uniform (`0x0843` in RT64, `0` in the null build). The image is an
+    buffer was uniform (`0x0843` in RT64, `0` in the null build). The image is an
     **N64 JPEG** (`'HU'` container holding `'HUFF'` + numMB, asset `0x00183352` =
     ROM `0x7175A2`), and the pipeline is: CPU Huffman decode `func_8008B250` →
     **four `M_NJPEGTASK` (type 4) RSP tasks** (`ucode=0x8009ED80`/`0x7C0`, boot
@@ -606,13 +645,8 @@ hardware. RT64 remains the primary native renderer throughout. See
     IMEM DMA address `0x1080` (not `0x8009ED80`, whose low 13 bits rotated every
     `j` target by `0x300`); each task now writes all `mbs` blocks, the scene no
     longer stalls, and the decoder is **on by default** (`OGRE_NJPEG=0` forces the
-    stub). The background is still uniform because the readback source
-    (a framebuffer) is: the open question is whether RT64 renders the `0x800A5110`
-    YUV draw and whether it can write that rendered framebuffer back to RDRAM for
-    a **CPU** read (`OGRE_DL_DECODE=all` around those four DLs, `RT64
-    FramebufferManager::storeRAM`/`checkRAM`).
-    See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md` for the
-    superseded reading of the decoder bug).
+    stub). See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md` for
+    the superseded reading of the decoder bug).
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy
