@@ -77,6 +77,7 @@ def parse_func_arrays(text: str) -> dict[str, list[tuple[str, int]]]:
 # with no BSS (ram end = ram start + size).
 RAM_END: dict[int, int] = {
     0x066E30: 0x8019A690,  #  0 (unit E)
+    0x069920: 0x8019C950,  # 17 (unit B)
     0x06E680: 0x801F1530,  #  1 (unit D)
     0x0E4910: 0x8019EE70,  #  2
     0x0EBBD0: 0x801AD5C0,  #  3 (unit A)
@@ -87,6 +88,7 @@ RAM_END: dict[int, int] = {
     0x25EE60: 0x802210E0,  # 12 (unit C)
     0x275820: 0x802258B0,  # 13 (unit C)
     0x281830: 0x80243DD0,  # 14 (unit C)
+    0x1BA020: 0x80230600,  # 18 (unit B)
 }
 
 

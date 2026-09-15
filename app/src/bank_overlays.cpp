@@ -106,8 +106,8 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x281830u, (int32_t)0x802258B0u, 0x005370u, true  },  // 14 (bank unit C)
     { 0x1CE040u, (int32_t)0x80197B90u, 0x0229C0u, true  },  // 15 (main unit, overlay C)
     { 0x279FF0u, (int32_t)0x802258B0u, 0x007840u, false },  // 16
-    { 0x069920u, (int32_t)0x80197B90u, 0x004D60u, false },  // 17
-    { 0x1BA020u, (int32_t)0x80220F60u, 0x0092B0u, false },  // 18
+    { 0x069920u, (int32_t)0x80197B90u, 0x004D60u, true  },  // 17 (bank unit B)
+    { 0x1BA020u, (int32_t)0x80220F60u, 0x0092B0u, true  },  // 18 (bank unit B)
 };
 
 // Boot straight into a screen.
@@ -134,13 +134,14 @@ struct SceneName {
 // recorded in docs/HANDOFF-2026-09-14-session36.md). `0x18`/`0x02` still crash:
 // their update functions need the unfinished cross-bank work (sessions 33/34).
 static const SceneName kScenes[] = {
-    { "title", 0x0004 },      // attract title: prologue text, then the logo + PRESS START over the scrolling clouds (the OGRE_FOG screen)
+    { "title", 0x0004 },      // attract title: prologue text, then the logo + the New Game / Tutorial / Stereo menu over the scrolling clouds
     { "intro", 0x0009 },      // boot intro: soldiers, falling cube, Nintendo 64 logo
     { "publishers", 0x000A }, // Licensed by Nintendo / ATLUS / QUEST
     { "story", 0x000B },      // world-map story attract
     { "unit-info", 0x000C },  // the unit-description book
-    { "menu", 0x0018 },       // title menu (New Game / Tutorial / Stereo) - crashes until the cross-bank work lands
-    { "new-game", 0x0002 },   // New Game / Tutorial path - crashes until the cross-bank work lands
+    { "tutorial", 0x0017 },   // title menu -> Tutorial: Deneb's "Is this your first time here?" dialogue (session 43)
+    { "menu", 0x0018 },       // title menu sub-screen (record 1) - crashes until the cross-bank work lands
+    { "new-game", 0x0002 },   // New Game loader (records 0/14) - one frame, then 0x0D
 };
 
 static bool scene_lookup(const char* spec, uint16_t& id) {

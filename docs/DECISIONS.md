@@ -5,6 +5,56 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-15 (session 43) — bank unit B for records 17/18, scene 0x17 is the Tutorial, and two address/VM corrections
+
+### Decision: one new bank unit for two RAM-disjoint records
+
+Records 17 (`rom=0x069920`, RAM `0x80197B90`, size `0x4D60`, ram_end
+`0x8019C950`) and 18 (`rom=0x1BA020`, RAM `0x80220F60`, size `0x92B0`, ram_end
+`0x80230600`) are what scene `0x17` asks for (descriptor mask `0x00060000`).
+They cannot join any existing unit: rec 17 overlaps records 0/1/2/15 (all at
+`0x80197B90`) and rec 18 overlaps unit C's records 12/13/16. They are
+RAM-disjoint from **each other**, and a unit only partitions RAM — the runtime
+registers each record's functions from its own DMA (`is_function_bank_loaded` is
+keyed by ROM start) — so one new unit (`B`, previously unused) holds both
+rather than two units of one record each. `RAM_END` in `tools/gen_bank_funcs.py`
+gained both ends from the segment table (ROM `0x387C0`).
+
+### Correction: the movie-path word is `0x80197794`, not `0x8019F794`
+
+Sessions 38, 39 and 42 all cite `0x8019F794` as the flag scene `0x0D`'s movie
+path reads. The instruction is `lui $v0,0x8019` + `lw $v0,0x7794($v0)` at
+`0x801B80B4`/`0x801B80B8` (`build/bankC/asm/1F0A00.s`), i.e. **`0x80197794`**;
+`0x7794 = 30612` was mis-expanded to `0xF794`. It is a cached hand-off pointer
+written by scene `0x02`'s record-0 code (`func_ovlE_801980A0`,
+`func_ovlE_801988C8`), cleared by record 14a (`0x80234C58`, `0x80234DE8`) and
+read by record 10's `func_ovlC_801B7EBC`. Any replay of the session-38/42
+decompressor work must use the corrected address.
+
+### Correction: the VM dispatch byte is `sp+0x60`; `sp+0x61` is the operand
+
+`func_80170974` reads the opcode with `lb $v1,0x0($v0)` and the operand with
+`lb $a0,0x1($v0)` at `0x801709D0`/`0x801709D4`, storing them to `sp+0x60` /
+`sp+0x61`. Session 42's "opcode byte" probe logged `sp+0x61`, so its `op=0x00`
+readings were operands. Also `jtbl_80190758` is indexed by `opcode - 1`
+(`addiu $v1,$v0,-1` at `0x801709E4`), so index 0 is unused: **opcode 0x10** is
+the `D_8018F1C0 = var[0]; D_8018F1C2 = 0x8002` handler at `0x80170AC0`.
+
+### Decision: scene `0x17` is the Tutorial (verified), and the title-menu counter mapping
+
+Scene `0x17` renders Deneb's `"Welcome! / Is this your first time here?"`
+dialogue box. Driving the real title menu with `OGRE_TAP_BUTTON` (`Down` then
+`Start`) enters it, so `func_80177A58` state 3 → scene `0x17` is the Tutorial.
+The title menu capture is `New Game` / `Tutorial` / `Stereo`. With no save the
+highlight bitmask has bits `{New Game, Tutorial}` (Stereo is left/right, not a
+cursor entry) and `func_8019B8CC`'s `if (a0 == 2 && counter == 2) counter = 3`
+shift maps Tutorial to counter 3; with a save the third cursor entry is
+`Load Game`, so counter 2 → scene `0x12`. That makes **scene `0x12` = Load
+Game** (unreachable without Controller Pak save state, which is why its forced
+runs die on a near-NULL).
+
+---
+
 ## 2026-09-14 (session 38) — two more cross-bank dispatches, record-BSS zeroing, and why the forced new-game path stops in scene 0x0D's init
 
 Session 37's `0x0D` wall moved twice. First, the forced run died right after

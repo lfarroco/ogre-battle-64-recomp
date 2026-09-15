@@ -195,9 +195,12 @@ from here.
   scene `D_8018F1C2`, 16 script opcodes per visit. The attract loop is a
   different flow (`title ↔ story 0x0B / unit-info 0x0C`) and never enters
   `0x02`/`0x0D`.
-- **Known open walls** (as of session 42): command-mode step 2
+- **Known open walls** (as of session 43): command-mode step 2
   (`func_ovlC_8022D1CC` → `jal 0x802399AC` with `s0 = 0` and an unprimed frame);
-  movie mode (`func_801AFC2C(0)` → `func_8007A110` with a bogus size because
-  `0x8019F794 == 0`); scene `0x17` (needs bank records 17/18 compiled); menu
-  `0x18` natural entry. Current status and details: the newest
-  `docs/HANDOFF-*.md` and `PLAN.md`.
+  the movie step (`func_801AFC2C(0)` → `func_8007A110` with a bogus size, gated
+  by the word `0x80197794` — *not* `0x8019F794`, see session 43), which the
+  script VM never selects (`func_80170974`'s opcode `0x10` writes
+  `F1C0 = var[0] = 1/2` before the first `0x0D` visit); menu `0x18` natural
+  entry; scene `0x12` = Load Game (needs save pre-state). Scene `0x17` = the
+  Tutorial and now runs (bank unit B, records 17/18). Current status and
+  details: the newest `docs/HANDOFF-*.md` and `PLAN.md`.

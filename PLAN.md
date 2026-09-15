@@ -500,6 +500,28 @@ hardware. RT64 remains the primary native renderer throughout. See
     `func_801AFC2C(0)` on session 38's decompressor wall because
     `0x8019F794 == 0` (and that flag is 0 even on the natural `title → Start`
     path). See `docs/HANDOFF-2026-09-14-session42.md`.
+  - ✅ **Scene `0x17` is the Tutorial, and the last two bank records are
+    compiled (session 43)**: records 17 (`rom=0x069920`) and 18
+    (`rom=0x1BA020`) are now **bank unit B** (they are RAM-disjoint from each
+    other, so one new unit holds both; `BANK_UNITS := A B C D E`). Scene `0x17`
+    loads 21 + 125 functions with zero stubs and renders Deneb's tutorial
+    dialogue (`docs/proofs/native-tutorial-dialogue.png`) — the title's
+    **Tutorial** entry, verified by driving the menu (`Down` + `Start` →
+    `[scene] id=0x0017`). The title menu itself is captured
+    (`docs/proofs/native-title-menu.png`): `New Game` (cursor) / `Tutorial` /
+    `Stereo` — so `func_80177A58` state 3 → `0x17` = Tutorial and state 2 →
+    `0x12` = the save-only **Load Game** entry. Also corrected a load-bearing
+    address in sessions 38/39/42: the movie-path word is **`0x80197794`**, not
+    `0x8019F794` (`lui $v0,0x8019` + `lw $v0,0x7794($v0)` at `0x801B80B4/B8`).
+    And measured the `D_8018F1C0` writer with a probe over all four store
+    sites: only `0x80170ADC` fires — it is the script VM's **opcode 0x10**
+    (`jtbl_80190758[15] = 0x80170AC0`), which sets `F1C0 = var[0]` **and**
+    `F1C2 = 0x8002` at pc 16 (`var[0]=1`) and pc 32 (`var[0]=2`), each before
+    the `0x02`/`0x0D` visit it causes; the stores that can write 0 never
+    execute, so the movie branch is never selected. The developer confirmed the
+    New Game opening starts with the short intro movie, so the next step is
+    decoding the script's first 16 opcodes (which opcode should set
+    `var[0] = 0`). See `docs/HANDOFF-2026-09-15-session43.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

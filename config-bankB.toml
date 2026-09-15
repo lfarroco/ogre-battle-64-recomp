@@ -1,0 +1,12 @@
+# N64Recomp config for streamed-overlay bank unit B (Phase 4).
+# See config-bankA.toml for the model; this unit holds records 17 and 18, the
+# two records scene 0x17 asks for.
+
+[input]
+output_func_path = "BankBFuncs"
+elf_path = "build/bankB.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
