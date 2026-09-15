@@ -919,6 +919,24 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // Do NOT force the plain F3DEX GBI here — it does not map those opcodes
         // and misparses the DLs.
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFF, 0, true);
+
+        // OGRE: the game reads one of its njpeg framebuffers with the CPU right
+        // after it waits for this RSP task (func_ovlE_8019976C's stage-3 copy).
+        // The port completes the emulated task as soon as the display list has
+        // been handed to RT64, so without this the readback copies RDRAM before
+        // the YUV macroblock draw has rendered. Wait here -- on the RSP worker,
+        // not the game thread -- until the renderer has built those framebuffers,
+        // so the game's own task wait also covers the render. Bounded: a renderer
+        // that is gone must not hang the game. OGRE_NJ_WAIT_MS=0 disables it.
+        {
+            static const uint32_t njWaitMs = [] {
+                const char* v = getenv("OGRE_NJ_WAIT_MS");
+                return (v != nullptr) ? (uint32_t)strtoul(v, nullptr, 0) : 500u;
+            }();
+            if (njWaitMs != 0) {
+                app_->waitForGameFramebuffers(njWaitMs);
+            }
+        }
         // OGRE_DL_ANALYZE=1: walk the submitted display list with the app's own
         // F3DEX2 analyzer and report its geometry. "The cube is missing" is
         // either "the DL has no triangles" (game-side) or the triangles are

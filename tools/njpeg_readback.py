@@ -54,10 +54,16 @@ ANCHOR = "    // 0x80199878: lw          $s0, 0x64($a0)\n    ctx->r16 = MEM_W(ct
 
 # The CPU is about to copy a framebuffer here. RT64 renders into a Vulkan/Metal
 # target and only writes it back to RDRAM when a workload is retired, so the
-# readback would copy RDRAM as it was *before* the draw (the New Game background
-# was black for exactly this reason). Ask the renderer to retire the pending
-# workload and write its framebuffers back first. The symbol is a no-op on
-# renderers without render targets (null, web), so the null build is unchanged.
+# readback would copy RDRAM as it was *before* the draw. Ask the renderer to
+# retire the pending workload and write its framebuffers back first. The symbol
+# is a no-op on renderers without render targets (null, web), so the null build
+# is unchanged.
+#
+# The render wait itself lives on the RSP worker (app/src/renderer.cpp,
+# Application::waitForGameFramebuffers): the port completes the emulated RSP task
+# as soon as the display list is handed to RT64, so waiting here on the game
+# thread can deadlock. This call only does the writeback for whatever the
+# renderer has finished by now.
 SYNC = """
     // njpeg readback: make the RDP's rendered pixels visible in RDRAM first.
     ogre_sync_framebuffers();

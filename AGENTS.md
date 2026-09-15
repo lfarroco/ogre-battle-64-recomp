@@ -275,23 +275,29 @@ from here.
   register contract (session 45's step-2 wall). Find unknown modules by logging
   every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
   record table.
-- **The cathedral background is still black; RT64's YUV16 decode was tried and
-  reverted (session 49, correcting session 48).** The YUV macroblock draws do
-  reach the renderer and do target colour image `0x000400` (`OGRE_RDP_TRACE=2` →
-  `[cimgseq]`, `OGRE_YUV_TRACE=1`), and the shader's `case G_IM_FMT_YUV:` does
-  fall through to `float4(0,0,0,1)` — but **do not add a YUV16 decoder on that
-  basis alone**: a decoder written this session turns the frame into a corrupt
-  magenta/green blob, not the backdrop, and was reverted. The game's CPU readback
-  (`func_ovlE_8019976C`'s stage-3 row loop `0x80199884`,
-  `memcpy(state[0x70], state[0x64], 2*width)` per row) runs 4×, all in scene
-  `0x02`, and **every copy reads a zero framebuffer** — upstream of any decode;
-  its source `state[0x64]` comes from the game's framebuffer table at **guest
-  `0x800A8204` = `{0x80000400, 0x80025C00, 0x8004B400}`** (ROM `0x38604`; **not**
-  `0x800B8204`, which is alignment padding). Session 48's scratch-word patch
-  (`0x807FFC00`) and `tools/njpeg_readback.py` are in place and harmless but were
-  never the wall. Before writing another decoder, check GLideN64 — the emulator
-  that upstream closed [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
-  with — against RT64. See `docs/HANDOFF-2026-09-15-session49.md` §2/§7.
+- **The cathedral background is still black, but RT64's YUV16 decode is now
+  implemented (session 50); the remaining wall is render timing.** RT64's
+  `TextureDecoder.hlsli` returned `float4(0,0,0,1)` for every `G_IM_FMT_YUV` texel,
+  and the njpeg background is drawn as `fmt=1 siz=2` YUV16 — so the framebuffer
+  the game reads back was black *by construction*. Session 49's reverted attempt
+  invented a byte pairing; the **correct** layout comes from the code that writes
+  it, mupen64plus-rsp-hle `jpeg.c` `GetUYVY` (`jpeg_decode_OB`): in the 32-bit word
+  at byte offset `4*(2t + (s>>1))`, `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`,
+  `byte3 = Y(s odd)`; luma is sampled from the upper TMEM half (`OR 0x800`) with
+  the usual XOR-3/XOR-4 swap, chroma from the lower half. Convert with the matrix
+  **the game itself programs via `G_SETCONVERT`** (`OGRE_CONVERT_TRACE=1` shows
+  `k0=175 k1=469 k2=423 k3=222`): `R = Y+K0*V>>8`, `G = Y+(K1*V+K2*U)>>8`,
+  `B = Y+K3*U>>8`. That decoder is in the tree (`sampleTMEMYUV16` /
+  `sampleTMEMWithConvert`) and the YUV arm is no longer a stub — do not replace it
+  with a guess again. **Remaining wall:** the port completes the emulated RSP task
+  as soon as the display list reaches RT64, so the game's CPU copy can run before
+  the renderer has drawn; `Application::waitForGameFramebuffers` (RSP worker,
+  `OGRE_NJ_WAIT_MS`) waits for a game framebuffer, and a wait on the *game* thread
+  deadlocks. Also **session 49's four stage-3 copies are not shown to be the njpeg
+  readback**: they run at t≈1.4–3.0 s (widths 320/176 x heights 240/144) while
+  scene `0x0D` and the draw submission do not start until t≈3.7 s, with source
+  `0x80000400` and njpeg target `0` — identify the copy's caller before building on
+  it. See `docs/HANDOFF-2026-09-15-session50.md`.
 - **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables
@@ -304,13 +310,13 @@ from here.
   `RspFuncs/njpeg_ucode.cpp`) and **runs by default** (`OGRE_NJPEG=0` forces the
   stub); all `mbs` blocks decode in 0–1 ms.
   See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md`, superseded).
-  The **renderer** half is still open: session 49 tried a YUV16 decoder in
-  `TextureDecoder.hlsli` and reverted it (it produced a corrupt blob, not the
-  backdrop). [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
+  The **renderer** half is now implemented (session 50): RT64 samples YUV16 with
+  the layout from the RSP decoder and converts with the game's own `G_SETCONVERT`
+  matrix — see the cathedral fact above.
+  [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
   ("Missing backgrounds in Ogre Battle 64 battles and also some cutscenes") was
-  fixed upstream by the RSP-side `jpeg_decode_OB`, which this port already has;
-  check GLideN64's renderer path before writing another decoder. See
-  `docs/HANDOFF-2026-09-15-session49.md`.
+  fixed upstream by the RSP-side `jpeg_decode_OB`, which this port already has.
+  See `docs/HANDOFF-2026-09-15-session50.md`.
 - **RSPRecomp's `text_address` is a label base, not an address.** It must equal
   the RSP **IMEM DMA address** the microcode was assembled for (masked `0x1FFF`)
   — `0x1080` for a ucode the game's boot loader loads at IMEM `0x080`

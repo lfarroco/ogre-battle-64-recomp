@@ -634,8 +634,9 @@ hardware. RT64 remains the primary native renderer throughout. See
     it). The fix uses the buffer the draw landed in rather than answering
     whether retail reaches the same mismatched state. See
     `docs/HANDOFF-2026-09-15-session48.md` §4.
-  - 🚧 **The cathedral scene's background pipeline (sessions 46/47; the renderer
-    half still open after session 49's reverted attempt, see above)**: the step-2 display list's first `G_TRI2`
+  - 🚧 **The cathedral scene's background pipeline (sessions 46/47; **session 50
+    implemented RT64's YUV16 decode**, the render-timing half is still open)**:
+    the step-2 display list's first `G_TRI2`
     quads are a full-screen 320x240 RGBA16 blit from guest `0x80243E28`, and that
     buffer was uniform (`0x0843` in RT64, `0` in the null build). The image is an
     **N64 JPEG** (`'HU'` container holding `'HUFF'` + numMB, asset `0x00183352` =
@@ -650,8 +651,22 @@ hardware. RT64 remains the primary native renderer throughout. See
     IMEM DMA address `0x1080` (not `0x8009ED80`, whose low 13 bits rotated every
     `j` target by `0x300`); each task now writes all `mbs` blocks, the scene no
     longer stalls, and the decoder is **on by default** (`OGRE_NJPEG=0` forces the
-    stub). See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md` for
-    the superseded reading of the decoder bug).
+    stub). **Session 50 implemented the renderer half**: RT64's
+    `TextureDecoder.hlsli` returned `float4(0,0,0,1)` for every `G_IM_FMT_YUV`
+    texel, so the framebuffer the game read back was black by construction. YUV16
+    is now sampled with the layout the RSP decoder writes (mupen64plus-rsp-hle
+    `jpeg.c` `GetUYVY`: `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`,
+    `byte3 = Y(s odd)` in the word at `4*(2t + (s>>1))`, luma from the upper TMEM
+    half) and converted with the matrix the game itself programs via
+    `G_SETCONVERT` (`k0=175 k1=469 k2=423 k3=222`). The remaining wall is
+    **render timing**: the port completes the emulated RSP task as soon as RT64
+    has the display list, so the game's CPU copy can run before the draw renders;
+    `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) bounds
+    that wait — a wait on the game thread deadlocks. Session 49's four stage-3
+    copies are also **not shown to be** the njpeg readback (they run before scene
+    `0x0D` starts).
+    See `docs/HANDOFF-2026-09-15-session50.md`, and `-session47.md` /
+    `-session46.md` for the decoder fix and the superseded reading of it.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy
