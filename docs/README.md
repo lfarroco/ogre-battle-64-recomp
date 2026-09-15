@@ -4,6 +4,7 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 
 | Document | Purpose |
 |---|---|
+| [../AGENTS.md](../AGENTS.md) | **Read this first if you are an AI agent**: working rules for this repo — ask the developer what the current scene should display rather than inferring intent, treat handoffs as hypotheses, verify the consumer before naming a struct, isolate one variable per experiment, revert probes by regenerating. |
 | [DECISIONS.md](DECISIONS.md) | Living log of technical decisions and their rationale. |
 | [HANDOFF-2026-08-24.md](HANDOFF-2026-08-24.md) | Session handoff: current state, the first-boot SIGBUS, and next steps. |
 | [HANDOFF-2026-08-25.md](HANDOFF-2026-08-25.md) | Session 4 handoff: first RSP task + real VI mode achieved; drainer thread; next steps. |
@@ -32,6 +33,10 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 
 ## Conventions
 
+- **If you are an AI agent, read [`../AGENTS.md`](../AGENTS.md) first.** It holds
+  the working rules this project learned the hard way; the most important one is
+  to ask the developer what a scene should display instead of inferring intent
+  from the code.
 - ROM dumps / extracted assets are **never** committed to this repository.
 - All third-party tools live under `tools/` as git submodules; the app project
   lives under `app/`.

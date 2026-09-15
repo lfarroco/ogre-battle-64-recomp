@@ -14,6 +14,12 @@ Recompiled and Majora's Mask / Ocarina of Time PC ports.
 **Legal note:** this is a "bring your own ROM" project. No copyrighted ROM data is
 committed to this repository. You must provide a dump of your own cartridge.
 
+**Working rules for AI agents: [`AGENTS.md`](AGENTS.md).** Read it before you
+start. It is short, and every rule in it is a session that lost time —
+especially "ask the developer what the current scene should display instead of
+inferring intent from the code" and "a previous handoff is a hypothesis, verify
+it at instruction level".
+
 ---
 
 ## Goal
@@ -457,6 +463,43 @@ hardware. RT64 remains the primary native renderer throughout. See
     `jal 0x801B00D0` sites are now dispatched to bank unit C's real
     `func_ovlC_801B00D0`. See `docs/HANDOFF-2026-09-14-session40.md` and
     `docs/HANDOFF-2026-09-14-session41.md`.
+  - ✅ **`D_8018F1C0`'s writer found, and the re-entry's selector-2 branch is
+    game data (session 42)**: `D_8018F1C0` is written by the scene-script VM
+    `func_80170974` (`sh` to `0($s5)` at `0x80170ADC`, `$s5 = &D_8018F1C0`);
+    session 41's audit missed it because every store goes through `$s5`, not
+    through the symbol. Probes show the VM writing `1` at script pc 16 and `2`
+    at pc 32, and the `0x0D` path reading exactly those
+    (`func_80226FA8 F1C0=0x0001` / `0x0002`); `func_80178568`'s own
+    `D_8018FC39` store is **not** taken. The selector comes from
+    `func_8022683C(-5, n)`: `func_80227E64(n)` reads the decompressed descriptor
+    table (asset `0x19A8804` = ROM `0x1F3CA54`) and returns the step's command —
+    `n=1 → -7`, `n=2 → -3`. Step 2's `-3` → jtbl index 7 → handler `0x80226E30`
+    → `func_80227700(2)` legitimately selects the crashing branch, while step
+    1's `-7` → handler `0x80226AC4` → selector 0. So the `jal 0x802399AC` in
+    `func_ovlC_8022D1CC` is a path the game's own data asks for. At that call
+    the port has `sp=0x800C22A8`, `s0=0`, `*(sp+0x1EC)=0`, while visit 1's
+    per-frame `func_ovlC_80239874` frames run at `sp=0x800C1BF0` (their `a2`
+    slot lands at `0x800C1DDC`, `0x6B8` below the slot path B reads). Both
+    scene-setup callbacks (`func_ovlC_80225A3C` sel 0, `func_ovlC_80226110`
+    sel 2) run at the *same* depth, so that read address is fixed by the call
+    chain and never written. Also established: the attract loop is
+    `title ↔ {story(0x0B), unit-info(0x0C)}` and never enters `0x02`/`0x0D`
+    (170 s tap-free run, exit 0), so `0x02`/`0x0D` is the New Game intro; the
+    title's entry 3 leads to scene `0x17`, which is blocked *only* by two
+    uncompiled bank records (17 `rom=0x069920 ram=0x80197B90 size=0x4D60`,
+    18 `rom=0x1BA020 ram=0x80220F60 size=0x92B0`) — the concrete next step.
+    Also corrected the scene model: scene ids dispatch through the accessor
+    table `D_800AF028` hardcoded in `func_80075BC0`, and the descriptor's
+    `+0x00`/`+0x04`/`+0x08`/`+0x0C`/`+0x10` are **enter / update / update-hook /
+    leave / record-mask** (previous sessions had this half-wrong). New Game's
+    `0x0D` enter `func_80178568` has **two modes** chosen by `D_8018F1C0`:
+    `0`/bit15 = movie mode (DMAs records 10a/10b, installs the cutscene vtable
+    `&D_801E5AC0`), non-zero = command mode (DMAs 14a/14b, runs the scripted
+    command that sets `D_8018FC39`). Both are walls today: command mode dies at
+    step 2 on the frame-less `jal 0x802399AC`, movie mode dies in
+    `func_801AFC2C(0)` on session 38's decompressor wall because
+    `0x8019F794 == 0` (and that flag is 0 even on the natural `title → Start`
+    path). See `docs/HANDOFF-2026-09-14-session42.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy
