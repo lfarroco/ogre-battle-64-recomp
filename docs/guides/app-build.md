@@ -82,6 +82,8 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | Variable | Effect |
 |---|---|
 | `OGRE_TAP_MS=<n>` | controller 0 presses Start for 150 ms out of every `n` ms (the native equivalent of the web probes' Enter tap) |
+| `OGRE_TAP_SCENE=<list>` | press `OGRE_TAP_MS`/`OGRE_TAP_BUTTON` only while the dispatcher's scene (`D_800E810E`) is in the list — names from `kScenes` (`title`, `new-game`, …) or hex, `,`/`+`-separated. Scopes a scripted tap to **game state instead of wall time**, so `OGRE_SPEED` and capture readback no longer break the schedule |
+| `OGRE_TAP_NOT_SCENE=<list>` | the complement of the above. `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the title and goes silent the moment New Game is confirmed — no `OGRE_TAP_MAX` tuning |
 | `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces, including `[pi] inline DMA` for every streamed-overlay load (very chatty) |
 | `OGRE_DEBUG_VI=1` | with `OGRE_DEBUG_TRACES`, log every `osViSetMode` (mode pointer + decoded geometry) and every VI geometry change (`[vi-debug]`) |

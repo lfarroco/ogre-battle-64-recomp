@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #if defined(__APPLE__)
 #define _XOPEN_SOURCE 700
 #include <ucontext.h>
@@ -167,7 +168,7 @@ static const SceneName kScenes[] = {
     { "new-game", 0x0002 },   // New Game loader (records 0/14) - one frame, then 0x0D
 };
 
-static bool scene_lookup(const char* spec, uint16_t& id) {
+static bool scene_lookup_impl(const char* spec, uint16_t& id) {
     for (const SceneName& scene : kScenes) {
         if (strcmp(spec, scene.name) == 0) {
             id = scene.id;
@@ -215,7 +216,7 @@ const ForcedScene& forced_scene() {
         if (spec == nullptr) {
             return f;
         }
-        if (!scene_lookup(spec, f.id) || f.id == 0) {
+        if (!scene_lookup_impl(spec, f.id) || f.id == 0) {
             fprintf(stderr, "[scene] unknown scene '%s' (use a name from the table or a hex id)\n",
                     spec);
             return f;
@@ -244,16 +245,6 @@ uint32_t scene_elapsed_ms() {
     return (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                ultramodern::time_since_start())
         .count();
-}
-
-// The id the dispatcher is currently running (`D_800E810E`), or 0xFFFF when the
-// game is not up yet.
-uint16_t active_scene_id() {
-    uint8_t* rdram = ultramodern::get_rdram_base();
-    if (rdram == nullptr) {
-        return 0xFFFF;
-    }
-    return (uint16_t)MEM_HU(0x0000, (gpr)(int32_t)0x800E810E);
 }
 
 // True once the target is the running scene. Latched: the attract loop may
@@ -312,6 +303,47 @@ void force_scene_on_load() {
 // are found and verified. Also the retry half of the scene forcing above: the
 // streamed-DMA hook rarely fires inside the boot window, so the per-frame path
 // re-applies the poke until the dispatcher agrees.
+// The id the dispatcher is currently running (`D_800E810E`), or 0xFFFF when the
+// game is not up yet.
+uint16_t active_scene_id() {
+    uint8_t* rdram = ultramodern::get_rdram_base();
+    if (rdram == nullptr) {
+        return 0xFFFF;
+    }
+    return (uint16_t)MEM_HU(0x0000, (gpr)(int32_t)0x800E810E);
+}
+
+bool scene_lookup(const char* spec, uint16_t& id) {
+    return scene_lookup_impl(spec, id);
+}
+
+// `OGRE_TAP_SCENE`/`OGRE_TAP_NOT_SCENE` take a `,` or `+` separated list, so a
+// scripted run can be scoped to a step of the opening rather than to wall time
+// ("tap until New Game starts" = `OGRE_TAP_NOT_SCENE=new-game`).
+bool scene_list_matches(const char* scene_list, uint16_t id) {
+    if (scene_list == nullptr || *scene_list == '\0') {
+        return false;
+    }
+    std::string spec(scene_list);
+    size_t start = 0;
+    while (start <= spec.size()) {
+        const size_t end = spec.find_first_of(",+", start);
+        const std::string item = spec.substr(
+            start, (end == std::string::npos) ? std::string::npos : end - start);
+        if (!item.empty()) {
+            uint16_t want = 0;
+            if (scene_lookup_impl(item.c_str(), want) && want == id) {
+                return true;
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
 void poll_scene() {
     const ForcedScene& forced = forced_scene();
     if (forced.configured && !forced_scene_active(forced) &&

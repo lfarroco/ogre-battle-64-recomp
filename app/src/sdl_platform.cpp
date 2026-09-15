@@ -1,5 +1,6 @@
 #include "sdl_platform.hpp"
 #include "synth_frame.hpp"
+#include "bank_overlays.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -225,6 +226,13 @@ void configure_automation(Platform& platform) {
                 platform.tap_ms, platform.exit_after_ms);
     }
     if (platform.tap_ms != 0) {
+        // Report the scene gate up front so a run's stderr says why taps stop.
+        if (const char* s = getenv("OGRE_TAP_SCENE")) {
+            fprintf(stderr, "[SDL] taps only while scene in '%s'\n", s);
+        }
+        if (const char* s = getenv("OGRE_TAP_NOT_SCENE")) {
+            fprintf(stderr, "[SDL] taps only while scene NOT in '%s'\n", s);
+        }
         const TapSchedule& schedule = tap_schedule();
         fprintf(stderr, "[SDL] tap schedule (%zu slots, last sticks):", schedule.count);
         for (size_t i = 0; i < schedule.count; ++i) {
@@ -461,6 +469,25 @@ static uint16_t automation_buttons() {
     extern Platform g_platform;
     if (g_platform.tap_ms == 0) {
         return 0;
+    }
+    // `OGRE_TAP_SCENE=<list>` / `OGRE_TAP_NOT_SCENE=<list>`: scope the synthetic
+    // press to the *scene* the dispatcher reports (`D_800E810E`) instead of to
+    // wall time. Wall-clock schedules drift with `OGRE_SPEED`, capture readback
+    // and load times, which is how a run meant for New Game ended up driving the
+    // attract loop; `OGRE_TAP_NOT_SCENE=new-game` presses Start through the
+    // title and goes silent the moment New Game is confirmed.
+    {
+        static const char* tap_scene = getenv("OGRE_TAP_SCENE");
+        static const char* tap_not_scene = getenv("OGRE_TAP_NOT_SCENE");
+        if (tap_scene != nullptr || tap_not_scene != nullptr) {
+            const uint16_t scene = ogre::active_scene_id();
+            if (tap_scene != nullptr && !ogre::scene_list_matches(tap_scene, scene)) {
+                return 0;
+            }
+            if (tap_not_scene != nullptr && ogre::scene_list_matches(tap_not_scene, scene)) {
+                return 0;
+            }
+        }
     }
     const uint64_t elapsed = platform_millis(g_platform);
     const uint64_t phase = elapsed % g_platform.tap_ms;

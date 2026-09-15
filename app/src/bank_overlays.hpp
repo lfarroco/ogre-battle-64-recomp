@@ -29,4 +29,17 @@ void register_bank_overlays();
 // state.
 void poll_scene();
 
+// The scene id the dispatcher is currently running (`D_800E810E`), or 0xFFFF
+// before the game is up. Exposed so the synthetic-input automation can scope a
+// scripted tap to a scene instead of to wall-clock time (see `OGRE_TAP_SCENE` /
+// `OGRE_TAP_NOT_SCENE` in sdl_platform.cpp).
+uint16_t active_scene_id();
+
+// Resolve a scene name from `kScenes` (bank_overlays.cpp) or a hex id.
+bool scene_lookup(const char* spec, uint16_t& id);
+
+// `scene_list` is a `,`/`+`-separated list of scene names/ids; true when `id`
+// matches one of them (false when the list is absent or empty).
+bool scene_list_matches(const char* scene_list, uint16_t id);
+
 }  // namespace ogre

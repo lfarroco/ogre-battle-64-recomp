@@ -5,6 +5,75 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## Durable decisions (read this first)
+
+This log is append-only and older entries are long; each one is a *session's*
+reasoning. The decisions that still bind the port are these — the entry or
+handoff holds the evidence.
+
+| date (session) | decision | evidence |
+|---|---|---|
+| 2026-09-15 (44) | Mirror the N64's low-window (KUSEG) RDRAM alias in `recomp_mem_addr` (`a < 0x80000000` → `a & 0x003FFFFF`); keep it narrow (4 MiB) | entry below; `docs/HANDOFF-2026-09-15-session44.md` §3 |
+| 2026-09-15 (44b) | Record hygiene: `DECISIONS.md` keeps a **durable-decisions table** at the top and a `> Superseded by …` banner on disproved entries; findings go in handoffs | `DECISIONS.md` top |
+| 2026-09-15 (44b) | Watch tools: `tools/midfunc.py` (`make midfunc`) for shared tails, `tools/rdram.py` for dump reads, `make handoffs`; synthetic taps can be scoped to a scene (`OGRE_TAP_SCENE` / `OGRE_TAP_NOT_SCENE`) | `docs/HANDOFF-2026-09-15-session44.md` addendum |
+| 2026-09-15 (43) | Records 17/18 live in **bank unit B** (they overlap every other unit's RAM); the movie-path word is **`0x80197794`**, not `0x8019F794` | entry below; handoff s43 |
+| 2026-09-14 (38) | Zero a streamed record's **BSS** from the segment table on load; dispatch `0x801AFC2C`/`0x801980A0` in the default build | entries below |
+| 2026-09-14 (37) | Repair the tail-call emission at dispatched sites; `revert` never restores a call to a same-address fragment | entries below |
+| 2026-09-14 (36) | `OGRE_SCENE` pokes **early** (`OGRE_SCENE_AFTER_MS` defaults to 0); `kScenes` names the captured screens | entry below |
+| 2026-09-12 (33) | Streamed bank records are recompiled as **separate units partitioned by RAM**, and the swap is driven by the game's PI DMA | entry below |
+| 2026-09-12 (32) | `osViSetMode = 0x800955C0`, `0x80095820 = __osViSwapContext`, `osViBlack = 0x80095B30` | entry below |
+| 2026-08-29 (10) | RT64 auto-detects F3DEX2 — no GBI override | entry below |
+| 2026-08-25 (9) | KMC merges epilogues: N64Recomp emits **fall-through tail calls**; `make midfunc` now lists those tails and their register contracts | entry below, `tools/midfunc.py` |
+| 2026-08-24/25 (2–6) | libultra is bridged **by name** (`symbol_addrs.txt` + the runtime's `osXxx_recomp`); the scheduler, PI-DMA and byte-order fixes are load-bearing | `docs/HANDOFF-2026-08-24*.md`, `-session6.md` |
+
+Two house rules that this log learned the hard way: a **finding** belongs in the
+session handoff, not here; and when a later session disproves an entry, add a
+one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+### Decision: record hygiene — durable table, superseded banners, and watch tools
+
+`DECISIONS.md` is append-only and averages ~75 lines per entry, so the decisions
+that still bind the port were buried under session reasoning. It now opens with a
+**durable-decisions table** (the ~15 rows that matter, each with a pointer), and
+entries later sessions disproved carry a one-line `> Superseded by …` banner
+instead of being deleted (the session-38 `0x8019F794` address and "command mode"
+label, the session-34 "body interiors" blocker, the session-9 shared-epilogue
+finding, the session-43 wall). Findings keep going in the handoffs.
+
+Two docs join the record because the code cannot supply them:
+`docs/symbols.md` (address → proposed name → evidence → confidence, the naming
+convention, and the cost of a rename: size overrides are keyed by name, `asm/`
+is committed, cross-bank seeds) and `docs/scenes.md` (what each screen should
+show, from the developer — the AGENTS §1 oracle data, including the New Game
+opening's five parts). `AGENTS.md` gains the mental model that unlocked this
+session: uninitialised guest state is the game's own leftovers, so "the port has
+0 where retail does not" means *check the address map and the runtime bridges*.
+
+### Decision: scene-scoped synthetic input (`OGRE_TAP_SCENE` / `OGRE_TAP_NOT_SCENE`)
+
+Wall-clock tap schedules drift with `OGRE_SPEED`, load times and capture readback;
+two runs this session drove the attract loop instead of New Game because of it.
+`automation_buttons()` now gates the press on the dispatcher's scene
+(`D_800E810E`, `ogre::active_scene_id()`), with the list taking `kScenes` names or
+hex. `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the
+title and goes silent the moment New Game is confirmed — verified: `0x02` at
+`t=10968 ms`, step 2 entered, exit 0, no `OGRE_TAP_MAX` tuning. Gate-out means
+"no press this interval"; the schedule index still advances.
+
+### Decision: `make midfunc` is the first stop for an unexplained `jal`
+
+Session 44 lost hours to `jal` targets that are the *tail* of the function above
+them (no `jr $ra` between them), so the callee inherits a frame and registers the
+caller never set up. `tools/midfunc.py` finds them by "the previous function does
+not end with a transfer", and reports each tail's `jal` sites plus the frame
+slots, callee-saved registers and inherited caller-saved registers it reads
+before writing. It names all 67 today, including both of this session's
+(`0x802399AC` → `$fs3/$fs1/$fs0`; `0x8023C894` → `$a3/$t0/$v1`) and session 41's
+`func_801AFC2C` (`0x2C/0x46/0x4E($sp)`) in about two seconds. AGENTS §4 now says
+to run it first.
+
 ## 2026-09-15 (session 44) — step 2's crash is a shared-tail call, the step table is decoded, and an asset's LZ block starts at `rom+4`
 
 ### Finding: the New Game step table, decoded from the ROM
@@ -90,6 +159,10 @@ the fatal path.
 ---
 
 ## 2026-09-15 (session 43, correction) — the first `0x0D` visit IS the New Game movie; the wall is step 2
+
+> Session 44: this wall is **fixed** (the writes landed in KUSEG; see the session-44 entry
+> below). The wall after it is RT64-only: `do_sendP + 0xC4`, guest `0xFE6E2C89`.
+
 
 ### Correction, from a capture rather than from code
 
@@ -183,6 +256,11 @@ runs die on a near-NULL).
 ---
 
 ## 2026-09-14 (session 38) — two more cross-bank dispatches, record-BSS zeroing, and why the forced new-game path stops in scene 0x0D's init
+
+> Session 43: the word this entry calls `0x8019F794` is really **`0x80197794`**
+> (`lui`+`lw 0x7794`); session 44 reads the same path as the cutscene engine, not
+> "command mode".
+
 
 Session 37's `0x0D` wall moved twice. First, the forced run died right after
 record 10a loaded in main-unit `func_801AFAF4` — the same bug class as session
@@ -607,6 +685,11 @@ swappable spans, which made a record-3 caller and a record-2 callee look like a
 cross-bank call and mis-rewrote ~320 harmless call sites.
 
 ### Finding (the blocker): most cross-bank targets are body interiors in the bank
+
+> Session 44: those body interiors are the **fall-through tails** of the function above
+> them. `make midfunc` (`tools/midfunc.py`) lists all 67 with the frame slots and
+> registers each tail inherits before it writes them.
+
 
 The mechanism needs the target address to be a function entry in the bank that is
 resident when the call runs. Of the 67 distinct cross-bank `jal` targets the main
@@ -2256,6 +2339,11 @@ supported GPU. The vendored runtime changes are snapshotted in
 ## 2026-08-25 (session 9) — The `func_8019FC68` DL-build crash was a recompilation bug; N64Recomp now emits fall-through tail calls; boot reaches real rendering
 
 ### Finding: KMC shared-epilogue functions lose their register restores
+
+> Session 44: the same phenomenon also produces `jal` targets that are plain tails
+> (not epilogues) — e.g. `0x802399AC` (the `0x80239874` cutscene render tail) and
+> `0x8023C824`/`0x8023C894` (RDP emitters needing `a3`). `make midfunc` lists them.
+
 
 OB64's compiler (KMC) merges identical function epilogues into a separate symbol
 that the preceding function **falls through into**. `func_8019ABC4`'s epilogue

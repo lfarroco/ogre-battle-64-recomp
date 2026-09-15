@@ -5,7 +5,9 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 | Document | Purpose |
 |---|---|
 | [../AGENTS.md](../AGENTS.md) | **Read this first if you are an AI agent**: working rules for this repo — ask the developer what the current scene should display rather than inferring intent, treat handoffs as hypotheses, verify the consumer before naming a struct, isolate one variable per experiment, revert probes by regenerating. |
-| [DECISIONS.md](DECISIONS.md) | Living log of technical decisions and their rationale. |
+| [DECISIONS.md](DECISIONS.md) | Living log of technical decisions. **Read the "Durable decisions" table at the top first** — it is the ~13 decisions that still bind the port; the entries below are session reasoning (superseded ones carry a banner). |
+| [scenes.md](scenes.md) | **What each screen is supposed to show**, sourced from the developer (the AGENTS §1 oracle), with the port's status per screen and the New Game opening's five parts. |
+| [symbols.md](symbols.md) | Proposed symbol names: address → name → evidence → confidence, plus the naming convention and what a rename costs. Read before naming a function or calling one "the X function". |
 | [HANDOFF-2026-08-24.md](HANDOFF-2026-08-24.md) | Session handoff: current state, the first-boot SIGBUS, and next steps. |
 | [HANDOFF-2026-08-25.md](HANDOFF-2026-08-25.md) | Session 4 handoff: first RSP task + real VI mode achieved; drainer thread; next steps. |
 | [HANDOFF-2026-08-25-session5.md](HANDOFF-2026-08-25-session5.md) | Session 5 handoff: RT64 renderer integrated; game stalls after its first RSP task; F3DEX 2.08 short-format GBI mismatch. |

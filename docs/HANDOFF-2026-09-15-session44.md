@@ -280,36 +280,52 @@ the `-10` steps (3–8, 14–16) the forms, and the lone `-4` step 10 the closin
 movie. Confirming it needs the steps to run, which the §3 fix now allows (the
 next session should capture them).
 
-## 4. The wall that the fix exposes: the RT64 build dies in the runtime's queue bridge
+## 4. The wall that the fix exposes: the RT64 build dies on a garbage PI-queue pointer
 
-With the mirror, the **RT64 build** (`build-app`) now reaches the second `0x0D`
-visit and immediately dies *in the runtime*, not in game code:
+With the mirror, the **RT64 build** (`build-app`) reaches the second `0x0D` visit
+and dies *in the runtime*, and a rerun under `OGRE_TRACE_HOOKS=1` gives the
+guest chain (the scene-gated taps make that run repeatable — §Addendum):
 
 ```
-[bank] loading overlay record rom=0x0E4910 ram=0x80197B90 size=0x72C0 (40 functions)
-[crash] host pc _Z7do_sendPhiibb + 0xC4
-[crash] signal 10 on N64 thread 4 fault=0x18eb3dc89 rdram=0x11045b000 offset=0x7E6E2C89
+[crash] host pc do_send + 0xC4   signal 10 (SIGBUS)   guest 0xFE6E2C89
+callchain t4: func_80072398 → func_800765D8 → func_ovlC_80226110 → func_ovlC_8022D1CC
+              → func_ovlC_80227030 → func_ovlC_802282D8      (the step interpreter)
+              → func_ovlC_8023BF50                            (an emitter, opcode 0x80000006)
+              → func_8009DBB8 (asset_load) → func_80089F80 → func_8008BC40 → osSendMesg
 ```
 
-`do_sendP` is `ultramodern`'s message-queue bridge, and the guest pointer it was
-handed translates to `guest 0xFE6E2C89` (KSEG3) — i.e. a queue address the
-bridge's `addr >= 0x80000000 && addr < 0x80800000` validation
-(`ultramodern/src/mesgqueue.cpp:255`) does not accept, after which it
-dereferences it anyway. The **null build never hits this** (60 s of the same
-`Start`-tap schedule, exit 0), so it is on the renderer path — plausibly the
-first display-list task of the step. Two hypotheses to separate next:
-(a) game code legitimately uses a KSEG3/KSSEG pointer (the game maps
-`0xC0000000` in `func_8009AAA0`) and the runtime bridges need the same
-segment translation the `MEM_*` macros now have; (b) the mirror lets a bad
-pointer survive where it used to fault, and a structure is corrupted.
+* `func_8008BC40(a0, s0, a2)` builds an `OSIoMesg` at `s0` and takes the queue
+  from `func_800998C0()`, which is literally `return D_800AA400 ? D_800AA408 : 0`
+  (`0x800998C0`: `lw v1, D_800AA400` / `beqz` / `lw v0, D_800AA408`).
+* the crash RDRAM dump (`OGRE_DUMP_RDRAM` at the crash) shows that PI-manager
+  state is **garbage**: `D_800AA400 = 0xE5DEFD56`, `D_800AA408 = 0xFE6E2C81`
+  (the crash's `0xFE6E2C89` differs in the low byte, so the region is being
+  written around the fault — the neighbourhood `0x800AA3C0..0x800AA420` is
+  high-entropy noise, *not* structured display-list words).
+* the same chain does not crash in the **null** build at all, so whatever leaves
+  that region garbage (or the different code path that reads it) is on the
+  renderer side.
+* **prior art** (`DECISIONS.md` → session 6): the PI manager is dead
+  (`osCreatePiManager` is an empty stub) and the guest `func_8008BC40` bails when
+  `D_800AA400 == 0`, so `func_8008BC40` was *reimplemented* in the runtime as a
+  synchronous `recomp::do_rom_read` + `osSendMesg`. Garbage in that word
+  *un-gates* the path and hands `osSendMesg` a bogus queue; a ROM copy whose
+  destination came out wrong would fill exactly this page with
+  compressed-asset noise. `func_8008BC40_recomp` is the first place to look.
+
+So this is *not* the bridge-translation question it first looked like: the queue
+pointer is not a legitimate KSSEG/KSEG3 address, it is **uninitialised/corrupted
+guest state** in the main segment's data area (`0x800AA400` is loaded from the
+ROM at boot, so something overwrote it). The next experiment is a write watch on
+`0x800AA400..0x800AA420` (or two `OGRE_DUMP_RDRAM` snapshots to diff), plus the
+same probe in the null build to see which run writes it.
 
 ## 5. What's next (session 45)
 
-1. **Chase the new `do_sendP` SIGBUS (RT64 only).** Dump the RDRAM at that crash
-   (`OGRE_DUMP_RDRAM`) and read the queue structure the game passed; watch the
-   guest register that holds the pointer at the `osSendMesg` call. Compare with
-   the null build at the same point (it does not crash) to see whether the
-   difference is the display-list task submission itself.
+1. **Find what writes `D_800AA400..0x800AA420`** (RT64 only; the state is garbage
+   at the step-2 enter, and `func_800998C0` feeds it to `osSendMesg` from the
+   asset-load path — §4). Two `OGRE_DUMP_RDRAM` snapshots to diff, or a watch on
+   that page; then the same in the null build, which does not crash.
 2. **Check that the mirror is not masking a real structure bug.** The two
    stores the fix tolerates are at guest `0` and `8`; verify no game code
    *reads* those offsets (`OGRE_DUMP_RDRAM` after the enter shows RDRAM
@@ -321,6 +337,73 @@ pointer survive where it used to fault, and a structure is corrupted.
 4. Unchanged and open: menu `0x18` natural entry, `OGRE_NO_AUDIO=1` early-boot
    crash, `osViFade`, scene `0x12` (Load Game, needs Controller Pak state), the
    movie-engine path (`0x80197794`).
+
+## Addendum (same session, after the developer's follow-up): repo hygiene + tooling
+
+The developer's scene description (above) was followed by a review of how the
+project records and re-derives knowledge. Everything below is additive; no
+game-logic or runtime behaviour changed, except the scene-gated taps (a harness
+feature).
+
+**Records**
+
+* `docs/DECISIONS.md` grew a **"Durable decisions (read this first)"** table (the
+  ~13 decisions that still bind the port, each with a pointer) and four
+  **superseded banners** on entries later sessions disproved (the session-38
+  `0x8019F794` address and "command mode" label, the session-34 "body interiors"
+  blocker, the session-9 shared-epilogue finding, and the session-43 wall this
+  session fixed). Mark, never delete.
+* `docs/scenes.md` — **what each screen is supposed to show**, sourced from the
+  developer, with the port's status per screen and the New Game opening's five
+  parts (movie → cathedral → name → birthday → questions → movie). This is the
+  AGENTS §1 oracle data in the repo instead of in a chat.
+* `docs/symbols.md` — the naming plan: address → proposed name → evidence →
+  confidence, seeded with this session's globals (`g_step_descriptor`,
+  `g_step_objects`, `g_dl_cursor`, `g_task_queue`, …), the interpreter/dispatch
+  layer, and every shared tail that has bitten the project. It also records the
+  convention (`<meaning>_<addr>`, keep `ovlX_` provenance, no runtime-name
+  collisions) and what a rename actually costs (size overrides are keyed by
+  name; `asm/` is committed; cross-bank seeds).
+* `AGENTS.md` gains the mental model that unlocked this session — *uninitialised
+  guest state is the game's own leftovers, not noise; the one systemic port
+  difference is zero-filled RDRAM, so check the address map and the bridges
+  first* — plus pointers to the two new docs and to `make midfunc`.
+
+**Tools**
+
+* `tools/rdram.py` — reads an `OGRE_DUMP_RDRAM` image with the runtime's byte
+  order (`word`/`half`/`byte`/`string`/`hexdump`/`find`/`ptr`). Every session
+  re-derived `unpack_from('<I', data, a & 0x1FFFFFFF)`; now it is a command.
+* `tools/midfunc.py` (`make midfunc`) — the **fall-through / shared tail**
+  report: every `jal` target that is the tail of the function above it, with the
+  `jal` sites that reach it and the frame slots / callee-saved / inherited
+  caller-saved registers it reads before writing. It finds 67 tails today,
+  including both of this session's (`0x802399AC` reads `$fs3/$fs1/$fs0`;
+  `0x8023C894` reads `$a3/$t0/$v1`) and session 41's `func_801AFC2C` (frame
+  `0x2C/0x46/0x4E($sp)`), in about two seconds.
+* `tools/handoffs.py` (`make handoffs`) — the 42 handoffs newest-first with
+  their first heading.
+* `OGRE_TAP_SCENE=<list>` / `OGRE_TAP_NOT_SCENE=<list>` (sdl_platform.cpp) —
+  scope a synthetic press to the **scene** (`D_800E810E`) instead of wall time.
+  `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the title
+  and goes silent the moment New Game is confirmed: verified, `0x02` at
+  `t=10968 ms`, step 2 entered, exit 0, with **no** `OGRE_TAP_MAX` tuning. This
+  removes the flakiness that cost two runs this session (a wall-clock schedule
+  drove the attract loop instead of New Game).
+
+**Still open (the last suggestion, deliberately not forced)**
+
+The runtime bridges translate guest pointers themselves
+(`mesgqueue.cpp`/`pi.cpp`/`vi.cpp`/`audio.cpp` validate and dereference
+`addr - 0x80000000`) while the recompiled macros now go through
+`recomp_mem_addr`. They must agree, and the RT64 crash after the KUSEG fix is on
+that boundary: `do_send` is handed queue pointer `0xFE6E2C89` (KSEG3). Two
+hypotheses — a legitimate KSSEG/KSEG3 mapping the game installs
+(`func_8009AAA0` maps `0xC0000000`) versus a corrupted pointer that the new
+low-window mirror now lets survive one step further — and they need the crash
+RDRAM dump before the translation is touched. A shared `guest_to_host` helper
+used by both the macros and the bridges is the eventual fix; doing it blind
+would widen the masking.
 
 ## Verification (final binaries, all probes reverted by `make recomp` + `make bank-recomp`)
 
@@ -365,8 +448,18 @@ repro commands below are the maintained verification.
 * `tools/ogrelz.py` — `--asset <rom> <id>...` mode, and the docstring now
   records that an asset's LZ block starts at `rom + 4` (the first word is the
   payload size).
-* `PLAN.md`, `docs/DECISIONS.md`, `docs/README.md`, `AGENTS.md` (walls list),
-  this file.
+* `app/src/bank_overlays.{hpp,cpp}` — `active_scene_id()` / `scene_lookup()` /
+  `scene_list_matches()` made public for the tap gate.
+* `app/src/sdl_platform.cpp` — `OGRE_TAP_SCENE` / `OGRE_TAP_NOT_SCENE` gating in
+  `automation_buttons()` (+ a startup line saying which gate is active).
+* `tools/rdram.py`, `tools/midfunc.py`, `tools/handoffs.py` (new) and the
+  `handoffs` / `midfunc` targets in the `Makefile`.
+* `docs/scenes.md`, `docs/symbols.md` (new).
+* `docs/guides/app-build.md` — the two new tap knobs in the env table.
+* `docs/README.md` — index rows for the new docs and the read-the-table-first
+  note on `DECISIONS.md`.
+* `PLAN.md`, `docs/DECISIONS.md`, `AGENTS.md` (walls list + mental model), this
+  file.
 * Probes, **all reverted by `make recomp` + `make bank-recomp`**: `funcs_0.c`
   (`0x80239874` entry), `funcs_1.c` (`func_ovlC_8023C894` entry and
   `func_ovlC_80226110` entry), `funcs_6.c` (`func_ovlC_802282D8` entry),

@@ -86,6 +86,10 @@ wrong half of a function. Check these before blaming game logic:
 - **Fall-through / merged tails**: `func_ovlC_802399AC` has no prologue — it is
   the continuation of `func_ovlC_80239874`. A `jal` into it is real code with a
   frame contract (`sp+0x1EC`, `s0`, the `f` regs) that the caller may not satisfy.
+  **Run `make midfunc` first**: it lists every such tail (67 today) with the
+  frame slots and registers the tail reads before writing, and the `jal` sites
+  that reach it. Session 44 lost hours to two of them that this report names in
+  seconds.
 - **Cross-bank fixed-address calls**: records overlap in RAM by design
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   *different* resident bank. `python3 tools/cross_bank.py report` lists sites;
@@ -118,8 +122,9 @@ An A/B run must change exactly one thing, or the result cannot be interpreted.
 - Prove it: `grep -rl probe42 RecompiledFuncs/ Bank*Funcs/ app/` must be empty,
   and re-run the battery. Record in the handoff which files carried probes.
 - `OGRE_DUMP_RDRAM=<path>` gives the whole 8 MiB image for offline reads; read it
-  with the byte-order rules in `docs/guides/app-build.md` (words are
-  little-endian at `addr - 0x80000000`; logical bytes are XOR-3).
+  with `tools/rdram.py` (`word`/`half`/`byte`/`string`/`hexdump`/`find`/`ptr`),
+  which implements the byte-order rules (words are little-endian at
+  `addr - 0x80000000`; logical bytes are XOR-3 — `docs/guides/app-build.md`).
 
 ## 7. Do not fabricate state to get past a crash
 
@@ -177,6 +182,18 @@ conclusion, and it means stop chasing it as a port bug.
 These were wrong or missing in earlier sessions. Verify if in doubt, but start
 from here.
 
+- **Uninitialised guest state is the game's own leftovers, not noise.** The
+  recompiled code is the ROM's instructions, so a register or stack slot that
+  nothing wrote holds the same value it holds on retail — the *one* systemic
+  difference is that the port zero-fills RDRAM at boot. So "the port has 0 where
+  retail clearly does not" should send you to the **address map** (`recomp_mem_addr`:
+  KSEG0, KSSEG/KSEG3 and the KUSEG low window) and to the **runtime bridges**
+  (they translate guest pointers themselves and must agree with the macros)
+  before you suspect a game-logic bug. Session 44's step-2 wall was exactly this.
+- **Vocabulary and intent live in two docs**: `docs/symbols.md` (address →
+  proposed name → evidence → confidence; read it before naming anything, and
+  before calling a function "the X function") and `docs/scenes.md` (what each
+  screen is supposed to show, from the developer — the AGENTS §1 oracle data).
 - **Scene dispatch**: `func_80075BC0` looks up `D_800AF028[scene_id]()` (ids
   ≥ 0x1F map to index 0). The accessor returns the scene descriptor, whose words
   are `+0x00` enter (once), `+0x04`/`+0x08` per-frame hooks, `+0x0C` leave,
@@ -216,7 +233,11 @@ from here.
   `recomp_mem_addr`** (`tools/N64ModernRuntime/N64Recomp/include/recomp.h`,
   recorded in `n64modernruntime-n64recomp.patch`): `a < 0x80000000` →
   `a & 0x003FFFFF`. Step 2's enter now completes (null build runs the scene with
-  no crash). The next wall is RT64-only: `do_sendP + 0xC4`, guest `0xFE6E2C89`.
+  no crash). The next wall is RT64-only: `do_send` SIGBUS, guest `0xFE6E2C89` — the
+  guest's PI state (`D_800AA400`/`D_800AA408`, never initialized because
+  `osCreatePiManager` is stubbed since session 6) holds garbage at the step-2
+  enter and `func_800998C0` feeds it to `osSendMesg` from the asset-load chain;
+  the null build does not hit it. Suspect a ROM DMA landing in the wrong place.
   Also open: the movie-engine branch (`F1C0 == 0`, gated by the word
   `0x80197794` — *not* `0x8019F794`, see session 43) which no New Game step
   selects; menu `0x18` natural entry; scene `0x12` = Load Game (needs save

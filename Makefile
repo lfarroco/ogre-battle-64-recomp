@@ -177,6 +177,20 @@ build/bank%.elf: config-bank%.yaml | build/bank%.ld
 		build/bank$*/asm/*.o build/bank$*/asm/data/*.o build/bank$*/assets/*.o
 	@echo "==> linked $@"
 
+# --- session bookkeeping helpers ---------------------------------------------
+# `make handoffs`: every docs/HANDOFF-*.md newest-first with its first heading,
+# so the per-session record is one command away (and the newest one is obvious).
+handoffs:
+	python3 tools/handoffs.py
+.PHONY: handoffs
+
+# `make midfunc`: the fall-through / shared-tail report (see tools/midfunc.py).
+# These are `jal` targets that are the tail of the function above them, so the
+# callee inherits a frame and registers a direct call never sets up.
+midfunc:
+	python3 tools/midfunc.py
+.PHONY: midfunc
+
 .PHONY: bank bank-force
 bank: bank-force
 
@@ -185,4 +199,4 @@ bank-force: $(BANK_ELFS)
 bank-recomp: bank
 	@for u in $(BANK_UNITS); do $(N64RECOMP) config-bank$$u.toml || exit 1; done
 	python3 tools/gen_bank_funcs.py
-.PHONY: all clean recomp cross-bank-report cross-bank-dispatch bank-split bank-recomp
+.PHONY: all clean recomp cross-bank-report cross-bank-dispatch bank-split bank-recomp handoffs midfunc

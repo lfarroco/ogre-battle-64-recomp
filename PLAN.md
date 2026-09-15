@@ -557,8 +557,13 @@ hardware. RT64 remains the primary native renderer throughout. See
     `n64modernruntime-n64recomp.patch`). Effect: the step-2 enter completes —
     the null build runs the scene 110 s with no crash (it died in one frame
     before), the movie still renders, Tutorial/attract unchanged. **Next wall:**
-    the RT64 build then dies in the runtime's queue bridge
-    (`do_sendP + 0xC4`, guest `0xFE6E2C89`), not hit by the null build.
+    the RT64 build dies in `do_send` (SIGBUS, guest `0xFE6E2C89`): the guest's PI
+    state (`D_800AA400`/`D_800AA408`, never initialised because
+    `osCreatePiManager` is stubbed since session 6) holds garbage at the step-2
+    enter, and `func_800998C0` feeds it to `osSendMesg` from the asset-load chain
+    (`func_ovlC_802282D8 → func_ovlC_8023BF50 → func_8009DBB8 → func_80089F80 →
+    func_8008BC40`); the null build does not hit it. Suspect a ROM DMA landing in
+    the wrong place (`func_8008BC40_recomp`).
     `tools/ogrelz.py` gained `--asset` and the corrected block-start rule.
     See `docs/HANDOFF-2026-09-15-session44.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
