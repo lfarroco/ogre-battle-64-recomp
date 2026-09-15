@@ -289,22 +289,36 @@ from here.
   `k0=175 k1=469 k2=423 k3=222`): `R = Y+K0*V>>8`, `G = Y+(K1*V+K2*U)>>8`,
   `B = Y+K3*U>>8`. That decoder is in the tree (`sampleTMEMYUV16` /
   `sampleTMEMWithConvert`) and the YUV arm is no longer a stub — do not replace it
-  with a guess again. **Remaining wall:** the port completes the emulated RSP task
-  as soon as the display list reaches RT64, so the game's CPU copy can run before
-  the renderer has drawn; `Application::waitForGameFramebuffers` (RSP worker,
-  `OGRE_NJ_WAIT_MS`) waits for a game framebuffer, and a wait on the *game* thread
-  deadlocks. Also **session 49's four stage-3 copies are not shown to be the njpeg
-  readback**: they run at t≈1.4–3.0 s (widths 320/176 x heights 240/144) while
-  scene `0x0D` and the draw submission do not start until t≈3.7 s, with source
-  `0x80000400` and njpeg target `0` — identify the copy's caller before building on
-  it. See `docs/HANDOFF-2026-09-15-session50.md`.
+  with a guess again. **The remaining wall is render timing, and it is now
+  localised:** the port completes the emulated RSP task as soon as the display
+  list reaches RT64, so the game's CPU copy can run before the renderer has drawn.
+  `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) waits for
+  a game framebuffer; a wait on the *game* thread deadlocks. The readback that
+  matters runs in **scene `0x02`** (the four stage-3 copies in
+  `func_ovlE_8019976C`, which are the njpeg readback — sole caller bankE
+  `0x80199D80` inside `func_ovlE_80199D30`'s drive loop; the four sizes
+  320x240/176x240/320x144/176x144 are the four sub-images of one `'B5'` asset,
+  ROM `0x7CADAC`, not tiles of one image), and the draw whose pixels it needs is
+  the `0x800A5110` display list submitted in that same scene. **That list carries
+  texture loads and no geometry**: `OGRE_DL_ANALYZE=1` reports
+  `cmds=1821 tri1=0 tri2=0 quad=0 texrect=0 fill=0 settimg=300 unknown=0` for
+  `dl=2 ptr=0x80025C00`, and `OGRE_DL_DECODE=2` shows only
+  `SETOTHERMODE/SETCIMG/SETSCISSOR/SETCONVERT/SETCOMBINE` + 300 ×
+  `{SETTIMG YUV16, SETTILE t7 fmt=1 siz=2 line=2, LOADTILE, MOVEMEM, MTX}`. Session
+  46's "the renderer receives the 300 macroblock draws" counted `display list N`
+  lines and `[yuv]` lines and never checked for geometry — so `found=0` in
+  `[njwait]` is expected (RT64 is asked to load, not draw). The open question is
+  upstream of the renderer: what turns those loads into a picture on hardware.
+  See `docs/HANDOFF-2026-09-15-session50.md` §5/§9.
 - **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables
   `0x800AC050`; `data_size` = macroblocks, `yield_data_size` = quantization
   scale; asset `0x00183352` = ROM `0x7175A2`, magic `'HU'` + `'HUFF'`) → a
-  **second gfx ucode `0x800A5110`** drawing one 16x16 YUV16 texture per macroblock
-  into `G_SETCIMG` → a **CPU framebuffer readback** → assembly of a
+  **second gfx ucode `0x800A5110`** — which, measured in session 50, **loads** one
+  16x16 YUV16 texture per macroblock into TMEM and emits **no geometry** (see the
+  cathedral fact above); it is *not* a draw → a **CPU framebuffer readback** →
+  assembly of a
   `'B5'`-headed image at `0x80243E10` whose pixels (at `0x80243E28`) the blit
   reads. The microcode is recompiled (`make rsp-recomp` →
   `RspFuncs/njpeg_ucode.cpp`) and **runs by default** (`OGRE_NJPEG=0` forces the

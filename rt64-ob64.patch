@@ -1,8 +1,8 @@
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
-index ee8bc1f..46c1c29 100644
+index ee8bc1f..1e581cd 100644
 --- a/src/hle/rt64_application.cpp
 +++ b/src/hle/rt64_application.cpp
-@@ -524,6 +524,10 @@ namespace RT64 {
+@@ -524,6 +524,14 @@ namespace RT64 {
          state->updateScreen(core.decodeVI(), false);
      }
  
@@ -10,14 +10,18 @@ index ee8bc1f..46c1c29 100644
 +        state->syncFramebuffers();
 +    }
 +
++    bool Application::waitForGameFramebuffers(uint32_t timeoutMs) {
++        return state->waitForGameFramebuffers(timeoutMs);
++    }
++
      void Application::destroyShaderCache() {
          workloadQueue->waitForWorkloadId(state->workloadId);
          presentQueue->waitForPresentId(state->presentId);
 diff --git a/src/hle/rt64_application.h b/src/hle/rt64_application.h
-index 6c83fe0..70bb5e6 100644
+index 6c83fe0..18ac07c 100644
 --- a/src/hle/rt64_application.h
 +++ b/src/hle/rt64_application.h
-@@ -156,6 +156,10 @@ namespace RT64 {
+@@ -156,6 +156,12 @@ namespace RT64 {
          SetupResult setup(uint32_t threadId);
          void processDisplayLists(uint8_t *memory, uint32_t dlStartAddress, uint32_t dlEndAddress, bool isHLE);
          void updateScreen();
@@ -25,6 +29,8 @@ index 6c83fe0..70bb5e6 100644
 +        // through ogre_sync_framebuffers() before it reads a framebuffer with the
 +        // CPU (the njpeg readback).
 +        void syncFramebuffers();
++        // OGRE: see State::waitForGameFramebuffers.
++        bool waitForGameFramebuffers(uint32_t timeoutMs);
          void destroyShaderCache();
          void updateMultisampling();
          void end();
@@ -395,7 +401,7 @@ index 7de5b69..f894351 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..54084aa 100644
+index a10c11a..b106d92 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -26,6 +26,14 @@
@@ -546,7 +552,25 @@ index a10c11a..54084aa 100644
  #   ifdef LOG_TEXTURE_IMAGE_METHODS
          RT64_LOG_PRINTF("RDP::setTextureImage(fmt %u, siz %u, width %u, address 0x%08X)", fmt, siz, width, address);
  #   endif
-@@ -1035,6 +1153,14 @@ namespace RT64 {
+@@ -1007,6 +1125,17 @@ namespace RT64 {
+         convertK[3] = k3;
+         convertK[4] = k4;
+         convertK[5] = k5;
++        // OGRE: the game's YUV -> RGB conversion matrix (G_SETCONVERT). The YUV16
++        // texture decode uses it, so a trace of it is the ground truth for the
++        // background's colour conversion.
++        if (getenv("OGRE_CONVERT_TRACE") != nullptr) {
++            static uint32_t convertTrace = 0;
++            if (++convertTrace <= 20) {
++                fprintf(stderr, "[convert] n=%u k0=%d k1=%d k2=%d k3=%d k4=%d k5=%d\n",
++                        convertTrace, k0, k1, k2, k3, k4, k5);
++                fflush(stderr);
++            }
++        }
+         state->updateDrawStatusAttribute(DrawAttribute::Convert);
+     }
+ 
+@@ -1035,6 +1164,14 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
  #   endif
  
@@ -561,7 +585,7 @@ index a10c11a..54084aa 100644
          // Filter out incorrect rectangles.
          if ((lrx < ulx) || (lry < uly)) {
              return;
-@@ -1197,6 +1323,52 @@ namespace RT64 {
+@@ -1197,6 +1334,52 @@ namespace RT64 {
              return;
          }
  
@@ -614,7 +638,7 @@ index a10c11a..54084aa 100644
          // Check if framebuffer pair must be changed.
          checkFramebufferPair();
  
-@@ -1222,6 +1394,17 @@ namespace RT64 {
+@@ -1222,6 +1405,17 @@ namespace RT64 {
                  }
              }
          }
@@ -632,7 +656,7 @@ index a10c11a..54084aa 100644
          
          bool flushedState = state->checkDrawState();
  
-@@ -1322,6 +1505,44 @@ namespace RT64 {
+@@ -1322,6 +1516,44 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
  #   endif
  
@@ -678,10 +702,20 @@ index a10c11a..54084aa 100644
          DrawCall &drawCall = state->drawCall;
          if (!drawCall.textureOn || (drawCall.textureTile != tile) || (drawCall.textureLevels != 1)) {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..0ff44e8 100644
+index 2970e71..1dfb34a 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
-@@ -616,6 +616,37 @@ namespace RT64 {
+@@ -5,7 +5,9 @@
+ #include "rt64_state.h"
+ 
+ #include <cassert>
++#include <chrono>
+ #include <cinttypes>
++#include <thread>
+ 
+ #include "im3d/im3d.h"
+ #include "im3d/im3d_math.h"
+@@ -616,6 +618,92 @@ namespace RT64 {
          workload.fbPairSubmitted++;
      }
      
@@ -690,11 +724,56 @@ index 2970e71..0ff44e8 100644
 +    // copy lags behind because it is only written back when a workload is retired,
 +    // so the CPU copy can see RDRAM as it was before the draw. Retire the pending
 +    // workload and write the rendered framebuffers back first.
++    bool State::waitForGameFramebuffers(uint32_t timeoutMs) {
++        const bool trace = (getenv("OGRE_SYNC_TRACE") != nullptr);
++        const auto start = std::chrono::steady_clock::now();
++        uint32_t spins = 0;
++        bool found = false;
++        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
++            spins++;
++            for (auto &entry : framebufferManager.framebuffers) {
++                Framebuffer &fb = entry.second;
++                const bool isGameFb = (entry.first == 0x400) || (entry.first == 0x25C00) || (entry.first == 0x4B400);
++                if (isGameFb && (fb.width != 0) && (fb.height != 0)) {
++                    found = true;
++                    break;
++                }
++            }
++            if (found) {
++                break;
++            }
++            std::this_thread::sleep_for(std::chrono::microseconds(200));
++        }
++
++        if (trace) {
++            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
++            fprintf(stderr, "[njwait] spins=%u found=%d ms=%lld fbs=%u queueId=%llu workloadId=%llu\n",
++                    spins, (int)found, (long long)ms, (unsigned)framebufferManager.framebuffers.size(),
++                    (unsigned long long)ext.workloadQueue->workloadId, (unsigned long long)workloadId);
++            fflush(stderr);
++        }
++        return found;
++    }
++
 +    void State::syncFramebuffers() {
 +        // Retire the most recently submitted workload so its draw calls have been
 +        // rendered and the framebuffer writeback that runs when a workload is
 +        // retired has put the pixels in RDRAM.
 +        ext.workloadQueue->waitForWorkloadId(workloadId);
++
++        // OGRE: the game's own wait is for the *emulated* RSP task, which the port
++        // completes as soon as the display list has been handed to RT64 -- the
++        // renderer thread has not necessarily rendered it yet. Wait for the game's
++        // framebuffers to actually appear in the framebuffer manager with rendered
++        // content before the CPU reads them (bounded, so a renderer that is gone
++        // cannot hang the game thread forever).
++        const bool syncTrace = (getenv("OGRE_SYNC_TRACE") != nullptr);
++        if (syncTrace) {
++            fprintf(stderr, "[syncfb] enter: framebuffers=%u workloadId=%llu queueId=%llu writeCursor=%u sawGameFb=%d\n",
++                    (unsigned)framebufferManager.framebuffers.size(), (unsigned long long)workloadId,
++                    (unsigned long long)ext.workloadQueue->workloadId, (unsigned)ext.workloadQueue->writeCursor);
++            fflush(stderr);
++        }
 +
 +        // Then write back every framebuffer that has rendered content. The CPU
 +        // readback picks a source from the game's own framebuffer table, and that
@@ -702,6 +781,16 @@ index 2970e71..0ff44e8 100644
 +        // has its rendered pixels in RDRAM rather than only the one it names.
 +        for (auto &entry : framebufferManager.framebuffers) {
 +            Framebuffer &fb = entry.second;
++            if (syncTrace && ((entry.first == 0x400) || (entry.first == 0x25C00) || (entry.first == 0x4B400))) {
++                uint32_t nz = 0;
++                for (uint32_t b = 0; b < 64; b++) {
++                    if (RDRAM[entry.first + b] != 0) nz++;
++                }
++                fprintf(stderr, "[syncfb] addr=0x%06X w=%u h=%u modifiedBytes=%u ramNZ64=%u\n",
++                        (unsigned)entry.first, (unsigned)fb.width, (unsigned)fb.height,
++                        (unsigned)fb.modifiedBytes, (unsigned)nz);
++                fflush(stderr);
++            }
 +            if ((fb.width == 0) || (fb.height == 0) || (fb.modifiedBytes == 0)) {
 +                continue;
 +            }
@@ -719,10 +808,26 @@ index 2970e71..0ff44e8 100644
      void State::checkRDRAM() {
          if (!rdramCheckPending) {
              return;
-@@ -1200,6 +1231,21 @@ namespace RT64 {
+@@ -1200,6 +1288,37 @@ namespace RT64 {
                          depthRowEnd = fbPair.drawDepthRect.bottom(true);
                      }
  
++                    // OGRE diagnostic: the njpeg targets specifically. A framebuffer pair
++                    // at 0x400/0x25C00/0x4B400 with a non-empty draw rect means the
++                    // YUV macroblock draw really is being rendered into RDRAM.
++                    if ((getenv("OGRE_SYNC_TRACE") != nullptr) &&
++                        ((colorImg.address == 0x400) || (colorImg.address == 0x25C00) || (colorImg.address == 0x4B400))) {
++                        static uint32_t njPair = 0;
++                        if (++njPair <= 40) {
++                            fprintf(stderr, "[njpair] n=%u addr=0x%06X fmt=%u siz=%u width=%u rectEmpty=%d rows=%u..%u writeWidth=%u calls=%u\n",
++                                    njPair, (unsigned)colorImg.address, (unsigned)colorImg.fmt, (unsigned)colorImg.siz,
++                                    (unsigned)colorImg.width, (int)fbPair.drawColorRect.isEmpty(),
++                                    (unsigned)colorRowStart, (unsigned)colorRowEnd, (unsigned)colorWriteWidth,
++                                    (unsigned)fbPair.gameCallCount);
++                            fflush(stderr);
++                        }
++                    }
++
 +                    // OGRE diagnostic: which framebuffer pairs RT64 renders and
 +                    // (below) writes back to RDRAM. The njpeg YUV draws target
 +                    // 0x80025C00; if that address never shows up here with a
@@ -741,7 +846,7 @@ index 2970e71..0ff44e8 100644
                      return true;
                  }
                  else {
-@@ -1476,6 +1522,21 @@ namespace RT64 {
+@@ -1476,6 +1595,21 @@ namespace RT64 {
                  pairCursor = framebufferPairCursor;
                  while (pairCursor < maxFramebufferPair) {
                      if (getFramebufferPairs(pairCursor)) {
@@ -752,8 +857,8 @@ index 2970e71..0ff44e8 100644
 +                            static uint32_t wbTrace = 0;
 +                            if (++wbTrace <= 40) {
 +                                const uint32_t off = colorFb->addressStart + 0x200 * 4;
-+                                fprintf(stderr, "[fbwrite] n=%u addr=0x%06X width=%u rows=%u..%u firstPixels=%04X %04X %04X %04X\n",
-+                                        wbTrace, (unsigned)colorFb->addressStart, (unsigned)colorWriteWidth,
++                                fprintf(stderr, "[fbwrite] t=%llums n=%u addr=0x%06X width=%u rows=%u..%u firstPixels=%04X %04X %04X %04X\n",
++                                        (unsigned long long)0, wbTrace, (unsigned)colorFb->addressStart, (unsigned)colorWriteWidth,
 +                                        (unsigned)colorRowStart, (unsigned)colorRowEnd,
 +                                        (unsigned)((RDRAM[off] << 8) | RDRAM[off + 1]), (unsigned)((RDRAM[off + 2] << 8) | RDRAM[off + 3]),
 +                                        (unsigned)((RDRAM[off + 4] << 8) | RDRAM[off + 5]), (unsigned)((RDRAM[off + 6] << 8) | RDRAM[off + 7]));
@@ -763,7 +868,7 @@ index 2970e71..0ff44e8 100644
                          colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
  
                          if (depthWriteWidth > 0) {
-@@ -1944,9 +2005,42 @@ namespace RT64 {
+@@ -1944,9 +2078,42 @@ namespace RT64 {
                  uint64_t newScreenHash = XXH3_64bits(present.storage.data(), screenFbBytes);
                  screenChangesMade = (newScreenHash != lastScreenHash);
                  lastScreenHash = newScreenHash;
@@ -807,10 +912,10 @@ index 2970e71..0ff44e8 100644
          if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
              // Push a new renderer event to the timeline for presenting this VI.
 diff --git a/src/hle/rt64_state.h b/src/hle/rt64_state.h
-index 7a8c13b..2592cc5 100644
+index 7a8c13b..c61b685 100644
 --- a/src/hle/rt64_state.h
 +++ b/src/hle/rt64_state.h
-@@ -145,6 +145,12 @@ namespace RT64 {
+@@ -145,6 +145,19 @@ namespace RT64 {
          void submitFramebufferPair(FramebufferPair::FlushReason flushReason);
          void checkRDRAM();
          void fullSync();
@@ -820,6 +925,13 @@ index 7a8c13b..2592cc5 100644
 +        // njpeg readback). Without it the CPU sees RDRAM as it was before the draw,
 +        // which is what made the New Game background black.
 +        void syncFramebuffers();
++        // OGRE: after a display list has been submitted, wait (bounded) until the
++        // renderer has rendered the game's njpeg framebuffers and written them
++        // back to RDRAM. Called from the RSP worker thread that submitted the
++        // list; the game's own wait for that RSP task then covers the render, so
++        // its CPU readback sees real pixels. Returns true if a game framebuffer
++        // was rendered.
++        bool waitForGameFramebuffers(uint32_t timeoutMs);
          void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
          void listProcessBegin();
          void listProcessEnd();
@@ -944,3 +1056,224 @@ index 9fae0d4..d510d49 100644
                      instanceDrawCall.type = InstanceDrawCall::Type::FillRect;
  
                      auto &clearRect = instanceDrawCall.clearRect;
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+index e7895c3..22cf404 100644
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -130,6 +130,14 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     
+     computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction);
+ 
++    // OGRE: G_SETCONVERT's YUV -> RGB matrix, for the YUV16 texture path. K2 is
++    // encoded across a field boundary as (k2 << 5) | ... so it is only 4 useful
++    // bits here; the sampler scales it back (see TextureDecoder.hlsli).
++    const float3 ogreConvertRG = float3(float(instanceRDPParams[instanceIndex].convertK[0]),
++                                        float(instanceRDPParams[instanceIndex].convertK[1]),
++                                        float(instanceRDPParams[instanceIndex].convertK[2]) / 32.0f);
++    const float3 ogreConvertBA = float3(float(instanceRDPParams[instanceIndex].convertK[3]), 0.0f, 0.0f);
++
+     float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+     if (renderFlagUsesTexture0(rp.flags)) {
+@@ -143,7 +151,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+-        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
++        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, ogreConvertRG, ogreConvertBA);
+     }
+     
+     if (renderFlagUsesTexture1(rp.flags)) {
+@@ -159,7 +167,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
+-        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug);
++        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, ogreConvertRG, ogreConvertBA);
+     }
+     
+     // Color combiner.
+diff --git a/src/shaders/TextureDecoder.hlsli b/src/shaders/TextureDecoder.hlsli
+index dcc88b2..919fabf 100644
+--- a/src/shaders/TextureDecoder.hlsli
++++ b/src/shaders/TextureDecoder.hlsli
+@@ -84,6 +84,70 @@ float4 sampleTMEMRGBA16(uint pixelValue16bit) {
+     return RGBA16ToFloat4(col16);
+ }
+ 
++// OGRE: YUV16 texel fetch, replicating the RDP's TMEM layout for the format.
++// YUV16 packs one luma byte per texel and one chroma pair per *two* texels, so a
++// 16-bit chroma word at TMEM half-word `((rowByteOffset + (x & ~1)) / 2) ^ ((t & 1) << 1) ^ 1`
++// holds (U << 8) | V, and the luma byte sits at `rowByteOffset + x` in the upper
++// half of TMEM (OR 0x800 = the upper 4 KiB), XOR 3, plus the odd-row XOR 4.
++// Layout and addressing follow parallel-rdp's `sample_texel_yuv16`
++// (parallel-rdp/shaders/texture.h); RT64's high-level `sampleTMEM` computes a
++// different (16-bit-per-texel) address for YUV, which is why YUV has to be
++// sampled here instead.
++//
++// Returns the four RDP channels in the order the hardware uses for YUV:
++//   .r = V - 128, .g = U - 128, .b = Y, .a = Y   (all 0..255, biased)
++// The RDP's colour combiner turns these into RGB with the K0..K3 matrix that
++// G_SETCONVERT programmed; this function applies that same matrix itself.
++float4 sampleTMEMYUV16(uint s, uint t, uint stride, uint address, float3 convertRG, float3 convertBA, Texture1D<uint> TMEM) {
++    // Byte layout, derived from the RSP decoder that writes it (mupen64plus-rsp-hle
++    // `jpeg_decode_OB` -> `GetUYVY`, the upstream fix for OB64's backgrounds).
++    // For a macroblock the decoder emits, per 32-bit word at RDRAM/TMEM offset
++    // 4*(2t + (s >> 1)):  byte0 = Y(s even), byte1 = V, byte2 = U, byte3 = Y(s odd).
++    // So a 16x16 texel tile interleaves two texel rows per 8-word line, and the
++    // luma byte of texel (s,t) is:
++    //   base = t*stride*8 (a line is 2 rows) ...
++    // The RDP samples it as two planes: the luma byte in the upper TMEM half
++    // (OR 0x800), the chroma pair in the lower half. The odd-row XOR is the same
++    // XOR-1/XOR-4 swap `sampleTMEM16b` performs for 16-bit texels.
++    const uint rowWord = (t >> 1u) * (stride >> 1u);
++    const uint wordIndex = rowWord + (s >> 1u) + ((t & 1u) * (stride >> 2u));
++    const uint wordBase = wordIndex << 2u;
++
++    const uint lumaByteOffset = (wordBase + ((s & 1u) << 1u)) & 0x7FFu;
++    const uint lumaIndex = (lumaByteOffset ^ ((t & 1u) << 2u) ^ 3u) | 0x800u;
++    const uint luma = TMEM.Load(int2(lumaIndex, 0)) & 0xFFu;
++
++    // The chroma pair for texels 2n and 2n+1 is in the same word: byte 1 is V,
++    // byte 2 is U. `gTMEM` is indexed in 32-bit words, so byte 0 is the low byte.
++    const uint chromaHalfWord = ((wordBase >> 1u) ^ ((t & 1u) << 1u)) & 0x3FFu;
++    const uint chromaWord = TMEM.Load(int2(chromaHalfWord >> 1u, 0));
++    const uint chroma = ((chromaHalfWord & 1u) != 0u) ? (chromaWord >> 8u) : chromaWord;
++
++    const float u = float((chroma >> 8u) & 0xFFu) - 128.0f;
++    const float v = float(chroma & 0xFFu) - 128.0f;
++    const float y = float(luma);
++
++    // K2 arrives in the caller's scaled form; undo the caller's 1/32 to apply the
++    // matrix exactly as G_SETCONVERT encodes it.
++    float3 rg = float3(convertRG.x, convertRG.y, convertRG.z * 32.0f);
++    // Without a programmed matrix, fall back to the N64's standard NTSC JPEG
++    // matrix as G_SETCONVERT would encode it (K0=175 K1=469 K2=423 K3=222).
++    if (dot(rg, rg) + dot(convertBA, convertBA) == 0.0f) {
++        rg = float3(175.0f, 469.0f, 423.0f);
++        convertBA = float3(222.0f, 0.0f, 0.0f);
++    }
++
++    // The RDP applies the G_SETCONVERT matrix with the sign-extended chroma
++    // bytes: R = Y + (K0*V + 0x80) >> 8, G = Y + (K1*V + K2*U + 0x80) >> 8,
++    // B = Y + (K3*U + 0x80) >> 8. Keep the hardware's arithmetic in float so the
++    // result is the same linear map without the integer rounding.
++    const float3 rgb = float3(
++        y + (rg.x * v) / 256.0f,
++        y + (rg.y * v + rg.z * u) / 256.0f,
++        y + (convertBA.x * u) / 256.0f);
++    return float4(rgb / 255.0f, 1.0f);
++}
++
+ float4 sampleTMEMIA16(uint pixelValue16bit) {
+     const uint ia16 = pixelValue16bit;
+     return IA16ToFloat4(ia16);
+@@ -146,7 +210,27 @@ float4 sampleTMEM32b(bool oddColumn, uint pixelValue0, uint pixelValue1, uint pi
+     }
+ }
+ 
++// Forward declaration: the YUV-aware body is defined right after this wrapper.
++float4 sampleTMEMWithConvert(int2 texelInt, uint siz, uint fmt, uint address, uint stride, uint tlut, uint palette,
++                             float3 convertRG, float3 convertBA, Texture1D<uint> TMEM);
++
+ float4 sampleTMEM(int2 texelInt, uint siz, uint fmt, uint address, uint stride, uint tlut, uint palette, Texture1D<uint> TMEM) {
++    return sampleTMEMWithConvert(texelInt, siz, fmt, address, stride, tlut, palette,
++                                 float3(0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 0.0f), TMEM);
++}
++
++// OGRE: `G_SETCONVERT` is the RDP's YUV -> RGB matrix. `sampleTMEM`'s wrappers do
++// not carry draw state, so the caller that has it (the pixel sampler) passes it
++// here; the compute-shader decode path can only pass zeroes, which falls back to
++// the standard N64 NTSC matrix below.
++float4 sampleTMEMWithConvert(int2 texelInt, uint siz, uint fmt, uint address, uint stride, uint tlut, uint palette,
++                             float3 convertRG, float3 convertBA, Texture1D<uint> TMEM) {
++    // A YUV tile is the one format whose TMEM layout is not one 16-bit texel per
++    // sample, so it gets its own addressing path (see sampleTMEMYUV16).
++    if ((fmt == G_IM_FMT_YUV) && (siz == G_IM_SIZ_16b) && (tlut == 0)) {
++        return sampleTMEMYUV16(uint(texelInt.x), uint(texelInt.y), stride, address, convertRG, convertBA, TMEM);
++    }
++
+     const bool oddRow = (texelInt.y & 1);
+     const bool oddColumn = (texelInt.x & 1);
+     const bool isRgba32 = and(fmt == G_IM_FMT_RGBA, siz == G_IM_SIZ_32b);
+diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
+index 1ceb2ce..2f1f3a7 100644
+--- a/src/shaders/TextureSampler.hlsli
++++ b/src/shaders/TextureSampler.hlsli
+@@ -71,7 +71,7 @@ void computeLOD(OtherMode otherMode, uint rdpTileCount, float2 primLOD, float re
+     }
+ }
+ 
+-float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float2 tcScale, int2 texelInt, uint tlut, bool gpuTileUsesTMEM, uint mipLevel) {
++float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float2 tcScale, int2 texelInt, uint tlut, bool gpuTileUsesTMEM, uint mipLevel, float3 convertRG, float3 convertBA) {
+     if (rdpTile.cms & G_TX_CLAMP) {
+         texelInt.x = clamp(texelInt.x, 0, (round(tcScale.x * rdpTile.lrs) / 4) - (round(tcScale.x * rdpTile.uls) / 4) + round(tcScale.x - 1.0f));
+     }
+@@ -101,7 +101,10 @@ float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float
+ 
+     // Check if tile requires TMEM decoding and sample using dynamic decoding.
+     if (gpuTileUsesTMEM) {
+-        return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[NonUniformResourceIndex(gpuTile.textureIndex)]);
++        // OGRE: the YUV -> RGB matrix is draw state (G_SETCONVERT) that only the
++        // pixel sampler has, so pass it for the YUV16 path. See TextureDecoder.hlsli.
++        return sampleTMEMWithConvert(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette,
++                                     convertRG, convertBA, gTMEM[NonUniformResourceIndex(gpuTile.textureIndex)]);
+     }
+     // Sample the color version directly.
+     else {
+@@ -139,7 +142,7 @@ float4 sampleTextureNative(Texture2D texture, uint nativeSampler, int2 texelBase
+     }
+ }
+ 
+-float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR) {
++float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR, float3 convertRG, float3 convertBA) {
+     float2 tcScale = gpuTile.tcScale;
+     float mipScale = float(1U << mipLevel);
+     uvCoord /= mipScale;
+@@ -155,15 +158,15 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+         int numSamples = select_uint(filtering, 4, 1);
+         [unroll]
+         for (int i = 0; i < numSamples; i++) {
+-            samples[i] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(i >> 1, i & 1), tlut, gpuTileUsesTMEM, mipLevel);
++            samples[i] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(i >> 1, i & 1), tlut, gpuTileUsesTMEM, mipLevel, convertRG, convertBA);
+         }
+ #else
+-        samples[0] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt, tlut, gpuTileUsesTMEM, mipLevel);
++        samples[0] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt, tlut, gpuTileUsesTMEM, mipLevel, convertRG, convertBA);
+         
+         if (filtering) {
+-            samples[1] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(0, 1), tlut, gpuTileUsesTMEM, mipLevel);
+-            samples[2] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 0), tlut, gpuTileUsesTMEM, mipLevel);
+-            samples[3] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 1), tlut, gpuTileUsesTMEM, mipLevel);
++            samples[1] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(0, 1), tlut, gpuTileUsesTMEM, mipLevel, convertRG, convertBA);
++            samples[2] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 0), tlut, gpuTileUsesTMEM, mipLevel, convertRG, convertBA);
++            samples[3] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 1), tlut, gpuTileUsesTMEM, mipLevel, convertRG, convertBA);
+         }
+ #endif
+     }
+@@ -214,7 +217,7 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+     }
+ }
+ 
+-float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug) {
++float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug, float3 convertRG, float3 convertBA) {
+     const bool texturePerspective = (otherMode.textPersp() == G_TP_PERSP);
+     const bool applyCorrection = (!texturePerspective && !renderFlagRect(renderFlags));
+ 
+@@ -326,13 +329,13 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+ #if USE_FOR_LOOPS
+     [unroll]
+     for (uint i = 0; i < numRDPSamples; i++) {
+-        textureSamples[i] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[i], usesHDR);
++        textureSamples[i] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[i], usesHDR, convertRG, convertBA);
+     }
+ #else
+-    textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR);
++    textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR, convertRG, convertBA);
+     
+     if (numRDPSamples > 1) {
+-        textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR);
++        textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR, convertRG, convertBA);
+     }
+ #endif
+ 

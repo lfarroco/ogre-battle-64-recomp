@@ -662,9 +662,12 @@ hardware. RT64 remains the primary native renderer throughout. See
     **render timing**: the port completes the emulated RSP task as soon as RT64
     has the display list, so the game's CPU copy can run before the draw renders;
     `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) bounds
-    that wait — a wait on the game thread deadlocks. Session 49's four stage-3
-    copies are also **not shown to be** the njpeg readback (they run before scene
-    `0x0D` starts).
+    that wait — a wait on the game thread deadlocks. The readback's identity is
+    settled (static trace): the four `func_ovlE_8019976C` stage-3 copies **are**
+    the njpeg readback (sole caller bankE `0x80199D80` inside
+    `func_ovlE_80199D30`), and they run in scene `0x02` because `0x0D` streams a
+    different bank over unit E's RAM — so the open question is why the scene-`0x02`
+    `0x800A5110` draw produces no game framebuffer for that wait to see.
     See `docs/HANDOFF-2026-09-15-session50.md`, and `-session47.md` /
     `-session46.md` for the decoder fix and the superseded reading of it.
   - ✅ **The publisher screens now render correctly (session 32)**: the

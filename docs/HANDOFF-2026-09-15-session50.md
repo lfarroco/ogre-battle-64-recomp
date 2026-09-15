@@ -112,31 +112,67 @@ straddles a bit boundary.
   presented frames: Archbishop Odiron, statues, candles, characters).
 * **The background is still black in that scene**, because of §5.
 
-## 5. Correction to session 49: the four copies are not yet shown to be the njpeg readback
+## 5. The four copies ARE the cathedral njpeg readback (post-session follow-up, static trace)
 
-Session 49 (and this session's first reading) treated the four
-`func_ovlE_8019976C` stage-3 copies as the njpeg readback. Measurement says
-otherwise:
+This section replaces an earlier, **wrong** session-50 reading that said the four
+copies were "not shown to be the njpeg readback". A read-only instruction-level
+trace (no probes, no rebuild) settled it the other way, and session 49's original
+reading was right:
 
-| copy | width x height | at wall time (forced shortcut) |
-|---|---|---|
-| 1 | 320 x 240 | t=1435 ms |
-| 2 | 176 x 240 | t=1941 ms |
-| 3 | 320 x 144 | t=2448 ms |
-| 4 | 176 x 144 | t=2952 ms |
+* **Sole caller.** `func_ovlE_8019976C` has exactly one `jal` in the whole ROM:
+  bankE `0x80199D80` (ROM `0x69020`), inside `func_ovlE_80199D30`'s per-image
+  drive loop (wait for stage 6 → call until stage == 6). Its address appears once
+  as data, at ROM `0x6E548` = `bankRec17`'s own jump table — record-17 addresses
+  that only *numerically* coincide with unit E's layout (rec17 and rec0 both load
+  at `0x80197B90`), not a pointer to this function.
+* **The four sizes are four separate jobs of ONE `'B5'` asset.** The container is
+  8-byte header `{'B','5',byte2,count}` + per sub-image a 16-byte chunk header
+  `{4 flags, u16 w, u16 h, u32 size}` + `size` bytes of `'HU'` data. Asset ROM
+  `0x7CADAC` is the unique ROM match for the runtime header id bytes
+  (`42 35 ?? 04 01 15 00 EB`), and its chunk headers are **exactly**
+  320×240 (`0x6DC8`), 176×240 (`0x3338`), 320×144 (`0x42E0`), 176×144 (`0x21C8`) —
+  the four measured sizes, in order. Independent confirmation: the four type-4 RSP
+  tasks have `data_size` `0x12C, 0xA5, 0xB4, 0x63` = 20×15, 11×15, 20×9, 11×9
+  macroblocks. Each sub-image is its own njpeg decode with its own state; they are
+  **not** tiles of one job (only sub0's pixels are blitted, and whether the other
+  three are resolutions or a split is unproven).
+* **The copy source is a real framebuffer, not a placeholder.** `state[0x64]` is
+  set in `func_ovlE_80199A08` at `0x80199B88`/`0x80199B98` from the framebuffer
+  table `0x800A8204` (ROM `0x38604`), indexed by the 3-way compare of
+  `D_800C4BB8` (`0x80199B14-0x80199B68`, gated on `D_800E7A0C == 1`). A live dump
+  with unit E resident has `D_800C4BB8 = 0x80000400` → `state[0x64] = 0x80025C00`
+  (= table entry 1), and that same buffer is both the `G_SETCIMG` target of the
+  `0x800A5110` draw and the RSP task's output (`func_ovlE_80198E70` stores
+  `state[0x64]` into `task+0x0C`).
+* **The `'B5'` container is built by `func_ovlE_80199D30`'s merge path**
+  (`0x80199E44-0x80199F70`: memcpy the asset's 8-byte header, each chunk's 16-byte
+  header, alloc, write the node's raw size `w*h*2`, then memcpy pixels from
+  `state[0x88+4*i]`). Runtime header at `0x80243E10` =
+  `42 35 01 04 | 01 15 00 EB | FF 1B FF 15 01 40 00 F0 | 00 02 58 00 | 80 26 96 50`,
+  i.e. `0x80243E28` = +24 = sub0's pixels = the address scene `0x0D` step 2's
+  `SETTIMG` uses. So the 320×240 background **is** decoded through
+  `func_ovlE_8019976C`, and no other CPU framebuffer copy produces it.
+* **Correction to the container magic.** The `sb 0x36 / sb 0x34` (`'6','4'`)
+  header written inside `func_ovlE_8019976C` (`0x801998E0-0x80199940`) is the
+  *single-image* path (`state[0x80] == 0`); for this `'B5'` asset
+  `state[0x80] = 1`, so no header is written there and the `'B5'` header comes
+  from the asset via the merge memcpys above. The earlier `'64'`/`'B5'` conflation
+  (sessions 47/48/50) is wrong on this point.
+* **Why the copies precede scene `0x0D`:** scene `0x02`'s enter `func_80178920`
+  calls into unit E and sets next = `0x0D`; scene `0x02`'s mask `0x00004001` loads
+  ROM `0x066E30` (unit E `bankRec0`, 21 functions) at `0x80197B90`, whereas
+  `0x0D`'s mask `0x40007C14` loads ROM `0x0E4910` (unit A `bankRec2`) over that
+  same RAM. The background is therefore decoded during the scene-`0x02` visit that
+  precedes `0x0D` — it is preloaded, and finished before `0x0D` starts at
+  t≈3.7 s.
 
-Scene `0x0D` does not start until t≈3745 ms in that run, and the `[njwait]`
-lines only start reporting `found=1` after that. So all four copies run **before
-the code that submits the YUV draw has run** — the copy's source is
-`0x80000400` (the ROM placeholder / table entry 0) and the njpeg scratch target
-is `0x000000` for the first. The YUV draw's display list does pass `state[0x64]`
-to `G_SETCIMG` (`0x801992ec: lw v0, 100(a0)` feeding the `0xED` command), so
-`state[0x64]` *is* the njpeg colour image — the question is why the copy runs
-before that state exists, and whether these four copies are the njpeg readback
-at all. **Do not build on "the readback copies the njpeg framebuffer" until the
-copy's caller is identified at instruction level**; the sizes above
-(320x240, 176x240, 320x144, 176x144) are a 4-way tile decomposition, not one
-320x240 image.
+**What this means for the wall:** the readback that matters runs in **scene
+`0x02`**, and the draw whose pixels it needs is the `0x800A5110` display list
+submitted in that same scene. In `/tmp/final_check.log` the RSP-worker wait
+reports `[njwait] found=0` throughout scene `0x02` (it times out) and only
+`found=1` after `0x0D` starts — so the wait is not covering the draw that matters,
+and `[renderer] display list 2 … ucode=0x800A5110 data=0x80025C00` needs checking
+for whether that list actually contains geometry.
 
 ## 6. The render-timing fix that is in the tree
 
@@ -171,31 +207,137 @@ worker can wait safely, and the wait returns as soon as a game framebuffer exist
   worker (a game-thread wait can deadlock).
 * `docs/HANDOFF-2026-09-15-session50.md` (this file), plus `PLAN.md`,
   `DECISIONS.md`, `AGENTS.md`, `docs/README.md` updates.
-* `tools/RT64` remains dirty (the project's own patches); the new shader and
-  state changes belong in `rt64-ob64.patch`, which **has not been refreshed this
-  session** — do that before relying on a clean-submodule apply.
+* `tools/RT64` remains dirty (the project's own patches). **`rt64-ob64.patch` was
+  refreshed at the end of the session and verified**: it is
+  `git -C tools/RT64 diff HEAD -- . ':(exclude)src/contrib/plume'` (11 files), and
+  applying it to a **clean** submodule worktree (`git worktree add --detach` at
+  `HEAD` = `4337374`) reproduces the dirty tree byte for byte
+  (`diff` of the two `git diff HEAD` outputs is empty). Note that a plain
+  `git -C tools/RT64 diff` is **not** enough here — these changes were applied to
+  the index, so the diff must be taken against `HEAD`. The pre-refresh file is at
+  `/tmp/rt64-ob64.patch.bak` for this session only.
 * **No temporary probes left**: `grep -rn "probe49\|probe50\|probe51\|p50call\|p50draw"
   app/src/ tools/RT64/src/ Bank*Funcs/ RecompiledFuncs/` is empty; `build-app` and
   `build-null` were rebuilt after the cleanup.
 
 ## 8. Next lead (in order)
 
-1. **Identify the caller of the four stage-3 copies.** If they are not the njpeg
-   readback, the njpeg pipeline's CPU copy is elsewhere and the YUV decode fix is
-   what will make *that* one produce the backdrop. `func_ovlE_8019976C` is a
-   stage machine on `D_8019A680` (`state+0x7E` stages 0/2/3/5), and `state+0x64`
-   is the njpeg colour image; log `state+0x7E` and `state+0x64` at each call to
-   `func_ovlE_8019976C` to see whether the stage-5 copy ever runs with the njpeg
-   target set.
-2. **Check the tile `line` field for the YUV tile.** `stride` in RT64 is
+1. ~~Identify the caller of the four stage-3 copies.~~ **DONE** (see §5): they
+   *are* the njpeg readback, sole caller bankE `0x80199D80` inside
+   `func_ovlE_80199D30`, and they run in scene `0x02` as a preload of the four
+   sub-images of the `'B5'` asset at ROM `0x7CADAC`.
+2. **Find out why the scene-`0x02` wait times out, i.e. why `0x800A5110`'s draw
+   produces no game framebuffer.** In `/tmp/final_check.log` every `[njwait]`
+   during scene `0x02` reports `found=0 fbs=2` (lines 236/733/1184/1585/2037) and
+   the first `found=1` is line 2182, after `0x0D` starts (line 2040). Two candidate
+   mechanisms, both cheap to discriminate: (a) the display list really is empty —
+   `[renderer] display list 2 … ucode=0x800A5110 data=0x80025C00 entries=0`
+   (`entries` is `debug_total_entry_count` delta, so 0 only means no recompiled
+   function ran during the parse, not that the list is empty — use
+   `OGRE_DL_ANALYZE=1` / `OGRE_DL_DECODE=<n>` for the command count); or (b) the
+   draw is parsed and the framebuffer is built, but the wait samples the manager
+   before the workload's fbPair is registered. Turn on
+   `OGRE_NJ_WAIT_MS=0` + `OGRE_FB_WRITEBACK=1`/`OGRE_SYNC_TRACE=1` for a run and
+   read `[fbpair]`/`[fbwrite]` for `addr=0x000400`/`0x025C00` to see which of the
+   two it is.
+3. **Check the tile `line` field for the YUV tile.** `stride` in RT64 is
    `tile.line << 3`; the working RT64 fork cited for this class of background
    reportedly also needed a `line << 4` fix for YUV texrects. `OGRE_WORKLOAD_TRACE`
    / a one-line trace of `rdpTile.stride` for `fmt=YUV` settles whether the 16x16
    macroblock tile is read as 16 or 32 bytes per line.
-3. **Then re-run the A/B in session 49 §4** (framebuffer histogram of `0x000400`)
+4. **Then re-run the A/B in session 49 §4** (framebuffer histogram of `0x000400`)
    with the decode in place, and check the assembled `'B5'` image at `0x80243E28`
    (`42 35 …` header at `0x80243E10`, pixels at `0x80243E28`) — it is still
    uniform in the last 20 s dump.
+
+## 9. New finding: the `0x800A5110` display list carries texture loads but no geometry
+
+Both the app's own analyzer and the full command decode say the macroblock draw
+submits **no triangles and no rectangles**:
+
+```text
+OGRE_DL_ANALYZE=1 (static, 0x800A5110 lists):
+[dl-analyze] dl=2 ptr=0x80025C00 cmds=1821 dls=1 tri1=0 tri2=0 quad=0 texrect=0 fill=0 vtx=0 verts=0 settimg=300 unknown=0
+[dl-analyze] dl=3 … cmds=1011 … settimg=165
+[dl-analyze] dl=4 … cmds=1101 … settimg=180
+[dl-analyze] dl=5 … cmds=615 … settimg=99
+```
+
+`OGRE_DL_DECODE=2` (`dl=2 ptr=0x80025C00`, 114 139 bytes) shows the whole list is
+`SETOTHERMODE_*` + `SETCIMG fmt=0 siz=2 width=320 addr=0x80000400` + `SETSCISSOR
+0,0-1280,960` + `G_SETCONVERT` + `SETCOMBINE` + per macroblock
+`{SETTIMG fmt=YUV siz=16b width=16 addr=0x801D1030+, SETTILE t7 fmt=1 siz=2 line=2
+tmem=0, RDPLOADSYNC, LOADTILE t7 uls=0 ult=0 lrs=60 lrt=60, MOVEMEM (a matrix),
+MTX}` — i.e. 300 × (texture image + tile + load + matrix). **There is no
+`G_TRI1/TRI2/QUAD/TEXRECT/FILLRECT` anywhere in it.** The same shape holds for
+dl 3/4/5, and for the other unit-E images (dl 9/10 carry `SETTIMG fmt=0`).
+
+Two consequences:
+
+* **RT64 is very likely correct to render nothing into `0x25C00` for these
+  lists** — the task asked for a load, not a draw. That is consistent with
+  `[njwait] found=0` (no game framebuffer is ever built), and with the readback
+  source being empty.
+* Session 46's "the second gfx task's DL has 300 macroblocks / the renderer
+  receives the draws" was measured by counting `display list N` lines and
+  `[yuv]` setTextureImage calls; **it never verified that the list contains
+  geometry**. The open question is therefore upstream of the renderer: what turns
+  these 300 texture loads into a picture on real hardware — a second half of the
+  list that the port does not receive, or the game's own `G_MOVEMEM`/`G_MTX`
+  stream being interpreted as vertices by the real ucode.
+
+The builder corroborates the decode. `func_ovlE_80199130` writes the list into
+the pointer it loads at `0x8019915c` (`lw s8, 0(a0)`), advances `s8` by 8 per
+command, and its **inner** per-macroblock loop (`0x8019944c-0x801994fc`) emits in
+order `{G_MTX/G_MOVEMEM (from `state[0x60] + (col + s*(w>>4)) * 8` at
+`0x801994e0-0x801994f0`), SETTIMG (advancing `t1` by 768 = 0x300 per macroblock at
+`0x801994d8`), SETTILE t7, RDPLOADSYNC, LOADTILE, MOVEMEM, MTX}` and loops until
+the column counter reaches `state[0x78] >> 4`. There is no geometry write anywhere
+in the function.
+
+**So the previous session's pipeline description is wrong at this step:** the
+`0x800A5110` task is not "drawing one 16×16 YUV16 texture per macroblock into
+`G_SETCIMG`". It loads all 300 macroblocks into TMEM and emits no primitives. The
+thing that consumes them — if anything does — has not been identified, and the
+`G_SETCIMG`/`G_SETCONVERT`/`SETCOMBINE`/`SETSCISSOR` prefix may be setup for a
+subsequent list rather than for this one.
+
+**Answered by the discriminator run** (`OGRE_DL_TRACE=1`, forced step 2):
+
+```text
+display list 2 at t=867ms  (type=1 ucode=0x800A5110 data=0x80025C00)
+display list 3 at t=1375ms (type=1 ucode=0x800A5110 data=0x80025C00)
+display list 4 at t=1883ms (type=1 ucode=0x800A5110 data=0x80025C00)
+display list 5 at t=2387ms (type=1 ucode=0x800A5110 data=0x80025C00)
+```
+
+Exactly **four** `0x800A5110` submissions in scene `0x02` — one per sub-image,
+each ~508 ms of game time apart, matching the four readbacks — and **no fifth
+list follows any of them** before the scene changes. So nothing downstream in the
+port consumes the loaded macroblocks: the geometry is either never built by the
+game (the piece that would draw them is missing/lost) or is built into a list
+this port never receives. The renderer is not the wall for *these* lists.
+
+**The wrappers are resolved and they confirm the list is exactly this:** at
+`0x801995b4-0x80199600` the `a0 == 0` path appends `G_RDPFULLSYNC` + `G_ENDDL`
+(`e9000000`, `df000000`) to the list and stores the result in `state[0x58]`;
+`func_ovlE_80198FE8` (the submit function) builds the same list into `state[0x58]`
+and passes it as the task's `data_ptr`. So what the port hands to RT64 really is
+`SETOTHERMODE*/SETCIMG/SETSCISSOR/SETCONVERT/SETCOMBINE` + 300 ×
+`{SETTIMG, SETTILE, LOADTILE, MOVEMEM, MTX}` + `RDPFULLSYNC` + `ENDDL`, with no
+drawing primitive anywhere — and the game then CPU-reads the framebuffer and gets
+zeros. The `func_ovlE_80199588(1)` branch (`0x80199604+`) sets up the task fields
+(`type=1`, `ucode=0x800A5110`, `data=state[0x58]`, `output=state[0x64]`) and sends
+the message; it does not build a second list.
+
+**Open question, now sharpened:** either the macroblock geometry is built
+somewhere this port never reaches (a second builder/list for the same textures),
+or this task is meant only to *load* and something else must draw. The next cheap
+experiment is to grep the ROM for other writers of a display list that references
+YUV `SETTIMG` + a triangle/texrect opcode (search unit E for `lui/ori` pairs
+equal to `0xBF`/`0xB1`/`0xB6`/`0xB7`/`0xE4`/`0xF1` in the low byte and for stores
+adjacent to a `SETTIMG` in the same builder), which would name the drawing list
+if it exists.
 
 ### Diagnostics that were used and are still available
 
