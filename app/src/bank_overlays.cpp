@@ -406,6 +406,100 @@ void poll_scene() {
 
 namespace {
 
+// The boot-resident/streamed overlays of the *main* ELF (config.yaml). The
+// runtime registers these from its own section table, so they are not in
+// kBankRecords; the diagnostic below still has to know them, or it reports
+// overlay C loading into 0x80197B90 as an unknown module.
+struct MainOverlayModule {
+    uint32_t rom_start;
+    uint32_t size;
+    int32_t ram_start;
+};
+static const MainOverlayModule kMainOverlayModules[] = {
+    { 0x03F1B0u, 0x1CD0u, (int32_t)0x800E9C20 },   // streamedA (boot-resident)
+    { 0x040E80u, 0x265B0u, (int32_t)0x8016AF80 },  // streamedB (boot-resident)
+    { 0x1CE040u, 0x229C0u, (int32_t)0x80197B90 },  // streamedC (on demand)
+};
+
+// Does the port know a module for this exact DMA — some record (compiled, or a
+// segment-table record not compiled yet, or a main-ELF overlay) whose RAM base
+// is this destination and whose ROM range covers this source? Only the first
+// chunk of a chunked load lands on the base, so this is asked once per load.
+bool is_known_module(uint32_t rom_offset, uint32_t ram_addr) {
+    for (const BankRecord& record : kBankRecords) {
+        if ((uint32_t)record.ram_start == ram_addr &&
+            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.size) {
+            return true;
+        }
+    }
+    for (const StreamedRecord& record : kAllStreamedRecords) {
+        if ((uint32_t)record.ram_start == ram_addr &&
+            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.rom_size) {
+            return true;
+        }
+    }
+    for (const MainOverlayModule& record : kMainOverlayModules) {
+        if ((uint32_t)record.ram_start == ram_addr &&
+            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Is this RAM address a base the game streams modules *to*? True for every
+// record the port knows plus the main-ELF overlays.
+bool is_known_module_base(uint32_t ram_addr, uint32_t& known_rom) {
+    for (const BankRecord& record : kBankRecords) {
+        if ((uint32_t)record.ram_start == ram_addr) {
+            known_rom = record.rom_start;
+            return true;
+        }
+    }
+    for (const StreamedRecord& record : kAllStreamedRecords) {
+        if ((uint32_t)record.ram_start == ram_addr) {
+            known_rom = record.rom_start;
+            return true;
+        }
+    }
+    for (const MainOverlayModule& record : kMainOverlayModules) {
+        if ((uint32_t)record.ram_start == ram_addr) {
+            known_rom = record.rom_start;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Report a module the port does not have, once per (RAM, ROM) pair. The scene
+// id and the descriptor's record mask are printed too: they are how the next
+// record set to compile is chosen (same block as the UNCOMPILED report below).
+void report_unknown_module(uint32_t rom_offset, uint32_t ram_addr, uint32_t known_rom) {
+    static uint64_t reported[32] = {};
+    static size_t num_reported = 0;
+    const uint64_t key = ((uint64_t)ram_addr << 32) | rom_offset;
+    for (size_t i = 0; i < num_reported; i++) {
+        if (reported[i] == key) {
+            return;
+        }
+    }
+    if (num_reported < ARRLEN(reported)) {
+        reported[num_reported++] = key;
+    }
+    printf("[bank] UNKNOWN module rom=0x%06X ram=0x%08X (0x%08X is also where rom=0x%06X loads)\n"
+           "        the port has no functions for this module: calls into 0x%08X+ will run\n"
+           "        whichever bank is registered there instead (see docs/symbols.md)\n",
+           rom_offset, ram_addr, ram_addr, known_rom, ram_addr);
+    uint8_t* rdram = ultramodern::get_rdram_base();
+    if (rdram != nullptr) {
+        uint16_t scene = MEM_H(0x0000, (gpr)(int32_t)0x800E810E);
+        uint32_t desc = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x800E8294);
+        uint32_t mask = (desc != 0) ? (uint32_t)MEM_W(0x10, (gpr)(int32_t)desc) : 0;
+        printf("[bank]   scene=0x%04X descriptor=0x%08X record mask=0x%08X\n", scene, desc, mask);
+    }
+    fflush(stdout);
+}
+
 // The game copies a record in 0x200-byte chunks; register it once, on the first
 // chunk. The runtime keeps the authoritative "is this RAM resident" state.
 void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) {
@@ -491,6 +585,15 @@ void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) 
             fflush(stdout);
         }
         return;
+    }
+
+    // A DMA that starts exactly on a known module base with a ROM source the
+    // port does not know is a module it has never compiled (see
+    // is_known_module_base). `ram_addr == base` is what makes this specific:
+    // asset loads land on malloc'd buffers, never on a record base.
+    uint32_t known_rom = 0;
+    if (is_known_module_base(ram_addr, known_rom) && !is_known_module(rom_offset, ram_addr)) {
+        report_unknown_module(rom_offset, ram_addr, known_rom);
     }
 }
 

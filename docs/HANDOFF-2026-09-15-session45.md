@@ -169,6 +169,47 @@ dereferences. **Next session: A/B it** (revert the hunk in
 needs it. `docs/DECISIONS.md` carries a `> Superseded` banner on session 44's
 entry.
 
+## 4b. Guardrails (added this session, after the post-mortem)
+
+This wall took five sessions because the port silently ran a *different module's
+code*, and nothing in the build or the logs said so. Three checks now do:
+
+1. **`tools/cross_bank.py check`** (and `check-banks`, wired into
+   `make bank-recomp`) — fails the build when a bank unit defines a RAM range
+   another bank can own **and** calls into it from one of its *other* records.
+   A call *within* one record is fine. Verified: the check passes now
+   (`bank units: 1312 direct call(s) into swappable RAM, 0 outside their own
+   record`) and **fails** on the pre-fix code (replaying the old unit-C
+   `funcs_6.c` as a scratch unit: `2 outside their own record`, including
+   `func_ovlC_802282D8 ... calls 0x80239C24 directly`). `make cross-bank-check`
+   runs the full audit, which also reports the main unit's *known* backlog
+   (576 sites / 76 targets, sessions 33-41) without failing; `--strict` fails
+   on it too.
+2. **The unknown-module detector** (`app/src/bank_overlays.cpp`) — any PI DMA
+   that starts exactly on a RAM base the game streams modules to, with a ROM
+   source the port does not know, prints
+   `[bank] UNKNOWN module rom=… ram=… (that RAM is also where rom=… loads)` plus
+   the scene and record mask. Verified two ways: silent on a normal New Game,
+   Tutorial and attract run (no false positives), and — with unit G's record
+   removed from the generated `bank_funcs.inc` (one variable) — it prints
+   `[bank] UNKNOWN module rom=0x2A8CF0 ram=0x802395E0 (...)`, i.e. the line
+   whose absence cost five sessions. Note it also knows the main ELF's
+   streamed overlays (`kMainOverlayModules`), which is what keeps overlay C
+   from being reported.
+3. **`tools/rdram.py <dump> banks`** — the one-command discriminator: for every
+   module in `bank_funcs.inc` (+ the uncompiled segment-table records) it
+   compares the dump's bytes with the ROM and says which module is *actually*
+   resident, naming the ROM offset when it is not a known one. Verified across
+   two dumps of the same run: mid-movie it reports
+   `0x802395E0 resident: rom=0x2AE390` (rec14b), at step 2
+   `resident: rom=0x2A8CF0` (rec14c). That is the measurement that cracked this
+   session, in one command.
+
+The bring-up recipe for a new screen is therefore: run it, grep the log for
+`UNKNOWN module`, add that module to a unit that is **not** the caller's, recomp,
+rebuild; only if it still misbehaves, run `rdram.py … banks` on a dump and ask
+which bank was live at the faulting address.
+
 ## 5. What's next
 
 1. **A/B the KUSEG mirror** (§4): the New Game path no longer needs it; check the
@@ -237,7 +278,15 @@ the repro commands below are the maintained verification.
   `docs/proofs/native-newgame-academy-card.png` (new).
 * `PLAN.md`, `docs/DECISIONS.md` (new entry + superseded banner on session 44),
   `docs/scenes.md` (step 2 = renders; the Start-skip note resolved),
-  `docs/README.md`, `AGENTS.md` (walls list), this file.
+  `docs/README.md`, `AGENTS.md` (walls list + the two first-response
+  diagnostics), `docs/guides/app-build.md` (`rdram.py banks`,
+  `make cross-bank-check`), this file.
+* Guardrails: `tools/cross_bank.py` (`check` / `check-banks`), `Makefile`
+  (`bank-recomp` runs `check-banks`; new `cross-bank-check` target),
+  `app/src/bank_overlays.cpp` (unknown-module detector), `tools/rdram.py`
+  (`banks`). All three verified above, including the negative tests (silent on
+  a clean run) and the positive ones (the detector firing when rec14c is removed
+  from the record table; the assertion failing on the pre-fix unit-C code).
 * Probes, **all reverted by `make recomp` + `make bank-recomp`**:
   `RecompiledFuncs/funcs_8.c` (`func_80089F80` entry DMA log),
   `BankCFuncs/funcs_5.c` (`func_ovlC_8023BF50` entry + table read; interpreter
@@ -266,4 +315,9 @@ OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D \
 # regressions
 OGRE_SCENE=0x17 OGRE_SPEED=4 OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 ./build-null/ogrebattle64
 OGRE_SPEED=8 OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=45000 ./build-null/ogrebattle64
+
+# the guardrails
+make cross-bank-check                       # audit (bank units fail, main backlog reported)
+python3 tools/rdram.py /tmp/rdram.bin banks # which module is resident where
+grep "UNKNOWN module" /tmp/run.log          # modules the port has no functions for
 ```

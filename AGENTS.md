@@ -98,10 +98,21 @@ wrong half of a function. Check these before blaming game logic:
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   *different* resident bank. `python3 tools/cross_bank.py report` lists sites;
   `dispatch --only …` is wired into `make recomp`. Bank code is compiled into
-  `Bank{A,C,D,E}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`.
+  `Bank{A..G}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`.
+  **`make bank-recomp` now runs `cross_bank.py check-banks`**, which fails if a
+  unit defines a RAM range another bank can own *and* calls into it from another
+  of its records (a direct call bound to the wrong bank's layout — session 45).
+  `make cross-bank-check` is the full audit (it also counts the main unit's
+  known backlog).
 - **Register-relative stores/loads are invisible to symbol greps.** A symbol-name
   search for `D_8018F1C0` misses `lui $s5, %hi(…) / addiu $s5, … / sh $a0, 0($s5)`.
   Always grep both the symbol *and* the offset/call sites, and read the function.
+- **When a call runs the wrong code, ask the port first.** Before theorising:
+  `grep "UNKNOWN module" run.log` (the app reports a module it has no functions
+  for, with the RAM base and the ROM that normally loads there), and
+  `tools/rdram.py <dump> banks` (which module is *actually* resident in each
+  streamed RAM window, and which ROM offset the live bytes came from). Those two
+  answer in seconds what session 45 spent five sessions on.
 - Chunk-DMA records may never be DMA'd at all (`0xD0` gap), and record BSS must be
   zeroed on load (`func_ovlE_…`; see `load_function_bank` and `RAM_END` in
   `tools/gen_bank_funcs.py`).

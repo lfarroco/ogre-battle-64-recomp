@@ -46,6 +46,17 @@ Usage:
                                         # lookup — `make recomp` regenerates the
                                         # pristine direct call instead
     tools/cross_bank.py report          # analysis only, writes nothing
+    tools/cross_bank.py check           # FAIL if any unit still calls directly
+                                        # into a RAM range another bank can own
+
+`check` is the build-time guard for the class session 45 lost five sessions to.
+A direct C call into a *swappable* range is bound at build time to one bank's
+layout; when the other bank is resident it runs that other module's bodies with
+the wrong frame and register contract (`bankRec14b`'s prologue-less tail at
+`0x80239C24` vs `bankRec14c`'s real function there). The rule is: a swappable
+range must not be *defined* in the unit whose code calls into it — give each
+bank its own unit and let N64Recomp emit `LOOKUP_FUNC`. Calls *within* one
+record are fine (that bank is resident whenever the caller runs).
 """
 
 from __future__ import annotations
@@ -212,11 +223,9 @@ def bank_function_entries() -> dict[str, set[int]]:
     return result
 
 
-def region_table() -> list[dict]:
-    """All regions: main overlays + each bank unit's code sections."""
+def bank_regions() -> list[dict]:
+    """Each bank unit's code sections. Needs only the configs, not the map."""
     regions = []
-    for name, (lo, hi) in main_section_ranges().items():
-        regions.append({"kind": "main", "owner": f"main:{name}", "name": name, "lo": lo, "hi": hi})
     for unit, cfg in bank_unit_configs().items():
         for lo, hi in cfg["ranges"]:
             regions.append(
@@ -229,6 +238,15 @@ def region_table() -> list[dict]:
                     "hi": hi,
                 }
             )
+    return regions
+
+
+def region_table() -> list[dict]:
+    """All regions: main overlays + each bank unit's code sections."""
+    regions = []
+    for name, (lo, hi) in main_section_ranges().items():
+        regions.append({"kind": "main", "owner": f"main:{name}", "name": name, "lo": lo, "hi": hi})
+    regions.extend(bank_regions())
     return regions
 
 
@@ -762,6 +780,136 @@ def report(regions, swap_ranges) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# check: no direct call into a swappable range from outside its own record
+# ---------------------------------------------------------------------------
+
+STATIC_VRAM_RE = re.compile(r"^static_\d+_([0-9A-Fa-f]{8})$")
+
+
+def symbol_vram(name: str) -> int | None:
+    """The guest address a generated symbol name encodes, or None."""
+    m = FUNC_VRAM_RE.match(name)
+    if m:
+        return int(m.group(1), 16)
+    m = STATIC_VRAM_RE.match(name)
+    if m:
+        return int(m.group(1), 16)
+    return None
+
+
+def unit_records(unit: str) -> list[tuple[int, int, str]]:
+    """(ram_lo, ram_hi, name) for one unit's code segments, from its config."""
+    path = ROOT / f"config-bank{unit}.yaml"
+    segments = parse_yaml_segments(path)
+    out: list[tuple[int, int, str]] = []
+    for i, seg in enumerate(segments):
+        if seg.get("type") != "code" or "vram" not in seg or "start" not in seg:
+            continue
+        if i + 1 >= len(segments):
+            continue
+        out.append((seg["vram"], seg["vram"] + (segments[i + 1]["start"] - seg["start"]),
+                    seg.get("name", "?")))
+    return out
+
+
+def direct_calls(path: Path) -> list[tuple[int, str, int, int]]:
+    """(caller_vram, caller_name, target_vram, line_no) for direct calls."""
+    out = []
+    caller_vram: int | None = None
+    caller_name = "?"
+    pending = False
+    for line_no, line in enumerate(path.read_text().splitlines(), 1):
+        m = FUNC_DEF_RE.match(line)
+        if m:
+            caller_name, caller_vram, pending = m.group(1), None, True
+            continue
+        if pending:
+            t = TRACE_RE.search(line)
+            if t:
+                caller_vram = int(t.group(1), 16)
+                pending = False
+        if LOOKUP_RE.match(line):
+            continue
+        m = CALL_RE.match(line)
+        if m and caller_vram is not None:
+            target = symbol_vram(m.group(2))
+            if target is not None:
+                out.append((caller_vram, caller_name, target, line_no))
+    return out
+
+
+def record_of(addr: int, records: list[tuple[int, int, str]]) -> str | None:
+    for lo, hi, name in records:
+        if lo <= addr < hi:
+            return name
+    return None
+
+
+def check(regions, swap_ranges, strict_main: bool = False) -> int:
+    """Assert no unit calls directly into a swappable range it does not own.
+
+    Bank units are a hard failure: a unit must never define a swappable range
+    *and* call into it from another of its records (session 45's wall). The main
+    unit's overlay code has a long-standing backlog of the same shape — it cannot
+    know a bank exists, so `dispatch` rewrites the targets that matter and the
+    rest stay on the recompiler's bindings (sessions 33-41) — so those are
+    reported but only fail with `--strict`.
+    """
+    bank_bad: list[str] = []
+    main_bad: list[tuple[int, str]] = []
+    bank_total = 0
+
+    for unit_dir in sorted(ROOT.glob("Bank*Funcs")):
+        if not unit_dir.is_dir():
+            continue
+        unit = unit_dir.name[len("Bank"):-len("Funcs")]
+        if not (ROOT / f"config-bank{unit}.yaml").exists():
+            continue
+        records = unit_records(unit)
+        for path in sorted(unit_dir.glob("*.c")):
+            for caller, caller_name, target, line_no in direct_calls(path):
+                if not in_ranges(target, swap_ranges):
+                    continue
+                bank_total += 1
+                if record_of(target, records) == record_of(caller, records):
+                    continue  # same bank: resident whenever the caller runs
+                bank_bad.append(
+                    f"{path.relative_to(ROOT)}:{line_no}: {caller_name} (0x{caller:08X}) calls "
+                    f"0x{target:08X} directly, but that RAM is swappable"
+                )
+
+    for path in sorted(RECOMP_DIR.glob("*.c")):
+        for caller, caller_name, target, line_no in direct_calls(path):
+            if in_ranges(target, swap_ranges):
+                main_bad.append((target, f"{path.relative_to(ROOT)}:{line_no}: {caller_name} "
+                                         f"(0x{caller:08X}) calls 0x{target:08X} directly"))
+
+    for line in bank_bad[:60]:
+        print(f"cross_bank:   {line}")
+    print(f"cross_bank: bank units: {bank_total} direct call(s) into swappable RAM, "
+          f"{len(bank_bad)} outside their own record")
+    if main_bad:
+        targets = sorted({t for t, _ in main_bad})
+        print(f"cross_bank: main unit: {len(main_bad)} direct call(s) into swappable RAM across "
+              f"{len(targets)} target(s) (known backlog; `dispatch --only` fixes them one by one)")
+        for t in targets[:12]:
+            print(f"cross_bank:   0x{t:08X}  ({sum(1 for u, _ in main_bad if u == t)} site(s))")
+        if len(targets) > 12:
+            print(f"cross_bank:   ... and {len(targets) - 12} more")
+
+    if bank_bad:
+        print("cross_bank: check FAILED - a unit defines a swappable range and calls into it.")
+        print("cross_bank:   fix: move the target record into a unit that does not call it, so")
+        print("cross_bank:   N64Recomp emits LOOKUP_FUNC (see config-bankF.yaml / session 45).")
+        return 1
+    if main_bad and strict_main:
+        print("cross_bank: check FAILED (--strict): main-unit calls into swappable RAM remain.")
+        return 1
+    print("cross_bank: check OK - no bank unit calls into a swappable range it does not own")
+    return 0
+
+
 def parse_only(argv: list[str]) -> set[int] | None:
     """`--only ADDR[,ADDR...]` (repeatable): restrict `dispatch` to targets."""
     only: set[int] = set()
@@ -780,12 +928,16 @@ def parse_only(argv: list[str]) -> set[int] | None:
 
 
 def main() -> int:
-    if len(sys.argv) < 2 or sys.argv[1] not in ("write-seeds", "dispatch", "revert", "report"):
+    if len(sys.argv) < 2 or sys.argv[1] not in (
+            "write-seeds", "dispatch", "revert", "report", "check", "check-banks"):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     cmd = sys.argv[1]
     try:
-        regions = region_table()
+        if cmd == "check-banks":
+            regions = bank_regions()
+        else:
+            regions = region_table()
         swap_ranges = swappable_ranges(regions)
         if not swap_ranges:
             raise ToolError("no swappable RAM ranges; check the region model")
@@ -807,6 +959,19 @@ def main() -> int:
                         "target(s) matched no call site: "
                         + ", ".join(f"0x{a:08X}" for a in missing)
                     )
+        elif cmd == "check":
+            args = sys.argv[2:]
+            strict = "--strict" in args
+            args = [a for a in args if a != "--strict"]
+            if args:
+                raise ToolError("usage: cross_bank.py check [--strict]")
+            return check(regions, swap_ranges, strict)
+        elif cmd == "check-banks":
+            # `check` without the linker map: used by `make bank-recomp`, which
+            # may run before the main ELF has ever been linked.
+            if len(sys.argv) != 2:
+                raise ToolError("usage: cross_bank.py check-banks")
+            return check(regions, swap_ranges, False)
         elif cmd == "revert":
             if len(sys.argv) != 2:
                 raise ToolError("usage: cross_bank.py revert")

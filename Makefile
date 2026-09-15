@@ -132,6 +132,11 @@ cross-bank-dispatch:
 	python3 tools/cross_bank.py write-seeds
 	python3 tools/cross_bank.py dispatch
 
+# `make cross-bank-check`: the full audit, including the main unit's known
+# backlog of calls into swappable RAM (informational; `--strict` fails on it).
+cross-bank-check:
+	python3 tools/cross_bank.py check
+
 # ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C
@@ -201,4 +206,9 @@ bank-force: $(BANK_ELFS)
 bank-recomp: bank
 	@for u in $(BANK_UNITS); do $(N64RECOMP) config-bank$$u.toml || exit 1; done
 	python3 tools/gen_bank_funcs.py
-.PHONY: all clean recomp cross-bank-report cross-bank-dispatch bank-split bank-recomp handoffs midfunc
+	@# Assert the invariant session 45's wall broke: a unit must never define a
+	@# RAM range another bank can own *and* call into it from another record (the
+	@# call would be bound at build time to the wrong bank's layout). See
+	@# `cross_bank.py check` and config-bankF.yaml.
+	python3 tools/cross_bank.py check-banks
+.PHONY: all clean recomp cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc

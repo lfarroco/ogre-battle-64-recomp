@@ -39,6 +39,10 @@ make recomp
 # must be in different units — see config-bankF.yaml).
 make bank-recomp
 
+# optional: the full cross-bank audit (bank units fail, main-unit backlog is
+# reported; `make bank-recomp` already runs the bank-unit half and fails on it)
+make cross-bank-check
+
 # build the app
 cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
 cmake --build build-app -j
@@ -230,6 +234,21 @@ The runtime byte-reverses RDRAM (see `recomp.h`): the 32-bit word at game addres
 byte at `a` is at `(a ^ 3) - 0x80000000`. So a Python read is
 `struct.unpack_from('<I', data, a & 0x1FFFFFFF)[0]` for words and
 `data[(a & 0x1FFFFFFF) ^ 3]` for logical bytes.
+
+`tools/rdram.py` does all of that for you (`word`/`half`/`byte`/`string`/
+`hexdump`/`find`/`ptr`), and one mode answers the question mis-binding walls turn
+on:
+
+```sh
+tools/rdram.py /tmp/rdram.bin banks        # which module is resident in each window
+```
+
+It compares the dump against every record in `app/src/bank_funcs.inc` (+ the
+uncompiled segment-table records) and says which ROM offset is *actually* live at
+each streamed RAM base. Streamed RAM holds different modules at different times
+(`0x802395E0` is `bankRec14b` for the movie visit and `bankRec14c` for the steps
+after it), so "the port called the wrong function" usually shows up here as
+"the bytes at the faulting address are a different module's".
 
 The black canvas a stalled boot produces is the game's idle trajectory, not a
 renderer failure - but do not conclude that from a screen capture; see
