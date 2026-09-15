@@ -254,6 +254,94 @@ The black canvas a stalled boot produces is the game's idle trajectory, not a
 renderer failure - but do not conclude that from a screen capture; see
 "Capturing the native output".
 
+## Diagnostics toolkit
+
+Four offline tools answer the questions every session otherwise re-derives by
+hand. None of them needs a CUDA/GPU/game run except where noted.
+
+### `tools/runlog.py <run.log>` — one screen per run
+
+```sh
+OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D OGRE_SCENE_LOG=1 \
+  OGRE_EXIT_AFTER_MS=45000 ./build-null/ogrebattle64 > /tmp/run.log 2>&1
+tools/runlog.py /tmp/run.log              # scene timeline, RSP tasks, bank loads, problems
+tools/runlog.py /tmp/run.log --check      # exit 1 on crash / stub call / unknown module
+tools/runlog.py /tmp/run.log --json       # machine-readable
+```
+
+The **non-gfx RSP task table** is the part that matters: graphics tasks go to
+RT64 regardless, but a non-gfx task served by `stub microcode` is work the port
+silently drops. Session 46's four `M_NJPEGTASK` background-decode tasks were
+invisible inside 23k lines of gfx chatter and this prints them with their ucode,
+data and `data_ptr` on one screen. `--check` is the assertion a future
+`make smoke` should use.
+
+### `tools/rdram.py ... image` — is the buffer blank or an image?
+
+```sh
+tools/rdram.py /tmp/rdram.bin image 0x80243E28 --width 320 -o /tmp/bg.png
+tools/rdram.py /tmp/rdram.bin image 0x80243E28 --fmt ia8 --width 320
+tools/rdram.py /tmp/rdram.bin image 0x800D0000 --offset 0x18 --scale 3
+```
+
+Renders a region as an N64 texture (`rgba16`, `rgba32`, `ia16`, `ia8`, `ia4`,
+`i8`, `i4`, `ci8` + `--palette`) to an RGBA PNG (zlib only, no Pillow) and
+prints a luminance summary with a **`(near-)uniform` note** — the difference
+between "nobody drew this" and "an asset failed to decode".
+
+### `tools/rdram.py diff A.bin B.bin` — what did a run change, by module?
+
+```sh
+tools/rdram.py diff /tmp/stub.bin /tmp/with-fix.bin --min-run 16 --limit 20
+```
+
+Clusters changed bytes into runs, merges runs within `--gap`, and prints the
+running total **grouped by owning record/overlay** (from `tools/n64map.py`),
+flagging RAM that several records share. This replaces "add a probe to `rsp.cpp`
+that dumps a region before and after a call".
+
+### `tools/guestmap.py <addr>` — which module is this?
+
+```sh
+tools/guestmap.py 0x801B7EBC 0x802395E0 0x2F180    # vram or rom, auto-detected
+tools/guestmap.py 0x801B7EBC --context 4           # +-symbols
+tools/guestmap.py --list                           # the whole segment/record table
+```
+
+Prints the ROM offset (`vram - 0x80070C60 + 0x1060` and back), the owning
+segment/record and unit, whether the address is a **function entry in the ELF
+that owns that layout**, and — the mis-binding warning — the other records that
+map the same RAM. Example: `0x801B7EBC` is `func_801B7B9C + 0x320` (not an
+entry) in `ogrebattle64.elf`, but `func_ovlC_801B7EBC` (an entry) in `bankC.elf`
+and `func_ovlG_801B7EBC` in `bankG.elf`; which one is live is decided by the
+game's DMA.
+
+### `tools/watch.sh <guest-addr>` — who writes this address?
+
+```sh
+OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D \
+  tools/watch.sh 0x80243E28 --after func_80178920 --ignore 1 --hits 3
+```
+
+Arms an lldb watchpoint on `rdram + (guest - 0x80000000)` after a given guest
+symbol (skip its first `--ignore` hits to pick a later visit), and prints a
+backtrace per write.
+
+The app, the recompiled code and `librecomp`/`ultramodern` are built with
+`-fno-omit-frame-pointer` (RT64 is not), because the runtime's shadow *guest*
+call chain is empty when a fault happens inside runtime code reached through a
+bridge. With frame pointers a breakpoint in the runtime unwinds across the
+bridge to the guest caller:
+
+```
+frame #0  do_recv            frame #2  osRecvMesg_recomp
+frame #1  osRecvMesg         frame #3  func_80088F08 + 717   <- the guest caller
+```
+
+(`bt` at a *signal* stop can still print only the faulting frame — if the crash
+is a `SIGFPE`/`SIGBUS` inside the runtime, break on that function instead:
+`lldb -b -o "breakpoint set -n do_recv" -o run -o "bt 14" -- ./build-null/ogrebattle64`.)
+
 ## Config directory
 
 - macOS: `~/Library/Application Support/ogrebattle64/`

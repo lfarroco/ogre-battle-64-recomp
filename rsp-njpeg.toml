@@ -1,0 +1,16 @@
+# RSP microcode recompilation: the game's Nintendo-JPEG (M_NJPEGTASK, type 4)
+# decoder, used for the full-screen background images of the New Game opening
+# (scene 0x0D steps >= 2). The port stubbed every non-gfx RSP task, so those
+# images decoded to nothing and the cathedral rendered over black.
+#
+#   RDRAM 0x8009ED80 (size 0x7C0)  ROM 0x2F180   main segment
+#                                  (`ROM = vram - 0x80070C60 + 0x1060`)
+#   RDRAM 0x800AC050 (size 0xF0)   ROM 0x3C450   Huffman/quant tables
+#
+# Run `make rsp-recomp` after changing this file.
+text_offset = 0x2F180
+text_size = 0x7B8
+text_address = 0x8009ED80
+rom_file_path = "assets/ogre64.z64"
+output_file_path = "RspFuncs/njpeg_ucode.cpp"
+output_function_name = "njpeg_ucode"

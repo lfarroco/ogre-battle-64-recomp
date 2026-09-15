@@ -57,6 +57,7 @@ def parse_addr(text: str) -> int:
 
 class Dump:
     def __init__(self, path: str) -> None:
+        self.path = path
         self.data = open(path, "rb").read()
         self.base = RDRAM_BASE
         # The whole dump in logical (guest) byte order: logical[off] ==
@@ -153,6 +154,216 @@ def cmd_ptr(d: Dump, addr: int, depth: int) -> None:
         if not in_rdram:
             break
         current = value
+
+
+# --- `image`: render a region as an N64 texture ------------------------------
+#
+# Every session writes this loop again ("is the buffer zero, or is it an image
+# someone forgot to draw?"). Formats match the RDP's `G_IM_FMT`/`G_IM_SIZ`.
+# The output is an RGBA PNG (alpha preserved, so an IA/I image is not silently
+# premultiplied to black), written with zlib only — no Pillow.
+
+IMAGE_FORMATS = {
+    "rgba16": (2.0, "RGBA 16b (5-5-5-1)"),
+    "rgba32": (4.0, "RGBA 32b (8-8-8-8)"),
+    "ia16": (4.0, "IA 16b"),
+    "ia8": (1.0, "IA 8b (4+4)"),
+    "ia4": (0.5, "IA 4b (3+1)"),
+    "i8": (1.0, "I 8b"),
+    "i4": (0.5, "I 4b"),
+    "ci8": (1.0, "CI 8b (palette RGBA16)"),
+}
+
+
+def write_png_rgba(path: str, width: int, height: int, rgba: bytes) -> None:
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    raw = b"".join(b"\x00" + rgba[y * width * 4:(y + 1) * width * 4] for y in range(height))
+    blob = b"\x89PNG\r\n\x1a\n"
+    blob += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    blob += chunk(b"IDAT", zlib.compress(raw, 6))
+    blob += chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(blob)
+
+
+def texel_decoder(fmt: str, d: Dump, addr: int, palette: int | None):
+    """Return (bytes_per_texel, decode(i) -> (r, g, b, a)) for a region."""
+    def byte_at(i: int) -> int:
+        return d.byte(addr + i)
+
+    def rgb5551(v: int) -> tuple[int, int, int, int]:
+        return (((v >> 11) & 31) * 255 // 31, ((v >> 6) & 31) * 255 // 31,
+                ((v >> 1) & 31) * 255 // 31, 255 if (v & 1) else 0)
+
+    if fmt == "rgba16":
+        return 2.0, lambda i: rgb5551((byte_at(i * 2) << 8) | byte_at(i * 2 + 1))
+    if fmt == "rgba32":
+        return 4.0, lambda i: (byte_at(i * 4), byte_at(i * 4 + 1),
+                               byte_at(i * 4 + 2), byte_at(i * 4 + 3))
+    if fmt == "ia16":
+        return 4.0, lambda i: (byte_at(i * 4),) * 3 + (byte_at(i * 4 + 2),)
+    if fmt == "ia8":
+        def ia8(i: int) -> tuple[int, int, int, int]:
+            v = byte_at(i)
+            intensity = ((v >> 4) & 15) * 17
+            return (intensity, intensity, intensity, (v & 15) * 17)
+        return 1.0, ia8
+    if fmt == "i8":
+        return 1.0, lambda i: (byte_at(i),) * 3 + (255,)
+    if fmt in ("i4", "ia4"):
+        def nibble(i: int) -> int:
+            v = byte_at(i // 2)
+            return (v >> 4) & 15 if i % 2 == 0 else v & 15
+
+        def i4(i: int) -> tuple[int, int, int, int]:
+            v = nibble(i) * 17
+            return (v, v, v, 255)
+
+        def ia4(i: int) -> tuple[int, int, int, int]:
+            v = nibble(i)
+            intensity = ((v >> 1) & 7) * 36
+            return (intensity, intensity, intensity, 255 if (v & 1) else 0)
+
+        return 0.5, (ia4 if fmt == "ia4" else i4)
+    if fmt == "ci8":
+        if palette is None:
+            raise SystemExit("ci8 needs --palette <addr>")
+        return 1.0, lambda i: rgb5551(d.half(palette + byte_at(i) * 2))
+    raise SystemExit("unknown --fmt %r (choose from %s)" % (fmt, ", ".join(IMAGE_FORMATS)))
+
+
+def cmd_image(d: Dump, addr: int, width: int, height: int | None, fmt: str,
+              offset: int, palette: int | None, out: str | None, scale: int) -> None:
+    per_texel, decode = texel_decoder(fmt, d, addr + offset, palette)
+    avail = len(d.data) - d.off(addr + offset)
+    rows = int(avail // (per_texel * width))
+    height = rows if not height else min(height, rows)
+    if height <= 0:
+        raise SystemExit("region too small for %d texels/row" % width)
+    pixels = bytearray()
+    values = []
+    for y in range(height):
+        for x in range(width):
+            i = y * width + x
+            r, g, b, a = decode(i)
+            values.append((r + g + b) // 3)
+            pixels += bytes((r, g, b, a))
+    if scale > 1:
+        scaled = bytearray()
+        for y in range(height):
+            row = pixels[y * width * 4:(y + 1) * width * 4]
+            big = b"".join(row[x * 4:x * 4 + 4] * scale for x in range(width))
+            for _ in range(scale):
+                scaled += big
+        pixels = scaled
+        height *= scale
+        width *= scale
+    if out is None:
+        out = "%s.0x%08X.%s.png" % (d.path, addr, fmt)
+    write_png_rgba(out, width, height, bytes(pixels))
+
+    uniq = len(set(values))
+    mean = sum(values) / len(values)
+    dark = sum(1 for v in values if v < 8) / len(values)
+    print("%s  %s, %dx%d from 0x%08X+0x%X (%d row(s) available)  ->  %s"
+          % (IMAGE_FORMATS[fmt][1], fmt, width // scale, height // scale, addr, offset,
+             rows, out))
+    print("  luminance: mean %.1f, min %d, max %d, %d unique value(s), %.1f%% near-black"
+          % (mean, min(values), max(values), uniq, dark * 100.0))
+    if uniq <= 2:
+        print("  NOTE: (near-)uniform — this is a blank/fill buffer, not an image")
+
+
+# --- `diff`: what did a run change, grouped by module ------------------------
+
+def changed_runs(a: bytes, b: bytes, gap: int) -> list[tuple[int, int]]:
+    """[start, end) byte runs where the two images differ, merging close runs."""
+    runs: list[tuple[int, int]] = []
+    i = 0
+    n = min(len(a), len(b))
+    while i < n:
+        if a[i] == b[i]:
+            i += 1
+            continue
+        start = i
+        while i < n:
+            if a[i] != b[i]:
+                i += 1
+                continue
+            # Close a run only when `gap` equal bytes follow.
+            j = i
+            while j < n and j - i < gap and a[j] == b[j]:
+                j += 1
+            if j - i >= gap or j >= n:
+                break
+            i = j
+        runs.append((start, i))
+    return runs
+
+
+def cmd_diff(path_a: str, path_b: str, min_run: int, limit: int, gap: int,
+             as_json: bool) -> None:
+    da, db = Dump(path_a), Dump(path_b)
+    runs = [r for r in changed_runs(da.logical, db.logical, gap) if r[1] - r[0] >= min_run]
+    total = sum(e - s for s, e in runs)
+    print("A %s (%d bytes)" % (path_a, len(da.data)))
+    print("B %s (%d bytes)" % (path_b, len(db.data)))
+    if len(da.data) != len(db.data):
+        print("WARNING: different sizes; compared the common prefix")
+    print("%d byte(s) changed (%.2f%% of the dump) in %d run(s) (min-run %d, gap %d)"
+          % (total, 100.0 * total / max(1, len(da.data)), len(runs), min_run, gap))
+
+    try:
+        import n64map
+        m = n64map.load_map()
+    except Exception:                                    # noqa: BLE001 - optional
+        m = None
+
+    def owner(addr: int) -> str:
+        if m is None:
+            return ""
+        seg = m.by_vram(addr)
+        if seg is None:
+            if addr < 0x80001000:
+                return "low RDRAM (exception vectors / KUSEG alias)"
+            return "heap/stack/asset space"
+        shared = [s for s in m.segments if s is not seg and s.vram is not None
+                  and s.kind == "record" and s.vram <= addr < s.vram_end]
+        label = seg.label()
+        if shared:
+            label += " (shared by %d record(s))" % len(shared)
+        return label
+
+    groups: dict[str, list[int]] = {}
+    for start, end in runs:
+        key = owner(0x80000000 + start)
+        entry = groups.setdefault(key or "(unmapped)", [0, 0])
+        entry[0] += end - start
+        entry[1] += 1
+    print("\nby region:")
+    for key, (bytes_, count) in sorted(groups.items(), key=lambda kv: -kv[1][0]):
+        print("  %10d byte(s)  %4d run(s)  %s" % (bytes_, count, key))
+
+    if as_json:
+        import json
+        print(json.dumps([{"start": 0x80000000 + s, "end": 0x80000000 + e,
+                           "owner": owner(0x80000000 + s)} for s, e in runs[:limit]]))
+        return
+
+    print("\nruns (first %d):" % limit)
+    for start, end in runs[:limit]:
+        addr = 0x80000000 + start
+        first_a, first_b = da.byte(addr), db.byte(addr)
+        print("  0x%08X..0x%08X  0x%-6X  A[0]=%02X B[0]=%02X  %s"
+              % (addr, 0x80000000 + end, end - start, first_a, first_b,
+                 owner(addr)))
+    if len(runs) > limit:
+        print("  ... %d more" % (len(runs) - limit))
 
 
 # --- `banks`: is the code in RDRAM the module we compiled there? -------------
@@ -253,29 +464,74 @@ def cmd_banks(d: Dump, rom_path: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) < 3 or (len(sys.argv) < 4 and sys.argv[2] != "banks"):
+    argv = sys.argv[1:]
+    if len(argv) < 2:
         print(__doc__)
         return 2
-    dump, mode = sys.argv[1], sys.argv[2]
+    if argv[0] == "diff":
+        return main_diff(argv[1:])
+    if len(argv) < 2 or (len(argv) < 3 and argv[1] != "banks"):
+        print(__doc__)
+        return 2
+    dump, mode = argv[0], argv[1]
     d = Dump(dump)
     if mode == "find":
-        cmd_find(d, sys.argv[3])
+        cmd_find(d, argv[2])
         return 0
     if mode == "banks":
-        cmd_banks(d, sys.argv[3] if len(sys.argv) > 3 else str(ROOT / "assets" / "ogre64.z64"))
+        cmd_banks(d, argv[2] if len(argv) > 2 else str(ROOT / "assets" / "ogre64.z64"))
         return 0
-    addr = parse_addr(sys.argv[3])
+    if mode == "image":
+        return main_image(d, argv[2:])
+    addr = parse_addr(argv[2])
     if mode == "string":
-        cmd_string(d, addr, int(sys.argv[4], 0) if len(sys.argv) > 4 else 64)
+        cmd_string(d, addr, int(argv[3], 0) if len(argv) > 3 else 64)
     elif mode == "hexdump":
-        cmd_hexdump(d, addr, int(sys.argv[4], 0) if len(sys.argv) > 4 else 64)
+        cmd_hexdump(d, addr, int(argv[3], 0) if len(argv) > 3 else 64)
     elif mode == "ptr":
-        cmd_ptr(d, addr, int(sys.argv[4], 0) if len(sys.argv) > 4 else 4)
+        cmd_ptr(d, addr, int(argv[3], 0) if len(argv) > 3 else 4)
     elif mode in ("word", "half", "byte"):
-        cmd_word(d, addr, int(sys.argv[4], 0) if len(sys.argv) > 4 else 1, mode)
+        cmd_word(d, addr, int(argv[3], 0) if len(argv) > 3 else 1, mode)
     else:
         print(__doc__)
         return 2
+    return 0
+
+
+def main_image(d: Dump, args: list[str]) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="rdram.py <dump> image",
+                                 description="Render an RDRAM region as an N64 texture (PNG).")
+    ap.add_argument("addr")
+    ap.add_argument("--width", type=int, default=320)
+    ap.add_argument("--height", type=int, default=240,
+                    help="texels to render (default 240; 0 = as many as fit)")
+    ap.add_argument("--fmt", default="rgba16", choices=sorted(IMAGE_FORMATS))
+    ap.add_argument("--offset", type=lambda s: int(s, 0), default=0,
+                    help="bytes to skip before the first texel (e.g. a header)")
+    ap.add_argument("--palette", type=lambda s: parse_addr(s), default=None,
+                    help="RGBA16 palette address (ci8)")
+    ap.add_argument("-o", "--out", default=None)
+    ap.add_argument("--scale", type=int, default=1)
+    ns = ap.parse_args(args)
+    cmd_image(d, parse_addr(ns.addr), ns.width, ns.height, ns.fmt, ns.offset,
+              ns.palette, ns.out, ns.scale)
+    return 0
+
+
+def main_diff(args: list[str]) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="rdram.py diff",
+                                 description="What did a run change, grouped by module.")
+    ap.add_argument("a")
+    ap.add_argument("b")
+    ap.add_argument("--min-run", type=int, default=1)
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--gap", type=int, default=4,
+                    help="merge runs separated by fewer than N equal bytes")
+    ap.add_argument("--json", action="store_true")
+    ns = ap.parse_args(args)
+    cmd_diff(ns.a, ns.b, ns.min_run, ns.limit, ns.gap, ns.json)
     return 0
 
 

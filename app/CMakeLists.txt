@@ -53,6 +53,17 @@ endif()
 # --- Runtime: ultramodern + librecomp (+ its bundled N64Recomp) --------------
 add_subdirectory(${OGRE_TOOLS}/N64ModernRuntime ${CMAKE_BINARY_DIR}/N64ModernRuntime)
 
+# Frame pointers in the runtime too, not just in the app: a crash inside
+# runtime code reached through a bridge (the message-queue math, for example)
+# has an empty shadow *guest* chain, and without frame pointers lldb prints only
+# the faulting frame and nobody can see who called it. RT64 keeps its own flags
+# (hot path). See docs/guides/app-build.md -> "Diagnostics toolkit".
+foreach(OGRE_FP_TARGET librecomp ultramodern)
+    if (TARGET ${OGRE_FP_TARGET})
+        target_compile_options(${OGRE_FP_TARGET} PRIVATE -fno-omit-frame-pointer)
+    endif()
+endforeach()
+
 # --- Renderer ----------------------------------------------------------------
 if (OGRE_USE_RT64)
     # Static build, expecting an SDL window outside of Windows (same options as
@@ -95,12 +106,44 @@ target_include_directories(ogrebattle64_recomp PRIVATE
 
 target_compile_options(ogrebattle64_recomp PRIVATE
     -fno-strict-aliasing
+    # Keep frame pointers so a host backtrace actually unwinds at a crash: the
+    # runtime's shadow guest chain is empty when the fault is in runtime code
+    # reached through a bridge (see tools/watch.sh and docs/guides/app-build.md).
+    -fno-omit-frame-pointer
     -Wno-unused-variable
     -Wno-unused-parameter
     -Wno-unused-function
     -Wno-unused-but-set-variable
     -Wno-implicit-function-declaration
 )
+
+# --- Recompiled RSP microcode -----------------------------------------------
+# Non-graphics RSP tasks are run through recompiled microcode (src/rsp.cpp).
+# Today that is the game's Nintendo-JPEG decoder (M_NJPEGTASK, type 4) used for
+# the New Game opening's full-screen backgrounds; regenerate with
+# `make rsp-recomp` (rsp-njpeg.toml -> RspFuncs/njpeg_ucode.cpp). The generated
+# code is C++ (it uses librecomp's RSP VU implementation).
+file(GLOB RSP_RECOMP_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../RspFuncs/*.cpp)
+
+if(RSP_RECOMP_SOURCES)
+    add_library(ogrebattle64_rsp STATIC ${RSP_RECOMP_SOURCES})
+
+    target_include_directories(ogrebattle64_rsp PRIVATE
+        ${OGRE_TOOLS}/N64ModernRuntime/N64Recomp/include
+        ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
+        ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
+    )
+
+    target_compile_options(ogrebattle64_rsp PRIVATE
+        -fno-strict-aliasing
+        -fno-omit-frame-pointer
+        -Wno-unused-variable
+        -Wno-unused-parameter
+        -Wno-unused-function
+        -Wno-unused-but-set-variable
+        -Wno-implicit-function-declaration
+    )
+endif()
 
 # --- Streamed-overlay bank units (Phase 4) ----------------------------------
 # Independent recompilations (config-bank<U>.yaml / .toml, built by
@@ -125,6 +168,7 @@ foreach(BANK_UNIT_DIR ${BANK_UNIT_DIRS})
     )
     target_compile_options(${BANK_UNIT_LIB} PRIVATE
         -fno-strict-aliasing
+        -fno-omit-frame-pointer
         -Wno-unused-variable
         -Wno-unused-parameter
         -Wno-unused-function
@@ -162,6 +206,13 @@ endif()
 
 add_executable(ogrebattle64 ${OGRE_APP_SOURCES} ${OGRE_RENDERER_SOURCES})
 
+# Keep frame pointers in the app + recompiled code so lldb can unwind a host
+# backtrace at a crash. The runtime keeps a shadow *guest* call chain, but it is
+# empty when the fault is inside runtime code reached through a bridge (a
+# SIGFPE in the message-queue math, for example), and without frame pointers
+# `bt` prints only the faulting frame. RT64 is left alone (hot path).
+target_compile_options(ogrebattle64 PRIVATE -fno-omit-frame-pointer)
+
 target_include_directories(ogrebattle64 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../RecompiledFuncs
@@ -192,6 +243,10 @@ target_link_libraries(ogrebattle64 PRIVATE
     librecomp
     ultramodern
 )
+
+if(RSP_RECOMP_SOURCES)
+    target_link_libraries(ogrebattle64 PRIVATE ogrebattle64_rsp)
+endif()
 
 if (OGRE_USE_RT64)
     target_link_libraries(ogrebattle64 PRIVATE rt64)

@@ -608,6 +608,9 @@ void register_bank_overlays() {
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
+    // A divide-by-zero in the runtime's message-queue math (a queue whose
+    // msgCount is 0) arrives as SIGFPE; report the guest chain for it too.
+    sigaction(SIGFPE, &sa, nullptr);
 #endif
     recomp::overlays::set_streamed_dma_hook(on_streamed_dma);
 

@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-15 (46) | Non-gfx RSP microcode is recompiled with RSPRecomp (`make rsp-recomp` → `RspFuncs/`) and dispatched by ucode address in `app/src/rsp.cpp`; the gfx ucode still goes to RT64. The M_NJPEGTASK decoder is **opt-in** (`OGRE_NJPEG=1`) until its output is correct | entry below; `docs/HANDOFF-2026-09-15-session46.md` |
 | 2026-09-15 (45) | A shared RAM range can hold **several records**: compile each one (units F/G) and keep them **out of the unit whose code calls into it**, so N64Recomp emits `LOOKUP_FUNC` and the game's DMA selects the resident module | entry below; `docs/HANDOFF-2026-09-15-session45.md` §2 |
 | 2026-09-15 (44) | Mirror the N64's low-window (KUSEG) RDRAM alias in `recomp_mem_addr` (`a < 0x80000000` → `a & 0x003FFFFF`); keep it narrow (4 MiB) — **justification weakened by session 45** (it masked a mis-binding); A/B it | entry below (see its session-45 banner) |
 | 2026-09-15 (44b) | Record hygiene: `DECISIONS.md` keeps a **durable-decisions table** at the top and a `> Superseded by …` banner on disproved entries; findings go in handoffs | `DECISIONS.md` top |
@@ -30,6 +31,53 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-15 (session 46) — non-gfx RSP microcode is now recompilable (`make rsp-recomp`); the cathedral background needs it, and the M_NJPEGTASK decode is opt-in until it is correct
+
+**Decision.** The port runs **non-graphics RSP microcode through RSPRecomp**
+instead of always stubbing it. `rsp-njpeg.toml` + `make rsp-recomp` regenerate
+`RspFuncs/njpeg_ucode.cpp` (gitignored, like `RecompiledFuncs/`), which
+`app/CMakeLists.txt` builds into `ogrebattle64_rsp`; `app/src/rsp.cpp`
+dispatches by ucode address (`task->t.ucode == 0x8009ED80`, the game's Nintendo
+JPEG decoder, `M_NJPEGTASK` = type 4) — behind **`OGRE_NJPEG=1`**.
+
+**Why opt-in.** The recompiled microcode runs and returns
+`RspExitReason::Broke`, but a pre/post RDRAM diff around the decoder shows it
+writes only **one `0x300`-byte block** per task (not the stream its loop
+structure implies). The game's image assembler then copies an empty resource,
+the scene stops submitting display lists at the step-2 entry, and the null
+build dies with SIGFPE in the runtime's `do_recv` (`osRecvMesg` with a
+null-derived queue `0x80000010`, `msgCount = 0`). Enabling it by default would
+regress step 2 from "renders with a black background" to "does not draw", so
+the stub stays the default.
+
+**What it establishes.** The cathedral background is **not** a renderer bug:
+the background is a 320x240 pre-rendered image at guest `0x80243E28` (the
+step-2 display list's first 48 `G_TRI2` quads), and the game decodes it through
+four `M_NJPEGTASK` tasks (asset `0x00183352` = ROM `0x7175A2`, magic `'HU'` +
+`'HUFF'`) that the port stubbed. Any future fix must either make the recompiled
+microcode correct (find why it stops after one block; check whether the skipped
+`ucode_boot` at `0x8009ECB0` matters) or reproduce the decode another way —
+fabricating the image is not an option (AGENTS §7).
+
+**RSPRecomp note.** The declared ucode region is `0x7C0` bytes, but its last 8
+bytes are data (`0x0900060E` recompiles as `j 0x1838` to a nonexistent label);
+`text_size = 0x7B8` ends after the final `break` + delay slot.
+
+**Tooling decision (same session, after the developer asked whether we need
+better tooling).** Session work must use `tools/runlog.py` (one-screen run
+summary + `--check`), `tools/guestmap.py` (offline rom/vram/record/function-entry
+lookup), `tools/rdram.py image`/`diff`, and `tools/watch.sh`, rather than
+re-writing those loops per session; `AGENTS.md` §4 points at them and
+`docs/guides/app-build.md` → "Diagnostics toolkit" documents them. The app, the
+recompiled code and `librecomp`/`ultramodern` are built with
+`-fno-omit-frame-pointer` (RT64 is not) so a fault inside runtime code reached
+through a bridge unwinds to the guest caller; without it `bt` printed a single
+frame.
+
+Entry: `docs/HANDOFF-2026-09-15-session46.md`. Durable table row added.
 
 ---
 

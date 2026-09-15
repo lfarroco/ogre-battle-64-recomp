@@ -211,4 +211,18 @@ bank-recomp: bank
 	@# call would be bound at build time to the wrong bank's layout). See
 	@# `cross_bank.py check` and config-bankF.yaml.
 	python3 tools/cross_bank.py check-banks
-.PHONY: all clean recomp cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc
+
+# ---------------------------------------------------------------------------
+# RSP microcode (RSPRecomp). Only microcodes the runtime's task thread actually
+# executes need this: gfx tasks go to RT64, which parses display lists itself.
+# rsp-njpeg.toml recompiles the game's Nintendo-JPEG decoder (M_NJPEGTASK, type
+# 4), which decodes the New Game opening's full-screen background images into
+# RspFuncs/njpeg_ucode.cpp; app/src/rsp.cpp dispatches it by ucode address.
+# ---------------------------------------------------------------------------
+RSPRECOMP := tools/N64Recomp/build/RSPRecomp
+
+.PHONY: rsp-recomp
+rsp-recomp:
+	$(RSPRECOMP) rsp-njpeg.toml
+
+.PHONY: all clean recomp cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp

@@ -63,6 +63,38 @@ that were considered and are NOT needed:
 
 </details>
 
+## Image-decode ucode: `M_NJPEGTASK` (type 4) — recompiled, opt-in (session 46)
+
+The New Game opening's full-screen backgrounds are decoded by a **type-4
+(`M_NJPEGTASK`) microcode**, not by the gfx ucode. Four tasks are submitted at
+the second `0x02` enter (the cathedral, scene `0x0D` step 2):
+
+```
+type=4 ucode=0x8009ED80 ucode_size=0x7C0 ucode_data=0x800AC050 ucode_data_size=0xF0
+       boot=0x8009ECB0/0xD0 data_ptr=0x801D1030 data_size=0x12C
+```
+
+| part | RDRAM | ROM (`vram - 0x80070C60 + 0x1060`) | size |
+|---|---|---|---|
+| boot loader | `0x8009ECB0` | `0x2F0B0` | `0xD0` |
+| main microcode | `0x8009ED80` | `0x2F180` | `0x7C0` |
+| Huffman/quant tables | `0x800AC050` | `0x3C450` | `0xF0` |
+
+The config is `rsp-njpeg.toml`; `make rsp-recomp` regenerates
+`RspFuncs/njpeg_ucode.cpp` (gitignored), which `app/CMakeLists.txt` builds into
+`ogrebattle64_rsp` (the generated code is C++ — it uses librecomp's `RSP` VU
+implementation). `app/src/rsp.cpp` dispatches on the ucode address. **Two
+constraints:**
+
+* `text_size = 0x7B8`, not the declared `0x7C0`: the last 8 bytes of the region
+  are data (`0x0900060E` decodes as `j 0x1838`, and RSPRecomp emits a `goto` to
+  a label that does not exist).
+* The decoder is behind `OGRE_NJPEG=1` and the stub stays the default: the
+  recompiled microcode runs but writes only one `0x300`-byte block per task, the
+  scene then stops drawing, and the null build dies in the runtime's `do_recv`
+  (`osRecvMesg` with a null-derived queue `0x80000010`, `msgCount = 0`). See
+  `docs/HANDOFF-2026-09-15-session46.md` §4-5.
+
 ## Audio ucode (still TBD)
 
 No audio tasks (type 5) are submitted yet during boot, so the stub microcode in

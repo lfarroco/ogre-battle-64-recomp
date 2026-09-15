@@ -113,6 +113,17 @@ wrong half of a function. Check these before blaming game logic:
   `tools/rdram.py <dump> banks` (which module is *actually* resident in each
   streamed RAM window, and which ROM offset the live bytes came from). Those two
   answer in seconds what session 45 spent five sessions on.
+- **Reach for the toolkit before writing another throwaway script** (session 46
+  built it because those scripts cost hours):
+  `tools/runlog.py <run.log>` (one screen: scene timeline, RSP tasks by type —
+  including any non-gfx task the stub swallows — bank loads, problems;
+  `--check` makes it an assertion); `tools/guestmap.py <addr>` (rom <-> vram,
+  owning record/unit, function-entry check, and *which other records share this
+  RAM*); `tools/rdram.py <dump> image` (render a region as an N64 texture and
+  say whether it is blank); `tools/rdram.py diff A B` (what a run changed,
+  grouped by module); `tools/watch.sh <guest-addr>` (an lldb write watchpoint on
+  the right host address, with backtraces). All are documented in
+  `docs/guides/app-build.md` -> "Diagnostics toolkit".
 - Chunk-DMA records may never be DMA'd at all (`0xD0` gap), and record BSS must be
   zeroed on load (`func_ovlE_…`; see `load_function_bank` and `RAM_END` in
   `tools/gen_bank_funcs.py`).
@@ -264,3 +275,19 @@ from here.
   register contract (session 45's step-2 wall). Find unknown modules by logging
   every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
   record table.
+- **The cathedral scene's background is missing (session 46, open).** The step-2
+  display list's first 48 `G_TRI2` quads blit a full-screen 320x240 RGBA16 image
+  from guest `0x80243E28`, and that buffer is all zero — so this is not a
+  renderer bug. The image is decoded through **four RSP tasks of type 4
+  (`M_NJPEGTASK`)** submitted at the second `0x02` enter
+  (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables `0x800AC050`; asset
+  `0x00183352` = ROM `0x7175A2`, magic `'HU'` + `'HUFF'`), and
+  `app/src/rsp.cpp` **stubs every non-gfx RSP task**. The microcode is now
+  recompilable (`make rsp-recomp` → `RspFuncs/njpeg_ucode.cpp`) and dispatchable
+  behind `OGRE_NJPEG=1`, but the recompiled decoder writes only one `0x300`-byte
+  block per task, the scene then stops submitting display lists at the step-2
+  entry, and the null build dies in the runtime's `do_recv` (`osRecvMesg` with a
+  null-derived queue `0x80000010`, `msgCount = 0`). The stub is therefore the
+  default and the background is still black; the open question is why the
+  recompiled microcode stops after one block (and whether the skipped
+  `ucode_boot` matters). See `docs/HANDOFF-2026-09-15-session46.md`.
