@@ -518,10 +518,20 @@ hardware. RT64 remains the primary native renderer throughout. See
     (`jtbl_80190758[15] = 0x80170AC0`), which sets `F1C0 = var[0]` **and**
     `F1C2 = 0x8002` at pc 16 (`var[0]=1`) and pc 32 (`var[0]=2`), each before
     the `0x02`/`0x0D` visit it causes; the stores that can write 0 never
-    execute, so the movie branch is never selected. The developer confirmed the
-    New Game opening starts with the short intro movie, so the next step is
-    decoding the script's first 16 opcodes (which opcode should set
-    `var[0] = 0`). See `docs/HANDOFF-2026-09-15-session43.md`.
+    execute. **And the first `0x0D` visit is the New Game movie, which the port
+    already renders**: with `F1C0 = 1` (session 42's "command mode" — a
+    misnomer, it is the cutscene engine) a natural visit 1 runs its full 28.7 s
+    (`0x0D` t=11063 ms → `0x02` t=39780 ms) and draws a sepia courtyard
+    cutscene with the subtitle *"I promise I'll make you proud."*
+    (`docs/proofs/native-newgame-cutscene.png`). So `var[0] = 1` is correct for
+    step 1 and the movie-mode branch is not on the New Game path. The scene the
+    developer identified as coming *after* the movie is the cathedral dialogue
+    `Archbishop Odiron` / *"He who has learned the way of the sword and god's
+    teachings,"* — i.e. **step 2**, which is exactly where the port dies
+    (`func_ovlC_8022D1CC` path B → `jal 0x802399AC`). That wall is the next
+    session's single goal. Also: dialogue/subtitle text is LZ-compressed
+    (`tools/ogrelz.py` decodes `func_8007A110`'s format).
+    See `docs/HANDOFF-2026-09-15-session43.md`.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

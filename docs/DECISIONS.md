@@ -5,6 +5,49 @@ Each entry records what was decided, why, and when. New entries go on top.
 
 ---
 
+## 2026-09-15 (session 43, correction) — the first `0x0D` visit IS the New Game movie; the wall is step 2
+
+### Correction, from a capture rather than from code
+
+Session 43 first recorded "the developer confirmed the movie is first, so
+`F1C0` should be 0 on the first `0x0D` visit". A capture of the *natural* first
+visit (tap `Start` only until New Game is confirmed, then stop tapping) shows
+that is wrong: with `F1C0 = 1` the port renders a multi-shot sepia cutscene in a
+castle courtyard with the subtitle `I promise I'll make you proud.`
+(`docs/proofs/native-newgame-cutscene.png`), for the full 28.7 s
+(`0x0D` at `t=11063 ms` → `0x02` at `t=39780 ms`). Session 42's "command mode"
+label is a misnomer: `F1C0 != 0` is the **cutscene engine**, driven by the step
+descriptor table; the `F1C0 == 0` branch (records 10a/10b, vtable
+`&D_801E5AC0`) is a different engine that no New Game step selects. The
+developer's parenthetical in that question was the agent's own inference.
+
+Consequence: the script VM's `D_8018F1C0 = var[0] = 1` is correct for step 1;
+nothing in the VM needs repair, and the corrected word `0x80197794` /
+`func_ovlC_801B7EBC` is not on the critical path until a later step selects the
+other engine.
+
+### The scene after the movie is step 2, and step 2 is the wall
+
+The developer supplied the reference for the scene the opening should show
+*after* the movie: a cathedral interior, dialogue box
+`Archbishop Odiron` / `"He who has learned the way of` /
+`the sword and god's teachings,`. The port never reaches it — visit 1 ends,
+`0x02` reloads, and visit 2 (`0x0D` at `t=39901 ms`) dies in
+`func_ovlC_8022D1CC`'s path B (`D_8018FC39 == 2` → `jal 0x802399AC`, session
+42 §3). So session 42's frame-contract wall gates an identified scene, and
+fixing it is the next session's single goal.
+
+### Dialogue text is LZ-compressed
+
+`Archbishop`, `learned`, `promise`: none appear as ASCII anywhere in the ROM.
+The name table (ROM `0x64810`) and the attract-story text (ROM `0x100710`) are
+uncompressed exceptions; cutscene/dialogue text lives in LZ blocks decoded by
+`func_8007A110`. `tools/ogrelz.py` implements that format (5 tokens, read off
+`0x8007A110..0x8007A7D4`); the asset base is `rom = (id & 0x0FFFFFFF) +
+0x594250` (`func_8009DAF4`).
+
+---
+
 ## 2026-09-15 (session 43) — bank unit B for records 17/18, scene 0x17 is the Tutorial, and two address/VM corrections
 
 ### Decision: one new bank unit for two RAM-disjoint records

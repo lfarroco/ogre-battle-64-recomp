@@ -40,14 +40,26 @@ Result:
    (`var[0] = 1`) and pc 32 (`var[0] = 2`), each **before** the `0x02`/`0x0D`
    visit it causes. The two stores that can write `0` (`0x80170B88`
    `& 0xBFFF`, `0x80170BC4` `sh $zero`) never execute.
-6. **Developer oracle (recorded, this session):** the New Game opening starts
-   with the *short intro movie* — i.e. the `F1C0 == 0` (movie) branch is the
-   intended first `0x0D` visit. Combined with (5) that makes the wall sharp:
-   the port enters `0x0D` in **command** mode on every visit because the
-   script's own opcode 0x10 advances the step word to 1 *before* the first
-   visit; nothing in the VM ever produces 0.
+6. **The first `0x0D` visit IS the New Game movie, and the port already renders
+   it.** A capture of the natural visit 1 (taps stop after New Game is
+   confirmed, `OGRE_TAP_MAX=7`) shows a multi-shot sepia cutscene in a castle
+   courtyard, with the subtitle `I promise I'll make you proud.` —
+   `docs/proofs/native-newgame-cutscene.png` and
+   `native-newgame-cutscene-2.png`. The visit runs its full **28.7 s**
+   (`0x0D` at `t=11063 ms` → `0x02` at `t=39780 ms`), exactly session 42's
+   number. So `F1C0 = 1` (session 42's "command mode") is the cutscene engine,
+   and the earlier reading that the first visit should be `F1C0 == 0` is
+   **retracted** — the developer's parenthetical in this session's question was
+   the agent's inference, and the pixels contradict it.
+7. **The developer's reference for the *next* scene is step 2.** They supplied
+   a capture of the scene after the movie: a cathedral interior with a dialogue
+   box `Archbishop Odiron` / `"He who has learned the way of` / `the sword and
+   god's teachings,`. The port never reaches it: visit 1 ends, `0x02` reloads,
+   and visit 2 (`0x0D` at `t=39901 ms`) dies in `func_ovlC_8022D1CC`'s path B
+   (`D_8018FC39 == 2` → `jal 0x802399AC`). That is session 42's frame-contract
+   wall, and it is now known to gate a specific, identified scene.
 
-No game-logic repair was made (none is identified yet — see §5). The bank-unit
+No game-logic repair was made (the wall is step 2 — see §5). The bank-unit
 work is a real fix and is verified. All probes reverted by regen; both build
 variants rebuilt; the runs below re-verified.
 
@@ -211,39 +223,52 @@ So:
 
 `var[0]` is written by ordinary VM opcodes into `0x40($s1 + var*2)`
 (`s1 = sp+0x10`); the three instructions that write it in this build are
-`0x801711A4`, `0x80171594` and `0x801715D0`. Decoding the script's pc 0..15 to
-see which one sets `var[0] = 1` — and whether the game intends that to happen
-before or after the first `0x0D` visit — is the concrete next step (§5.1).
+`0x801711A4`, `0x80171594` and `0x801715D0`. Since visit 1 draws the movie
+(§0.6), `var[0] = 1` is correct for step 1 and the VM needs no repair here; the
+script decode is now only useful for *naming* steps 3..n.
 
 ## 5. What's next (session 44)
 
-1. **Decode the script's first 16 opcodes** (`func_80170974`, the heap buffer at
-   `D_80197B38`/`D_80197B3C`). The question is not "what should the scene show"
-   (the developer has answered: the intro movie first) but "which opcode should
-   have set `var[0] = 0` for the movie step, and why does the port's script skip
-   it". Cheap dump: at VM entry, when `D_80197B24 == 0`, log `a0` plus 24
-   halfwords (the probe is in this session's log below) and decode with the
-   `jtbl` table. Compare the two script buffers (`0x801C0902` vs `0x8019F4A2`) —
-   they are different scripts, and knowing which one the New Game path should
-   run is the likely root cause.
-2. **The movie path itself** (if it is reached): after the address fix, re-run
-   the force-movie-mode A/B (session 42 §6) and probe `0x80197794` at
-   `func_ovlC_801B7EBC` and at the rec-0 writers. Session 42's decompressor
-   crash may simply be a downstream symptom of the missed step.
-3. **Command-mode step 2 / path B** (session 42 §3, unchanged and now
-   lower priority if the movie is really step 0): `jal 0x802399AC` at
-   `0x8022D218` enters `func_ovlC_80239874`'s continuation with `s0 = 0` and an
-   unprimed `sp+0x1EC`. Concrete test: hardware watchpoint on
-   `ultramodern::get_rdram_base() + 0xC2494`, or a temporary store check.
-4. **Command-mode step 1 renders** — worth capturing now: in the port visit 1
-   (command mode, selector 0) runs ~28.7 s healthy. Nothing has published what
-   it draws. A capture of the natural (no extra taps) first `0x0D` visit would
-   settle whether command mode is "the intro movie" after all, which would
-   demote item 1. `OGRE_CAPTURE_PRESENT` + `OGRE_CAPTURE_EVERY` with only the
-   Start taps needed to reach New Game.
-5. Open and untouched: menu `0x18` natural entry (session-39 tail wall,
+1. **Fix command-mode step 2 — it now gates an identified scene.** The
+   developer's capture (`Archbishop Odiron`, `"He who has learned the way of /
+   the sword and god's teachings,"`) is the scene after the New Game movie, and
+   the port dies entering it: `func_ovlC_8022D1CC` (`0x8022D218`) takes path B
+   when the mode byte `D_8018FC39 == 2` and `jal 0x802399AC` enters
+   `func_ovlC_80239874`'s fall-through continuation with `s0 = 0` and an
+   unprimed `sp+0x1EC` (session 42 §3, re-verified this session as the
+   `0x02 → 0x0D` visit-2 crash). Concrete next probes: (a) is the real entry
+   `func_ovlC_80239874` reached at all in visit 2 (it is set up by
+   `func_ovlC_80239D68` in visit 1), i.e. is the *call* wrong or the *mode*?
+   (b) what writes `0x800C2494` (the read address of `sp+0x1EC` on path B) —
+   session 42 concluded nothing does, which makes it a hardware question too.
+   A hardware watchpoint on `ultramodern::get_rdram_base() + 0xC2494` (session
+   42 §4) is the discriminating experiment.
+2. **`D_8018FC39`'s selector-2 setup** (`func_ovlC_80226110`, registered by
+   `func_80227700(2)` via the step-2 descriptor) is the scene's own enter; it
+   runs at `sp = 0x800C22C0`, the same depth as step 1's `func_ovlC_80225A3C`.
+   Comparing the two callbacks instruction by instruction is the cheapest way
+   to see what step 2 sets up that step 1 does not.
+3. **The movie-engine path (`F1C0 == 0` / bit 15) is still untested in a real
+   flow.** Step 1 does not use it, so the corrected word `0x80197794` and
+   `func_ovlC_801B7EBC` matter only if a later step selects it. Do not spend
+   time there before step 2 works.
+4. Open and untouched: menu `0x18` natural entry (session-39 tail wall,
    `8017BB28 → 8019C69C`, N64 `0x14`), `OGRE_NO_AUDIO=1` early-boot crash,
    `osViFade`. Scene `0x12` needs a save-slot pre-state to test (Load Game).
+
+### A tool worth keeping: `tools/ogrelz.py`
+
+The dialogue/subtitle text is **LZ-compressed**, which is why neither the
+cathedral line nor the movie subtitle `I promise I'll make you proud.` appears
+as ASCII in the ROM (the name table at ROM `0x64810` and the attract-story text
+at `0x100710` are the uncompressed exceptions). `tools/ogrelz.py` implements the
+decompressor that `func_8007A110` runs, read off `0x8007A110..0x8007A7D4`:
+5 token types keyed by the flag byte's top bits, back-references copy from
+`dst - offset - 1`, and the last two tokens are 0xFF-fill and zero-fill runs.
+Its `scan` mode finds candidate blocks but is not yet reliable (it only
+validated the format, not the block starts); a proper block list should come
+from the asset table behind `func_8009DAF4` (`rom = (id & 0x0FFFFFFF) +
+0x594250`).
 
 ## Verification (final binaries, all probes reverted via regen)
 
@@ -259,6 +284,12 @@ before or after the first `0x0D` visit — is the concrete next step (§5.1).
   Stereo, cursor on New Game).
 - Tutorial capture: `docs/proofs/native-tutorial-dialogue.png` (Deneb).
 - Title routing: `OGRE_TAP_BUTTON=…,down,start` → `[scene] t=12389ms id=0x0017`.
+- **The New Game movie**: with taps stopped after the confirming Start
+  (`OGRE_TAP_MS=1500 OGRE_TAP_MAX=7`, `OGRE_SPEED=4`) visit 1 runs
+  `[scene] t=11063ms id=0x000D` → `t=39780ms id=0x0002` = **28.7 s**, and the
+  captures show the sepia courtyard cutscene with the subtitle
+  `I promise I'll make you proud.` (`docs/proofs/native-newgame-cutscene.png`).
+  The same run then enters `0x0D` at `t=39901 ms` and dies on thread 4.
 - New Game re-entry repro on the final binaries (60 s, `OGRE_SPEED=4`,
   `OGRE_TAP_MS=3000 OGRE_TAP_MAX=4`): `0x02 → 0x0D → 0x02 → 0x0D` then
   SIGSEGV on thread 4 — **unchanged** from session 42, as expected (no
@@ -278,8 +309,12 @@ repro commands below are the maintained verification.
   `tutorial` = `0x0017` and the `title`/`menu` comments are corrected (the title
   screen itself carries the New Game / Tutorial / Stereo menu).
 - `app/src/bank_funcs.inc` (generated, gitignored) — 17 records, 1867 functions.
-- `PLAN.md`, `docs/DECISIONS.md`, `docs/README.md`, this file.
-- `docs/proofs/native-title-menu.png`, `docs/proofs/native-tutorial-dialogue.png`.
+- `PLAN.md`, `docs/DECISIONS.md`, `docs/README.md`, `AGENTS.md`, this file.
+- `docs/proofs/native-title-menu.png`, `docs/proofs/native-tutorial-dialogue.png`,
+  `docs/proofs/native-newgame-cutscene.png`,
+  `docs/proofs/native-newgame-cutscene-2.png`.
+- `tools/ogrelz.py` — new: the `func_8007A110` LZ decoder (format verified from
+  the disassembly; the block-start scanner is a work in progress, see §5).
 - Temporary, all reverted by `make recomp`: `RecompiledFuncs/funcs_3.c`
   (a `probe43_store` helper + calls at `0x80170ADC`/`0x80170B00`/`0x80170B88`/
   `0x80170BC4`, and a script-buffer dump at `func_80170974` entry) and
@@ -307,9 +342,16 @@ OGRE_SPEED=4 OGRE_TAP_MS=1500 \
   OGRE_SCENE_LOG=1 OGRE_CAPTURE_PRESENT=/tmp/tut OGRE_CAPTURE_AFTER=300 \
   OGRE_CAPTURE_EVERY=60 OGRE_EXIT_AFTER_MS=16000 ./build-app/ogrebattle64
 
-# the New Game re-entry wall (unchanged)
+# the New Game re-entry wall (unchanged): visit 1 = the movie, visit 2 dies
 OGRE_SPEED=4 OGRE_TAP_MS=3000 OGRE_TAP_MAX=4 OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=60000 \
   ./build-null/ogrebattle64
+
+# capture the New Game movie: tap only until New Game is confirmed, then silence.
+# Visit 1 runs the full 28.7 s; sample it with OGRE_CAPTURE_EVERY.
+OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_MAX=7 OGRE_SCENE_LOG=1 \
+  OGRE_CAPTURE_PRESENT=/tmp/ng OGRE_CAPTURE_AFTER=1000 OGRE_CAPTURE_EVERY=200 \
+  OGRE_EXIT_AFTER_MS=40000 ./build-app/ogrebattle64
+# /tmp/ng.3600.ppm is the frame with the subtitle "I promise I'll make you proud."
 
 # the VM jump table (ROM), index 15 -> 0x80170AC0
 python3 - <<'EOF'

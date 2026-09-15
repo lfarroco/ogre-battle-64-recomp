@@ -186,8 +186,11 @@ from here.
   hook `func_80178B40`, leave `func_80178B7C`, mask `0x40007C14`.
   Its enter has **two modes** selected by `D_8018F1C0`:
   `0`/bit15 → movie mode (DMAs records 10a/10b, installs the cutscene vtable
-  `&D_801E5AC0`); non-zero → command mode (DMAs 14a/14b, calls
-  `func_80226FA8` → `func_8022683C(-5, F1C0 & 0xFFF)`).
+  `&D_801E5AC0`); non-zero → **the cutscene engine the New Game opening actually
+  uses** (DMAs 14a/14b, calls `func_80226FA8` →
+  `func_8022683C(-5, F1C0 & 0xFFF)`). Session 42 called the second one "command
+  mode"; the render (session 43) shows it drawing the New Game movie, so the
+  label is a misnomer.
 - **`0x02`** (`D_8018FC50`): enter `func_80178920` — a one-frame loader that sets
   next = `0x0D`.
 - **New Game** is `title (0x04) → 0x02 → 0x0D → 0x02 → 0x0D → …`, a scripted
@@ -195,12 +198,15 @@ from here.
   scene `D_8018F1C2`, 16 script opcodes per visit. The attract loop is a
   different flow (`title ↔ story 0x0B / unit-info 0x0C`) and never enters
   `0x02`/`0x0D`.
-- **Known open walls** (as of session 43): command-mode step 2
-  (`func_ovlC_8022D1CC` → `jal 0x802399AC` with `s0 = 0` and an unprimed frame);
-  the movie step (`func_801AFC2C(0)` → `func_8007A110` with a bogus size, gated
-  by the word `0x80197794` — *not* `0x8019F794`, see session 43), which the
-  script VM never selects (`func_80170974`'s opcode `0x10` writes
-  `F1C0 = var[0] = 1/2` before the first `0x0D` visit); menu `0x18` natural
-  entry; scene `0x12` = Load Game (needs save pre-state). Scene `0x17` = the
-  Tutorial and now runs (bank unit B, records 17/18). Current status and
+- **Known open walls** (as of session 43): command-mode step 2 — the New Game
+  movie is step 1 and **already renders** (sepia courtyard cutscene, "I promise
+  I'll make you proud."), and the scene after it is the cathedral dialogue
+  `Archbishop Odiron` / "He who has learned the way of the sword and god's
+  teachings," = step 2, which dies in `func_ovlC_8022D1CC` path B
+  (`D_8018FC39 == 2` → `jal 0x802399AC` with `s0 = 0` and an unprimed frame);
+  the movie-engine branch (`F1C0 == 0`, gated by the word `0x80197794` — *not*
+  `0x8019F794`, see session 43) which no New Game step selects; menu `0x18`
+  natural entry; scene `0x12` = Load Game (needs save pre-state). Scene `0x17` =
+  the Tutorial and runs (bank unit B, records 17/18). Dialogue text is
+  LZ-compressed (`func_8007A110`, `tools/ogrelz.py`). Current status and
   details: the newest `docs/HANDOFF-*.md` and `PLAN.md`.
