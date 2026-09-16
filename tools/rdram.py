@@ -83,7 +83,12 @@ class Dump:
         return struct.unpack_from("<I", self.data, self.off(addr))[0]
 
     def half(self, addr: int) -> int:
-        return struct.unpack_from("<H", self.data, self.off(addr & ~1))[0]
+        # A halfword needs the XOR-2 as well: guest bytes are reversed inside
+        # each word (logical byte at `a` == `data[off(a) ^ 3]`), so the logical
+        # halfword at an even `a` lives at `(a & ~1) ^ 2`. Reading `a & ~1`
+        # returns the *neighbouring* halfword — the same defect the in-app
+        # console had; session 58 fixed both.
+        return struct.unpack_from("<H", self.data, self.off((addr & ~1) ^ 2))[0]
 
     def byte(self, addr: int) -> int:
         return self.data[self.off(addr) ^ 3]

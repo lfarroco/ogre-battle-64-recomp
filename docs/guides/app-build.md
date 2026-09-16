@@ -382,9 +382,18 @@ replays forward into scene `0x16`, the closing movie); a save/load pair in the
 *same* run reproduces the rewind.
 
 Limits: valid only in the process that wrote it (function pointers are
-process-local) and for the same binary; the app's own knobs (`OGRE_TAP_BUTTON`
-position, `OGRE_SCENE`, `OGRE_STEP`) are not part of the snapshot; RT64's own
-render state is not rewound (the next frame redraws from the restored RDRAM).
+process-local) and for the same binary — the file carries an FNV-1a hash of the
+running executable (`version 2`), so a **rebuild invalidates every checkpoint**
+and `load` says so. The app's own knobs (`OGRE_TAP_BUTTON` position,
+`OGRE_SCENE`, `OGRE_STEP`) are not part of the snapshot, and RT64's own render
+state is not rewound (the next frame redraws from the restored RDRAM).
+**Where** you save matters: a checkpoint taken while a *stable step* is live
+resumes and replays (verified at the cathedral and at the personality
+questions), but one taken at a scene/step **transition** (e.g. during the brief
+`0x02` loader visit, when the engine has already reset the step word to 0)
+restores into the "no step" movie-mode branch and the sequence bounces between
+`0x00` and `0x0D` instead of continuing — so save *inside* the step you want to
+replay, and check `c` reports the step you expect before `save` (session 58).
 
 ### `tools/runlog.py <run.log>` — one screen per run
 

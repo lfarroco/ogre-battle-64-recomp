@@ -260,6 +260,74 @@ needs (`load /tmp/ck-movie.ckpt`, then drop `r`/`d`/`c` commands into the watche
 file). Note the checkpoint was written by the *current* build — a rebuild now
 invalidates it by design (see §1's build id).
 
+## 3b-bis. Tool bug fixed: halfword reads were byte-swapped (the `step`/`next` mix-up)
+
+Chasing the crash exposed a defect in the port's own instruments. The runtime
+stores guest bytes reversed **inside each word**, so the logical halfword at an
+even `a` is the little-endian halfword at `(a & 0x1FFFFFFE) ^ 2` — the `^ 2`
+matters. The live console's `console_half` (and `tools/rdram.py`'s `half`) read
+it *without* the XOR, i.e. returned the **neighbouring** halfword. The game
+stores the sequence step with an `sh` at `0x8018F1C0`, so every `c` line and
+every `rh` read printed the `next` word under the name `step` and vice versa
+(e.g. the console said `step=32770` = `0x8002`, which is really `D_8018F1C2`'s
+value, while the true step `974` appeared under `next`). Both accessors are
+fixed — the console now reports `scene=0x000D step=542 next=0x8002` at a point
+where the `[scene]` log says `id=0x000D`, and `OGRE_PROBE57`'s (correct
+`MEM_HU`) readings agree. **Any earlier quoted console `step`/`next`/`spin`
+value in this or an older handoff is swapped.** The checkpoint save/load
+messages used the same accessor and so printed the `next` word as the step.
+
+## 3c. Recon for the next milestone: the game's own save system is the Controller Pak
+
+The developer (session 58): *"the game has a save system, which we should arrive
+in one of the next scenes. after that, it will be possible to save the progress
+and load the state using the game's own system."* Static recon so that session
+does not start cold:
+
+* **The save device is the Controller Pak (`osPfs*`), not cartridge
+  SRAM/EEPROM/FlashRAM.** The main segment alone has **105 `jal`s into the
+  PFS/Controller-Pak cluster** (`0x8009616C`..`0x80097DC0`; the largest targets
+  are `func_80097BD0` ×23, `func_800970D0` ×18, `func_80097DC0`/`func_8009788C`
+  ×14 each), and the ROM carries the whole menu as text at ROM
+  `0x790EC..0x7967C`: `Controller Pak Menu`, `Save`/`Load`/`Erase`/`Exit`,
+  `OgreBattle Game Notes`, `OGREBATTLE64 %d`, `Pages`, `No Data`,
+  `Insert Controller Pak.`, `Saving data.`/`Loading data.`/`Deleting data.`,
+  `Do not remove Controller Pak.`, `Data saved to Controller Pak.`,
+  `Data loaded to Game Pak.`, `Saving data has failed.` (and its Load/Delete
+  variants), `1 note 25 pages to save.`, `Insufficient pages to copy game.`,
+  `Different Controller Pak has been inserted.`, `{C0}Not an Ogre Battle 64
+  note.`, `Overwrite data?`, `Delete data?`, `Game Data 1`/`Game Data 2`.
+* **Those strings are in bank unit H** (`guestmap.py 0x790EC` →
+  `D_ovlH_801A260C`, the scene-`0x07` module, RAM `0x801A260C`), i.e. **the
+  Controller Pak menu is drawn by the same UI module as the name-entry/birthday
+  forms that already render**. So the *menu's* drawing is very likely already
+  working; what is missing is the device underneath it.
+* **The runtime cannot answer it today.** `librecomp/src/pak.cpp` is upstream's
+  51-line stub: every `osPfs*` entry (`osPfsInitPak`, `osPfsAllocateFile`,
+  `osPfsFindFile`, `osPfsReadWriteFile`, `osPfsDeleteFile`, `osPfsFileState`,
+  `osPfsFreeBlocks`, `osPfsNumFiles`, `osPfsChecker`, `osPfsRepairId`) returns
+  `1` = `PFS_ERR_NOPACK`. `recomp::SaveType` (`game.hpp`) has `None`, `Eep4k`,
+  `Eep16k`, `Sram`, `Flashram`, `AllowAll` — **no Controller Pak**, and the
+  app sets `entry.save_type = recomp::SaveType::None` with a TODO
+  (`app/src/main.cpp:92`). So today the game sees "no pak inserted" and the
+  menu path can only report `Insert Controller Pak.`
+* **What the milestone needs**, in order:
+  1. A **32 KiB pak image** with the real PFS layout (ID sector at page 1,
+     directory, file headers, 256-byte pages) so existing emulator/hardware pak
+     dumps are usable and the game's own saves are interchangeable.
+  2. A real `osPfs*` implementation over that image (the ten entry points above)
+     plus the raw SI access the PFS layer uses (`__osContRamRead`/
+     `__osContRamWrite` and the pak-presence bits `osContInit`'s query returns).
+  3. A **save file path** for it. The existing cartridge-save plumbing is
+     `pi.cpp`'s `save_context` (`save_buffer`, `update_save_file()` →
+     `<config_path>/<save_folder>/<name>.bin` with `.temp`+`.bak` via
+     `files.cpp`), keyed on `get_save_size(SaveType)` — a Controller Pak is a
+     *separate device*, so it wants its own image file rather than that buffer.
+  4. Only then: the scene that hosts the menu (reachable after the chapter card
+     / second movie) can be exercised, and the title's `Load Game` entry
+     (`docs/scenes.md`, needs a save) becomes testable.
+
+
 
 **Next lead:** why the step runs past 19. The step table and the script VM
 (`func_80170974`, 16 opcodes per visit) are decoded; the question is whether the
@@ -297,8 +365,9 @@ redirected on long runs (the periodic `[snap]` dump stalls boot otherwise).
 
 * `app/src/sdl_platform.cpp` — the `save`/`load` console commands, the
   checkpoint file format/verification (`write_checkpoint`/`read_checkpoint`),
-  `OGRE_CONSOLE_AT_MS`, and the `c` command now prints the **halfword** step
-  (`D_8018F1C0`) instead of a 4-byte read of it.
+  the `OGRE_CONSOLE_AT_MS` gate, the build-id guard, and the **halfword
+  accessor fix** (`console_half` now applies the runtime's `^ 2`, §3b-bis).
+* `tools/rdram.py` — the same halfword fix in the offline `half` accessor.
 * `tools/N64ModernRuntime/librecomp/{include/librecomp/overlays.hpp,src/overlays.cpp}`
   — `get_overlay_state_blob()` / `restore_overlay_state_blob()`.
 * `tools/N64ModernRuntime/ultramodern/{include/ultramodern/ultramodern.hpp,src/function_trace.cpp}`

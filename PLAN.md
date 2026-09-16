@@ -765,6 +765,23 @@ hardware. RT64 remains the primary native renderer throughout. See
   - ⬜ **After the chapter animation comes a second movie** (the player received
     for duty with other soldiers — `docs/scenes.md` row 8, developer-reported);
     the developer offered screenshots. Ask for them when the port reaches it.
+  - ⬜ **The game's own save system is the Controller Pak — recon done, nothing
+    implemented (session 58)**. The developer: *"the game has a save system,
+    which we should arrive in one of the next scenes."* The device is the
+    **Controller Pak** (`osPfs*`), not cartridge SRAM/Flash: 105 `jal`s from the
+    main segment into the PFS cluster (`0x8009616C`..`0x80097DC0`) and the whole
+    menu as ROM text (`0x790EC..0x7967C` — `Controller Pak Menu`, `Save`/`Load`/
+    `Erase`, `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to
+    Controller Pak.`, `Game Data 1`/`2`). The strings live in **bank unit H**
+    (`D_ovlH_801A260C`), the same UI module as the name/birthday forms, so the
+    menu's *drawing* should already work. Missing: `librecomp/src/pak.cpp` is
+    upstream's stub returning `PFS_ERR_NOPACK` for every entry point,
+    `recomp::SaveType` has no Controller Pak, and `app/src/main.cpp` sets
+    `SaveType::None` with a TODO — so the game currently sees "no pak inserted".
+    Plan: a 32 KiB pak image in the real PFS layout (interchangeable with
+    emulator/hardware dumps) + a real `osPfs*` implementation + the raw SI pak
+    access (`__osContRamRead`/`Write`, presence bits) + a save file for it.
+    See `docs/HANDOFF-2026-09-16-session58.md` §3c and `docs/scenes.md` row 9.
   - ✅ **Scene `0x16`'s content is confirmed** (session 58): the closing movie's
     five shots all render, in order, and match the developer's retail
     screenshots — `ATLUS USA / presents` → `Developed & licensed by Quest /

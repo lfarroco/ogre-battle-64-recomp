@@ -699,8 +699,15 @@ inline uint32_t console_word(const uint8_t* base, uint32_t addr) {
     return v;
 }
 
+// A *halfword* needs the XOR-2 as well: the runtime stores guest bytes
+// byte-reversed inside each word (logical byte at `a` == `rdram[(a & 0x1FFFFFFF) ^ 3]`),
+// so the logical halfword at an even `a` is the little-endian halfword at
+// `(a & 0x1FFFFFFE) ^ 2` — not at `a`. Reading it without the XOR silently
+// returns the *neighbouring* halfword, which is how `c` printed `step` and
+// `next` swapped (the game stores the step with an `sh` at `0x8018F1C0`, so its
+// value appeared under `next`) until session 58 fixed this accessor.
 inline uint16_t console_half(const uint8_t* base, uint32_t addr) {
-    const uint32_t off = (addr & 0x1FFFFFFEu);
+    const uint32_t off = (addr & 0x1FFFFFFEu) ^ 2u;
     uint16_t v;
     memcpy(&v, base + off, 2);
     return v;
