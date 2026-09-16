@@ -205,6 +205,62 @@ same instruction:
   `0x16` module (the module is no longer at those addresses when the fault
   happens; the enclosing symbol is `bankRec14a`'s).
 
+## 3b. Corrected and extended (same session, after the developer's answers)
+
+The developer supplied what comes after the movie — a **"Prologue" chapter
+animation** (characters revealed over *"Casting their gaze on the ground,
+trudging along..."*), then a **second movie** (the player received for duty with
+other soldiers) — and confirmed the movie is **one scene in five phases**
+(*"the game reuses the same scene and displays content in 5 different phases"*),
+so the port's repeated `0x16` visits are correct.
+
+That changes the reading of the crash:
+
+* **Step 1073 is a legitimate step.** The step table at ROM `0x1F3CA54` (asset
+  `0x19A8804`) is a raw `u32` array whose header word `0x1A74` gives **1693
+  entries**; entry 1073 = asset `0x01A1625A`, a valid LZ block (declared size
+  `0x12C` == decoded size). The step is **not** out of range — the "past the
+  19-step table" phrasing above is wrong: session 44 decoded only the first 19
+  steps as a sample, the table is much longer.
+* The movie's five phases are steps **970..974** (each descriptor starts with
+  opcode `80000006`; their last-word commands are 5,1,1,5,1).
+* Step **1073's descriptor starts with opcode `0000001B`** (27), and the
+  interpreter's compare tree sends every opcode **< 31** to one shared case
+  (`0x80228E84`: `v1 = s3 + s1*4`, then nine operands, then `jal 0x8022C270`).
+  So the chapter card is a *low-opcode* descriptor whose handler is
+  `func_ovlC_8022C270` — the function that faults.
+* `func_ovlC_8022C270` walks a table based at **`*(0x8023A994)`** and does
+  `lw a0, 0x248(v1)` / `free` / `malloc(0xC)` on entries. `0x8023A994` is a
+  global **written by `func_ovlC_8022D1CC`** (`0x8022D1E8`, in unit C's
+  `bankRec14a`) as the result of `malloc(0x1CB8)`; its callers are the two
+  scene-setup callbacks `func_ovlC_80225A3C` (`0x80225AC8`) and
+  `func_ovlC_80226110` (`0x8022619C`) — the `sel 0` / `sel 2` setup paths session
+  42 identified.
+* **Measured (live console, checkpoint `/tmp/ck-movie.ckpt` at the movie):
+  `0x8023A994` holds `0x52513AFF`, and `0x8023A960..0x8023A9A0` is a byte table
+  of `xx xx xx FF` rows (a colour/palette table), i.e. the address is inside a
+  *module's data*, not a live engine pointer.** The earlier `OGRE_PROBE57` run
+  shows the same word taking values like `0x58933768`/`0x46000086`/`0x3C01801D`
+  (code-like words) at other moments. So the handler dereferences a global that
+  is only a pointer while the engine structure it belongs to has been
+  initialised *and* its owning bank is resident.
+
+**Leading hypothesis (not yet proven):** the chapter-card step takes a
+scene-setup path that should (re-)run the engine init `func_ovlC_8022D1CC` — or
+the bank that owns `0x8023A994` is swapped after the init — and in the port the
+global is stale module data when the handler reads it, so `0x248(v1)` walks off
+the mapping. The cheapest discriminating experiment is a probe on `0x8022D1E8`
+(does the init run on the step-1073 visit?) plus reading `0x8023A994` at the
+exact crash instant from a checkpoint.
+
+**Repro that makes this cheap:** `/tmp/ck-movie.ckpt` is a checkpoint taken at
+`t=75.5 s` (scene `0x02` heading to step 974, ~2.5 s before the crash). Loading
+it re-runs the end of the sequence; a live-console driver then reads whatever it
+needs (`load /tmp/ck-movie.ckpt`, then drop `r`/`d`/`c` commands into the watched
+file). Note the checkpoint was written by the *current* build — a rebuild now
+invalidates it by design (see §1's build id).
+
+
 **Next lead:** why the step runs past 19. The step table and the script VM
 (`func_80170974`, 16 opcodes per visit) are decoded; the question is whether the
 retail loop ends the sequence at step 19 (title/credits) and the port's missing
@@ -273,17 +329,22 @@ env/console-gated and off unless `save`/`load` is used.
 
 ## 6. Next leads
 
-1. **The step-1073 crash** (§3): find where the sequence step leaves 1..19. The
-   `docs/HANDOFF-2026-09-15-session44.md` step table plus a checkpoint at
-   `t≈70 s` is the cheap instrument. `D_8018F1C0`'s writer is the script VM
-   `func_80170974` (opcode 0x10 at `0x80170ADC`), so the value it writes at the
-   end of the script is the thing to watch (`OGRE_PROBE57=1` logs it).
-2. **Scene `0x16`'s content**: the scene now runs but nobody has looked at it.
-   Capture it (`OGRE_CAPTURE_PRESENT=…`) and ask the developer what the closing
-   movie should show — `docs/scenes.md` row 6 is still "unknown".
-3. **Does the real sequence reach `0x16` more than once?** The port loops
-   `0x02 → 0x0D → 0x16` ~4 times before the crash. If retail plays `0x16` once
-   and then the title/credits, the loop is itself a symptom of the step running
-   off the end.
-4. `docs/guides/app-build.md` -> "Checkpoints" for the new tool; a future
+1. **The chapter-card crash** (§3b) — the concrete next wall. Steps:
+   * probe `0x8022D1E8` (the `malloc(0x1CB8)` store in `func_ovlC_8022D1CC`) to
+     see whether the engine init runs on the step-1073 visit at all;
+   * read `0x8023A994` (and `0x8023A970`/`0x8023A978`, the interpreter's index
+     and descriptor base) at the crash instant from a checkpoint — the faulting
+     handler walks `*(0x8023A994) + s1*4 + 0x248`;
+   * decide whether the value is stale because the *owning bank* was swapped
+     after the init (the session-45 class, but for a global instead of code) or
+     because the init path was not taken.
+   `/tmp/ck-movie.ckpt` (t=75.5 s, ~2.5 s before the crash) exists but is
+   invalidated by any rebuild — recreate it in ~80 s with the maintained route.
+2. **The chapter animation and second movie** (`docs/scenes.md` rows 7/8): the
+   developer described the chapter card's text and offered screenshots of the
+   second movie (the player received for duty). Ask for them when the port
+   reaches that far, so the render can be validated the way the five movie
+   shots were.
+3. `docs/guides/app-build.md` -> "Checkpoints" for the new tool; a future
    session can extend the snapshot to the app's own knobs if needed.
+

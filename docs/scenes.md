@@ -48,9 +48,20 @@ step table).
 | 5 | **personality questions**: `"What dost thou hold within thy sword?"` with the choices `ardor / passion / vigor / talent / belief / hatred` over a live scene (characters in a hall); the answers decide the player's initial units and items | dev (session 44, screenshot) | **renders** (session 56, developer): the steps after the birthday form run and are answerable; the same intermittent backdrop artifact can appear. The sequence then reaches **scene `0x16`** (descriptor `0x8018FC00`, mask `0x400`) |
 | 6 | **the closing intro movie**, in five shots: (1) `ATLUS USA` / `presents`, (2) `Developed & licensed by` / `Quest / Nintendo`, (3) `Ogre Battle Saga` / `Episode VI`, (4) `Person of Lordly Caliber` over a flower pattern (the symbol of Lodis), (5) a montage of the player and friends travelling around the kingdom (several different scenes — to be detailed later) | dev (session 58, retail screenshots `docs/proofs/intro-movie-reference/retail-shot-1..4.png`) | **renders — developer-confirmed** (session 58: *"the intro movie played perfectly, with all different animations (some of them are complex)"*). Scene `0x16` plays all five shots in order: `docs/proofs/native-newgame-movie-atlus.png`, `-quest.png`, `-episode-vi.png`, `-lodis.png` (the flower/card shot), and the montage — `-campfire.png`, `-sunset.png` (the party on a cliff at sunset), `-map.png` (the parchment world map with the red route and dagger, `Alta Región` / `Southern Coast` / `Zetegin Sea`). It chunk-DMAs ROM `0x244770` (0x7500) → RAM `0x801D0860` — record 10's arena, which unit C's `bankRec10a` also owned — and that module was uncompiled, so every call into it hit the runtime's streamed stub (session 57 §2). It is now **bank unit I** (43 functions; `bankRec10a` moved to unit **J** so the two banks of that RAM are separate units) and the scene plays and **advances out of it** (repeated `0x02 → 0x0D → 0x16` cycles, no stub calls). The sequence then **crashes** at the end — the developer's end-of-sequence crash, now reproduced: `SIGBUS` in `func_ovlC_8022C270 + 0x53A` with the step word `D_8018F1C0 = 0x0431` (step 1073, past the decoded 19-step table). See `docs/HANDOFF-2026-09-16-session58.md` §2/§3 |
 
+| 7 | a **chapter animation**: characters are revealed with an animation over the text `Prologue` / `Casting their gaze on the ground, trudging along...` | dev (session 58) | **missing** — this is the step after the movie. The sequence reaches it (step 1073, asset `0x01A1625A`, command 6) and the port **crashes** in the descriptor interpreter's low-opcode handler `func_ovlC_8022C270` dereferencing `*(0x8023A994)`; see `docs/HANDOFF-2026-09-16-session58.md` §3/§4 |
+| 8 | another **movie**: the player being received for duty with other soldiers | dev (session 58, screenshots offered) | **unknown** — not reached by the port yet; blocked by row 7 |
+
 The step table's commands suggest (unverified) that steps 2 and 9 (`-3`) are the
 dialogue parts, the `-10` steps (3–8, 14–16) the forms, and the single `-4`
 step 10 the closing movie. Confirm against the captures when those steps run.
+
+**The movie is one scene in five phases** (developer, session 58): *"from the
+player's perspective, it's a single scene, there's no time interval or fade to
+black transitions. it seems that the game reuses the same scene and displays
+content in 5 different phases"* — so the port's repeated `0x02 → 0x0D → 0x16`
+visits are the correct shape, and the five phases are steps **970..974** (the
+first-word opcodes `80000006`; the phase count matches the shot count exactly).
+
 
 Session 45 got as far as step 2 (which renders and then waits: its dialogue is
 advanced with the button the quill prompts). **Session 56 ran the whole opening**

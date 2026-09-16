@@ -742,16 +742,29 @@ hardware. RT64 remains the primary native renderer throughout. See
     behind), and a `data` subsegment needs an explicit following `bin` gap.
     `tools/gen_bank_syms.py` now also sees spimdisasm's `.Lovl<U>_<addr>`
     references. See `docs/HANDOFF-2026-09-16-session58.md` §2.
-  - 🚧 **The sequence-end crash reproduces (session 58)** — first time in the
-    port, deterministic: `SIGBUS` in `func_ovlC_8022C270 + 0x53A`
-    (`lw v0,0(v1)` at `0x8022C7A4`) on N64 thread 4, faulting guest
-    `0x7FFF43E8`, right after a `0x02 → 0x0D` visit at t≈78.1 s (4×). The crash
-    dump (`OGRE_DUMP_RDRAM=/tmp/s58-crash.bin`, regenerate with the same env var)
-    shows **`D_8018F1C0 = 0x0431` — step 1073, far past the decoded 19-step
-    table** — so the sequence has run off its script. Next lead: watch what the
-    script VM `func_80170974` (opcode `0x10`, store at `0x80170ADC`) writes at
-    the end of the script, and whether retail ends at step 19; a checkpoint at
-    t≈70 s makes that cheap. See `docs/HANDOFF-2026-09-16-session58.md` §3.
+  - 🚧 **The chapter-card crash (session 58)** — the developer's end-of-sequence
+    crash, reproduced deterministically: `SIGBUS` in `func_ovlC_8022C270 + 0x53A`
+    (`lw v0,0(v1)`) on N64 thread 4, right after a `0x02 → 0x0D` visit at
+    t≈78 s (4×), with `D_8018F1C0 = 0x0431` = **step 1073**. Corrected by the
+    session's later work: the step table at ROM `0x1F3CA54` (asset `0x19A8804`)
+    is a raw `u32` array of **1693** entries, and step 1073 = asset
+    `0x01A1625A` is a *valid* step — it is the **"Prologue" chapter animation**
+    the developer describes (`docs/scenes.md` row 7), whose descriptor starts
+    with the low opcode `0x1B` (< 31) and so goes to the interpreter's shared
+    low-opcode case (`0x80228E84` → `func_ovlC_8022C270`). That handler walks a
+    table based at **`*(0x8023A994)`**, a global written by `func_ovlC_8022D1CC`
+    (`0x8022D1E8`, `malloc(0x1CB8)`) from the `sel 0`/`sel 2` scene-setup
+    callbacks; measured live at the movie, that address holds **module data**
+    (a `xx xx xx FF` colour table, `0x52513AFF`), not a live pointer. Leading
+    hypothesis: the init's bank is swapped after the init, or the init path is
+    not taken for this step. Cheap next experiment: probe `0x8022D1E8`, and read
+    `0x8023A994`/`0x8023A970`/`0x8023A978` at the crash instant from a
+    checkpoint (`/tmp/ck-movie.ckpt`, t=75.5 s, ~2.5 s before the crash; a
+    rebuild invalidates it by design). See
+    `docs/HANDOFF-2026-09-16-session58.md` §3/§3b.
+  - ⬜ **After the chapter animation comes a second movie** (the player received
+    for duty with other soldiers — `docs/scenes.md` row 8, developer-reported);
+    the developer offered screenshots. Ask for them when the port reaches it.
   - ✅ **Scene `0x16`'s content is confirmed** (session 58): the closing movie's
     five shots all render, in order, and match the developer's retail
     screenshots — `ATLUS USA / presents` → `Developed & licensed by Quest /

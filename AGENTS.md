@@ -382,9 +382,16 @@ from here.
   chunk-DMAs ROM `0x244770` (0x7500) → RAM `0x801D0860` — record 10's arena,
   which `bankRec10a` (unit **J**) also owns. That module is **bank unit I**
   (session 58; 43 functions), so the movie plays and the sequence advances; it
-  then **crashes** deterministically in `func_ovlC_8022C270 + 0x53A` with
-  `D_8018F1C0 = 0x0431` — step 1073, past the decoded 19-step table (session 58
-  §3).
+  then **crashes** deterministically in `func_ovlC_8022C270` with
+  `D_8018F1C0 = 0x0431` = **step 1073, which is a *valid* step, not an
+  overrun**: the step table at ROM `0x1F3CA54` (asset `0x19A8804`) is a raw
+  `u32` array of **1693** entries (its header word `0x1A74`), and 1073 is the
+  **"Prologue" chapter animation** the developer describes. Its descriptor's low
+  opcode (`0x1B` < 31) goes to the interpreter's shared case at `0x80228E84`
+  (`func_ovlC_8022C270`), which walks a table based at **`*(0x8023A994)`** — a
+  global written as `malloc(0x1CB8)` by `func_ovlC_8022D1CC` (`0x8022D1E8`) from
+  the `sel 0`/`sel 2` scene-setup callbacks — and there it holds module data
+  (a colour table), not a live pointer (session 58 §3b).
   See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` §1-§7,
   `-session50.md` §5/§9, `-session57.md` and `-session58.md`. **Other large
   backgrounds use the
