@@ -388,10 +388,15 @@ from here.
   `u32` array of **1693** entries (its header word `0x1A74`), and 1073 is the
   **"Prologue" chapter animation** the developer describes. Its descriptor's low
   opcode (`0x1B` < 31) goes to the interpreter's shared case at `0x80228E84`
-  (`func_ovlC_8022C270`), which walks a table based at **`*(0x8023A994)`** — a
-  global written as `malloc(0x1CB8)` by `func_ovlC_8022D1CC` (`0x8022D1E8`) from
-  the `sel 0`/`sel 2` scene-setup callbacks — and there it holds module data
-  (a colour table), not a live pointer (session 58 §3b).
+  (`func_ovlC_8022C270`), which walks a table based at **`*(0x8023A994)`**.
+  `probe58` (reverted) showed the engine init `func_ovlC_8022D1CC` DOES run
+  (`malloc(0x1CB8)` stored at `0x8022D1E8`) on **every sequence visit except the
+  one that faults**, and the arena DMA (`bankRec14c`, 44 chunks →
+  `0x802395E0..0x8023EBE0`) covers that word (`+0x13B4`) on every visit — so the
+  missing init leaves the module's own file data there and the handler
+  dereferences it. The open question is the step's **command → setup selector**
+  dispatch (command 6 vs the movie's 5/1/1/5/1): `func_80227700(sel)` picks
+  `sel 0`/`sel 2`, the two callbacks that call the init (session 58 §3d).
   See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` §1-§7,
   `-session50.md` §5/§9, `-session57.md` and `-session58.md`. **Other large
   backgrounds use the

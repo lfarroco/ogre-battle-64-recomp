@@ -1178,6 +1178,12 @@ void console_exec(const std::string& line_in) {
     fflush(stdout);
 }
 
+// Run one command line from outside the main-thread poll (the scene trigger in
+// bank_overlays.cpp). Same semantics as a line in the watched file.
+void exec(const std::string& line) {
+    console_exec(line);
+}
+
 // Poll the watched command file and the number-key triggers. Returns true when
 // a command ran, so the caller can skip other edge handling for that frame.
 bool tick() {

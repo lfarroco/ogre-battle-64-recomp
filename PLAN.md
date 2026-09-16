@@ -742,26 +742,35 @@ hardware. RT64 remains the primary native renderer throughout. See
     behind), and a `data` subsegment needs an explicit following `bin` gap.
     `tools/gen_bank_syms.py` now also sees spimdisasm's `.Lovl<U>_<addr>`
     references. See `docs/HANDOFF-2026-09-16-session58.md` §2.
-  - 🚧 **The chapter-card crash (session 58)** — the developer's end-of-sequence
-    crash, reproduced deterministically: `SIGBUS` in `func_ovlC_8022C270 + 0x53A`
-    (`lw v0,0(v1)`) on N64 thread 4, right after a `0x02 → 0x0D` visit at
-    t≈78 s (4×), with `D_8018F1C0 = 0x0431` = **step 1073**. Corrected by the
-    session's later work: the step table at ROM `0x1F3CA54` (asset `0x19A8804`)
-    is a raw `u32` array of **1693** entries, and step 1073 = asset
-    `0x01A1625A` is a *valid* step — it is the **"Prologue" chapter animation**
-    the developer describes (`docs/scenes.md` row 7), whose descriptor starts
-    with the low opcode `0x1B` (< 31) and so goes to the interpreter's shared
-    low-opcode case (`0x80228E84` → `func_ovlC_8022C270`). That handler walks a
-    table based at **`*(0x8023A994)`**, a global written by `func_ovlC_8022D1CC`
-    (`0x8022D1E8`, `malloc(0x1CB8)`) from the `sel 0`/`sel 2` scene-setup
-    callbacks; measured live at the movie, that address holds **module data**
-    (a `xx xx xx FF` colour table, `0x52513AFF`), not a live pointer. Leading
-    hypothesis: the init's bank is swapped after the init, or the init path is
-    not taken for this step. Cheap next experiment: probe `0x8022D1E8`, and read
-    `0x8023A994`/`0x8023A970`/`0x8023A978` at the crash instant from a
-    checkpoint (`/tmp/ck-movie.ckpt`, t=75.5 s, ~2.5 s before the crash; a
-    rebuild invalidates it by design). See
-    `docs/HANDOFF-2026-09-16-session58.md` §3/§3b.
+  - 🚧 **The chapter-card crash, mechanism pinned down (session 58)** — the
+    developer's end-of-sequence crash reproduces deterministically: `SIGBUS` in
+    `func_ovlC_8022C270` on N64 thread 4, right after a `0x02 → 0x0D` visit,
+    with `D_8018F1C0 = 0x0431` = **step 1073** = the **"Prologue" chapter
+    animation** (`docs/scenes.md` row 7). Corrected findings: the step table
+    (ROM `0x1F3CA54`, asset `0x19A8804`) is a raw `u32` array of **1693**
+    entries, so 1073 is *valid*, not an overrun; its descriptor's low opcode
+    (`0x1B` < 31) goes to the interpreter's shared case (`0x80228E84` →
+    `func_ovlC_8022C270`), which walks a table based at **`*(0x8023A994)`**.
+    **The engine init DOES run** — `probe58` (tagged, reverted) showed
+    `func_ovlC_8022D1CC` storing `malloc(0x1CB8)` = `0x8019F490` at `0x8022D1E8`
+    once per sequence visit, **except the visit that faults** (t=75235 in the
+    measured run). And the arena DMA covers the engine word every visit
+    (`bankRec14c` 44 chunks → RAM `0x802395E0..0x8023EBE0`; the word is at
+    `+0x13B4`), so the missing init leaves the module's own file data there
+    (`0x46000086`/`0x3C01801D`/`0x58933768` — exactly the module images' words at
+    that offset) and the handler dereferences it. **Next:** the step **command →
+    setup selector** dispatch for command **6** (step 1073's command; the movie's
+    are 5/1/1/5/1) — `func_80227700(sel)` picks `sel 0`=`func_ovlC_80225A3C` /
+    `sel 2`=`func_ovlC_80226110`, both of which call the init; a mis-dispatch
+    there is the session-42-class bug. `docs/HANDOFF-2026-09-16-session58.md`
+    §3b/§3d.
+  - ✅ **`OGRE_CONSOLE_ON_SCENE` / `_STEP` / `_CMD` (session 58)** — run one
+    console command the moment a chosen scene (and step) is live, e.g.
+    `OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974
+    OGRE_CONSOLE_ON_CMD='save /tmp/ck.ckpt'`. This makes checkpointing
+    deterministic against the wall-clock route flakiness (a run whose taps
+    started before a late title stayed in the attract loop) and is how the
+    step-974 checkpoint was taken.
   - ⬜ **After the chapter animation comes a second movie** (the player received
     for duty with other soldiers — `docs/scenes.md` row 8, developer-reported);
     the developer offered screenshots. Ask for them when the port reaches it.

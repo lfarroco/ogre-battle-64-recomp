@@ -2,12 +2,23 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 #include <SDL.h>
 
 #include "ultramodern/ultramodern.hpp"
 
 namespace ogre {
+
+// The live debug console (see the block comment in sdl_platform.cpp).
+//   tick()      polls the watched command file and the 1..9 hotkeys
+//   exec(line)  runs one command line — tick uses it, and so does the
+//               scene/step trigger in bank_overlays.cpp
+// Both run on the main thread.
+namespace console {
+bool tick();
+void exec(const std::string& line);
+}
 
 // Platform I/O for the app: SDL2 window, N64-style input, and SDL audio queue.
 // The game itself never touches SDL; ultramodern calls these callbacks.

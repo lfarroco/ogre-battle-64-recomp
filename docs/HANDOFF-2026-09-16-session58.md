@@ -277,6 +277,59 @@ where the `[scene]` log says `id=0x000D`, and `OGRE_PROBE57`'s (correct
 value in this or an older handoff is swapped.** The checkpoint save/load
 messages used the same accessor and so printed the `next` word as the step.
 
+## 3d. The crash mechanism, pinned down (`probe58`, reverted)
+
+Two measurements closed this out.
+
+**1. The engine init runs on *every* sequence visit except the one that crashes.**
+`probe58` (a tagged `fprintf` at `func_ovlC_8022D1CC`'s store, guest `0x8022D1E8`,
+in `BankCFuncs/funcs_10.c`; reverted — `grep -rl probe58` is empty) ran the
+maintained title route. Nine hits, each `*(0x8023A994) = 0x8019F490` (a real
+`malloc(0x1CB8)` result), and they line up one-per-visit:
+
+```
+t=56113 0x0D -> init      t=66492 0x0D -> init
+t=60796 0x0D -> init      t=69467 0x0D -> init
+t=63918 0x0D -> init      t=75235 0x0D -> (no init)  <- this visit faults
+```
+
+**2. The arena DMA really does cover the engine word, every visit.** From the
+full PI-DMA trace, `bankRec14c`'s load is 44 contiguous chunks
+ROM `0x2A8CF0..0x2AE2F0` → RAM `0x802395E0..0x8023EBE0` (span `0x5800`), and
+`bankRec14b`'s is 84 chunks → RAM `0x802395E0..0x80243BE0` (span `0xA800`).
+The engine pointer sits at `0x8023A994` = base `+0x13B4`, i.e. **inside both
+spans**, so each visit's DMA overwrites it and the game's own `func_ovlC_8022D1CC`
+call is what re-establishes it. Measured directly at step 974 (checkpoint
+replay): the word holds `0x58933768`; at other moments `0x46000086` /
+`0x3C01801D` — and those two are exactly the module files' own data words at
+`+0x13B4` (`bankRec14c` ROM `0x2AA0A4` = `0x46000086`, `bankRec14b` ROM
+`0x2AF744` = `0x3C01801D`). So the value is the module image, not a pointer.
+
+**Conclusion.** The fault is not a missing module, not an out-of-range step, and
+not a stale checkpoint: **the visit that plays the chapter card takes a scene
+setup path that does not re-run the engine init, while its DMA has just wiped the
+engine pointer.** Retail must run the init on that visit too (the DMA is the
+game's own code), so the next thing to look at is the step **command → setup
+selector** dispatch for step 1073. Its command is **6** (the descriptor's last
+word is `0xFF000006`), whereas the movie's five phases are commands 5,1,1,5,1
+and the earlier cathedral/form steps are -3/-10/-4; session 42 decoded that
+`func_80227700(sel)` selects the setup path (`sel 0` = `func_ovlC_80225A3C`,
+`sel 2` = `func_ovlC_80226110`, both of which call `func_ovlC_8022D1CC` at
+`0x80225AC8` / `0x8022619C`). So: log/derive the selector for command 6 and
+check whether the port takes the `sel 0`/`sel 2` path (a mis-dispatch there is
+the session-42-class bug this project has hit repeatedly).
+
+**Also learned (route determinism).** The step *after* 974 differs between runs —
+sometimes 975 (command 2, no crash), sometimes 1073 (the chapter card, crash) —
+because the opening's continuation depends on the answers given at the
+personality questions. A checkpoint taken with `OGRE_CONSOLE_ON_SCENE`/`_STEP`
+carries that state, so it reproduces *its own* branch; to reproduce the crashing
+branch, checkpoint a run that is about to crash. That trigger is also the fix
+for the wall-clock route flakiness: `OGRE_CONSOLE_ON_SCENE=0x0D
+OGRE_CONSOLE_ON_STEP=974 OGRE_CONSOLE_ON_CMD='save /tmp/ck.ckpt'` fired exactly
+when the game reached step 974, in a run whose taps started before the title was
+even up (`[scene] console trigger: scene 0x000D step 974 -> save …`).
+
 ## 3c. Recon for the next milestone: the game's own save system is the Controller Pak
 
 The developer (session 58): *"the game has a save system, which we should arrive
@@ -368,6 +421,11 @@ redirected on long runs (the periodic `[snap]` dump stalls boot otherwise).
   the `OGRE_CONSOLE_AT_MS` gate, the build-id guard, and the **halfword
   accessor fix** (`console_half` now applies the runtime's `^ 2`, §3b-bis).
 * `tools/rdram.py` — the same halfword fix in the offline `half` accessor.
+* `app/src/bank_overlays.cpp` + `app/src/sdl_platform.{hpp,cpp}` — the
+  **`OGRE_CONSOLE_ON_SCENE` / `OGRE_CONSOLE_ON_STEP` / `OGRE_CONSOLE_ON_CMD`**
+  trigger (run one console command when a chosen scene/step goes live) and the
+  `ogre::console::exec` entry point it calls. This is what made the step-974
+  checkpoint land deterministically; it fires once per process.
 * `tools/N64ModernRuntime/librecomp/{include/librecomp/overlays.hpp,src/overlays.cpp}`
   — `get_overlay_state_blob()` / `restore_overlay_state_blob()`.
 * `tools/N64ModernRuntime/ultramodern/{include/ultramodern/ultramodern.hpp,src/function_trace.cpp}`
@@ -393,8 +451,12 @@ Generated/regenerated (gitignored): `RecompiledFuncs/`, `Bank*Funcs/` (now A..J)
 `app/src/bank_funcs.inc`, `build/bank*.elf`, `BankEFuncs/funcs_0.c` (the njpeg
 readback patch re-applied by `make bank-recomp`).
 
-**Probes: none added.** The checkpoint code is a feature, not a probe; it is
-env/console-gated and off unless `save`/`load` is used.
+**Probes:** one, `probe58`, in the **generated** `BankCFuncs/funcs_10.c` (a
+tagged `fprintf` at the engine init's store, `0x8022D1E8`). It was reverted with
+`make recomp && make bank-recomp`, and
+`grep -rl probe58 RecompiledFuncs/ Bank*Funcs/ app/` is empty; both builds were
+rebuilt after the revert. The checkpoint code and the console trigger are
+features, not probes (env/console-gated, inert unless used).
 
 ## 6. Next leads
 

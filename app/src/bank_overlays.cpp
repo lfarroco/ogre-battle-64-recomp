@@ -17,6 +17,7 @@
 #include "ultramodern/ultramodern.hpp"
 
 #include "bank_overlays.hpp"
+#include "sdl_platform.hpp"  // ogre::console::exec (OGRE_CONSOLE_ON_CMD)
 
 namespace ogre {
 namespace {
@@ -538,6 +539,54 @@ void poll_scene() {
             fprintf(stderr, "[scene] seeded step %u while scene 0x%02X runs\n",
                     (unsigned)forced_step().step, (unsigned)forced_step().scene);
             fflush(stderr);
+        }
+    }
+
+    // OGRE_CONSOLE_ON_SCENE=<scene> [+ OGRE_CONSOLE_ON_STEP=<n>] and
+    // OGRE_CONSOLE_ON_CMD=<command>: run one console command on the first frame
+    // the selected scene (and, if given, that exact sequence step) is active.
+    //
+    // This exists because every scripted route in this project is wall-clock
+    // (`OGRE_TAP_MS`) while the game's own progress depends on how fast the boot
+    // reaches the title: a schedule tuned for a 2 s title lands in the attract
+    // loop when the title takes 9 s (session 58 lost runs to exactly that).
+    // Triggering on the *game's* state instead makes "checkpoint the moment
+    // scene 0x0D reaches step 974" deterministic, e.g.
+    //   OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974 \
+    //   OGRE_CONSOLE_ON_CMD='save /tmp/ck.ckpt' ./build-app/ogrebattle64 ...
+    // It fires once per process; an unknown scene name is reported and ignored.
+    {
+        static const char* spec = getenv("OGRE_CONSOLE_ON_SCENE");
+        static const char* cmd = getenv("OGRE_CONSOLE_ON_CMD");
+        static const uint16_t want_scene = [&] {
+            uint16_t id = 0;
+            return ((spec != nullptr) && scene_lookup(spec, id)) ? id : (uint16_t)0xFFFF;
+        }();
+        static const bool have_step = (getenv("OGRE_CONSOLE_ON_STEP") != nullptr);
+        static const uint16_t want_step = [&] {
+            const char* v = getenv("OGRE_CONSOLE_ON_STEP");
+            return (v != nullptr) ? (uint16_t)strtoul(v, nullptr, 0) : (uint16_t)0;
+        }();
+        static bool fired = false;
+        if ((cmd != nullptr) && !fired) {
+            if (want_scene == 0xFFFF) {
+                fired = true;
+                fprintf(stderr, "[scene] OGRE_CONSOLE_ON_SCENE '%s' is not a known scene\n",
+                        spec != nullptr ? spec : "");
+                fflush(stderr);
+            } else if (active_scene_id() == want_scene) {
+                uint8_t* rdram = ultramodern::get_rdram_base();
+                const uint16_t step = (rdram != nullptr)
+                                          ? (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x8018F1C0)
+                                          : (uint16_t)0;
+                if (!have_step || (step == want_step)) {
+                    fired = true;
+                    fprintf(stderr, "[scene] console trigger: scene 0x%04X step %u -> %s\n",
+                            (unsigned)want_scene, (unsigned)step, cmd);
+                    fflush(stderr);
+                    console::exec(cmd);
+                }
+            }
         }
     }
 
