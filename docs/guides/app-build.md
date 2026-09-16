@@ -275,7 +275,54 @@ renderer failure - but do not conclude that from a screen capture; see
 ## Diagnostics toolkit
 
 Four offline tools answer the questions every session otherwise re-derives by
-hand. None of them needs a CUDA/GPU/game run except where noted.
+hand. None of them needs a CUDA/GPU/game run except where noted. The **live
+console** below is the fifth, and the only one that queries a *running* game.
+
+### The live console — query a running game (session 56)
+
+The offline tools can only look at a dump, and a bounded run can only dump at its
+exit; by then the buffer that mattered has usually been overwritten (session 56
+lost an afternoon to a framebuffer readback that had to be caught mid-frame).
+The console executes commands inside the running game, on the **main thread**,
+where RDRAM is available and a multi-megabyte write cannot race the game thread.
+
+Two triggers, both landing in the same command set:
+
+* **a watched command file** (default `/tmp/ogre-console.txt`, override with
+  `OGRE_CONSOLE_FILE`): when the file exists its lines are executed and the file
+  is **removed**, so an external tool can drive a live run:
+
+  ```sh
+  OGRE_EXIT_AFTER_MS=600000 ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
+  # in another shell (or from an agent):
+  printf 'c\nr 0x8018FDAC 8\nk 0x80243E00 8192\ndump /tmp/at-now.bin\n' > /tmp/ogre-console.txt
+  ```
+
+* **number keys `1`..`9`** run `OGRE_KEY_1`..`OGRE_KEY_9` (edge-triggered, one
+  command per press), e.g.
+  `OGRE_KEY_1='dump /tmp/here.bin' OGRE_KEY_2='c' ./build-app/ogrebattle64 …`.
+
+Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
+`[console]` and is flushed):
+
+| command | what it does |
+|---|---|
+| `r <addr> [n]` | `n` words in the runtime's dump order (what `tools/rdram.py word` prints) |
+| `rh` / `rb` / `rk` | halfwords / logical bytes (`addr ^ 3`) / **raw** host-order words |
+| `d <addr> [len]` | hex + ASCII dump of a byte range |
+| `f <value> [max]` | find a 32-bit word anywhere in RDRAM (guest + file offset) |
+| `fb <hexbytes> [max]` | find a byte pattern |
+| `s <addr> [len] [max]` | strings in a range |
+| `k <addr> [len]` | fnv1a checksum of a range — the cheap before/after for A/B runs |
+| `w <addr> <value>` | store a word (A/B experiments; it is a real write) |
+| `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
+| `dump [path]` | write the whole 8 MiB RDRAM image **at this instant** |
+| `help` | the list |
+
+`dump` is the one that fixes the "wrong moment" problem: run the game until the
+screen is in the state you want, then drop the command file (or press the bound
+key) and the image is written while that state is live. Pair it with
+`tools/rdram.py <dump> image …` / `diff …` as usual.
 
 ### `tools/runlog.py <run.log>` — one screen per run
 

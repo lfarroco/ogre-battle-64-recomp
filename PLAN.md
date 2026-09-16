@@ -666,6 +666,26 @@ hardware. RT64 remains the primary native renderer throughout. See
     off to `0x02`/`0x0D` at `t≈20.7 s`. Proof
     `docs/proofs/native-newgame-name-entry.png`. See
     `docs/HANDOFF-2026-09-16-session55.md`.
+  - 🚧 **The opening runs through the whole New Game sequence (session 56,
+    developer-confirmed)**: name form → **date of birth** → **personality
+    questions** (steps 3–8) → **scene `0x16`** (descriptor `0x8018FC00`, mask
+    `0x400`) at `t≈54.3 s` (4×). Two open items: (a) the cathedral backdrop can
+    come back with a **rectangular stale region** (the previous form's content,
+    ~70% x 30%, intermittent) — session 56 §1 has the readback evidence (four
+    sub-image passes all copying `src=0x80000400`) and the next discriminating
+    experiment; (b) the **sequence-end crash** the developer sees is **not**
+    reproduced in the port's own 150 s run (exit 0 through `0x16`). See
+    `docs/HANDOFF-2026-09-16-session56.md`.
+  - ✅ **Live debug console (session 56, developer's suggestion)**: the running
+    game can now be queried on demand instead of only at a bounded run's exit —
+    a watched command file (`OGRE_CONSOLE_FILE`, default
+    `/tmp/ogre-console.txt`: command lines run and the file is removed) or the
+    number keys `1`..`9` (`OGRE_KEY_<n>`). Commands: `r`/`rh`/`rb`/`rk`, `d`,
+    `f`, `fb`, `s`, `k` (checksum for A/B), `w`, `c` (scene/descriptor/mask/step)
+    and `dump` (the whole 8 MiB **at that instant** — the fix for "the exit dump
+    is always too late"). It runs on the main thread, in
+    `app/src/sdl_platform.cpp`; documented in `docs/guides/app-build.md` and
+    `AGENTS.md` §4.
   - 🚧 **Why the game's own frame index lands on the placeholder is open
     (session 48)**: `D_800C4BB8` is the VI manager's "displayed buffer" word
     (written by `func_8007307C`, which `func_80089540` — N64 Thread 5 — calls

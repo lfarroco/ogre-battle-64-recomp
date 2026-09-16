@@ -2,8 +2,11 @@
 #include "synth_frame.hpp"
 #include "bank_overlays.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include <SDL.h>
@@ -16,6 +19,12 @@
 extern "C" uint8_t* ultramodern_get_rdram_base();
 
 namespace ogre {
+
+// Defined below (the live debug console block); declared here because
+// pump_sdl_events, above it, is the main-thread caller.
+namespace console {
+bool tick();
+}
 
 namespace {
 
@@ -353,6 +362,12 @@ void open_audio(Platform& platform, uint32_t frequency) {
 }
 
 void pump_sdl_events(Platform& platform, bool* quit) {
+    // Live debug console: the watched command file and the OGRE_KEY_<n>
+    // hotkeys. Runs before the exit check so a command sent on the final frame
+    // still executes, and on the main thread because a command may write a
+    // multi-megabyte dump (see the console block in this file).
+    console::tick();
+
     // Bounded run: OGRE_EXIT_AFTER_MS ends the process from the main thread.
     if (platform.exit_after_ms != 0 && platform_millis(platform) >= platform.exit_after_ms) {
         const uint32_t budget = platform.exit_after_ms;
@@ -583,6 +598,381 @@ static uint16_t gamecontroller_buttons(SDL_GameController* controller) {
 
     return buttons;
 }
+
+// --- live debug console ---------------------------------------------------
+//
+// The problem this solves: almost every wall in this project is "what is in
+// guest RAM at the moment X happens", and a bounded run can only dump at its
+// exit. By then the interesting buffer has usually been overwritten (session
+// 56 lost an afternoon to exactly that). The console lets a running game be
+// queried on demand:
+//
+//   * a watched command file (default `/tmp/ogre-console.txt`, override with
+//     `OGRE_CONSOLE_FILE`): when it exists, each line is executed and the file
+//     is removed. An agent can therefore drive a live run with its own tools.
+//   * number keys `1`..`9` run `OGRE_KEY_1`..`OGRE_KEY_9` (a key press is an
+//     edge, so one command per press).
+//
+// Both paths land in the same command set:
+//
+//   r  <addr> [count]        words (int-dump order)
+//   rh <addr> [count]        halfwords
+//   rb <addr> [count]        logical bytes (XOR-3)
+//   rk <addr> [count]        raw host-order 32-bit words
+//   d  <addr> [len]          hex/ascii dump of a byte range
+//   f  <value> [limit]       find a 32-bit word in RDRAM (int-dump order)
+//   fb <hexbytes> [limit]    find a byte pattern
+//   s  <addr> [len] [max]    strings in a range
+//   k  <addr> [len]          checksum (fnv1a) of a range, for before/after
+//   w  <addr> <value>        store a 32-bit word (A/B experiments)
+//   c  [bytes]               report the scene/descriptor/state words
+//   dump [path]              write the whole 8 MiB RDRAM image right now
+//   help                     this list
+//
+// Addresses are guest KSEG0 (`0x80xxxxxx`) or bare hex; a leading `0x` is
+// optional. Output goes to stdout (prefixed `[console]`) and is flushed, so
+// `./build-app/ogrebattle64 ... | tee run.log` is enough to keep it.
+//
+// The commands run on the **main thread**, from `pump_sdl_events` (called by
+// update_gfx), not from the game thread: writing a multi-megabyte dump while
+// the game thread is inside a recompiled function would race its own reads,
+// and the main thread already owns the SDL event pump.
+namespace console {
+
+constexpr uint32_t kConsoleMaxTokens = 12;
+
+std::string trim_copy(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && isspace(static_cast<unsigned char>(s[b]))) b++;
+    while (e > b && isspace(static_cast<unsigned char>(s[e - 1]))) e--;
+    return s.substr(b, e - b);
+}
+
+std::string lower_copy(std::string s) {
+    for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// Accepts `0x1F0A00`, `1F0A00` and `8018FC3C`. Returns false on junk.
+bool parse_num(const std::string& text, uint32_t& out) {
+    if (text.empty()) {
+        return false;
+    }
+    const char* p = text.c_str();
+    char* end = nullptr;
+    const unsigned long long value = strtoull(p, &end, 16);
+    if (end == p || *end != '\0') {
+        return false;
+    }
+    out = static_cast<uint32_t>(value);
+    return true;
+}
+
+std::string fmt_bytes(const uint8_t* p, size_t n) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(n * 3);
+    for (size_t i = 0; i < n; i++) {
+        if (i != 0) out.push_back(' ');
+        out.push_back(hex[p[i] >> 4]);
+        out.push_back(hex[p[i] & 0xF]);
+    }
+    return out;
+}
+
+// The runtime byte-reverses RDRAM, so the logical word at guest `a` is the
+// little-endian word at `a - 0x80000000` and a logical byte is `addr ^ 3`
+// (docs/guides/app-build.md -> "Reading a dump"). These accessors are the same
+// rules the offline `tools/rdram.py` implements.
+inline uint32_t console_word(const uint8_t* base, uint32_t addr) {
+    const uint32_t off = (addr & 0x1FFFFFFFu);
+    uint32_t v;
+    memcpy(&v, base + off, 4);
+    return v;
+}
+
+inline uint16_t console_half(const uint8_t* base, uint32_t addr) {
+    const uint32_t off = (addr & 0x1FFFFFFEu);
+    uint16_t v;
+    memcpy(&v, base + off, 2);
+    return v;
+}
+
+inline uint8_t console_byte(const uint8_t* base, uint32_t addr) {
+    return base[(addr & 0x1FFFFFFFu) ^ 3u];
+}
+
+uint32_t range_check(uint32_t addr, uint32_t len) {
+    return addr >= 0x80000000u && addr + len <= 0x80800000u;
+}
+
+void console_exec(const std::string& line_in) {
+    const std::string line = trim_copy(line_in);
+    if (line.empty() || line[0] == '#') {
+        return;
+    }
+    uint8_t* rdram = ultramodern_get_rdram_base();
+    if (rdram == nullptr) {
+        printf("[console] RDRAM not mapped yet; ignoring \"%s\"\n", line.c_str());
+        fflush(stdout);
+        return;
+    }
+    std::string tok[kConsoleMaxTokens];
+    size_t ntok = 0;
+    {
+        size_t i = 0;
+        while (i < line.size() && ntok < kConsoleMaxTokens) {
+            while (i < line.size() && isspace(static_cast<unsigned char>(line[i]))) i++;
+            size_t start = i;
+            while (i < line.size() && !isspace(static_cast<unsigned char>(line[i]))) i++;
+            if (i > start) tok[ntok++] = line.substr(start, i - start);
+        }
+    }
+    if (ntok == 0) {
+        return;
+    }
+    const std::string cmd = lower_copy(tok[0]);
+    printf("[console] > %s\n", line.c_str());
+
+    auto num = [&](size_t idx, uint32_t def) -> uint32_t {
+        uint32_t v = def;
+        if (idx < ntok && parse_num(tok[idx], v)) {
+            return v;
+        }
+        return def;
+    };
+
+    if (cmd == "help") {
+        printf("[console] r/rh/rb/rk <addr> [n] | d <addr> [len] | f <value> [max] | fb <hex> [max]\n"
+               "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c | dump [path]\n");
+    } else if (cmd == "r" || cmd == "rw" || cmd == "rh" || cmd == "rb" || cmd == "rk") {
+        const uint32_t addr = num(1, 0);
+        uint32_t count = num(2, 1);
+        if (count == 0) count = 1;
+        if (count > 256) count = 256;
+        if (!range_check(addr, count * 4)) {
+            printf("[console] out of RDRAM: 0x%08X\n", addr);
+        } else if (cmd == "rb") {
+            std::string s = fmt_bytes(rdram + ((addr & 0x1FFFFFFFu) ^ 3u), count);
+            printf("[console] bytes 0x%08X: %s\n", addr, s.c_str());
+        } else {
+            for (uint32_t i = 0; i < count; i++) {
+                const uint32_t a = addr + i * (cmd == "rh" ? 2u : 4u);
+                if (cmd == "rh") {
+                    printf("[console] %08X = %04X\n", a, (unsigned)console_half(rdram, a));
+                } else if (cmd == "rk") {
+                    uint32_t raw;
+                    memcpy(&raw, rdram + (a & 0x1FFFFFFFu), 4);
+                    printf("[console] %08X = %08X (raw)\n", a, raw);
+                } else {
+                    printf("[console] %08X = %08X\n", a, console_word(rdram, a));
+                }
+            }
+        }
+    } else if (cmd == "d") {
+        const uint32_t addr = num(1, 0);
+        uint32_t len = num(2, 64);
+        if (len > 1024) len = 1024;
+        if (!range_check(addr, len)) {
+            printf("[console] out of RDRAM: 0x%08X+0x%X\n", addr, len);
+        } else {
+            for (uint32_t i = 0; i < len; i += 16) {
+                char ascii[17];
+                for (uint32_t j = 0; j < 16 && i + j < len; j++) {
+                    const uint8_t b = console_byte(rdram, addr + i + j);
+                    ascii[j] = (b >= 32 && b < 127) ? static_cast<char>(b) : '.';
+                }
+                ascii[std::min<uint32_t>(16, len - i)] = '\0';
+                uint8_t raw[16];
+                for (uint32_t j = 0; j < 16 && i + j < len; j++) {
+                    raw[j] = console_byte(rdram, addr + i + j);
+                }
+                printf("[console] %08X  %-47s  %s\n", addr + i,
+                       fmt_bytes(raw, std::min<uint32_t>(16, len - i)).c_str(), ascii);
+            }
+        }
+    } else if (cmd == "f") {
+        const uint32_t value = num(1, 0);
+        uint32_t limit = num(2, 32);
+        if (limit > 256) limit = 256;
+        uint32_t found = 0;
+        for (uint32_t off = 0; off + 4 <= 0x800000u && found < limit; off += 4) {
+            uint32_t v;
+            memcpy(&v, rdram + off, 4);
+            if (v == value) {
+                printf("[console] found %08X at guest 0x%08X (file 0x%06X)\n", value,
+                       0x80000000u + off, off);
+                found++;
+            }
+        }
+        printf("[console] find %08X: %u hit(s)%s\n", value, found,
+               found >= limit ? " (limit reached)" : "");
+    } else if (cmd == "fb") {
+        uint8_t pat[32];
+        size_t plen = 0;
+        {
+            const std::string hex = tok[1];
+            for (size_t i = 0; i + 1 < hex.size() && plen < sizeof(pat); i += 2) {
+                const std::string b = hex.substr(i, 2);
+                pat[plen++] = static_cast<uint8_t>(strtoul(b.c_str(), nullptr, 16));
+            }
+        }
+        uint32_t limit = num(2, 16);
+        if (limit > 64) limit = 64;
+        uint32_t found = 0;
+        if (plen == 0) {
+            printf("[console] fb needs hex bytes\n");
+        } else {
+            for (uint32_t off = 0; off + plen <= 0x800000u && found < limit; off++) {
+                if (memcmp(rdram + off, pat, plen) == 0) {
+                    printf("[console] pattern at guest 0x%08X\n", 0x80000000u + off);
+                    found++;
+                }
+            }
+            printf("[console] fb: %u hit(s)\n", found);
+        }
+    } else if (cmd == "s") {
+        const uint32_t addr = num(1, 0);
+        uint32_t len = num(2, 256);
+        uint32_t max = num(3, 16);
+        if (len > 0x10000) len = 0x10000;
+        if (max > 64) max = 64;
+        if (!range_check(addr, len)) {
+            printf("[console] out of RDRAM: 0x%08X+0x%X\n", addr, len);
+        } else {
+            uint32_t found = 0;
+            char buf[64];
+            size_t n = 0;
+            for (uint32_t i = 0; i < len && found < max; i++) {
+                const uint8_t b = console_byte(rdram, addr + i);
+                if (b >= 32 && b < 127 && n + 1 < sizeof(buf)) {
+                    buf[n++] = static_cast<char>(b);
+                } else {
+                    if (n >= 4) {
+                        buf[n] = '\0';
+                        printf("[console] str at 0x%08X: \"%s\"\n", addr + i - (uint32_t)n, buf);
+                        found++;
+                    }
+                    n = 0;
+                }
+            }
+            if (n >= 4 && found < max) {
+                buf[n] = '\0';
+                printf("[console] str at 0x%08X: \"%s\"\n", addr + (uint32_t)(len - n), buf);
+                found++;
+            }
+            printf("[console] s: %u string(s) in 0x%X bytes\n", found, len);
+        }
+    } else if (cmd == "k") {
+        const uint32_t addr = num(1, 0);
+        uint32_t len = num(2, 0x1000);
+        if (!range_check(addr, len)) {
+            printf("[console] out of RDRAM: 0x%08X+0x%X\n", addr, len);
+        } else {
+            uint32_t h = 2166136261u;
+            const uint32_t off = addr & 0x1FFFFFFFu;
+            for (uint32_t i = 0; i < len; i++) {
+                h ^= rdram[off + i];
+                h *= 16777619u;
+            }
+            printf("[console] fnv1a(0x%08X, 0x%X) = %08X\n", addr, len, h);
+        }
+    } else if (cmd == "w") {
+        const uint32_t addr = num(1, 0);
+        const uint32_t value = num(2, 0);
+        if (!range_check(addr, 4)) {
+            printf("[console] out of RDRAM: 0x%08X\n", addr);
+        } else {
+            memcpy(rdram + (addr & 0x1FFFFFFFu), &value, 4);
+            printf("[console] wrote %08X to 0x%08X\n", value, addr);
+        }
+    } else if (cmd == "c") {
+        const uint32_t scene = console_half(rdram, 0x800E810Eu);
+        const uint32_t pending = console_half(rdram, 0x800E8214u);
+        const uint32_t desc = console_word(rdram, 0x800E8294u);
+        const uint32_t mask = desc ? console_word(rdram, desc + 0x10u) : 0;
+        const uint32_t step = console_word(rdram, 0x8018F1C0u);
+        const uint32_t next = console_word(rdram, 0x8018F1C2u);
+        const uint32_t spin = console_half(rdram, 0x800C4C26u);
+        printf("[console] scene=0x%04X pending=0x%04X desc=0x%08X mask=0x%08X step=%u next=0x%04X spin=0x%04X\n",
+               scene, pending, desc, mask, step, next, spin);
+    } else if (cmd == "dump") {
+        const char* path = ntok > 1 ? tok[1].c_str() : "/tmp/ogre-console-rdram.bin";
+        if (FILE* f = fopen(path, "wb")) {
+            const size_t written = fwrite(rdram, 1, 0x800000u, f);
+            fclose(f);
+            printf("[console] dumped %zu bytes to %s\n", written, path);
+        } else {
+            printf("[console] could not open %s\n", path);
+        }
+    } else {
+        printf("[console] unknown command \"%s\" (try help)\n", cmd.c_str());
+    }
+    fflush(stdout);
+}
+
+// Poll the watched command file and the number-key triggers. Returns true when
+// a command ran, so the caller can skip other edge handling for that frame.
+bool tick() {
+    bool ran = false;
+
+    // 1. The watched file. Written by an external tool (an agent can create it
+    //    mid-run), read wholesale, then removed so it fires exactly once.
+    {
+        static const char* path = getenv("OGRE_CONSOLE_FILE") ? getenv("OGRE_CONSOLE_FILE")
+                                                              : "/tmp/ogre-console.txt";
+        if (FILE* f = fopen(path, "rb")) {
+            std::string text;
+            char buf[512];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+                text.append(buf, n);
+            }
+            fclose(f);
+            remove(path);
+            size_t pos = 0;
+            while (pos <= text.size()) {
+                const size_t nl = text.find('\n', pos);
+                const std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+                if (!trim_copy(line).empty()) {
+                    console_exec(line);
+                    ran = true;
+                }
+                if (nl == std::string::npos) break;
+                pos = nl + 1;
+            }
+        }
+    }
+
+    // 2. `1`..`9` -> OGRE_KEY_<n>. Edge-triggered so a held key runs once.
+    {
+        static bool was_down[10] = {};
+        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        for (int d = 1; d <= 9; d++) {
+            const SDL_Scancode sc = static_cast<SDL_Scancode>(SDL_SCANCODE_1 + (d - 1));
+            const bool down = keys[sc] != 0;
+            if (down && !was_down[d]) {
+                char env[32];
+                snprintf(env, sizeof(env), "OGRE_KEY_%d", d);
+                if (const char* cmd = getenv(env)) {
+                    if (cmd[0] != '\0') {
+                        printf("[console] key %d -> %s\n", d, cmd);
+                        console_exec(cmd);
+                        ran = true;
+                    }
+                } else {
+                    printf("[console] key %d pressed; set %s=\"<command>\" to bind it\n", d, env);
+                    fflush(stdout);
+                }
+            }
+            was_down[d] = down;
+        }
+    }
+
+    return ran;
+}
+
+}  // namespace console
 
 static void poll_input() {
     // Deliberately does NOT pump SDL events.

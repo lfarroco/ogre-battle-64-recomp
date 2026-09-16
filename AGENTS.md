@@ -126,6 +126,14 @@ wrong half of a function. Check these before blaming game logic:
   grouped by module); `tools/watch.sh <guest-addr>` (an lldb write watchpoint on
   the right host address, with backtraces). All are documented in
   `docs/guides/app-build.md` -> "Diagnostics toolkit".
+- **When the question is "what is in RAM at the moment X happens", use the live
+  console instead of a bounded run's exit dump** (session 56: an exit dump is
+  always too late). Start the game, then drop commands into the watched file
+  (`printf 'c\nr <addr> <n>\ndump /tmp/at-now.bin\n' > /tmp/ogre-console.txt`)
+  and read the `[console]` lines from the run's stdout — or press `1`..`9` with
+  `OGRE_KEY_<n>` bound. Commands: `r`/`rh`/`rb`/`rk`, `d`, `f`, `fb`, `s`, `k`
+  (checksum for A/B), `w` (a real write), `c` (scene/descriptor/mask/step),
+  `dump`. See `docs/guides/app-build.md` -> "The live console".
 - Chunk-DMA records may never be DMA'd at all (`0xD0` gap), and record BSS must be
   zeroed on load (`func_ovlE_…`; see `load_function_bank` and `RAM_END` in
   `tools/gen_bank_funcs.py`).
