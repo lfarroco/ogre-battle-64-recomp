@@ -3199,3 +3199,29 @@ The app uses SDL2 for window/input/audio. On macOS it is provided by Homebrew
 
 Because N64ModernRuntime is GPL-3.0 and is statically linked, the final
 `ogrebattle64` app is **GPL-3.0**.
+
+### Decision: OGRE_STEP seeds the step once instead of holding it (session 53)
+
+`OGRE_STEP=<n>` used to write `D_8018F1C0 = n` on every frame while the selected
+scene was active. The scene-script VM writes the same word when the sequence
+advances, so the hold overwrote the advance and the New Game opening re-entered
+the same step forever ("the cathedral scene restarts" — developer, session 53).
+
+The step is now **seeded once** on the first frame the target scene is active and
+released as soon as the live step differs from the seed (or after a 1500 ms
+window). A shortcut must not be able to pin game state the game itself writes.
+
+### Decision: syncFramebuffers reads the last written native slot (session 53)
+
+`State::syncFramebuffers` writes every framebuffer in the framebuffer manager
+back to RDRAM, because the game's CPU readback can pick a stale source. It called
+`Framebuffer::copyNativeToRAM`, which consumes the same per-framebuffer write
+buffer slots the game already consumed when it retired the workload; for a
+framebuffer the current workload did not touch, the consumer index points past
+the history and `NativeTarget::copyToRAM` dereferenced null (the name-entry
+form's crash).
+
+`NativeTarget` now tracks `lastWrittenBufferSlot` and `copyLastNativeToRAM`
+reads that slot without consuming it, skipping framebuffers that were not
+rendered since their last reset. This preserves the writeback's purpose (every
+rendered framebuffer reaches RDRAM) without reusing a consumed slot.

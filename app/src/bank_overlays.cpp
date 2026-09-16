@@ -316,6 +316,12 @@ void force_scene_on_load() {
 // scenes, 16-19, with `D_8018FC39 = 2` for every step >= 2.
 //
 // Combine with `OGRE_SCENE`: `OGRE_SCENE=new-game OGRE_STEP=2` is the cathedral.
+//
+// How long the seeded step is kept alive if the VM never rewrites
+// `D_8018F1C0` itself. Long enough for the scene's enter to consume it, short
+// enough that a step the game does not advance cannot pin the sequence.
+static constexpr uint32_t kStepHoldWindowMs = 1500;
+
 struct ForcedStep {
     bool configured = false;
     uint16_t step = 0;
@@ -340,8 +346,18 @@ const ForcedStep& forced_step() {
     return forced;
 }
 
-// Poke the step without disturbing the rest of the state block. Returns true
-// while the game is running the target scene (i.e. while the hold applies).
+// OGRE_STEP=<n>: seed the scene-script step so the selected scene runs step `n`
+// instead of the first one. Returns true on the frame the seed is written (used
+// for the announcement below).
+//
+// The seed is applied *once per entry* into the target scene, not every frame.
+// The VM writes the step it wants into the same word when it advances the
+// sequence, so a per-frame hold overwrites the advance and the opening loops on
+// the held step forever (session 53: the cathedral dialogue restarted instead of
+// moving on to the next step). Seeding once on entry skips the earlier steps and
+// leaves the game's own advance intact; the hold is released as soon as the live
+// step moves off the seed, or after a bounded window so a step the VM never
+// rewrites cannot loop either.
 bool hold_step() {
     const ForcedStep& step = forced_step();
     if (!step.configured || (active_scene_id() != step.scene)) {
@@ -351,9 +367,45 @@ bool hold_step() {
     if (rdram == nullptr) {
         return false;
     }
-    MEM_H(0x0, (gpr)(int32_t)0x8018F1C0) = step.step;
-    MEM_H(0x0, (gpr)(int32_t)0x8018F1C2) = 0x8002;
-    return true;
+
+    static bool seeded = false;
+    static bool released = false;
+    static uint32_t seeded_at_ms = 0;
+
+    const uint16_t live = (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x8018F1C0);
+
+    // Seed on the first frame the scene is active, before its enter function
+    // reads D_8018F1C0.
+    if (!seeded) {
+        MEM_H(0x0, (gpr)(int32_t)0x8018F1C0) = step.step;
+        MEM_H(0x0, (gpr)(int32_t)0x8018F1C2) = 0x8002;
+        seeded = true;
+        seeded_at_ms = scene_elapsed_ms();
+        return true;
+    }
+
+    if (released) {
+        return false;
+    }
+
+    if (live != step.step) {
+        // The game's own advance reached this word: hand it back for good.
+        released = true;
+        fprintf(stderr, "[scene] step hold released: live step %u (seeded %u)\n",
+                (unsigned)live, (unsigned)step.step);
+        fflush(stderr);
+        return false;
+    }
+
+    if ((scene_elapsed_ms() - seeded_at_ms) > kStepHoldWindowMs) {
+        released = true;
+        fprintf(stderr, "[scene] step hold released: %ums window elapsed, live step %u\n",
+                (unsigned)kStepHoldWindowMs, (unsigned)live);
+        fflush(stderr);
+        return false;
+    }
+
+    return false;
 }
 
 // OGRE_SCENE_LOG=1: log every scene change. This is how the names in kScenes
@@ -402,6 +454,35 @@ bool scene_list_matches(const char* scene_list, uint16_t id) {
 }
 
 void poll_scene() {
+    // OGRE_PROBE55=1: the New Game sequence state per frame, logged on change:
+    // the scene-script step word (`D_8018F1C0`), the next-scene word
+    // (`D_8018F1C2`) and the three script-buffer words session 43 recorded
+    // (`0x80197B23`/`0x80197B38`/`0x80197B3C`). Session 53 used this to show the
+    // step stuck at 2 through the cathedral and then 0, with the buffer words
+    // never leaving 0.
+    {
+        static uint16_t lastStep = 0xFFFF, lastNext = 0xFFFF;
+        static uint32_t lastB23 = 0, lastB38 = 0, lastB3C = 0;
+        static uint32_t n = 0;
+        if ((getenv("OGRE_PROBE55") != nullptr) && (++n % 2 == 0)) {
+            uint8_t* rdram = ultramodern::get_rdram_base();
+            if (rdram != nullptr) {
+                const uint16_t step = (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x8018F1C0);
+                const uint16_t next = (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x8018F1C2);
+                const uint32_t b23 = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x80197B23);
+                const uint32_t b38 = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x80197B38);
+                const uint32_t b3c = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x80197B3C);
+                if (step != lastStep || next != lastNext || b23 != lastB23 || b38 != lastB38 || b3c != lastB3C) {
+                    fprintf(stderr, "[probe55] t=%ums scene=0x%04X step=%u next=0x%04X B23=0x%08X B38=0x%08X B3C=0x%08X\n",
+                            scene_elapsed_ms(), (unsigned)active_scene_id(), (unsigned)step, (unsigned)next,
+                            b23, b38, b3c);
+                    fflush(stderr);
+                    lastStep = step; lastNext = next; lastB23 = b23; lastB38 = b38; lastB3C = b3c;
+                }
+            }
+        }
+    }
+
     const ForcedScene& forced = forced_scene();
     if (forced.configured && !forced_scene_active(forced) &&
         (scene_elapsed_ms() >= scene_after_ms())) {
@@ -416,7 +497,7 @@ void poll_scene() {
     if (getenv("OGRE_STEP") != nullptr) {
         if (holding && !step_announced) {
             step_announced = true;
-            fprintf(stderr, "[scene] holding step %u while scene 0x%02X runs\n",
+            fprintf(stderr, "[scene] seeded step %u while scene 0x%02X runs\n",
                     (unsigned)forced_step().step, (unsigned)forced_step().scene);
             fflush(stderr);
         }

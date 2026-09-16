@@ -618,15 +618,36 @@ hardware. RT64 remains the primary native renderer throughout. See
     it). Session 49 measured that both that index and the njpeg target resolve to
     `0x000400`, so this is not the backdrop wall; the question is still open.
     See `docs/HANDOFF-2026-09-15-session48.md` §4.
-  - ✅ **Boot straight to a New Game step (`OGRE_STEP`, session 48)**: the opening's
-    steps are the scene-script word `D_8018F1C0`, so
-    `OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 ./build-app/ogrebattle64`
-    reaches the cathedral ~1.4 s after boot instead of after the 28.7 s movie.
-    The hold is re-applied every frame while the selected scene runs (the VM
-    rewrites the word on each visit) and released when the dispatcher leaves it.
-    This also makes the background fix above reproducible without the flaky
-    title-tap timing. See `docs/guides/app-build.md` (`OGRE_STEP`) and
+  - ✅ **Boot straight to a New Game step (`OGRE_STEP`, session 48; corrected in
+    session 53)**: the opening's steps are the scene-script word `D_8018F1C0`, so
+    `OGRE_SPEED=8 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 ./build-app/ogrebattle64`
+    reaches the cathedral ~2.2 s after boot instead of after the 28.7 s movie.
+    **The step is *seeded* on the first frame the selected scene is active, not
+    held every frame.** Session 48's per-frame hold overwrote the game's own
+    advance: the moment the game wrote the next step the hold put the seeded one
+    back, so the opening re-entered the cathedral forever ("the scene is running
+    in a loop, restarting the cathedral scene" — developer, session 53). The
+    seed is released as soon as the live step moves off it, or after a 1500 ms
+    window. This also makes the background fix above reproducible without the
+    flaky title-tap timing. See `docs/guides/app-build.md` (`OGRE_STEP`) and
     `docs/scenes.md`.
+  - 🚧 **The cathedral never advances, and dies in a 1 GiB `memset` (session
+    53)**: with `OGRE_STEP` no longer pinning the step, `0x0D` step 2 runs the
+    whole dialogue (`I shall now complete thy training with an oath to our Mother
+    Berthe.`) and hands the sequence back — but the step word
+    (`D_8018F1C0`) reads 2 through the cathedral and then **0**, the scene's
+    per-frame hook `func_80178B40` re-enters the cutscene engine every frame
+    (`func_8022770C` keeps returning `0xFF`), and it dies issuing
+    **`memset(dst, 0, 0x40000000)`** inside the engine update. lldb frames:
+    `func_80093380` ← `func_ovlC_801B5D78` ← `func_ovlC_801BB5AC` ←
+    `func_ovlC_801D9300` ← `func_ovlC_801C88BC` ← `func_80178B40`. **The
+    `[crash] host pc` symbol is wrong** (it names the function containing the
+    return address); the lldb frame list is authoritative. The crash reproduces
+    on the **null renderer** and with session 53's RT64 fix reverted, so it is
+    **pre-existing**. `func_801C88BC` dispatches through `*(0x801D0830)`, which
+    reads `0x801E5AC0` — the *movie-mode* vtable the `0x0D` enter installs for
+    `D_8018F1C0 == 0` — although the visit ran in command mode. See
+    `docs/HANDOFF-2026-09-15-session53.md` §5.
   - 🚧 **Why the game's own frame index lands on the placeholder is open
     (session 48)**: `D_800C4BB8` is the VI manager's "displayed buffer" word
     (written by `func_8007307C`, which `func_80089540` — N64 Thread 5 — calls
