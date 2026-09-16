@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-15 (52) | **The YUV→RGB conversion must sign-extend `G_SETCONVERT`'s 9-bit fields, scale them `2*K+1`, and pair `K1` with U.** The hardware coefficients are `K = 2*sext9(k)+1` (GLideN64 `gDPSetConvert`: `SIGN(k,9)<<1 + 1`; parallel-rdp `set_convert`: `2*sext<9>(k)+1`), giving `351/−85/−177/445` for the game's `k0..k3 = 175/469/423/222`, and the rows are `R = Y + K0*V'`, `G = Y + K1*U' + K2*V'`, `B = Y + K3*U'` (`U'=U-128`, `V'=V-128`). Session 51 used the raw **unsigned** fields directly and paired `K1` with V, so the green row exploded positive and the cathedral backdrop drew as blue banding; the geometry, the de-interleaved TMEM planes and the `[U, Y(even), V, Y(odd)]` source were all verified correct, so **session 51 §7's "the defect is in sampling/upload" is wrong**. `K4`/`K5` as *combiner* inputs stay the raw fields over 255 (GLideN64 `_FIXED2FLOATCOLOR(k,8)`) | `docs/HANDOFF-2026-09-15-session52.md` §1-§3 |
 | 2026-09-15 (51) | **The `0x800A5110` njpeg display list is an S2DEX2 list and its `0xDA` command is the draw.** The ucode is `S2DEX 2.08` (`GBIUCode::S2DEX2` — the game's ucode text/data hashes match RT64's `S2DEX2_FIFO_2_08` database entries exactly), so per macroblock `0xDC` = **`G_OBJ_MOVEMEM`** (`gSPObjSubMatrix`, the 8-byte `uObjSubMtx`) and `0xDA` = **`G_OBJ_RECTANGLE_R`** (`gSPObjRectangleR`, the 24-byte `uObjSprite`), not F3DEX2 `G_MOVEMEM`/`G_MTX`. RT64's `GBI_S2DEX2` mapped neither, so the geometry was skipped and only the texture loads ran — **session 50 §9's "the list carries no geometry" is wrong and is corrected here**. Both commands (plus `G_OBJ_SPRITE`/`G_OBJ_RECTANGLE` and the four `objLoadTx*` handlers that `assert(false)`'d) are implemented in RT64; a live trace shows 300 rectangles tiling the 320x240 `G_SETCIMG` target exactly. **A YUV tile must also be loaded as the RDP's two-plane format** — one luma byte per texel in TMEM's upper half, one U/V pair per two texels in the lower — so a YUV `LOADTILE` de-interleaves, the sampler follows parallel-rdp's `sample_texel_yuv16`, and YUV16 tiles require raw-TMEM sampling. The source word is `[U, Y(even), V, Y(odd)]`, correcting session 50 §2. Still open: the sampled colours (blue banding, not the backdrop) | `docs/HANDOFF-2026-09-15-session51.md` §1-§7 |
 | 2026-09-15 (50) | **RT64's YUV16 decode is implemented from the code that writes the format, not from a guessed byte pairing.** In the 32-bit word at `4*(2t + (s>>1))`: `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`, `byte3 = Y(s odd)` (mupen64plus-rsp-hle `jpeg.c` `GetUYVY` / `jpeg_decode_OB`); luma is sampled from the upper TMEM half (`OR 0x800`) with the XOR-3/XOR-4 swap, chroma from the lower half, converted with the matrix **the game programs via `G_SETCONVERT`** (`k0=175 k1=469 k2=423 k3=222`). The old stub returned black for every YUV texel, which is why the framebuffer the game read back was black. The remaining wall is **render timing**: the port completes the emulated RSP task as soon as the display list reaches RT64, so the game's CPU copy can run before the draw renders; wait on the **RSP worker** (`Application::waitForGameFramebuffers`), never on the game thread (it deadlocks). A follow-up static trace fixed the readback's identity: the four `func_ovlE_8019976C` stage-3 copies **are** the njpeg readback (sole caller bankE `0x80199D80` inside `func_ovlE_80199D30`), they are the four sub-images of one `'B5'` asset (ROM `0x7CADAC`), and they run in scene `0x02` as a preload because `0x0D` streams bankRec2 over unit E's RAM. ~~byte0 = Y(even), byte1 = V, byte2 = U, byte3 = Y(odd)~~ and ~~the sampler design (luma at `| 0x800` with an XOR-3 swap, chroma via a half-word XOR)~~ are **corrected by session 51**: the word is `[U, Y(even), V, Y(odd)]`, and the RDP keeps luma one byte per texel at `offset + stride*t + s` in the upper half with U/V pairs in the lower | `docs/HANDOFF-2026-09-15-session50.md` §2-§5; corrections in `docs/HANDOFF-2026-09-15-session51.md` §6 |
 | 2026-09-15 (49) | **The cathedral background is still black.** A YUV16 decoder was written for RT64's `TextureDecoder.hlsli` (which does return black for `G_IM_FMT_YUV`) and **reverted**: it produced a corrupt blob, not the backdrop, so the hypothesis is unproven. The game's CPU readback copies a zero framebuffer, upstream of any decode. Next: check GLideN64 — the emulator upstream closed [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102) with | entry below; `docs/HANDOFF-2026-09-15-session49.md` §2/§7 |
@@ -37,6 +38,58 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-15 (session 52) — the YUV→RGB conversion is `2*sext9(k)+1` with `K1` on U, and that is what made the cathedral backdrop
+
+**Decision.** In RT64's `sampleTMEMYUV16`, apply `G_SETCONVERT` the way the
+hardware does: sign-extend each 9-bit `k0..k3` field, scale it `2*K+1`, and use
+
+```
+R = Y + K0*(V-128)/256
+G = Y + (K1*(U-128) + K2*(V-128))/256
+B = Y + K3*(U-128)/256
+```
+
+`K4`/`K5` as **combiner** inputs keep the raw fields over 255.
+
+**Why.** Session 51 implemented the S2DEX2 geometry and the RDP two-plane YUV16
+tile correctly, but drew the backdrop as blue horizontal banding. Three
+independent references agree on the conversion and RT64 was doing neither half of
+it:
+
+* **GLideN64** (the plugin that fixed the upstream
+  [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
+  "Missing backgrounds in Ogre Battle 64 battles and also some cutscenes")
+  `gDPSetConvert` stores `SIGN(k,9) << 1 + 1` for `k0..k3`
+  (`src/gDP.cpp:959`), and `glsl_CombinerProgramBuilderAccurate.cpp`'s
+  `YUV_Convert` does `icolor.rg -= 128` for `format == 1`, then
+  `r = b + (P0*g + 128)/256`, `g = b + (P1*r + P2*g + 128)/256`,
+  `b = b + (P3*r + 128)/256`.
+* **parallel-rdp** `set_convert` is `constants.convert[i] = 2*sext<9>(k)+1`
+  (`rdp_renderer.cpp:3521`), and `texture_convert_factors`
+  (`shaders/texture.h:487`) is the same formula.
+* The sampled YUV texel is `i16x4(u-0x80, v-0x80, luma, luma)` in both, i.e.
+  `.r = U-128`, `.g = V-128`, `.b = Y` — so `K0` multiplies **V**, `K1` and `K2`
+  multiply **U** and **V** respectively, and `K3` multiplies **U**.
+
+Session 51's code passed the raw unsigned fields (`OGRE_CONVERT_TRACE=1`:
+`k0=175 k1=469 k2=423 k3=222`) straight in: the "green" row became
+`Y + 1.83·V' + 1.65·U'` instead of `Y − 0.33·U' − 0.69·V'`, and `K1` was paired
+with `V`. The geometry, the loader's de-interleaved TMEM planes and the
+`[U, Y(even), V, Y(odd)]` source were each verified correct with a temporary
+loader probe, so the blue was the matrix, not the sampling.
+
+**Result.** The backdrop is the cathedral (red carpet, stone walls, pillars,
+statues, candles) on the RT64 build, and the assembled `'B5'` image at
+`0x80243E28` renders as the full scene. `docs/proofs/native-newgame-cathedral.png`
+and `docs/proofs/native-newgame-cathedral-background.png` are **replaced** — the
+previous files were the black/blue-band broken renders.
+
+**Corrects.** `docs/HANDOFF-2026-09-15-session51.md` §7 ("the remaining defect is
+localised to the YUV sampling/upload step") and its "pure blue is impossible"
+argument, which assumed the corrected coefficient scale.
 
 ---
 

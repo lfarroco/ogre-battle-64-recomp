@@ -634,10 +634,13 @@ hardware. RT64 remains the primary native renderer throughout. See
     it). The fix uses the buffer the draw landed in rather than answering
     whether retail reaches the same mismatched state. See
     `docs/HANDOFF-2026-09-15-session48.md` §4.
-  - 🚧 **The cathedral scene's background pipeline (sessions 46/47; session 50
-    implemented RT64's YUV16 decode; **session 51 found and implemented the
-    missing geometry — the draws happen now, the sampled colours are still
-    wrong**)**:
+  - ✅ **The cathedral scene's background renders correctly (sessions 46/47; 50
+    implemented RT64's YUV16 decode; 51 implemented the missing S2DEX2 geometry;
+    **52 fixed the YUV -> RGB conversion, and the backdrop is the cathedral**)**.
+    `docs/proofs/native-newgame-cathedral.png` and
+    `-cathedral-background.png` are the corrected captures; the pipeline below
+    still describes how it gets there, and the "still open" note at the end is
+    superseded:
     the step-2 display list's first `G_TRI2`
     quads are a full-screen 320x240 RGBA16 blit from guest `0x80243E28`, and that
     buffer was uniform (`0x0843` in RT64, `0` in the null build). The image is an
@@ -671,13 +674,17 @@ hardware. RT64 remains the primary native renderer throughout. See
     never have worked. The source word is `[U, Y(even), V, Y(odd)]`
     (mupen64plus-rsp-hle `GetUYVY`, verified against a live macroblock dump),
     converted with the matrix the game programs via `G_SETCONVERT`
-    (`k0=175 k1=469 k2=423 k3=222`). **Still open: the sampled colours** — the
-    background now draws as blue banding instead of black, with the geometry, the
-    RDRAM source and the de-interleaved TMEM planes all verified correct; the
-    ranked next checks are in the handoff.
-    See `docs/HANDOFF-2026-09-15-session51.md` (§7 for the next checks), and
-    `-session50.md` / `-session47.md` / `-session46.md` for the decoder fix and
-    the readings of the display list that session 51 §1/§6 corrects.
+    (`k0=175 k1=469 k2=423 k3=222`). **Session 52 found why the colours were
+    wrong**: RT64 stored the raw unsigned 9-bit `k0..k3` fields and used them
+    directly, while the hardware sign-extends each field and scales it
+    `2*K+1` (GLideN64 `gDPSetConvert`, parallel-rdp `set_convert`), and the
+    green channel paired `K1` with V instead of U. With both fixed the
+    background is the cathedral (red carpet, stone walls, statues) and the
+    assembled `'B5'` image at `0x80243E28` renders as the full scene.
+    See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` (§7 for the
+    checks that localized it), and `-session50.md` / `-session47.md` /
+    `-session46.md` for the decoder fix and the readings of the display list
+    that session 51 §1/§6 corrects.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

@@ -1,5 +1,12 @@
 # Handoff — 2026-09-15, session 49: the cathedral background is still black (a wrong YUV16 decode was tried and reverted)
 
+> **Superseded (session 52):** the background renders. The session-50/51
+> sampler/geometry work plus session 52's `G_SETCONVERT` conversion fix made
+> `docs/proofs/native-newgame-cathedral-background.png` a correct cathedral
+> capture — the file referenced below has been **replaced**, so the "is black"
+> readings in this handoff describe the state on 2026-09-15 session 49, not the
+> current file. See `docs/HANDOFF-2026-09-15-session52.md`.
+
 ## Goal and result
 
 **Goal:** the New Game cathedral (scene `0x0D` step 2) has no background

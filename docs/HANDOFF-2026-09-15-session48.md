@@ -1,5 +1,13 @@
 # Handoff — 2026-09-15, session 48: the cathedral background renders (the njpeg readback was copying the wrong buffer)
 
+> **Corrected (session 52):** "the background renders" here meant *a black frame
+> over the correct sprites* — the real backdrop is a fully lit cathedral
+> (red carpet, stone walls, statues). The readback-buffer finding is sound and
+> still stands; the title of this handoff overstates the result. The proof
+> `docs/proofs/native-newgame-cathedral-background.png` was the black capture and
+> has been **replaced** by the session-52 render. See
+> `docs/HANDOFF-2026-09-15-session52.md` §6.
+
 ## Goal and result
 
 **Goal (session 47's open wall):** the cathedral scene (scene `0x0D` step 2) had no

@@ -1532,19 +1532,19 @@ index 9fae0d4..d510d49 100644
  
                      auto &clearRect = instanceDrawCall.clearRect;
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
-index e7895c3..22cf404 100644
+index e7895c3..b033e17 100644
 --- a/src/shaders/RasterPS.hlsl
 +++ b/src/shaders/RasterPS.hlsl
 @@ -130,6 +130,14 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
      
      computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction);
  
-+    // OGRE: G_SETCONVERT's YUV -> RGB matrix, for the YUV16 texture path. K2 is
-+    // encoded across a field boundary as (k2 << 5) | ... so it is only 4 useful
-+    // bits here; the sampler scales it back (see TextureDecoder.hlsli).
++    // OGRE: G_SETCONVERT's YUV -> RGB matrix, for the YUV16 texture path. These
++    // are the raw 9-bit `k0..k3` fields; the sampler sign-extends and applies the
++    // hardware's `2*K+1` scaling (see TextureDecoder.hlsli -> sampleTMEMYUV16).
 +    const float3 ogreConvertRG = float3(float(instanceRDPParams[instanceIndex].convertK[0]),
 +                                        float(instanceRDPParams[instanceIndex].convertK[1]),
-+                                        float(instanceRDPParams[instanceIndex].convertK[2]) / 32.0f);
++                                        float(instanceRDPParams[instanceIndex].convertK[2]));
 +    const float3 ogreConvertBA = float3(float(instanceRDPParams[instanceIndex].convertK[3]), 0.0f, 0.0f);
 +
      float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1569,10 +1569,10 @@ index e7895c3..22cf404 100644
      
      // Color combiner.
 diff --git a/src/shaders/TextureDecoder.hlsli b/src/shaders/TextureDecoder.hlsli
-index dcc88b2..14d3c79 100644
+index dcc88b2..71e0955 100644
 --- a/src/shaders/TextureDecoder.hlsli
 +++ b/src/shaders/TextureDecoder.hlsli
-@@ -84,6 +84,55 @@ float4 sampleTMEMRGBA16(uint pixelValue16bit) {
+@@ -84,6 +84,65 @@ float4 sampleTMEMRGBA16(uint pixelValue16bit) {
      return RGBA16ToFloat4(col16);
  }
  
@@ -1585,10 +1585,18 @@ index dcc88b2..14d3c79 100644
 +// this layout, and the usual RDP 64-bit word flip applies to odd rows (bit 2 of
 +// the byte offset within the row, as `implLoadTMEM` replays).
 +//
-+// Returns the four RDP channels in the order the hardware uses for YUV:
-+//   .r = V - 128, .g = U - 128, .b = Y, .a = Y   (all 0..255)
-+// The RDP's colour combiner turns these into RGB with the K0..K3 matrix that
-+// G_SETCONVERT programmed; this function applies that same matrix itself.
++// `convertRG` carries the raw 9-bit `k0,k1,k2` fields and `convertBA` carries
++// `k3` from G_SETCONVERT. The hardware sign-extends each 9-bit field and applies
++// `2*K+1` before using it as a conversion coefficient -- the same transform
++// GLideN64's `gDPSetConvert` (`SIGN(k,9)<<1 + 1`) and parallel-rdp's
++// `set_convert` (`2*sext<9>(k)+1`) perform. The conversion itself is:
++//
++//   R = Y + (K0*(V-128) + 128) >> 8
++//   G = Y + (K1*(U-128) + K2*(V-128) + 128) >> 8
++//   B = Y + (K3*(U-128) + 128) >> 8
++//
++// See GLideN64 `glsl_CombinerProgramBuilderAccurate.cpp` `YUV_Convert` and
++// parallel-rdp `texture.h` `texture_convert_factors`, which agree exactly.
 +float4 sampleTMEMYUV16(uint s, uint t, uint stride, uint address, float3 convertRG, float3 convertBA, Texture1D<uint> TMEM) {
 +    const uint rowBase = address + stride * t;
 +    const uint rowXor = ((t & 1u) != 0u) ? 4u : 0u;
@@ -1604,31 +1612,33 @@ index dcc88b2..14d3c79 100644
 +    const float uf = float(u) - 128.0f;
 +    const float vf = float(v) - 128.0f;
 +
-+    // K2 arrives in the caller's scaled form; undo the caller's 1/32 to apply the
-+    // matrix exactly as G_SETCONVERT encodes it.
-+    float3 rg = float3(convertRG.x, convertRG.y, convertRG.z * 32.0f);
 +    // Without a programmed matrix, fall back to the N64's standard NTSC JPEG
 +    // matrix as G_SETCONVERT would encode it (K0=175 K1=469 K2=423 K3=222).
-+    if (dot(rg, rg) + dot(convertBA, convertBA) == 0.0f) {
-+        rg = float3(175.0f, 469.0f, 423.0f);
++    if (convertRG.x + convertRG.y + convertRG.z + convertBA.x == 0.0f) {
++        convertRG = float3(175.0f, 469.0f, 423.0f);
 +        convertBA = float3(222.0f, 0.0f, 0.0f);
 +    }
 +
-+    // The RDP applies the G_SETCONVERT matrix with the sign-extended chroma
-+    // bytes: R = Y + (K0*V + 0x80) >> 8, G = Y + (K1*V + K2*U + 0x80) >> 8,
-+    // B = Y + (K3*U + 0x80) >> 8. Keep the hardware's arithmetic in float so the
-+    // result is the same linear map without the integer rounding.
++    // 9-bit signed fields, then the hardware's `2*K+1` coefficient scaling.
++    const float3 sext = float3(
++        (convertRG.x >= 256.0f) ? (convertRG.x - 512.0f) : convertRG.x,
++        (convertRG.y >= 256.0f) ? (convertRG.y - 512.0f) : convertRG.y,
++        (convertRG.z >= 256.0f) ? (convertRG.z - 512.0f) : convertRG.z);
++    const float k3s = (convertBA.x >= 256.0f) ? (convertBA.x - 512.0f) : convertBA.x;
++    const float3 k = 2.0f * sext + 1.0f;
++    const float k3 = 2.0f * k3s + 1.0f;
++
 +    const float3 rgb = float3(
-+        y + (rg.x * v) / 256.0f,
-+        y + (rg.y * v + rg.z * u) / 256.0f,
-+        y + (convertBA.x * u) / 256.0f);
-+    return float4(rgb / 255.0f, 1.0f);
++        y + (k.x * vf) / 256.0f,
++        y + (k.y * uf + k.z * vf) / 256.0f,
++        y + (k3 * uf) / 256.0f);
++    return float4(saturate(rgb / 255.0f), 1.0f);
 +}
 +
  float4 sampleTMEMIA16(uint pixelValue16bit) {
      const uint ia16 = pixelValue16bit;
      return IA16ToFloat4(ia16);
-@@ -146,7 +195,27 @@ float4 sampleTMEM32b(bool oddColumn, uint pixelValue0, uint pixelValue1, uint pi
+@@ -146,7 +205,27 @@ float4 sampleTMEM32b(bool oddColumn, uint pixelValue0, uint pixelValue1, uint pi
      }
  }
  
