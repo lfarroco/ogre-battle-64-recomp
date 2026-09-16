@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #if defined(__APPLE__)
 #define _XOPEN_SOURCE 700
@@ -483,6 +484,43 @@ void poll_scene() {
         }
     }
 
+    // OGRE_PROBE57=1: the New Game sequence state, logged on change — the
+    // scene-script step word `D_8018F1C0`, the next-scene word `D_8018F1C2`, the
+    // cutscene vtable pointer the scene-0x0D exit dispatches through
+    // (`0x801D0830`) and the engine state words `0x8023A994`/`0x8023A960`.
+    // Session 54 used it to show the opening advance step 1 -> 2 -> handoff and
+    // then enter scene `0x07` with the step reset to 0.
+    {
+        static uint16_t lastStep = 0xFFFF, lastNext = 0xFFFF;
+        static uint32_t lastVt = 0xFFFFFFFFu, lastEng = 0xFFFFFFFFu;
+        static uint8_t lastE5C = 0xFF, lastF90 = 0xFF;
+        static uint32_t n = 0;
+        if ((getenv("OGRE_PROBE57") != nullptr) && (++n % 2 == 0)) {
+            uint8_t* rdram = ultramodern::get_rdram_base();
+            if (rdram != nullptr) {
+                const uint16_t step = (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x8018F1C0);
+                const uint16_t next = (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x8018F1C2);
+                const uint32_t vt = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x801D0830);
+                const uint32_t eng = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x8023A994);
+                const uint8_t e5c = (uint8_t)MEM_BU(0x0, (gpr)(int32_t)0x8023A960);
+                const uint8_t f90 = (uint8_t)MEM_BU(0x0, (gpr)(int32_t)0x801DFC90);
+                if (step != lastStep || next != lastNext || vt != lastVt ||
+                    eng != lastEng || e5c != lastE5C || f90 != lastF90) {
+                    fprintf(stderr,
+                            "[probe57] t=%ums scene=0x%04X step=%u next=0x%04X "
+                            "vt(801D0830)=0x%08X eng(8023A994)=0x%08X "
+                            "e5c(8023A960)=0x%02X f90(801DFC90)=0x%02X\n",
+                            (unsigned)scene_elapsed_ms(), (unsigned)active_scene_id(),
+                            (unsigned)step, (unsigned)next, vt, eng, (unsigned)e5c,
+                            (unsigned)f90);
+                    fflush(stderr);
+                    lastStep = step; lastNext = next; lastVt = vt;
+                    lastEng = eng; lastE5C = e5c; lastF90 = f90;
+                }
+            }
+        }
+    }
+
     const ForcedScene& forced = forced_scene();
     if (forced.configured && !forced_scene_active(forced) &&
         (scene_elapsed_ms() >= scene_after_ms())) {
@@ -652,9 +690,27 @@ void report_unknown_module(uint32_t rom_offset, uint32_t ram_addr, uint32_t know
     fflush(stdout);
 }
 
+// OGRE_DMA_TRACE=1 accumulates every DMA the game issues, grouped by its
+// (ROM, RAM) base; `dump_dma_trace` prints it from the bounded-run exit path
+// (the process leaves through `_exit`, so an `atexit` dump never runs). The
+// `[bank]` line only fires for records the port knows, so a module the game
+// loads but the port has no record for — the scene-0x07 black screen — is
+// invisible without this (session 54).
+struct DmaTraceEntry { uint32_t first = 0; uint32_t last = 0; uint32_t count = 0; };
+static std::map<std::pair<uint32_t, uint32_t>, DmaTraceEntry> dma_trace_chunks;
+static uint32_t dma_trace_events = 0;
+
 // The game copies a record in 0x200-byte chunks; register it once, on the first
 // chunk. The runtime keeps the authoritative "is this RAM resident" state.
 void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) {
+    static const bool trace_dma = (getenv("OGRE_DMA_TRACE") != nullptr);
+    if (trace_dma) {
+        ++dma_trace_events;
+        DmaTraceEntry& e = dma_trace_chunks[{rom_offset, ram_addr}];
+        if (e.count == 0) e.first = dma_trace_events;
+        e.last = dma_trace_events;
+        ++e.count;
+    }
     // Scene loads are the moments the dispatcher is guaranteed to be looking at
     // the id, so the poke lives here (the original behaviour). Poking every
     // frame instead corrupts the scene state machine: the game rewrites the id
@@ -749,7 +805,31 @@ void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) 
     }
 }
 
+
 }  // namespace
+
+void dump_dma_trace() {
+    if (getenv("OGRE_DMA_TRACE") == nullptr) {
+        return;
+    }
+    fprintf(stderr, "[dma-trace] %u DMA event(s), %zu distinct (rom,ram) bases\n",
+            (unsigned)dma_trace_events, dma_trace_chunks.size());
+    // OGRE_DMA_TRACE_FULL=1 prints every (rom, ram) base; otherwise only the
+    // transfers into overlay C's RAM arena (0x80197B90..0x801C0000), which is
+    // where the scene-0x07 module should be and in the dump is all zeros
+    // (session 54).
+    const bool full = getenv("OGRE_DMA_TRACE_FULL") != nullptr;
+    for (const auto& entry : dma_trace_chunks) {
+        const uint32_t ram = entry.first.second;
+        if (!full && !(ram >= 0x80190000u && ram < 0x801C0000u)) {
+            continue;
+        }
+        fprintf(stderr, "[dma-trace] rom=0x%06X ram=0x%08X first=%u last=%u chunks=%u\n",
+                entry.first.first, ram, entry.second.first, entry.second.last,
+                entry.second.count);
+    }
+    fflush(stderr);
+}
 
 void register_bank_overlays() {
 #if !defined(__EMSCRIPTEN__)

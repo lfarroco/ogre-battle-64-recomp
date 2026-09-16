@@ -42,4 +42,10 @@ bool scene_lookup(const char* spec, uint16_t& id);
 // matches one of them (false when the list is absent or empty).
 bool scene_list_matches(const char* scene_list, uint16_t id);
 
+// `OGRE_DMA_TRACE=1`: dump every streamed DMA the game issued, grouped by
+// (ROM, RAM) base with a chunk count. Called from the bounded-run exit path
+// (`OGRE_EXIT_AFTER_MS`), because the process leaves through `_exit` and an
+// `atexit` dump never runs.
+void dump_dma_trace();
+
 }  // namespace ogre

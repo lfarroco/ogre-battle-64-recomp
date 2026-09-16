@@ -362,6 +362,9 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // scheduled is sitting. The recompiled code reports every function
         // entry and return, so the runtime also knows the live call chain.
         fprintf(stderr, "[SDL] exit_after_ms=%u elapsed, stopping\n", budget);
+        // OGRE_DMA_TRACE=1: the process leaves through _exit, so the streamed-DMA
+        // summary has to be printed here rather than from an atexit handler.
+        dump_dma_trace();
         fprintf(stderr, "[SDL] per-thread last recompiled function:\n");
         for (int tid = 1; tid < 32; tid++) {
             const uint32_t func = ultramodern::debug_last_func_vram(tid);

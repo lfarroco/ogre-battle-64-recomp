@@ -3225,3 +3225,40 @@ form's crash).
 reads that slot without consuming it, skipping framebuffers that were not
 rendered since their last reset. This preserves the writeback's purpose (every
 rendered framebuffer reaches RDRAM) without reusing a consumed slot.
+
+### Decision: drive New Game from the title, never by seeding a step (session 54)
+
+`OGRE_STEP=<n>` seeds the scene-script step to skip earlier steps. Session 54
+showed that this *changes the sequence's own state*: entering scene `0x0D` at
+step 2 with no step-1 visit leaves the exit on its `otherwise` arm, which
+re-enters `0x0D` at step 0 and selects the movie-mode branch — the 1 GiB
+`memset` crash session 53 recorded. The crash is therefore a property of the
+shortcut, not of the opening.
+
+The maintained New Game repro drives the real flow instead:
+
+```sh
+OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000 \
+  OGRE_TAP_BUTTON="start,a,start,a,…" ./build-app/ogrebattle64
+```
+
+A Start press summons the title menu (developer, session 54), the cursor starts
+on `New Game`, and a second Start confirms it; `A` then advances the movie and
+the cathedral dialogue. The engine's own exit resets `D_8018F1C0` to 0 and sets
+`next = 0x0007`, so a step word of 0 **at that point** is correct game
+behaviour. `OGRE_STEP` stays for reaching a later step when the pre-state does
+not matter, and its documentation now says so.
+
+### Decision: `OGRE_DMA_TRACE` is the tool for "a module is not resident" (session 54)
+
+The `[bank]` log only fires for streamed records the port has compiled, so a
+module the game loads but the port has no record for is invisible — that is the
+scene-`0x07` black screen: its enter calls `0x801A578C`, which lives in overlay
+C's RAM window and is zero at runtime.
+
+`OGRE_DMA_TRACE=1` accumulates **every** PI DMA the game issues, keyed by
+`(rom, ram)` base with first/last event indices, and dumps it from the
+bounded-run exit path (`_exit`, so no `atexit`). It answers "which module is
+resident in this RAM, and which one overwrote it" without trusting
+`config.yaml` — the same class of question `tools/rdram.py banks` answers for a
+dump. Reuse it before writing another throwaway PI-DMA logger.

@@ -43,7 +43,7 @@ step table).
 |---|---|---|---|
 | 1 | **the intro movie**: a multi-shot sepia cutscene in a castle courtyard, ending on the subtitle *"I promise I'll make you proud."* (~28.7 s) | dev (session 43), proof (`native-newgame-cutscene.png`, `native-newgame-cutscene-2.png`) | renders |
 | 2 | **cathedral**: a narrative card (`Ischka Military Academy / Graduation Ceremony`), then the player's character walks to Archbishop Odiron; a few dialogue lines. The backdrop is a **pre-rendered 320x240 image** (red carpet, columns, steps, organ; the candles animate) | dev (session 44 + retail reference, session 46), proof (`native-newgame-academy-card.png`, `native-newgame-cathedral.png`, `native-newgame-cathedral-background.png`) | **renders** (session 52): the card, the **cathedral backdrop** (red carpet, stone walls, statues, candles) and the dialogue box all draw, on the RT64 build. The backdrop is an njpeg **YUV16** image drawn by an **S2DEX2** list (session 51 implemented the missing `G_OBJ_MOVEMEM`/`G_OBJ_RECTANGLE_R` geometry); the colours were wrong (blue banding) until session 52 fixed the `G_SETCONVERT` conversion (sign-extend the 9-bit fields, scale `2*K+1`, pair `K1` with U). See `docs/HANDOFF-2026-09-15-session52.md` |
-| 3 | Odiron asks the player's **name** → character-table entry form: a box with the typed name (`Magnus` in the capture) and a grid `A–Z` / `a–z` with `INS / BS / DEL / END` and a scrollbar | dev (session 44, screenshot) | unknown |
+| 3 | Odiron asks the player's **name** → character-table entry form: a box with the typed name (`Magnus` in the capture) and a grid `A–Z` / `a–z` with `INS / BS / DEL / END` and a scrollbar | dev (session 44 + session 54, screenshot) | **missing**: reached as scene `0x07` (session 54) and renders black — the form's code at `0x801A578C` is in overlay C's RAM window and is zero at runtime |
 | 4 | Odiron asks the **date of birth** → form: `BIRTHDAY` banner, `Jul. 25`, and a second row `Trueno 12` | dev (session 44, screenshot) | unknown |
 | 5 | **personality questions**: `"What dost thou hold within thy sword?"` with the choices `ardor / passion / vigor / talent / belief / hatred` over a live scene (characters in a hall); the answers decide the player's initial units and items | dev (session 44, screenshot) | unknown |
 | 6 | an **intro movie** closes the sequence | dev (session 44) | unknown |
@@ -59,13 +59,27 @@ tap schedule that reaches the sequence without skipping the movie is
 pressing buttons inside `0x0D` advances the dialogue and the step
 (the "Ischka" card capture came from such a run).
 
-**Shortcut (session 48):** `OGRE_SCENE=new-game OGRE_STEP=<n>` boots straight to
-step `n` of this sequence without playing the ones before it — the app holds
-`D_8018F1C0` at `n` (and `D_8018F1C2` at `0x8002`) while the selected scene runs,
-so e.g. `OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1
-./build-app/ogrebattle64` reaches the cathedral ~1.4 s after boot instead of
-after the 28.7 s movie. The hold releases as soon as the dispatcher leaves the
-scene. See `docs/guides/app-build.md` (`OGRE_STEP`).
+**Shortcut (session 48):** `OGRE_SCENE=new-game OGRE_STEP=<n>` seeds step `n` so
+the app can reach a later step without playing the ones before it, e.g.
+`OGRE_SPEED=6 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1
+./build-app/ogrebattle64` reaches the cathedral ~2 s after boot instead of after
+the 28.7 s movie. **It is a seed, not a hold** (session 53), and it changes the
+sequence's own state: a step entered with no step-1 visit makes the exit take its
+`otherwise` arm and re-enter `0x0D` at step 0, which is the movie-mode branch and
+crashes. **For the real opening use the title route** (session 54):
+
+```sh
+OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000 \
+  OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,start,a,start,a,start,a" \
+  OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=200000 ./build-app/ogrebattle64
+```
+
+Measured by the developer's account and by `OGRE_PROBE57=1`: the attract title
+ignores input until a **Start** press summons the menu; the cursor starts on
+`New Game`, so a second Start confirms it. The route then runs the movie (step 1)
+→ cathedral (step 2) → **scene `0x07`** at `t≈17.9 s` (4×), which in the port
+renders black because the code `0x07` calls is not resident (see the newest
+handoff, session 54).
 
 ## Tutorial (title menu → Tutorial)
 
@@ -76,6 +90,17 @@ scene. See `docs/guides/app-build.md` (`OGRE_STEP`).
 The same form-box look (dark blue backdrop, dialogue/form panel) is what the
 name-entry and birthday screens use, so the form module that draws the Tutorial
 is the one to look at when those steps are reached.
+
+## New Game → scene `0x07` = the name-entry form
+
+After the cathedral dialogue, the sequence engine's exit resets `D_8018F1C0` to
+0 and sets the next scene to **`0x07`** (`func_80178CB0`, session 54). **`0x07`
+is the name-entry form** — the developer supplied a retail screenshot showing the
+name box (`Magnus`) and the `A–Z` / `a–z` grid with `INS BS DEL END` (session 54).
+In the port `0x07` enters and renders black: `func_80177F04` calls `0x801A578C`,
+which is in overlay C's RAM window (`.streamedC`, ROM `0x1CE040` → `0x80197B90`)
+and is zero at runtime. The form's *data* is loaded by the `0x0D` enter as usual
+(`func_80178E80` → the step asset); the missing piece is the *code*.
 
 ## Open questions for the developer
 

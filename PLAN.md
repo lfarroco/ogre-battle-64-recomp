@@ -631,23 +631,35 @@ hardware. RT64 remains the primary native renderer throughout. See
     window. This also makes the background fix above reproducible without the
     flaky title-tap timing. See `docs/guides/app-build.md` (`OGRE_STEP`) and
     `docs/scenes.md`.
-  - 🚧 **The cathedral never advances, and dies in a 1 GiB `memset` (session
-    53)**: with `OGRE_STEP` no longer pinning the step, `0x0D` step 2 runs the
-    whole dialogue (`I shall now complete thy training with an oath to our Mother
-    Berthe.`) and hands the sequence back — but the step word
-    (`D_8018F1C0`) reads 2 through the cathedral and then **0**, the scene's
-    per-frame hook `func_80178B40` re-enters the cutscene engine every frame
-    (`func_8022770C` keeps returning `0xFF`), and it dies issuing
-    **`memset(dst, 0, 0x40000000)`** inside the engine update. lldb frames:
-    `func_80093380` ← `func_ovlC_801B5D78` ← `func_ovlC_801BB5AC` ←
-    `func_ovlC_801D9300` ← `func_ovlC_801C88BC` ← `func_80178B40`. **The
-    `[crash] host pc` symbol is wrong** (it names the function containing the
-    return address); the lldb frame list is authoritative. The crash reproduces
-    on the **null renderer** and with session 53's RT64 fix reverted, so it is
-    **pre-existing**. `func_801C88BC` dispatches through `*(0x801D0830)`, which
-    reads `0x801E5AC0` — the *movie-mode* vtable the `0x0D` enter installs for
-    `D_8018F1C0 == 0` — although the visit ran in command mode. See
-    `docs/HANDOFF-2026-09-15-session53.md` §5.
+  - ✅ **The New Game opening advances past the cathedral (session 54)**, and
+    session 53's "the cathedral never advances" is corrected: the advance is real
+    and reachable. The maintained repro drives the real flow —
+    `OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000
+    OGRE_TAP_BUTTON="start,a,start,a,…"` — a Start summons the title menu
+    (developer, session 54), the cursor starts on New Game, a second Start
+    confirms it, and `A` advances the movie and the cathedral dialogue. Measured:
+    `0x04 → 0x02(step 1) → 0x0D` (movie, 3.5 s) `→ 0x02(step 2) → 0x0D`
+    (cathedral) `→ 0x07` at `t≈17.9 s` (4×). The engine's exit calls
+    `func_80178CB0`, which does `D_8018F1C0 = 0` (`func_801723B4`, `0x801723D8`)
+    and `D_800C4C26 = D_8018F1C2 = 0x0007` — so **the step word reading 0 at the
+    handoff is correct game behaviour**, and the movie-vtable dispatch session 53
+    saw belongs to the `OGRE_STEP` shortcut, which skips step 1 and leaves the
+    exit on its `otherwise` arm. See `docs/HANDOFF-2026-09-16-session54.md`.
+  - 🚧 **Scene `0x07` renders black, and the code it calls is not resident
+    (session 54)**: the handoff enters scene `0x07` (descriptor `D_8018FB98`,
+    `.streamedB` ROM `0x065A98`: enter `func_80177F04`, update `func_80177F20`,
+    hook `func_80177F3C`). Its enter calls `func_801A578C`, which `config.yaml`
+    places in overlay C's window (ROM `0x1CE040` → VRAM `0x80197B90`; file
+    `0x1DBC3C`), and in an `OGRE_DUMP_RDRAM` taken while `0x07` runs
+    `0x801A3000..0x801B0000` is **all zero**. `OGRE_DMA_TRACE=1` (new) shows the
+    four bases the game loads into that arena (`0x1CE040` boot; `0x066E30`,
+    `0x0E4910`, `0x06E680` later), and a conditional `watch.sh` on the word shows
+    the final zero written by the cutscene engine's own step interpreter
+    (`func_ovlC_8022B714` ← `func_ovlC_802282D8` ← `func_ovlC_80227030` ←
+    `func_ovlC_8022D1CC`). Two readings are open (the port never loads the
+    `0x07` module, or it loads a different record into that RAM); §8 of the
+    handoff names the discriminator. **The name-entry form is still not reached.**
+    See `docs/HANDOFF-2026-09-16-session54.md` §2-§5.
   - 🚧 **Why the game's own frame index lands on the placeholder is open
     (session 48)**: `D_800C4BB8` is the VI manager's "displayed buffer" word
     (written by `func_8007307C`, which `func_80089540` — N64 Thread 5 — calls

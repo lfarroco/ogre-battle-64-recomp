@@ -259,13 +259,26 @@ from here.
   "shared tail", the guest-`0`/`8` stores, the KUSEG mirror fix in
   `recomp_mem_addr`) were symptoms of that mis-binding and are corrected — the
   low-window stores no longer happen, so the mirror is unexercised and should be
-  A/B'd. Also open: the movie-engine branch (`F1C0 == 0`, gated by the word
-  `0x80197794` — *not* `0x8019F794`, see session 43) which no New Game step
-  selects; menu `0x18` natural entry; scene `0x12` = Load Game (needs save
-  pre-state); `OGRE_NO_AUDIO=1` early-boot crash; `osViFade`. Scene `0x17` = the
-  Tutorial and runs (bank unit B, records 17/18). Dialogue text is
-  LZ-compressed (`func_8007A110`, `tools/ogrelz.py --asset`). Current status and
-  details: the newest `docs/HANDOFF-*.md` and `PLAN.md`.
+  A/B'd. **Session 54 corrects the rest of this wall: the cathedral *does*
+  hand off** — `A` advances its dialogue, the engine exit `func_80178CB0` resets
+  `D_8018F1C0` to 0 and sets the next scene to **`0x07`**, which the dispatcher
+  then runs at `t≈17.9 s` (4×) of a title-driven New Game. Session 53's
+  "never advances / 1 GiB `memset`" is the **`OGRE_STEP` shortcut's** property:
+  seeding step 2 skips step 1, so the exit takes its `otherwise` arm, re-enters
+  `0x0D` at step 0 and selects the movie-mode branch. Drive the opening from the
+  title (`OGRE_TAP_BUTTON="start,a,start,a,…"`) instead of seeding a step. Scene
+  `0x07` then **renders black**: its enter `func_80177F04` calls `func_801A578C`,
+  which sits in overlay C's RAM window (`.streamedC`, ROM `0x1CE040` →
+  `0x80197B90`) and is **zero at runtime** — the game loads four other bases into
+  that arena (`OGRE_DMA_TRACE=1`) and the cutscene engine's step interpreter
+  zeroes it. Whether the `0x07` module is never loaded or loaded elsewhere is the
+  open question. Also open: the movie-engine branch (`F1C0 == 0`, gated by the
+  word `0x80197794` — *not* `0x8019F794`, see session 43); menu `0x18` natural
+  entry; scene `0x12` = Load Game (needs save pre-state); `OGRE_NO_AUDIO=1`
+  early-boot crash; `osViFade`. Scene `0x17` = the Tutorial and runs (bank unit
+  B, records 17/18). Dialogue text is LZ-compressed (`func_8007A110`,
+  `tools/ogrelz.py --asset`). Current status and details: the newest
+  `docs/HANDOFF-*.md` and `PLAN.md`.
 - **A swappable RAM range must not be compiled into the unit whose code calls
   into it.** If two records occupy the same RAM (banks of one arena), put
   *both* in other units: then N64Recomp emits `LOOKUP_FUNC(addr)` for the call
