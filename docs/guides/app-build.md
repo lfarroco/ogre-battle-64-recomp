@@ -131,9 +131,10 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_FOG_SCALE=<percent>` | scale the fog image's intensity when it is staged for the fog group (**default 100 = the game's own asset**, which is the right level: the combiner is `RGB=ONE, ALPHA=TEXEL0`, so the overlay is white modulated by the layer image's intensity, mean 5.1% / peak 20.4%). Lower values stage a scaled copy in the last 64 KiB of RDRAM, which OB64 leaves untouched (the first use reports it if that area is not zero); `45` gives a softer, non-retail look |
 | `OGRE_FOG_SUMMARY=1` | one `[fog-summary]` line per display list (groups repaired, layer/image used) plus one `[fog-group]` line per white group (`s`, `t`, the inherited tile, layer, image installed). This is how the `©1999 QUEST` blink was traced |
 | `OGRE_NJPEG=0` | force the **stub** for the Nintendo-JPEG decoder (`M_NJPEGTASK`, type 4: the New Game step ≥ 2 background decode). On by default since session 47, when the recompiled microcode was fixed (`text_address` is a label base — see `docs/guides/rsp-microcode.md`); it costs 0–1 ms per image |
-| `OGRE_NJPEG_TRACE=1` | `[njpeg]` lines: the colour image the YUV macroblock draw landed in (the buffer the readback should copy — see `tools/njpeg_readback.py` and `docs/HANDOFF-2026-09-15-session48.md`) |
+| `OGRE_NJPEG_TRACE=1` | `[njpeg]` lines: the colour image the YUV macroblock draw landed in. RT64 records it in the scratch word, but it is only *re*set by a YUV-texture-then-colour-image pair and never cleared, so it can be stale — the readback trusts the game's own `state[0x64]` instead (`tools/njpeg_readback.py`, `docs/HANDOFF-2026-09-16-session57.md` §1) |
+| `OGRE_NJREAD_LOG=1` | `[njread]` one line per njpeg stage-3 pass (`func_ovlE_8019976C`): the pass number, scene/step, the framebuffer the game's `state[0x64]` selects, which rule the `njpeg_readback.py` patch applied (`game` or `scratch`), the scratch word (`cimg`/`njpeg`/`lastfb`), the display word `D_800C4BB8`, and the pass's destination/size. This is how the stale-source artifact was found and is the before/after check for it |
 | `OGRE_YUV_TRACE=1` | `[yuv]` one line per `G_SETTIMG` with `fmt=YUV` (the njpeg macroblock texture image): confirms the `0x800A5110` draws reach RT64 at all |
-| `OGRE_NJ_WAIT_MS=<n>` | how long the **RSP worker** waits after a display list for the game's njpeg framebuffers (`0x400`/`0x25C00`/`0x4B400`) to appear in RT64's framebuffer manager (default `500`; `0` disables). The game reads one of them back with the CPU right after its own RSP wait, and the port completes the emulated task as soon as RT64 has the list — without this the copy runs before the draw renders. Progress: `OGRE_SYNC_TRACE=1` prints `[njwait]` and `[syncfb]` |
+| `OGRE_NJ_WAIT_MS=<n>` | how long the **RSP worker** waits after a display list for the game's njpeg framebuffers (`0x400`/`0x25C00`/`0x4B400`) to appear in RT64's framebuffer manager (default `500`; `0` disables). Measured (session 57): once the game has drawn into those buffers at all this returns immediately (`[njwait] spins=1 found=1 ms=0`), so it is effectively a no-op; it costs one ~500 ms stall on the run's first display list. The readback is ordered by the game's own DP-completion wait plus `ogre_sync_framebuffers()`, not by this. Progress: `OGRE_SYNC_TRACE=1` prints `[njwait]` and `[syncfb]` |
 | `OGRE_SYNC_TRACE=1` | `[njwait]` (the RSP-worker render wait: spins, found, ms, queue/workload ids), `[syncfb]` (the framebuffer manager at the game's CPU readback) and `[njpair]` (the framebuffer pairs RT64 builds for `0x400`/`0x25C00`/`0x4B400`) |
 | `OGRE_S2D_TRACE=1` | `[s2d]` the first 40 S2DEX 2D-object commands (`G_OBJ_RECTANGLE`/`_R`/`G_OBJ_SPRITE`), with the decoded `uObjSprite` (fmt/siz/image size/stride/TMEM address), the matrix-derived destination rectangle, the target colour image and the current texture image address. This is the diagnostic that showed Ogre Battle 64's 300 macroblock rectangles tiling its 320x240 njpeg framebuffer (session 51) — without the S2DEX2 object commands implemented, the same list looks like "texture loads only" |
 | `OGRE_CONVERT_TRACE=1` | `[convert]` the raw 9-bit `G_SETCONVERT` fields the game programs (`k0..k5`). The YUV16 decode sign-extends and scales them `2*K+1` and converts with `R = Y+K0*V'`, `G = Y+K1*U'+K2*V'`, `B = Y+K3*U'` (`U'=U-128`, `V'=V-128`) — the game sets `k0=175 k1=469 k2=423 k3=222 k4=114 k5=42`, i.e. coefficients `351/−85/−177/445` (session 52; `k4`/`k5` are the combiner's `K4`/`K5`, used raw over 255) |
@@ -353,6 +354,44 @@ Renders a region as an N64 texture (`rgba16`, `rgba32`, `ia16`, `ia8`, `ia4`,
 `i8`, `i4`, `ci8` + `--palette`) to an RGBA PNG (zlib only, no Pillow) and
 prints a luminance summary with a **`(near-)uniform` note** — the difference
 between "nobody drew this" and "an asset failed to decode".
+
+### `OGRE_NJREAD_LOG=1` — which framebuffer the njpeg readback copies
+
+```sh
+OGRE_NJREAD_LOG=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000 \
+  OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,a,a,a" \
+  OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64 assets/ogre64.z64 \
+  > /dev/null 2> /tmp/njread.log
+grep njread /tmp/njread.log
+```
+
+One `[njread]` line per stage-3 pass. Each New Game njpeg assembly runs four
+passes — the four tiles of the backdrop's 2x2 grid, `width x height` 240x320
+(top-left, destination `0x801AAE90`), 240x176 (`0x801D06B0`, bottom-left),
+144x320 (`0x801E50D0`, top-right), 144x176 (`0x801FB8F0`, bottom-right) — each
+with its own YUV draw. The four correct sources are the deterministic frames
+`573FF47B8A5A3279`, `48892A76C362A4BA`, `3F79B6732153B2FD`, `38BCBEBE5B555C3C`
+in that order, so an off-by-one read shows as a frame mismatch. **Pass 0 (the
+top-left tile) is where a stale selection shows**: the scratch word still names
+the previous step's target while `gameSrc` is the current one. See
+`docs/HANDOFF-2026-09-16-session57.md` §1.
+
+To check the *result* rather than the selection — the assembled backdrop the game
+blits — drive the live console from game state, not wall time (the 8 MiB dumps
+shift the tap schedule, so a fixed-time schedule does not reproduce):
+
+```sh
+# poll `c` and dump only while the dispatcher is on a chosen scene+step
+printf 'c\n' > /tmp/ogre-console.txt            # read state...
+printf 'dump /tmp/at-cathedral.bin\n' > /tmp/ogre-console.txt   # ...then dump
+tools/rdram.py /tmp/at-cathedral.bin image 0x80243E28 --width 320 -o /tmp/dst.png
+```
+
+With the console reading `desc=0x8018FC3C` and `step=0x021D8002` (the cathedral
+step after the name form), `0x80243E28` is the backdrop: the fix shows the
+cathedral, the old scratch-first rule showed the name-entry form — that is the
+intermittent artifact (`docs/proofs/native-newgame-backdrop-old-rule.png` vs
+`-backdrop-fixed.png`).
 
 ### `tools/rdram.py diff A.bin B.bin` — what did a run change, by module?
 

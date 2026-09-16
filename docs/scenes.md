@@ -55,9 +55,14 @@ step 10 the closing movie. Confirm against the captures when those steps run.
 Session 45 got as far as step 2 (which renders and then waits: its dialogue is
 advanced with the button the quill prompts). **Session 56 ran the whole opening**
 with a fixed tap-A schedule (developer-confirmed end to end): name form → date of
-birth → personality questions → `0x16`. Two open items from that run:
-a rectangular **stale backdrop region** after the forms (session 56 §1) and the
-**sequence-end crash** the developer sees (session 56 §2). The tap schedule that
+birth → personality questions → `0x16`. **Session 57 fixed the stale backdrop**
+(it was the njpeg readback copying the *previous* screen — RT64's scratch word is
+stale at the first pass of every assembly; `docs/HANDOFF-2026-09-16-session57.md`
+§1) and found what stops the port right after `0x16`: the scene chunk-DMAs **ROM
+`0x244770` → RAM `0x801D0860`**, which `config-bankC.yaml` carries as a `bin` gap
+while `bankRec10a` owns that RAM, so the calls hit the runtime's streamed stub and
+spin (§2). The developer's **sequence-end crash** is still not reproduced in the
+port (200 s, exit 0). The tap schedule that
 reaches the sequence without skipping the movie is
 `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D`; a schedule that keeps
 pressing buttons inside `0x0D` advances the dialogue and the step

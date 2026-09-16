@@ -16,6 +16,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "hle/rt64_application.h"
 #include "shared/rt64_f3d_defines.h"
@@ -658,7 +659,80 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
     void sync_framebuffers() {
         if (app_ != nullptr) {
             app_->syncFramebuffers();
+            readback_probe();
         }
+    }
+
+    // OGRE_NJREAD_LOG=1: one line per njpeg stage-3 pass (func_ovlE_8019976C's
+    // row loop), saying which framebuffer the copy is about to read. This is how
+    // the stale-source defect was found (session 57): the patch used to override
+    // the game's own `state[0x64]` with RT64's never-cleared scratch word, which
+    // at the first pass of an assembly still named the *previous* screen's
+    // framebuffer. `gameSrc` is the game's choice, the `game`/`scratch` token says
+    // which one the patch applied, and the parenthesised words are RT64's record
+    // (`scratch only when the game's index had no framebuffer-table match`).
+    void readback_probe() {
+        if (getenv("OGRE_NJREAD_LOG") == nullptr) {
+            return;
+        }
+        if (app_ == nullptr) {
+            return;
+        }
+        uint8_t* r = app_->core.RDRAM;
+        if (r == nullptr) {
+            return;
+        }
+        auto word = [&r](uint32_t guest) -> uint32_t {
+            const uint8_t* b = r + (guest - 0x80000000u);
+            return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+        };
+        const uint32_t dispWord = word(0x800C4BB8);
+        const bool displayKnown = (dispWord == word(0x800A8204)) || (dispWord == word(0x800A8208)) ||
+                                  (dispWord == word(0x800A820C));
+        // The njpeg pipeline state object (bankE loads it from 0x8019A680): the
+        // stage-3 copy reads +0x64 (source), writes +0x70 (destination), with
+        // +0x78 columns and +0x7A rows.
+        const uint32_t st = word(0x8019A680);
+        static uint32_t pass = 0;
+        if (st == 0) {
+            return;
+        }
+        // FNV-1a over the 320x240 RGB555 source, in the runtime's byte order. The
+        // four passes of one assembly read four fixed frames in order, so a
+        // 4-periodic sequence of `src` hashes is a self-contained "the copy read
+        // the right sub-image" check; `alt` is what the scratch-first rule would
+        // have read instead, and is 0 when it agrees.
+        auto sourceSig = [&r](uint32_t guest) -> uint64_t {
+            const uint8_t* b = r + ((guest & 0x1FFFFFFFu));
+            uint64_t h = 1469598103934665603ull;
+            uint32_t nz = 0;
+            for (uint32_t i = 0; i < 320u * 240u * 2u; i++) {
+                h = (h ^ b[i]) * 1099511628211ull;
+                nz += (b[i] != 0);
+            }
+            return (h & 0xFFFFFFFFFFFFull) | ((uint64_t)nz << 48);
+        };
+        const uint32_t gameSrc = word(st + 0x64);
+        const uint32_t njpegWord = word(0x807FFC08);
+        const uint32_t lastfbWord = word(0x807FFC0C);
+        const uint32_t scratchFirst = njpegWord ? njpegWord : lastfbWord;
+        const uint32_t used = displayKnown ? gameSrc : (scratchFirst ? scratchFirst : gameSrc);
+        const uint64_t srcSig = sourceSig(used);
+        // What the pre-session-57 rule (scratch word first) would have read; 0 when
+        // it agrees with the game, in which case the two rules are indistinguishable
+        // for this pass.
+        const uint64_t altSig = (displayKnown && (scratchFirst != 0) &&
+                                 ((scratchFirst & 0x1FFFFFFFu) != (gameSrc & 0x1FFFFFFFu)))
+                                    ? sourceSig(scratchFirst)
+                                    : 0;
+        fprintf(stderr,
+                "[njread] pass=%u present=%u scene=0x%04X step=0x%08X src=0x%08X %s sig=%016llX alt=%016llX "
+                "(gameSrc=0x%08X scratch njpeg=0x%06X lastfb=0x%06X disp=0x%08X) dst=0x%08X w=%u h=%u\n",
+                pass++, present_count_, word(0x800C4C26) & 0xFFFFu, word(0x8018F1C0), used,
+                displayKnown ? "game" : "scratch", (unsigned long long)srcSig, (unsigned long long)altSig,
+                gameSrc, njpegWord, lastfbWord, dispWord, word(st + 0x70),
+                word(st + 0x78) & 0xFFFFu, word(st + 0x7A) & 0xFFFFu);
+        fflush(stderr);
     }
 
     RT64Renderer(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
@@ -997,6 +1071,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         if (app_ == nullptr) {
             return;
         }
+        ++present_count_;
         // OGRE_VI_TRACE=1: report the VI state RT64 is about to present. The
         // presenter only draws when the decoded VI is visible and has a nonzero
         // size (rt64_present_queue.cpp: viVisible/fbSize), so a black canvas is
@@ -1156,6 +1231,10 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
     // "the game never sends a gfx task", and nothing else on this path reports
     // that, so log the first few and then every 50th.
     uint32_t dl_count_ = 0;
+    // Presents seen by update_screen(). RT64's `OGRE_CAPTURE_PRESENT` names its
+    // files by the same count, so the `[njread]` line's present index says which
+    // capture to look at for a given njpeg pass.
+    uint32_t present_count_ = 0;
 };
 
 }  // namespace

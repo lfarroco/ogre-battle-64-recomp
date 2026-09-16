@@ -13,13 +13,15 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-16 (57) | **The njpeg readback's source is the game's own framebuffer choice (`state[0x64]`), not RT64's scratch word.** RT64's `OGRE_NJPEG_SCRATCH` `+8` is only *re*set by a YUV-texture-image-then-colour-image pair and is **never cleared**, so at the first pass of an assembly it still names the previous step's framebuffer — which by then holds the previous screen (the name/date-of-birth form). That is the intermittent stale-backdrop rectangle, not a render-vs-readback race. `tools/njpeg_readback.py` now keeps `state[0x64]` whenever `D_800C4BB8` matches an entry of the framebuffer table `0x800A8204`, and uses the scratch word only as the session-48 fallback. Measured over 10 runs / 120 stage-3 passes: old rule wrong **13** (always pass 0), new rule wrong **0** | `docs/HANDOFF-2026-09-16-session57.md` §1; `tools/njpeg_readback.py` |
+| 2026-09-16 (57b) | **A game-thread framebuffer readback is already ordered by the game's DP-completion wait, so no extra handshake is needed.** `sp_complete()` does run before `send_dl()` (`ultramodern/src/events.cpp:422`/`:429`), but the game waits on the **DP** event (`:432`, its registered queue is `0x800E8BF4`); delaying the display list 400 ms inside `send_dl` never let the readback run inside the delay, and an in-flight-gfx-task handshake implemented for the window never blocked once (reverted). `ogre_sync_framebuffers()` is what forces the RDP's pixels back to RDRAM before the copy | `docs/HANDOFF-2026-09-16-session57.md` §1, "Why the render-vs-readback race hypothesis is wrong" |
 | 2026-09-16 (56) | **Guest RAM is queried from a *running* game, not only from a bounded run's exit dump.** A live console in the app (`ogre::console`, `app/src/sdl_platform.cpp`) executes read/search/checksum/dump commands on the **main thread** (where a multi-megabyte write cannot race the game thread), triggered either by a watched command file (`OGRE_CONSOLE_FILE`, default `/tmp/ogre-console.txt`; lines run, file removed) or by the number keys `1`..`9` (`OGRE_KEY_<n>`). This exists because every "what is in RAM at the moment X happens" question in this project was previously answered by an exit dump that had already been overwritten (session 56's backdrop readback). Byte order follows `tools/rdram.py` (logical word = LE word at `addr-0x80000000`, logical byte = `addr ^ 3`) | `docs/guides/app-build.md` → "The live console"; `docs/HANDOFF-2026-09-16-session56.md` §4 |
 | 2026-09-16 (55) | **Scene `0x07`'s form module is streamed code with its own bank unit (H), and a call into a *streamed module's* RAM must be dispatched like any other swappable range.** The module is ROM `0x712A0` (`0x8600`) → RAM `0x8019A7C0`, chunk-DMA'd by `func_8017B794`, the enter of the real scene-`0x07` descriptor **`D_8018FDAC`** (mask `0x00000002`) — session 54's `D_8018FB98`/`func_80177F04`/`0x801A578C` reading was the wrong table entry. Its RAM overlaps record 3 (unit A) and overlay C (the main ELF), so build-time bindings ran overlay C's bodies: of the module's 24 internal `jal` targets, **0** were main-ELF function entries. The fix is session 45's model applied to a module that is not in the segment table: new unit H, and `make recomp`'s `--only` list carries the six calls into it. `tools/cross_bank.py`'s `overloaded()` also had to be fixed (`hi = min(c.hi)` → `max(c.hi)`; it hid the module's whole range behind record 3's earlier start). The form renders | `docs/HANDOFF-2026-09-16-session55.md`; `docs/proofs/native-newgame-name-entry.png` |
 | 2026-09-15 (52) | **The YUV→RGB conversion must sign-extend `G_SETCONVERT`'s 9-bit fields, scale them `2*K+1`, and pair `K1` with U.** The hardware coefficients are `K = 2*sext9(k)+1` (GLideN64 `gDPSetConvert`: `SIGN(k,9)<<1 + 1`; parallel-rdp `set_convert`: `2*sext<9>(k)+1`), giving `351/−85/−177/445` for the game's `k0..k3 = 175/469/423/222`, and the rows are `R = Y + K0*V'`, `G = Y + K1*U' + K2*V'`, `B = Y + K3*U'` (`U'=U-128`, `V'=V-128`). Session 51 used the raw **unsigned** fields directly and paired `K1` with V, so the green row exploded positive and the cathedral backdrop drew as blue banding; the geometry, the de-interleaved TMEM planes and the `[U, Y(even), V, Y(odd)]` source were all verified correct, so **session 51 §7's "the defect is in sampling/upload" is wrong**. `K4`/`K5` as *combiner* inputs stay the raw fields over 255 (GLideN64 `_FIXED2FLOATCOLOR(k,8)`) | `docs/HANDOFF-2026-09-15-session52.md` §1-§3 |
 | 2026-09-15 (51) | **The `0x800A5110` njpeg display list is an S2DEX2 list and its `0xDA` command is the draw.** The ucode is `S2DEX 2.08` (`GBIUCode::S2DEX2` — the game's ucode text/data hashes match RT64's `S2DEX2_FIFO_2_08` database entries exactly), so per macroblock `0xDC` = **`G_OBJ_MOVEMEM`** (`gSPObjSubMatrix`, the 8-byte `uObjSubMtx`) and `0xDA` = **`G_OBJ_RECTANGLE_R`** (`gSPObjRectangleR`, the 24-byte `uObjSprite`), not F3DEX2 `G_MOVEMEM`/`G_MTX`. RT64's `GBI_S2DEX2` mapped neither, so the geometry was skipped and only the texture loads ran — **session 50 §9's "the list carries no geometry" is wrong and is corrected here**. Both commands (plus `G_OBJ_SPRITE`/`G_OBJ_RECTANGLE` and the four `objLoadTx*` handlers that `assert(false)`'d) are implemented in RT64; a live trace shows 300 rectangles tiling the 320x240 `G_SETCIMG` target exactly. **A YUV tile must also be loaded as the RDP's two-plane format** — one luma byte per texel in TMEM's upper half, one U/V pair per two texels in the lower — so a YUV `LOADTILE` de-interleaves, the sampler follows parallel-rdp's `sample_texel_yuv16`, and YUV16 tiles require raw-TMEM sampling. The source word is `[U, Y(even), V, Y(odd)]`, correcting session 50 §2. Still open: the sampled colours (blue banding, not the backdrop) | `docs/HANDOFF-2026-09-15-session51.md` §1-§7 |
 | 2026-09-15 (50) | **RT64's YUV16 decode is implemented from the code that writes the format, not from a guessed byte pairing.** In the 32-bit word at `4*(2t + (s>>1))`: `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`, `byte3 = Y(s odd)` (mupen64plus-rsp-hle `jpeg.c` `GetUYVY` / `jpeg_decode_OB`); luma is sampled from the upper TMEM half (`OR 0x800`) with the XOR-3/XOR-4 swap, chroma from the lower half, converted with the matrix **the game programs via `G_SETCONVERT`** (`k0=175 k1=469 k2=423 k3=222`). The old stub returned black for every YUV texel, which is why the framebuffer the game read back was black. The remaining wall is **render timing**: the port completes the emulated RSP task as soon as the display list reaches RT64, so the game's CPU copy can run before the draw renders; wait on the **RSP worker** (`Application::waitForGameFramebuffers`), never on the game thread (it deadlocks). A follow-up static trace fixed the readback's identity: the four `func_ovlE_8019976C` stage-3 copies **are** the njpeg readback (sole caller bankE `0x80199D80` inside `func_ovlE_80199D30`), they are the four sub-images of one `'B5'` asset (ROM `0x7CADAC`), and they run in scene `0x02` as a preload because `0x0D` streams bankRec2 over unit E's RAM. ~~byte0 = Y(even), byte1 = V, byte2 = U, byte3 = Y(odd)~~ and ~~the sampler design (luma at `| 0x800` with an XOR-3 swap, chroma via a half-word XOR)~~ are **corrected by session 51**: the word is `[U, Y(even), V, Y(odd)]`, and the RDP keeps luma one byte per texel at `offset + stride*t + s` in the upper half with U/V pairs in the lower | `docs/HANDOFF-2026-09-15-session50.md` §2-§5; corrections in `docs/HANDOFF-2026-09-15-session51.md` §6 |
 | 2026-09-15 (49) | **The cathedral background is still black.** A YUV16 decoder was written for RT64's `TextureDecoder.hlsli` (which does return black for `G_IM_FMT_YUV`) and **reverted**: it produced a corrupt blob, not the backdrop, so the hypothesis is unproven. The game's CPU readback copies a zero framebuffer, upstream of any decode. Next: check GLideN64 — the emulator upstream closed [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102) with | entry below; `docs/HANDOFF-2026-09-15-session49.md` §2/§7 |
-| 2026-09-15 (48) | **The njpeg readback copies the buffer its own YUV draw landed in**, recorded by RT64 in an RDRAM scratch word; `tools/njpeg_readback.py` (run by `make bank-recomp`) patches the stage-3 copy source so it survives regeneration, and is a no-op on renderers that do not maintain the scratch word. ~~The cathedral background renders~~ — **superseded by session 49**: harmless, but the readback source was never the wall | entry below (with its banner); `docs/HANDOFF-2026-09-15-session48.md` |
+| 2026-09-15 (48) | ~~The njpeg readback copies the buffer its own YUV draw landed in~~, recorded by RT64 in an RDRAM scratch word; `tools/njpeg_readback.py` (run by `make bank-recomp`) patches the stage-3 copy source so it survives regeneration, and is a no-op on renderers that do not maintain the scratch word. **Corrected by session 57**: the *mechanism* (a regeneration-surviving patch) stands, but the scratch word is not a valid source selector — it is stale at the first pass of every assembly, and preferring it is what produced the intermittent stale-backdrop rectangle. The patch now keeps the game's own `state[0x64]` and uses the scratch word only as a fallback. ~~The cathedral background renders~~ — **superseded by session 49**: harmless, but the readback source was never the wall | entry below (with its banner); `docs/HANDOFF-2026-09-15-session48.md`; correction in `docs/HANDOFF-2026-09-16-session57.md` §1 |
 | 2026-09-15 (48b) | The game's framebuffer table is at **guest `0x800A8204`** = `{0x80000400, 0x80025C00, 0x8004B400}` — **session 47 read `0x800B8204`, which is padding inside the data segment**. RT64 does draw the `0x800A5110` YUV macroblocks and does write framebuffers back to RDRAM; session 47's two candidate causes are disproved | `docs/HANDOFF-2026-09-15-session48.md` §1 |
 | 2026-09-15 (47) | **RSPRecomp's `text_address` is a label base, not an address**: it must be the RSP/IMEM DMA address the microcode was *assembled* for (masked `0x1FFF`), e.g. `0x1080` for a ucode the boot loader loads at IMEM `0x080`; getting it wrong rotates every `j` target by the difference and silently walks the wrong blocks. The njpg decoder is therefore **on by default** (`OGRE_NJPEG=0` forces the stub) | entry below; `docs/HANDOFF-2026-09-15-session47.md` §1-2 |
 | 2026-09-15 (46) | Non-gfx RSP microcode is recompiled with RSPRecomp (`make rsp-recomp` → `RspFuncs/`) and dispatched by ucode address in `app/src/rsp.cpp`; the gfx ucode still goes to RT64. ~~The M_NJPEGTASK decoder is **opt-in** (`OGRE_NJPEG=1`) until its output is correct~~ — **superseded by session 47**: the output is correct and it is on by default | entry below; `docs/HANDOFF-2026-09-15-session46.md` |
@@ -40,6 +42,72 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-16 (session 57) — the stale New Game backdrop is a stale readback *source*; the sequence end streams an uncompiled module
+
+**Decision (1): the njpeg stage-3 copy's source is the game's own framebuffer
+choice.** `tools/njpeg_readback.py` now keeps `state[0x64]` whenever the word the
+game derives its index from (`D_800C4BB8`) matches one of the three entries of
+the framebuffer table at `0x800A8204`, and falls back to RT64's scratch word
+(`0x807FFC08`, then `+12`) only when it does not.
+
+**Why.** Session 56 concluded the intermittent "cathedral backdrop shows a
+rectangle of the previous form" was a render-vs-readback timing race. It is not.
+At the instruction level the game computes the source itself
+(`func_ovlE_80199A08`: the index is built at `0x80199AF8`-`0x80199B68` and stored
+into `state[0x64]` at `0x80199B98` as `D_800A8204[index]`; index 1 exactly when
+the display word equals table[0], else 0 — i.e. the copy reads the buffer that is
+*not* displayed). RT64's scratch word `+8` is only *re*set when a display list
+sets a YUV texture image followed by a colour image, and is **never cleared**, so
+at the **first pass of every assembly** it still names the previous step's
+target — the buffer that by then holds the previous screen. Preferring it
+unconditionally replaced a correct selection with the name-entry form or the
+date-of-birth form.
+
+Measured with a temporary per-pass probe (`OGRE_NJREAD_LOG=1`, kept as a
+diagnostic) over 10 runs / 120 stage-3 passes, against the expected sub-image per
+pass (the four sources are the deterministic frames `573FF47B8A5A3279`,
+`48892A76C362A4BA`, `3F79B6732153B2FD`, `38BCBEBE5B555C3C` in order). Every stale
+read is **pass 0** (destination `0x801AAE90`, 240x320); the developer reports the
+broken on-screen tile as the **top-left** of the 2x2 backdrop, and pass 0 is the
+only stale pass, so they are almost certainly the same chunk — inferred, not read
+out of the blit, and the framebuffer's own chunk order is *not* the scene order
+(`docs/guides/njpeg-backgrounds.md`). Confirmed end to
+end with the **live console** (dump while the dispatcher reports scene-`0x0D` step
+`0x021D8002`): `0x80243E28` is the name-entry form under the old rule (5/5 dumps)
+and the cathedral with the fix (5/5) —
+`docs/proofs/native-newgame-backdrop-old-rule.png` / `-backdrop-fixed.png`:
+
+| rule | wrong source |
+|---|---|
+| scratch word first (the old patch) | **13** / 120, always pass 0, always the previous screen |
+| game's `state[0x64]` first (this session) | **0** / 120 |
+
+**Decision (2): no extra readback handshake.** `sp_complete()` does run before
+`renderer_context->send_dl()` (`ultramodern/src/events.cpp:422` vs `:429`), but
+the game does not act on that event — it waits for the **DP** completion, which
+`:432` posts *after* `send_dl`. A game-thread "wait for the in-flight display
+list" handshake was implemented, and it never blocked once, even with the njpeg
+display list deliberately delayed 400 ms inside `send_dl`; with it disabled the
+copy's content was still correct in 36/36 passes. It was reverted, and
+`git -C tools/N64ModernRuntime diff` is byte-identical to
+`n64modernruntime-ob64.patch`. `ogre_sync_framebuffers()` → `State::syncFramebuffers`
+(waits for the submitted workload, then `copyLastNativeToRAM` on every framebuffer)
+is what actually puts the RDP's pixels in RDRAM before the copy; the game issues
+no further display list until the copy returns, so the buffer cannot be recycled
+mid-copy.
+
+**Decision (3): scene `0x16` ends at an uncompiled module, and that is the next
+job.** The crash is not reproduced (200 s run, exit 0), but after `0x16` starts
+the game spins — 17 439 calls each — on `0x801D40D0`/`0x801D410C`, which
+`[bank] UNKNOWN module rom=0x244770 ram=0x801D0860` explains: scene `0x16`
+chunk-DMAs ROM `0x244770` (≈`0x7500`) over the RAM `bankRec10a` owns, and
+`config-bankC.yaml` carries that ROM range as a `bin` **gap**, so the port has no
+code for it. Fix with the session-55 treatment: compile the record into a bank
+unit other than `bankRec10a`'s, so the calls emit `LOOKUP_FUNC` and the DMA-driven
+bank map picks the resident module.
 
 ---
 

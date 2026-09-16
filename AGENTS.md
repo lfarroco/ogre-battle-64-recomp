@@ -345,16 +345,36 @@ from here.
   **combiner** inputs stay the raw fields over 255 (GLideN64
   `_FIXED2FLOATCOLOR(k,8)`), which is what RT64 already did. Also still
   true: the port completes the emulated RSP task as soon as the display list
-  reaches RT64, so the game's CPU copy can run before the renderer has drawn —
-  `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) bounds
-  that wait, and a wait on the *game* thread deadlocks. The readback that matters
+  reaches RT64 — but the game then waits for the **DP** completion, which the
+  runtime posts only *after* `send_dl` (`events.cpp:432`), so the CPU copy does
+  **not** race the render, and it calls `ogre_sync_framebuffers()` first, which
+  forces the RDP's pixels back to RDRAM. `Application::waitForGameFramebuffers`
+  (RSP worker, `OGRE_NJ_WAIT_MS`) was added for that race and is a no-op once the
+  game's framebuffers exist (session 57 measured `spins=1 found=1 ms=0`; it costs
+  one ~500 ms stall on the run's first display list). **The njpeg readback's source
+  is the game's own `state[0x64]`, not RT64's scratch word** — `0x807FFC08` is
+  never cleared, so it is stale at the first pass of every assembly and being
+  preferred unconditionally is what produced the intermittent stale-backdrop
+  rectangle (`tools/njpeg_readback.py`, `docs/HANDOFF-2026-09-16-session57.md`
+  §1). The readback that matters
   runs in **scene `0x02`** (the four stage-3 copies in `func_ovlE_8019976C`, sole
   caller bankE `0x80199D80` inside `func_ovlE_80199D30`'s drive loop; the four
-  sizes 320x240/176x240/320x144/176x144 are the four sub-images of one `'B5'`
-  asset, ROM `0x7CADAC`); the assembled image at `0x80243E28` now renders as the
-  cathedral.
-  See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` §1-§7 and
-  `-session50.md` §5/§9.
+  passes copy `state[0x78]` x `state[0x7A]` = 240x320 / 240x176 / 144x320 /
+  144x176 into `0x801AAE90` / `0x801D06B0` / `0x801E50D0` / `0x801FB8F0`, i.e.
+  the four chunks of the scene's 2x2 background; the framebuffer's own chunk
+  order is **not** the scene order, so do not infer an on-screen position from a
+  render of it — see `docs/guides/njpeg-backgrounds.md`);
+  the assembled image at `0x80243E28` renders as the
+  cathedral, and the opening now runs to **scene `0x16`**, which chunk-DMAs an
+  **uncompiled module** (ROM `0x244770` → RAM `0x801D0860`, a `bin` gap in
+  `config-bankC.yaml` whose RAM `bankRec10a` also owns) and then spins on the
+  runtime's streamed stub — the concrete sequence-end wall (session 57 §2).
+  See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` §1-§7,
+  `-session50.md` §5/§9 and `-session57.md`. **Other large backgrounds use the
+  same machinery and the dominant one is the same size** — all 75 njpeg
+  assets are enumerated (42 are 320x240) with the asset format, the tile
+  geometry and the check recipe in `docs/guides/njpeg-backgrounds.md`; the
+  stale-source fix is global to that path, not cathedral-specific.
 - **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables

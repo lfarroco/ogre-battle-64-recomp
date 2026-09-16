@@ -666,35 +666,52 @@ hardware. RT64 remains the primary native renderer throughout. See
     off to `0x02`/`0x0D` at `t≈20.7 s`. Proof
     `docs/proofs/native-newgame-name-entry.png`. See
     `docs/HANDOFF-2026-09-16-session55.md`.
-  - 🚧 **The opening runs through the whole New Game sequence (session 56,
-    developer-confirmed)**: name form → **date of birth** → **personality
-    questions** (steps 3–8) → **scene `0x16`** (descriptor `0x8018FC00`, mask
-    `0x400`) at `t≈54.3 s` (4×). Two open items: (a) the cathedral backdrop could
-    come back with a **rectangular stale region** (the previous form's content,
-    intermittent). **Session 56 found the cause with a live dump taken while the
-    artifact was on screen**: all three game framebuffers
-    (`0x80000400`/`0x80025C00`/`0x8004B400`) contain it, and the readback
-    destination `0x80243E28` holds a complete *picture of the form screen* — so
-    the game copied a frame that was already showing the form, and every later
-    cathedral draw blits that. The readback **source selection** (the
-    `njpeg_readback.py` patch: RT64's YUV handshake scratch `+8`, then the most
-    recent framebuffer `+12`, then the game's own `state[0x64]`) is the prime
-    suspect; the cheap A/B is `python3 tools/njpeg_readback.py --revert`. See
-    `docs/HANDOFF-2026-09-16-session56.md` §1. **The A/B was run and the patch is
-    not the cause** (the reverted build produces a pixel-identical bad backdrop),
-    and the developer captured the decisive **good/bad pair**: with no artifact
-    `0x80243E28` holds the correct throne-room backdrop and the scratch colour
-    image is `0x00025C00`; with the artifact it holds the **date-of-birth form**
-    and the scratch is `0x00000400`, while all three display framebuffers hold
-    the correctly rendered current frame in *both* dumps. So the source
-    *selection* is self-consistent (game index == RT64 handshake); the defect is
-    **render-vs-readback timing** — the assembly copies a framebuffer before the
-    backdrop draw has landed in it. Next: a dump at the instant of assembly and
-    the `waitForGameFramebuffers` / `OGRE_NJ_WAIT_MS` path in
-    `app/src/renderer.cpp`. (b) the **sequence-end crash**
-    the developer saw twice is **not** reproduced in the port's own 150 s run
-    (exit 0 through `0x16`); with the live console, use `dump` at the moment it
-    happens. See `docs/HANDOFF-2026-09-16-session56.md`.
+  - ✅ **The opening runs through the whole New Game sequence, and the stale
+    backdrop is fixed (sessions 56/57, developer-confirmed)**: name form →
+    **date of birth** → **personality questions** (steps 3–8) → **scene `0x16`**
+    (descriptor `0x8018FC00`, mask `0x400`) at `t≈44.7 s` (4×). The cathedral
+    backdrop could come back with a **rectangular stale region** (the previous
+    form's content, intermittent). **Session 56** found the artifact baked into
+    the game's own display framebuffers and the readback destination
+    `0x80243E28` holding a picture of the form, and concluded "render-vs-readback
+    timing". **Session 57 corrects that: it is the readback *source selection*,
+    not timing.** `tools/njpeg_readback.py` preferred RT64's scratch word `+8`,
+    which is only re-set by a YUV-texture-then-colour-image pair and **never
+    cleared**, so at the first pass of an assembly it still named the *previous*
+    step's framebuffer — by then holding the previous screen (the form). The
+    game's own `state[0x64]` (written at `0x80199B98` from the framebuffer table
+    `D_800A8204`, indexed at `0x80199AF8`-`0x80199B68` by `D_800C4BB8`; it selects
+    the buffer that is *not* displayed) named the correct sub-image at every pass
+    measured. The patch now keeps the game's choice whenever `D_800C4BB8` matches
+    a table entry and uses the scratch word only as the fallback (the session-48
+    case). Measured over 10 runs / 120 stage-3 passes with `OGRE_NJREAD_LOG=1`:
+    old rule wrong **13** (always pass 0, always the previous screen), new rule
+    wrong **0**. The stale pass was always **pass 0** (destination `0x801AAE90`,
+    240x320) — the developer reports the broken on-screen tile as the top-left of
+    the 4-image 2x2 backdrop, and pass 0 is the only stale pass, so they are
+    almost certainly the same chunk (inferred, not read out of the blit; the
+    framebuffer's own chunk order is scrambled — see
+    `docs/guides/njpeg-backgrounds.md`). **Live-console A/B** (dump while the dispatcher
+    reports scene-`0x0D` step `0x021D8002`): `0x80243E28` is the name-entry form
+    under the old rule (5/5) and the cathedral with the fix (5/5) —
+    `docs/proofs/native-newgame-backdrop-old-rule.png` / `-backdrop-fixed.png`.
+    The ordering hypothesis is also wrong: `sp_complete()` runs
+    before `send_dl` (`events.cpp:422`/`:429`) but the game waits for the **DP**
+    completion (`:432`, queue `0x800E8BF4`), so a game-thread handshake
+    implemented for it never blocked once, even with the njpeg display list
+    deliberately delayed 400 ms inside `send_dl`; it was reverted.
+    `ogre_sync_framebuffers()` still forces the RDP's pixels back to RDRAM before
+    the copy. Proofs: `docs/proofs/native-newgame-readback-stale-source.png` /
+    `-correct-source.png`, `docs/proofs/native-newgame-cathedral-post-dob.png`.
+    See `docs/HANDOFF-2026-09-16-session57.md` §1.
+  - 🚧 **Scene `0x16` streams a module the port never compiled (session 57)**:
+    ROM `0x244770` (≈`0x7500`) → RAM `0x801D0860` — the RAM `bankRec10a` owns, and
+    `config-bankC.yaml` carries ROM `0x244770` as a `bin` **gap**. Calls into
+    `0x801D40D0`/`0x801D410C` therefore hit the runtime's streamed stub and spin
+    (17 439 each in the 200 s run); the developer's **sequence-end crash** is not
+    reproduced in the port (exit 0). Fix = the session-55 treatment: compile the
+    record into a bank unit *other* than the one owning `bankRec10a` so the calls
+    emit `LOOKUP_FUNC`. See `docs/HANDOFF-2026-09-16-session57.md` §2.
   - ✅ **Live debug console (session 56, developer's suggestion)**: the running
     game can now be queried on demand instead of only at a bounded run's exit —
     a watched command file (`OGRE_CONSOLE_FILE`, default
