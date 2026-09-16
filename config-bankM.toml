@@ -1,0 +1,18 @@
+# N64Recomp config for streamed-overlay bank unit M (Phase 4).
+# See config-bankC.toml for the model; this unit holds bankRec05, the module
+# scene 0x05 streams to RAM 0x8019A7C0 (the other bank of that RAM is unit H's
+# bankRec07, the scene-0x07 name-entry form module).
+
+[input]
+output_func_path = "BankMFuncs"
+elf_path = "build/bankM.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+# Splat is given the module's own code/data boundary (ROM 0x85838). Extend any
+# piece it still caps in the middle of a call-and-continue emission here (the
+# failure is "use of undeclared label" at the `goto after_N`).
+function_sizes = []

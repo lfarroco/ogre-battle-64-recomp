@@ -742,7 +742,10 @@ hardware. RT64 remains the primary native renderer throughout. See
     behind), and a `data` subsegment needs an explicit following `bin` gap.
     `tools/gen_bank_syms.py` now also sees spimdisasm's `.Lovl<U>_<addr>`
     references. See `docs/HANDOFF-2026-09-16-session58.md` §2.
-  - 🚧 **The chapter-card crash, mechanism pinned down (session 58)** — the
+  - ⚠️ **The chapter-card crash, first reading (session 58) — SUPERSEDED by
+    session 59** (the crash was the record-14 arena's third bank, mis-bound
+    through unit C, not a missing engine init; the "engine word" it names is at
+    `0x8022A994`, not `0x8023A994`). Kept for the trail: the
     developer's end-of-sequence crash reproduces deterministically: `SIGBUS` in
     `func_ovlC_8022C270` on N64 thread 4, right after a `0x02 → 0x0D` visit,
     with `D_8018F1C0 = 0x0431` = **step 1073** = the **"Prologue" chapter
@@ -764,6 +767,39 @@ hardware. RT64 remains the primary native renderer throughout. See
     `sel 2`=`func_ovlC_80226110`, both of which call the init; a mis-dispatch
     there is the session-42-class bug. `docs/HANDOFF-2026-09-16-session58.md`
     §3b/§3d.
+  - ✅ **The chapter-card crash is FIXED — it was a missing third bank of the
+    record-14 arena (session 59)**, and the opening now plays on past the movie
+    into the post-movie story and scene `0x05`. The step's **`-8`** command
+    (`func_ovlC_80227E64` maps the descriptor's last-word low byte 6 through the
+    table at `0x8022ABE0`) selects the `func_ovlC_8022683C` arm at 0x802269DC,
+    which DMAs **ROM `0x286BA0` (0x138F0) → RAM `0x8022ACB0`** — the chapter
+    animation's module, which the port had no code for. `bankRec14a` (the *other*
+    bank of that RAM, ROM `0x29A490`) was compiled into unit C, so the resident
+    interpreter's `jal 0x8022C270`/`0x8022C6E4` and the callback's
+    `jal 0x8022E3F0` were bound to rec14a's bodies; with the chapter module
+    resident the interpreter ran rec14a's layout, left base/pc = 0 and walked
+    guest 0. Fixed with **unit K** (the chapter module) + **unit L**
+    (`bankRec14a` moved out of unit C), so those calls compile as `LOOKUP_FUNC` —
+    plus `bankRec14a`'s ROM end, which was `0x2A82F0` while the game DMAs
+    `0xE860` to `0x2A8CF0` (the truncated 0xA00 held its jump tables; N64Recomp
+    aborted on `jtbl_ovlL_80239270`). Verified: the **Prologue card renders**
+    (`docs/proofs/native-newgame-prologue-card.png`), the story after it renders
+    (`-received-for-duty.png`, `-magnus-old-man.png`), scene `0x05` enters with
+    **0 stub calls**, exit 0. Session 58's global addresses are corrected
+    (`0x8022A970`/`78`/`94`, **not** `0x8023A9xx`). See
+    `docs/HANDOFF-2026-09-16-session59.md`.
+  - ✅ **Scene `0x05`'s module is compiled (session 59, unit M)** — its enter
+    `func_8017B60C` DMAs ROM `0x79750` (0xDAD0) → RAM `0x8019A7C0`, the *other*
+    bank of unit H's scene-`0x07` form module; before this the scene called
+    `0x8019A7C0` and hit the streamed stub. Unit H's own extent is corrected from
+    ROM `0x798A0` (0x8600, session 55's chunk-rounded figure) to `0x79750`
+    (0x84B0, the enter's own `subu`). `app/src/bank_overlays.cpp`'s
+    `is_known_module` now also requires the chunk's rom→ram delta, which is what
+    had hidden this missing module (a plain ROM-range test matched unit H).
+    Scene `0x05` shares scene `0x07`'s update/hook and its enter is a near-twin,
+    so it looks like another UI/form screen, but it renders **black** (static —
+    visible only with `OGRE_PRESENT_ALWAYS=1`) — **what should scene `0x05`
+    show?** (`docs/scenes.md` row 10.)
   - ✅ **`OGRE_CONSOLE_ON_SCENE` / `_STEP` / `_CMD` (session 58)** — run one
     console command the moment a chosen scene (and step) is live, e.g.
     `OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974
@@ -771,9 +807,11 @@ hardware. RT64 remains the primary native renderer throughout. See
     deterministic against the wall-clock route flakiness (a run whose taps
     started before a late title stayed in the attract loop) and is how the
     step-974 checkpoint was taken.
-  - ⬜ **After the chapter animation comes a second movie** (the player received
-    for duty with other soldiers — `docs/scenes.md` row 8, developer-reported);
-    the developer offered screenshots. Ask for them when the port reaches it.
+  - ✅ **After the chapter animation comes the post-movie story (session 59)** —
+    the "received for duty with other soldiers" content (`General Godeslas` over
+    rows of soldiers) and the `Grey-Haired Old Man` / `Magnus` dialogue render
+    (`docs/proofs/native-newgame-received-for-duty.png`, `-magnus-old-man.png`),
+    then the sequence reaches scene `0x05` (`docs/scenes.md` row 8/10).
   - ⬜ **The game's own save system is the Controller Pak — recon done, nothing
     implemented (session 58)**. The developer: *"the game has a save system,
     which we should arrive in one of the next scenes."* The device is the

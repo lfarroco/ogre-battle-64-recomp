@@ -3,12 +3,14 @@
 # Unit H holds the code module scene 0x07 (the New Game name-entry form) streams
 # into record 1's arena *and into overlay C's RAM*:
 #
-#   bankRec07 ROM 0x712A0 (0x8600) -> RAM 0x8019A7C0
+#   bankRec07 ROM 0x712A0 (0x84B0) -> RAM 0x8019A7C0
 #
 # The scene's enter `func_8017B794` DMAs it in 0x200-byte chunks (67 of them,
-# ROM 0x712A0..0x798A0 -> RAM 0x8019A7C0..0x801A2DC0), then copies the first
-# 0x8140 bytes to 0x801A18E0, where the module's own pointer table (at
-# 0x801A18F0, entries 0x801A1B7C..) expects the copied code to run.
+# the last partial: `a2 = 0x79750 - 0x712A0 = 0x84B0`, RAM
+# 0x8019A7C0..0x801A2C70), then copies the first 0x8140 bytes to 0x801A18E0,
+# where the module's own pointer table (at 0x801A18F0, entries 0x801A1B7C..)
+# expects the copied code to run. The other bank of this RAM is unit M
+# (bankRec05, ROM 0x79750, scene 0x05).
 #
 # Why it needs its own unit: the module's RAM range overlaps both **record 3**
 # (unit A, RAM 0x8019EE70..0x801AD5C0) and **overlay C / record 15** (the main
@@ -75,6 +77,9 @@ segments:
       - [0x712A0, asm]
       - [0x783C0, data]
 
-  # Rest of the ROM: record 2 (ROM 0xE4910) and overlay C (ROM 0x1CE040) are
-  # other units, and are not part of this one.
-  - [0x798A0]
+  # Rest of the ROM: scene 0x05's module (unit M) starts at 0x79750, and record
+  # 2 (ROM 0xE4910) / overlay C (ROM 0x1CE040) are other units. The end marker
+  # is 0x79750, the DMA's own end: scene 0x07's enter computes
+  # `a2 = 0x79750 - 0x712A0 = 0x84B0` (session 55 carried 0x798A0, the 67-chunk
+  # rounded figure, which overlapped unit M's ROM by 0x150).
+  - [0x79750]

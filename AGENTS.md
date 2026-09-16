@@ -98,9 +98,11 @@ wrong half of a function. Check these before blaming game logic:
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   *different* resident bank. `python3 tools/cross_bank.py report` lists sites;
   `dispatch --only …` is wired into `make recomp`. Bank code is compiled into
-  `Bank{A..J}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`
+  `Bank{A..M}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`
   (unit H is the scene-`0x07` form module; unit I is scene `0x16`'s closing
-  movie, unit J is the `bankRec10a` bank of the same RAM; `cross_bank.py`'s `overloaded()` had
+  movie, unit J is the `bankRec10a` bank of the same RAM; K/L are the
+  chapter-animation module and `bankRec14a`, M is scene `0x05`'s module;
+  `cross_bank.py`'s `overloaded()` had
   a `min`/`max` bug that hid its whole range until session 55).
   **`make bank-recomp` now runs `cross_bank.py check-banks`**, which fails if a
   unit defines a RAM range another bank can own *and* calls into it from another
@@ -293,8 +295,10 @@ from here.
   55 corrects session 54's reading of scene `0x07`**: its descriptor is
   **`D_8018FDAC`** (the accessor table maps id 7 → `func_8017B600`; enter
   `func_8017B794`, mask `0x00000002`), *not* `D_8018FB98`, and the module it
-  streams is real — ROM `0x712A0` (`0x8600`) → RAM `0x8019A7C0`, chunk-DMA'd by
-  the enter. That RAM overlaps record 3 (unit A) and overlay C (the main ELF),
+  streams is real — ROM `0x712A0` (**`0x84B0`**, the enter's own `subu`; session
+  55 recorded `0x8600`, the 67-chunk rounded figure) → RAM `0x8019A7C0`,
+  chunk-DMA'd by the enter. That RAM overlaps record 3 (unit A) and overlay C
+  (the main ELF),
   so the port's build-time bindings ran overlay C's bodies at the module's
   addresses (of the module's 24 internal `jal` targets, none were main-ELF
   entries). It is now **bank unit H** and the six calls into it are dispatched;
@@ -381,24 +385,41 @@ from here.
   cathedral, and the opening runs to **scene `0x16`** (the closing movie), which
   chunk-DMAs ROM `0x244770` (0x7500) → RAM `0x801D0860` — record 10's arena,
   which `bankRec10a` (unit **J**) also owns. That module is **bank unit I**
-  (session 58; 43 functions), so the movie plays and the sequence advances; it
-  then **crashes** deterministically in `func_ovlC_8022C270` with
-  `D_8018F1C0 = 0x0431` = **step 1073, which is a *valid* step, not an
-  overrun**: the step table at ROM `0x1F3CA54` (asset `0x19A8804`) is a raw
-  `u32` array of **1693** entries (its header word `0x1A74`), and 1073 is the
-  **"Prologue" chapter animation** the developer describes. Its descriptor's low
-  opcode (`0x1B` < 31) goes to the interpreter's shared case at `0x80228E84`
-  (`func_ovlC_8022C270`), which walks a table based at **`*(0x8023A994)`**.
-  `probe58` (reverted) showed the engine init `func_ovlC_8022D1CC` DOES run
-  (`malloc(0x1CB8)` stored at `0x8022D1E8`) on **every sequence visit except the
-  one that faults**, and the arena DMA (`bankRec14c`, 44 chunks →
-  `0x802395E0..0x8023EBE0`) covers that word (`+0x13B4`) on every visit — so the
-  missing init leaves the module's own file data there and the handler
-  dereferences it. The open question is the step's **command → setup selector**
-  dispatch (command 6 vs the movie's 5/1/1/5/1): `func_80227700(sel)` picks
-  `sel 0`/`sel 2`, the two callbacks that call the init (session 58 §3d).
-  See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` §1-§7,
-  `-session50.md` §5/§9, `-session57.md` and `-session58.md`. **Other large
+  (session 58; 43 functions), so the movie plays and the sequence advances. The
+  step after it is **step 1073, which is a *valid* step, not an overrun**: the
+  step table at ROM `0x1F3CA54` (asset `0x19A8804`) is a raw `u32` array of
+  **1693** entries (its header word `0x1A74`), and 1073 is the **"Prologue"
+  chapter animation** the developer describes. **Session 59 fixed the crash it
+  used to produce**: the step's command is **`-8`** (`func_ovlC_80227E64` maps
+  the descriptor's last-word low byte 6 through the table at **`0x8022ABE0`**;
+  session 58's "command 6" was the raw byte), and `func_ovlC_8022683C`'s `-8` arm
+  at `0x802269DC` streams a **third bank of the record-14 arena** — ROM `0x286BA0`
+  (0x138F0) → RAM `0x8022ACB0`, code to `0x8023DE30`, i.e. RAM
+  `0x8022ACB0..0x8023E5A0`, bss to `0x8023E630`. The port had no code for it,
+  while `bankRec14a` (the *other* bank of that RAM, ROM `0x29A490`) was compiled
+  into unit C, so unit C's calls into `0x8022ACB0+` (the interpreter
+  `func_ovlC_802282D8`'s `jal 0x8022C270`/`0x8022C6E4`, the callback
+  `func_ovlC_80225F60`'s `jal 0x8022E3F0`) ran rec14a's bodies with the chapter
+  module resident. They are now **units K and L** and compile as `LOOKUP_FUNC`.
+  The engine/interpreter state the interpreter reads is at
+  **`0x8022A970`** (pc), **`0x8022A978`** (descriptor base) and **`0x8022A994`**
+  (engine struct) — **not** `0x8023A9xx`: the code addresses them with
+  `lui at,0x8023` plus a negative immediate and the addition wraps
+  (`0x80230000 + 0xFFFFA994 = 0x8022A994`); reading `0x8023A9xx` reads the
+  **DMA'd arena image**. Session 58's probe58 conclusion ("the engine init does
+  not run on the faulting visit") and its `0x8023A994` readings describe the same
+  crash from the wrong address. Result: the Prologue card renders
+  (`docs/proofs/native-newgame-prologue-card.png`), the opening plays on into the
+  post-movie story (General Godeslas `-received-for-duty.png`; Magnus
+  `-magnus-old-man.png`) and reaches **scene `0x05`** (descriptor `0x8018FD70`,
+  mask `0x2`), whose module is **unit M** (ROM `0x79750`, 0xDAD0 → RAM
+  `0x8019A7C0`; the other bank of that RAM is unit H, whose real size is
+  `0x84B0`, not the `0x8600` session 55 recorded). **A bank's size is its DMA's,
+  and "do we know this module?" must compare the chunk's rom→ram delta, not just
+  the ROM range** — that range test is what hid unit M behind unit H's
+  over-claimed size. See `docs/HANDOFF-2026-09-16-session59.md` §1-§4, then
+  `-session58.md`, `-session57.md`, `-session52.md`, `-session51.md` §1-§7,
+  `-session50.md` §5/§9. **Other large
   backgrounds use the
   same machinery and the dominant one is the same size** — all 75 njpeg
   assets are enumerated (42 are 320x240) with the asset format, the tile

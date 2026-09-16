@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-16 (59) | **Every bank of a swappable RAM gets its own unit, and the unit whose code calls into that RAM defines none of them — the record-14 arena has a *third* bank (ROM `0x286BA0` → RAM `0x8022ACB0`, the chapter animation's module), now unit K, with `bankRec14a` moved to unit L; scene `0x05`'s module (ROM `0x79750` → RAM `0x8019A7C0`, the other bank of unit H's RAM) is unit M.** A bank's extent is its DMA's own size, not a previous session's chunk-rounded figure (`bankRec14a` `0xE860` not `0xDE60`; `bankRec07` `0x84B0` not `0x8600`), and the "is this DMA a module we know?" test must compare the rom→ram delta, not just the ROM range — the range test hid unit M behind unit H's over-claimed size | `docs/HANDOFF-2026-09-16-session59.md`; `config-bankK/L/M.yaml`; `app/src/bank_overlays.cpp` |
 | 2026-09-16 (58) | **A save state is RDRAM *plus* the overlay state, and the two must be captured with the game threads parked.** `save`/`load` in the live console write/restore the whole 8 MiB image and the runtime's function map/bank records (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`). RDRAM alone is not a machine rewind: which recompiled body runs at each RAM address is host state, and a restore that leaves the map on a later bank runs the wrong module's bodies (the session-45/55 mis-binding class). The file I/O is wrapped in `ultramodern::checkpoint_pause_begin/end`, which parks every thread executing recompiled code at a function-entry boundary — the recompiled N64 threads are 1:1 native threads, and without the park the image **tears** (session 58: the checkpoint's own checksum did not match its bytes and its first `0x300` bytes were zeros while the game kept submitting RSP tasks during the write). A checkpoint is only valid in the process/binary that wrote it | `docs/guides/app-build.md` → "Checkpoints"; `docs/HANDOFF-2026-09-16-session58.md` §1 |
 | 2026-09-16 (58c) | **OB64's save hardware is the Controller Pak (`osPfs*`), and the port has no Controller Pak support at all — the runtime's `pak.cpp` is an upstream stub returning `PFS_ERR_NOPACK` for every entry point.** Evidence: 105 `jal`s from the main segment into the PFS cluster (`0x8009616C`..`0x80097DC0`) and the whole save menu as ROM text (`0x790EC..0x7967C`: `Controller Pak Menu`, `Save`/`Load`/`Erase`, `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to Controller Pak.`). The menu's strings are in **bank unit H** (`D_ovlH_801A260C`), the same UI module that draws the name/birthday forms, so the menu's *drawing* is likely already working and the missing piece is the device. `recomp::SaveType` (cartridge EEPROM/SRAM/FlashRAM) does not cover it, and `app/src/main.cpp` sets `SaveType::None` with a TODO. The game's own save system therefore needs a 32 KiB Controller Pak image (real PFS layout) + a real `osPfs*` implementation + the raw SI pak access, before the save scene is usable | `docs/HANDOFF-2026-09-16-session58.md` §3c; `tools/N64ModernRuntime/librecomp/src/pak.cpp`; `docs/scenes.md` row 9 |
 | 2026-09-16 (58b) | **A streamed module that shares RAM with another record gets its own unit and the calls into it are `LOOKUP_FUNC` — scene `0x16`'s closing movie is bank unit I (ROM `0x244770` → RAM `0x801D0860`), and `bankRec10a` moved out of unit C to unit J because it is the *other bank* of that exact RAM.** `bankRec10a` could not stay in unit C (unit C's own code calls into that range — session 45's rule) and could not share unit I with `bankRec16` (overlapping records). Splat/N64Recomp hygiene this exposed: a unit's asm/assets must be cleared before `splat split` (splat never deletes a removed segment's output, and the ELF rule globs its inputs), `RecompiledFuncs/`/`Bank*Funcs/` must be cleared before regenerating (N64Recomp never deletes a previous run's file, so a symbol that changed section leaves a conflicting definition behind), a `data` subsegment needs an explicit following `bin` gap (splat extends it to the next segment otherwise), and `gen_bank_syms.py` must also see spimdisasm's `.Lovl<U>_<addr>` local-label references | `docs/HANDOFF-2026-09-16-session58.md` §2; `config-bankI.yaml`, `config-bankJ.yaml` |
@@ -45,6 +46,66 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-16 (session 59) — the record-14 arena has a *third* bank; scene `0x05`'s module; and the ROM end of a bank is its DMA's, not the segment's
+
+**Decision (1): every bank of a streamed RAM gets its own unit, and the unit
+whose code calls into that RAM defines none of them.** The New Game sequence's
+chapter-animation step (1073, command `-8`) streams **ROM `0x286BA0` (0x138F0)
+→ RAM `0x8022ACB0`**, a module the port had no code for. `bankRec14a` — the
+*other* bank of that same RAM — was in unit C, so the record-14 interpreter's
+`jal 0x8022C270`/`jal 0x8022C6E4` and the command-`-8` callback's
+`jal 0x8022E3F0` were bound at build time to rec14a's bodies; when the chapter
+module was resident the interpreter ran rec14a's layout, left the engine state
+(`0x8022A970`/`0x8022A978`/`0x8022A994`) at **0**, and walked guest 0 until it
+took an opcode with a wild argument — the developer's end-of-sequence `SIGBUS`.
+The banks are now **unit K** (the chapter module, `bankRec14d`) and **unit L**
+(`bankRec14a`), so unit C's calls compile as `LOOKUP_FUNC` and the runtime's
+DMA-driven bank map picks the resident module. This is session 45's rule with a
+*third* bank in the same arena, plus the third time a scene's next module was
+found this way (sessions 45, 55, 58, 59). Evidence: at the crash
+(`/tmp/s58-crash.bin`) RAM `0x8022ACB0` is byte-identical to ROM `0x286BA0`.
+`docs/HANDOFF-2026-09-16-session59.md` §1; `config-bankK.yaml`,
+`config-bankL.yaml`).
+
+**Decision (2): a chunk-DMA bank's extent is the DMA's own, and a truncated
+segment can be a *build* failure rather than a silent one.** `config-bankC.yaml`
+ended `bankRec14a` at ROM `0x2A82F0` (size `0xDE60`), but the enter's `subu` at
+0x80226A28 shows the game DMAs `0x2A8CF0 - 0x29A490 = 0xE860`. The missing
+`0xA00` bytes (RAM `0x80238B10..0x80239510`) hold the module's jump tables, so
+splat named `jtbl_ovlL_80239270` without emitting it and N64Recomp aborted with
+`Failed to determine size of jump table at 0x80239270`. Read the size out of the
+DMA call site, not out of a previous session's rounded chunk count (unit H
+carried `0x8600` for the same reason; its real size is `0x84B0`, its enter's
+`subu` at 0x8017B7E4). `docs/HANDOFF-2026-09-16-session59.md` §1b/§3.
+
+**Decision (3): scene `0x05`'s module is unit M** (`bankRec05`, ROM `0x79750`
+(0xDAD0) → RAM `0x8019A7C0`), the *other* bank of unit H's scene-`0x07` form
+module. Scene `0x05`'s enter `func_8017B60C` DMAs it and calls `0x8019A7C0`;
+before the unit existed that call hit the runtime's streamed stub and the scene
+produced no frames. `docs/HANDOFF-2026-09-16-session59.md` §3.
+
+**Decision (4): "is this DMA a module the port knows?" must compare the chunk's
+rom→ram delta, not just the ROM range.** `app/src/bank_overlays.cpp`'s
+`is_known_module` matched any record whose ROM range contained the DMA's source
+and whose RAM base was the destination. Unit H's over-claimed `0x8600` range
+therefore covered unit M's ROM `0x79750`, so the port believed it had the module
+and never printed `[bank] UNKNOWN module` — the report that normally names the
+next wall. It now requires `rom_offset - record.rom_start == ram_addr -
+record.ram_start` (`same_stream_delta`). `docs/HANDOFF-2026-09-16-session59.md`
+§3b.
+
+**Correction to session 58 (recorded, not deleted).** The engine/interpreter
+globals session 58 read at `0x8023A970`/`0x8023A978`/`0x8023A994` are at
+**`0x8022A970`/`0x8022A978`/`0x8022A994`**: the generated code uses `lui
+at,0x8023` with a negative immediate, and the addition wraps
+(`0x80230000 + 0xFFFFA994 = 0x8022A994`). The `0x8023A9xx` reads were the
+**DMA'd arena image**, not the state; the crash dump has the three words at 0.
+Session 58's "engine init does not run on the faulting visit" and "the handler
+dereferences a stale global" describe the same crash from the wrong address —
+the mechanism is decision (1).
 
 ---
 

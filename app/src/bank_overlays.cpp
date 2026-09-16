@@ -664,22 +664,37 @@ static const MainOverlayModule kMainOverlayModules[] = {
 // segment-table record not compiled yet, or a main-ELF overlay) whose RAM base
 // is this destination and whose ROM range covers this source? Only the first
 // chunk of a chunked load lands on the base, so this is asked once per load.
+//
+// The test is the *delta*, not just "the ROM range contains this offset": two
+// modules can live in adjacent ROM blocks and be streamed to the same RAM (unit
+// H's scene-0x07 module ROM 0x712A0..0x79750 and unit M's scene-0x05 module ROM
+// 0x79750..0x87220 both load at 0x8019A7C0). A range test alone called the
+// scene-0x05 DMA "known" because 0x79750 sat inside unit H's 0x8600-byte record,
+// so the port never reported the module it was missing (session 59).
+bool same_stream_delta(uint32_t rom_offset, uint32_t ram_addr, uint32_t rom_start,
+                       int32_t ram_start) {
+    return (rom_offset - rom_start) == (ram_addr - (uint32_t)ram_start);
+}
+
 bool is_known_module(uint32_t rom_offset, uint32_t ram_addr) {
     for (const BankRecord& record : kBankRecords) {
         if ((uint32_t)record.ram_start == ram_addr &&
-            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.size) {
+            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.size &&
+            same_stream_delta(rom_offset, ram_addr, record.rom_start, record.ram_start)) {
             return true;
         }
     }
     for (const StreamedRecord& record : kAllStreamedRecords) {
         if ((uint32_t)record.ram_start == ram_addr &&
-            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.rom_size) {
+            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.rom_size &&
+            same_stream_delta(rom_offset, ram_addr, record.rom_start, record.ram_start)) {
             return true;
         }
     }
     for (const MainOverlayModule& record : kMainOverlayModules) {
         if ((uint32_t)record.ram_start == ram_addr &&
-            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.size) {
+            rom_offset >= record.rom_start && rom_offset < record.rom_start + record.size &&
+            same_stream_delta(rom_offset, ram_addr, record.rom_start, record.ram_start)) {
             return true;
         }
     }

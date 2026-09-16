@@ -23,8 +23,9 @@ self-contained table:
     <ram end> is the record's RAM end (exclusive) from the game's segment table
     (ROM 0x387C0, 0x28-byte entries); the loader zeroes [ram start + size,
     ram end) as BSS on every load. Records that are not segment-table entries
-    (explicit chunk DMAs like bankRec10a/10b/14a/14b) have no BSS: ram end is
-    ram start + size for those (see RAM_END, which defaults that way).
+    (explicit chunk DMAs like bankRec10a/10b/14a/14b/14d and the scene modules)
+    have no BSS: ram end is ram start + size for those (see RAM_END, which
+    defaults that way) — except bankRec14d, whose bss the game itself zeroes.
 
 app/src/bank_overlays.cpp uses it to register a record's functions when the game
 DMA's it, and to drop them when another bank overwrites that RAM.
@@ -88,6 +89,7 @@ RAM_END: dict[int, int] = {
     0x25EE60: 0x802210E0,  # 12 (unit C)
     0x275820: 0x802258B0,  # 13 (unit C)
     0x281830: 0x80243DD0,  # 14 (unit C)
+    0x286BA0: 0x8023E630,  # 14's chapter-animation bank (unit K, explicit DMA)
     0x1BA020: 0x80230600,  # 18 (unit B)
 }
 

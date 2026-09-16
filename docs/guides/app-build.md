@@ -32,7 +32,7 @@ make recomp
 
 # streamed-overlay bank units (Phase 4): a second recompilation for the overlay
 # records the game loads into RAM another overlay/bank also occupies. Required
-# before configuring the app — it writes Bank{A..G}Funcs/ and
+# before configuring the app — it writes Bank{A..M}Funcs/ and
 # app/src/bank_funcs.inc, and the app links all of them. Units are listed in
 # `BANK_UNITS` in the Makefile; add a unit there when a new bank record is
 # compiled (a range can hold several records, but two records that share RAM
