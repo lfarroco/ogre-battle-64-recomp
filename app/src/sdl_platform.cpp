@@ -744,7 +744,8 @@ void console_exec(const std::string& line_in) {
 
     if (cmd == "help") {
         printf("[console] r/rh/rb/rk <addr> [n] | d <addr> [len] | f <value> [max] | fb <hex> [max]\n"
-               "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c | dump [path]\n");
+               "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c\n"
+               "[console] dump [path]  (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n");
     } else if (cmd == "r" || cmd == "rw" || cmd == "rh" || cmd == "rb" || cmd == "rk") {
         const uint32_t addr = num(1, 0);
         uint32_t count = num(2, 1);
@@ -897,13 +898,24 @@ void console_exec(const std::string& line_in) {
         printf("[console] scene=0x%04X pending=0x%04X desc=0x%08X mask=0x%08X step=%u next=0x%04X spin=0x%04X\n",
                scene, pending, desc, mask, step, next, spin);
     } else if (cmd == "dump") {
-        const char* path = ntok > 1 ? tok[1].c_str() : "/tmp/ogre-console-rdram.bin";
-        if (FILE* f = fopen(path, "wb")) {
+        // A bare `dump` never overwrites an earlier one: the key can be pressed
+        // as often as the developer likes and every snapshot is kept, numbered.
+        // `dump <path>` still writes exactly where it is told.
+        static uint32_t dump_seq = 0;
+        std::string path;
+        if (ntok > 1) {
+            path = tok[1];
+        } else {
+            char auto_path[128];
+            snprintf(auto_path, sizeof(auto_path), "/tmp/ogre-rdram-%04u.bin", ++dump_seq);
+            path = auto_path;
+        }
+        if (FILE* f = fopen(path.c_str(), "wb")) {
             const size_t written = fwrite(rdram, 1, 0x800000u, f);
             fclose(f);
-            printf("[console] dumped %zu bytes to %s\n", written, path);
+            printf("[console] dumped %zu bytes to %s\n", written, path.c_str());
         } else {
-            printf("[console] could not open %s\n", path);
+            printf("[console] could not open %s\n", path.c_str());
         }
     } else {
         printf("[console] unknown command \"%s\" (try help)\n", cmd.c_str());

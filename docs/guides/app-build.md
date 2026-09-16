@@ -316,7 +316,7 @@ Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
 | `k <addr> [len]` | fnv1a checksum of a range — the cheap before/after for A/B runs |
 | `w <addr> <value>` | store a word (A/B experiments; it is a real write) |
 | `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
-| `dump [path]` | write the whole 8 MiB RDRAM image **at this instant** |
+| `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
 | `help` | the list |
 
 `dump` is the one that fixes the "wrong moment" problem: run the game until the

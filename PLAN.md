@@ -669,13 +669,32 @@ hardware. RT64 remains the primary native renderer throughout. See
   - 🚧 **The opening runs through the whole New Game sequence (session 56,
     developer-confirmed)**: name form → **date of birth** → **personality
     questions** (steps 3–8) → **scene `0x16`** (descriptor `0x8018FC00`, mask
-    `0x400`) at `t≈54.3 s` (4×). Two open items: (a) the cathedral backdrop can
+    `0x400`) at `t≈54.3 s` (4×). Two open items: (a) the cathedral backdrop could
     come back with a **rectangular stale region** (the previous form's content,
-    ~70% x 30%, intermittent) — session 56 §1 has the readback evidence (four
-    sub-image passes all copying `src=0x80000400`) and the next discriminating
-    experiment; (b) the **sequence-end crash** the developer sees is **not**
-    reproduced in the port's own 150 s run (exit 0 through `0x16`). See
-    `docs/HANDOFF-2026-09-16-session56.md`.
+    intermittent). **Session 56 found the cause with a live dump taken while the
+    artifact was on screen**: all three game framebuffers
+    (`0x80000400`/`0x80025C00`/`0x8004B400`) contain it, and the readback
+    destination `0x80243E28` holds a complete *picture of the form screen* — so
+    the game copied a frame that was already showing the form, and every later
+    cathedral draw blits that. The readback **source selection** (the
+    `njpeg_readback.py` patch: RT64's YUV handshake scratch `+8`, then the most
+    recent framebuffer `+12`, then the game's own `state[0x64]`) is the prime
+    suspect; the cheap A/B is `python3 tools/njpeg_readback.py --revert`. See
+    `docs/HANDOFF-2026-09-16-session56.md` §1. **The A/B was run and the patch is
+    not the cause** (the reverted build produces a pixel-identical bad backdrop),
+    and the developer captured the decisive **good/bad pair**: with no artifact
+    `0x80243E28` holds the correct throne-room backdrop and the scratch colour
+    image is `0x00025C00`; with the artifact it holds the **date-of-birth form**
+    and the scratch is `0x00000400`, while all three display framebuffers hold
+    the correctly rendered current frame in *both* dumps. So the source
+    *selection* is self-consistent (game index == RT64 handshake); the defect is
+    **render-vs-readback timing** — the assembly copies a framebuffer before the
+    backdrop draw has landed in it. Next: a dump at the instant of assembly and
+    the `waitForGameFramebuffers` / `OGRE_NJ_WAIT_MS` path in
+    `app/src/renderer.cpp`. (b) the **sequence-end crash**
+    the developer saw twice is **not** reproduced in the port's own 150 s run
+    (exit 0 through `0x16`); with the live console, use `dump` at the moment it
+    happens. See `docs/HANDOFF-2026-09-16-session56.md`.
   - ✅ **Live debug console (session 56, developer's suggestion)**: the running
     game can now be queried on demand instead of only at a bounded run's exit —
     a watched command file (`OGRE_CONSOLE_FILE`, default
