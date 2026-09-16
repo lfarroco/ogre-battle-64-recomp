@@ -14,8 +14,11 @@
 
 #include <SDL.h>
 #if defined(__APPLE__)
+#include <mach-o/dyld.h>  // _NSGetExecutablePath (the checkpoint build id)
 #include <SDL_metal.h>
 #include <SDL_syswm.h>
+#else
+#include <unistd.h>  // readlink (the checkpoint build id)
 #endif
 
 // Defined in librecomp/src/recomp.cpp: the RDRAM base handed to the game.
@@ -728,7 +731,7 @@ inline uint8_t console_byte(const uint8_t* base, uint32_t addr) {
 // input schedule) keep their current position rather than being part of the
 // snapshot.
 constexpr char kCheckpointMagic[8] = {'O', 'G', 'R', 'E', 'C', 'K', 'P', 'T'};
-constexpr uint32_t kCheckpointVersion = 1;
+constexpr uint32_t kCheckpointVersion = 2;  // 2: added build_id (see below)
 
 struct CheckpointHeader {
     char magic[8];
@@ -737,6 +740,7 @@ struct CheckpointHeader {
     uint32_t host_size;
     uint32_t flags;
     uint64_t checksum;  // FNV-1a over host blob + RDRAM image
+    uint64_t build_id;  // FNV-1a of this executable; a rebuild invalidates
 };
 
 uint64_t fnv1a_bytes(uint64_t hash, const void* data, size_t size) {
@@ -751,6 +755,45 @@ uint64_t fnv1a_bytes(uint64_t hash, const void* data, size_t size) {
 constexpr uint64_t kFnv1aOffsetBasis = 14695981039346656037ull;
 constexpr uint32_t kRdramSize = 0x800000u;
 
+// A checkpoint is only meaningful for the binary that wrote it: the overlay
+// blob carries no function pointers (they are process-local), so a restore in a
+// *different* build would re-register this process's bodies for the saved bank
+// extents — which after a recompile can be different code. The blob's own
+// version/size checks catch a format change but not "same format, new code", so
+// the header also carries a hash of the running executable. Reading 20 MB costs
+// a few ms, once per save/load.
+bool executable_fingerprint(uint64_t& out, std::string& error) {
+    char path[4096];
+    uint32_t size = (uint32_t)sizeof(path);
+#if defined(__APPLE__)
+    if (_NSGetExecutablePath(path, &size) != 0) {
+        error = "cannot locate the running executable";
+        return false;
+    }
+#else
+    const ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (n <= 0) {
+        error = "cannot locate the running executable";
+        return false;
+    }
+    path[n] = '\0';
+#endif
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        error = "cannot open the running executable";
+        return false;
+    }
+    uint64_t hash = kFnv1aOffsetBasis;
+    uint8_t buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        hash = fnv1a_bytes(hash, buf, n);
+    }
+    fclose(f);
+    out = hash;
+    return true;
+}
+
 bool write_checkpoint(const char* path, uint8_t* rdram, std::string& error) {
     const std::vector<uint8_t> host = recomp::overlays::get_overlay_state_blob();
 
@@ -760,6 +803,9 @@ bool write_checkpoint(const char* path, uint8_t* rdram, std::string& error) {
     header.rdram_size = kRdramSize;
     header.host_size = (uint32_t)host.size();
     header.flags = 0;
+    if (!executable_fingerprint(header.build_id, error)) {
+        return false;
+    }
     uint64_t hash = fnv1a_bytes(kFnv1aOffsetBasis, host.data(), host.size());
     hash = fnv1a_bytes(hash, rdram, kRdramSize);
     header.checksum = hash;
@@ -826,8 +872,19 @@ bool read_checkpoint(const char* path, uint8_t* rdram, std::string& error) {
         error = "checksum mismatch (truncated or edited file)";
         return false;
     }
-    // Overlay state first: if the runtime rejects the blob (a different binary),
-    // the RDRAM image has not been touched yet.
+    // Same format but new code: the blob has no function pointers, so a restore
+    // in a rebuilt binary would bind this process's bodies to the saved extents.
+    // Refuse rather than run the wrong module (see executable_fingerprint).
+    uint64_t build_id = 0;
+    if (!executable_fingerprint(build_id, error)) {
+        return false;
+    }
+    if (build_id != header.build_id) {
+        error = "checkpoint was written by a different build of this executable";
+        return false;
+    }
+    // Overlay state first: if the runtime rejects the blob, the RDRAM image has
+    // not been touched yet.
     if (!recomp::overlays::restore_overlay_state_blob(host)) {
         error = "overlay state rejected (checkpoint from another build?)";
         return false;
