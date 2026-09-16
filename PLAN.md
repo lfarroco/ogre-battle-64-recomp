@@ -823,6 +823,25 @@ hardware. RT64 remains the primary native renderer throughout. See
     card unchanged. The no-`--only` full dispatch also fixes it (89 sites /
     7 extra targets) and is the way to clear the remaining backlog.
     `docs/HANDOFF-2026-09-16-session60.md`; `docs/scenes.md` row 10.
+  - 🚧 **The map's sprites are missing/garbled (session 60, developer spec)** —
+    the developer supplied the retail screenshot
+    (`docs/proofs/map-reference/retail-map-screen.png`) and the screen's spec:
+    the framed world map + the **party sprite**, the unit markers, a **cursor**
+    (white arrow + red dot) and the bottom-right **date panel** (`MONTH`/`DATE`
+    + e.g. `Sombra 1`); plus the map's **`R` menu** (1 Organize / 2 Hugo Report /
+    3 Settings / 4 Save, with the two-slot save window, the overwrite prompt and
+    the title's `Load Game` cursor default) — all written into `docs/scenes.md`.
+    The port draws the terrain, the frame, the I8 road/label mask and the panel's
+    month name, but **not the party/cursor/panel box**: the party is a row of
+    ~18 repeated dark ellipses. Measured: the party rect is 144x23 px but its
+    render tile is a **7x10-texel** window (`SETTILESIZE lrs=28 lrt=40`) of an
+    RGBA32 sprite atlas, so the tile repeats; the atlas is asset `0x01DD210A`
+    (decoded by `func_8007A110` from unit **M**'s entry into `0x80219C20`), and
+    the port's decode matches the offline one byte for byte — the sampled region
+    is genuinely transparent. So it reads as a **sprite descriptor the map never
+    finished filling**, and the next step is to find what fills it (and whether
+    retail animates the party/panel in, since the port's frame is static).
+    `docs/HANDOFF-2026-09-16-session60.md` §7.
   - ✅ **`OGRE_CONSOLE_ON_SCENE` / `_STEP` / `_CMD` (session 58)** — run one
     console command the moment a chosen scene (and step) is live, e.g.
     `OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974

@@ -52,6 +52,43 @@ step table).
 | 10 | **the map scene** — the world map: terrain and rivers, location labels, the route of dots, unit markers and the `Flama` cursor, inside a stone frame. (Developer, session 60: *"the next scene after this prologue movie is an important one: it's the map scene. from there, it should be possible to save the game"*.) | dev (session 60) + code | **renders** (session 60): descriptor `0x8018FD70`, mask `0x2`; scene `0x05`. Proof `docs/proofs/native-newgame-map-scene.png`. The scene enters at t≈180 s on the natural route and, before this session, stayed on the prologue's black fade because **no frames were produced**: two calls in the scene update/hook (`func_8017B858` @0x8017B8A0 `jal 0x8019AF0C`, `func_8017B9C8` @0x8017BA10 `jal 0x801A103C`) were compiled as "call the containing body + early return" (a `jal` into a size-overridden body interior), so each abandoned the caller's frame; the frame-pump thread then read its `$s0`/`$s1` from the wrong stack slots, `$s1` (the message-type comparator) became 0 and the pump stopped after two frames. Both targets are in the RAM the scene module occupies and are now dispatched through the bank map (`make recomp`'s `--only` list) — `0x8019AF0C` resolves to unit **M**'s own state-1 handler, which is what the game's state machine asks for (scene `0x05`'s enter sets `0x801977E8 = 1`; scene `0x07`'s sets `3` and takes a different branch, which is why the form worked). See `docs/HANDOFF-2026-09-16-session60.md` |
 | 9 | the **Controller Pak menu** (reached from a later scene): `Save` / `Load` / `Erase` / `Exit` over `OgreBattle Game Notes`, with `Game Data 1` / `Game Data 2` notes, `Pages`, `No Data`, and the system messages (`Insert Controller Pak.`, `Saving data.`, `Data saved to Controller Pak.`, `1 note 25 pages to save.`, `Saving data has failed.` and its Loading/Deleting variants) | dev (session 58: *"the game has a save system, which we should arrive in one of the next scenes"*); text ROM `0x790EC..0x7967C` | **missing** — the device is unimplemented. The save system is the **Controller Pak** (`osPfs*`): 105 calls into the PFS cluster from the main segment, and the menu's strings live in **bank unit H** (`D_ovlH_801A260C`, the same UI module as the name/birthday forms), so drawing should already work. The runtime's `librecomp/src/pak.cpp` is an upstream stub returning `PFS_ERR_NOPACK` for every entry point, and `recomp::SaveType` has no Controller Pak, so the game currently sees "no pak inserted". See `docs/HANDOFF-2026-09-16-session58.md` §3c |
 
+### The map screen (scene `0x05`) — what it must show (developer, session 60)
+
+The developer's retail screenshot is `docs/proofs/map-reference/retail-map-screen.png`
+(the state right after the prologue). The screen is the framed world map plus:
+
+* the **player's party sprite** at its location (a blue knight), and the other
+  **unit markers**;
+* a **cursor** (white arrow + red dot) on the selected location;
+* the **date panel** in the bottom-right: a small `MONTH` / `DATE` box and the
+  current date in the italic serif face, e.g. `Sombra 1` (`Sombra` is the month
+  name, `1` the day).
+
+**Status (session 60): partial.** The terrain, the location labels, the road of
+dots and some unit markers draw (`docs/proofs/native-newgame-map-scene.png`), but
+the **party sprite, the cursor, the date-panel frame and its `MONTH/DATE` text
+and day number are missing** — the only piece of the panel that appears is the
+month name (`Flama` in the port's capture) without its box. This is a
+renderer/scene question, not a bank one. See
+`docs/HANDOFF-2026-09-16-session60.md`.
+
+### The map's `R` menu (developer, session 60)
+
+While on the map, pressing **R** opens a horizontal menu:
+
+| # | entry | what it opens |
+|---|---|---|
+| 1 | **Organize** (the default selection) | the screen where the player manages the army |
+| 2 | **Hugo Report** (press → once) | information about the game |
+| 3 | **Settings** | a window with game/text speed and misc settings |
+| 4 | **Save** | a window with **two slots stacked vertically**; selecting one shows the confirmation *"Any existing data will be overwritten. Proceed?"* with **Yes/No** (Yes is the default). Choosing Yes saves the game |
+
+### The title's `Load Game` entry (developer, session 60)
+
+When a save exists on the Controller Pak, the title menu's cursor **starts on
+`Load Game`** (instead of `New Game`), and selecting it goes to the **Load Game
+screen**, which lists the two saves.
+
 The step table's commands suggest (unverified) that steps 2 and 9 (`-3`) are the
 dialogue parts, the `-10` steps (3–8, 14–16) the forms, and the single `-4`
 step 10 the closing movie. Confirm against the captures when those steps run.

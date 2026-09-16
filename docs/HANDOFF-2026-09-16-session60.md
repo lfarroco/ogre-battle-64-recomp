@@ -141,6 +141,8 @@ OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1500 \
   (`cross_bank:   dispatched 0x…`, N site(s)); useful for the next wall.
 * `docs/proofs/native-newgame-map-scene.png` (new) — the map, captured from the
   port.
+* `docs/proofs/map-reference/retail-map-screen.png` (new) — the developer's
+  retail screenshot of the map screen (the reference for §7).
 * `PLAN.md`, `docs/scenes.md`, `DECISIONS.md`, `docs/README.md`, `AGENTS.md`,
   this file.
 
@@ -149,20 +151,103 @@ dispatches 15 call sites across **12 distinct targets** and repairs 12 tail-call
 sites), `Bank*Funcs/`, `app/src/bank_funcs.inc`, `build/bank*.elf`.
 
 **Probes:** `probe59`, in the generated `RecompiledFuncs/funcs_2.c`,
-`funcs_4.c` and `funcs_9.c` (guest-`$sp` logging around the frame chain). All
-reverted by `make recomp`; `grep -rl probe59 RecompiledFuncs/ Bank*Funcs/ app/`
-is empty and both builds were rebuilt afterwards. No app or runtime probe.
+`funcs_4.c` and `funcs_9.c` (guest-`$sp` logging around the frame chain), and
+`probe60` in `RecompiledFuncs/funcs_0.c` (the asset loader
+`func_8009DD38`'s `(id, arg)` per call, §7). All reverted by `make recomp`;
+`grep -rl 'probe59\|probe60' RecompiledFuncs/ Bank*Funcs/ app/` is empty and
+both builds were rebuilt afterwards. No app or runtime probe.
 
 ## 6. Next leads
 
-1. **The game's own save system (Controller Pak)** — the developer's stated next
-   milestone, now reachable from the map. Recon is in
+1. **The map's sprites are missing/garbled — the concrete next wall** (§7).
+2. **The game's own save system (Controller Pak)** — the developer's stated next
+   milestone, reachable from the map. Recon is in
    `docs/HANDOFF-2026-09-16-session58.md` §3c: a 32 KiB PFS image, a real
    `osPfs*` implementation over it (`librecomp/src/pak.cpp` is upstream's
    `PFS_ERR_NOPACK` stub), the raw SI pak access, and a save file for it.
-2. **What is interactive on the map** — the map draws; which buttons open the
-   menu / the save screen? (developer question).
 3. **The remaining cross-bank backlog** — `python3 tools/cross_bank.py report`:
    75 main-unit targets have no bank entry (kept as direct calls) and the
    overlay-C-base calls (0x80197B90/0x801989AC) are dispatched only by the
    no-`--only` full pass. Any of these is the same wall one scene further on.
+
+## 7. The map screen's content: what it must show, and what is missing
+
+### The developer's spec (session 60) — recorded in `docs/scenes.md`
+
+Retail reference: `docs/proofs/map-reference/retail-map-screen.png` (the state
+right after the prologue). The screen is the framed world map plus the **party
+sprite** (a blue knight) at its location, the other **unit markers**, a
+**cursor** (white arrow + red dot), and the **date panel** in the bottom-right
+(a `MONTH`/`DATE` box and the date, e.g. `Sombra 1`).
+
+The map's **`R` menu** is a horizontal menu: 1 **Organize** (default), 2 **Hugo
+Report**, 3 **Settings**, 4 **Save**. Save opens a window with two vertically
+stacked slots; picking one prompts *"Any existing data will be overwritten.
+Proceed?"* with Yes (default) / No. With a save present the title's cursor
+starts on **Load Game**, which opens the Load Game screen listing the two saves.
+All of that is written up in `docs/scenes.md`.
+
+### The port's state: terrain ✓, sprites ✗
+
+The port draws the terrain, the stone frame, the road/label mask (the 23
+full-width **I8** rows) and the panel's month name (`Flama` in the capture), but:
+
+* the **party sprite** is a row of ~18 repeated dark ellipses where retail has
+  the knight and plain terrain;
+* the **cursor** and the **panel box / `MONTH DATE` label / day digit** are
+  likewise wrong or missing;
+* the same run's capture is `docs/proofs/native-newgame-map-scene.png`.
+
+### What the display list actually asks for (measured)
+
+`OGRE_DL_DECODE=all` on the forced scene gives the map's per-frame list: 1773
+commands, **97 `G_TEXRECT`s**, 8 nested `G_DL`s, 0 unknown opcodes — a pure
+2D F3DEX2 list. The pieces: 25 CI16 terrain tiles, 38 CI16 border rows, 23
+**I8** full-width overlay rows (the roads/labels/markers), 5 CI16 glyph rects
+(the date text) and five small sprite rects. The suspicious one is the party:
+
+```
+SETTIMG fmt=RGBA siz=32b addr=0x8021AC88
+SETTILE t7 fmt=0 siz=3 line=0 tmem=0     + LOADBLOCK   (load the tile)
+SETTILE t0 fmt=0 siz=3 line=2 tmem=0                       (render tile)
+SETTILESIZE t0 uls=0 ult=0 lrs=28 lrt=40                   -> a 7x10-TEXEL window
+TEXRECT ulx=568 uly=476 lrx=1144 lry=568 dsdx=1024 dtdy=1024  -> a 144x23-PIXEL rect
+```
+
+A 7x10-texel window over a 144x23-pixel rect at dsdx=1.0 (RDP S5.10) repeats the
+tile ~18 times — exactly the row of ellipses — and retail's screenshot has no
+such pattern, so the **port's descriptor values differ from retail's** (the
+renderer is doing what the list says: the same list in RT64 gives the same
+stripes, and `OGRE_RECT_STATE=119-142` confirms the tile window, `fmt=0 siz=3
+line=2`, and an alpha-blend combiner `RGB/A = TEXEL0`, `P=CC A=CC_A M=FB B=1-A`).
+
+### Where the data comes from (measured)
+
+* The sprite buffers are part of a decoded **sprite atlas**: the loader
+  `func_8009DD38(asset_id)` (ROM `(id & 0x0FFFFFFF) + 0x594250`, 4-byte size
+  header, `func_8007A110` LZ) is called from unit **M**'s entry
+  (`func_ovlM_8019A7C0`) with ~20 assets; the cursor/party/panel sprites come
+  from **asset `0x01DD210A` (ROM `0x2356DBC`, 0x12D0 payload → 0x5288 bytes)**,
+  which lands at `0x80219C20` in the port. The cursor is at atlas `+0x4F0` and
+  the party rect samples atlas `+0x1068`.
+* **The port's decode is correct**: `tools/ogrelz.py`'s offline decode of that
+  asset matches the port's RDRAM byte for byte at those offsets, and the bytes
+  at `+0x1068` really are mostly zero/transparent 32-bit RGBA.
+* A write watchpoint (`tools/watch.sh 0x8021AC88`) confirms `func_8007A110`
+  writes there, from `func_8009DD38` ← `func_ovlM_8019A7C0` ← the scene-`0x05`
+  enter `func_8017B60C` — i.e. the load is the map's own setup, and it writes
+  the same bytes the asset holds.
+
+**So the wall is not the decode and not the renderer**: the game's map is asking
+for a sprite whose tile window and rect do not match any sane sprite, and whose
+sampled region of the atlas is empty. That reads as **a sprite descriptor that
+the map never finished filling** — the next thing to find is what fills those
+descriptors (the map's object/sprite table) and which step of scene `0x05`'s
+setup was skipped. Unit M's entry, the 20 asset ids and their buffer addresses
+are all in this section; `OGRE_RECT_STATE` and `tools/watch.sh` are the tools
+that got this far. Note the same investigation should ask the developer whether
+the party appears *immediately* when the map opens or only after its intro
+animation — the port's frame is completely static (700+ identical display
+lists), so if retail animates the party/panel in, "stuck at frame 0" is the
+wall rather than a wrong descriptor.
+
