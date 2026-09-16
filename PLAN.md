@@ -704,14 +704,59 @@ hardware. RT64 remains the primary native renderer throughout. See
     the copy. Proofs: `docs/proofs/native-newgame-readback-stale-source.png` /
     `-correct-source.png`, `docs/proofs/native-newgame-cathedral-post-dob.png`.
     See `docs/HANDOFF-2026-09-16-session57.md` §1.
-  - 🚧 **Scene `0x16` streams a module the port never compiled (session 57)**:
-    ROM `0x244770` (≈`0x7500`) → RAM `0x801D0860` — the RAM `bankRec10a` owns, and
-    `config-bankC.yaml` carries ROM `0x244770` as a `bin` **gap**. Calls into
-    `0x801D40D0`/`0x801D410C` therefore hit the runtime's streamed stub and spin
-    (17 439 each in the 200 s run); the developer's **sequence-end crash** is not
-    reproduced in the port (exit 0). Fix = the session-55 treatment: compile the
-    record into a bank unit *other* than the one owning `bankRec10a` so the calls
-    emit `LOOKUP_FUNC`. See `docs/HANDOFF-2026-09-16-session57.md` §2.
+  - ✅ **Checkpoints: `save`/`load` in the live console (session 58, the
+    developer's idea)** — a fast-testing instrument that removes the ~45-60 s
+    New Game replay from every experiment. A checkpoint is the whole 8 MiB RDRAM
+    image **plus the runtime's overlay state** (which recompiled body is mapped
+    at each RAM address; RDRAM alone would restore a later bank's function map
+    and run the wrong module's bodies), written/restored by the console commands
+    `save [path]` / `load [path]` (`write_checkpoint`/`read_checkpoint` in
+    `app/src/sdl_platform.cpp`; `recomp::overlays::get_overlay_state_blob` /
+    `restore_overlay_state_blob`). Both wrap the file I/O in
+    `ultramodern::checkpoint_pause_begin/end`, which parks every thread executing
+    recompiled code at a function-entry boundary — the N64 threads are 1:1
+    native, and without the park the image **tears** (first attempts: the
+    checkpoint's own checksum did not match its bytes, first `0x300` bytes zero,
+    while the game kept submitting RSP tasks during the write). Verified: file
+    self-consistency, an in-run rewind that then plays forward (personality
+    questions → `0x16`), and a cross-process load. `OGRE_CONSOLE_AT_MS` delays
+    the watched-file read so a scripted run can leave the command file in place.
+    See `docs/guides/app-build.md` → "Checkpoints" and
+    `docs/HANDOFF-2026-09-16-session58.md` §1.
+  - ✅ **Scene `0x16`'s module is compiled and the closing movie plays (session
+    58)** — session 57's next lead, done. Scene `0x16` (descriptor `0x8018FC00`,
+    mask `0x400`) chunk-DMAs ROM `0x244770` (0x7500, 59 × 0x200) → RAM
+    `0x801D0860` (record 10's arena). It is now **bank unit I**
+    (`config-bankI.yaml`/`.toml`: code `0x244770..0x24B3E0`, data to the module
+    end `0x801D7D60`, 43 functions), and `bankRec10a` — the *other bank* of that
+    RAM — moved out of unit C into **unit J** (`BANK_UNITS := … I J`), because a
+    unit cannot hold overlapping records and unit C's own code calls into that
+    range. Result: the scene loads, plays and **advances out of it** (repeated
+    `0x02 → 0x0D → 0x16` cycles at t≈58.8/66.0/68.6/71.4 s at 4x, no stub
+    calls; `20 streamed-overlay record(s), 1975 function(s) armed`).
+    Three build-hygiene traps this exposed are fixed in the `Makefile`:
+    `build/bank<U>/{asm,assets}` must be cleared before `splat split` (splat
+    never deletes a removed segment's output), `RecompiledFuncs/`/`Bank*Funcs/`
+    must be cleared before regenerating (N64Recomp never deletes a previous
+    run's file, so a symbol that changed section leaves a conflicting definition
+    behind), and a `data` subsegment needs an explicit following `bin` gap.
+    `tools/gen_bank_syms.py` now also sees spimdisasm's `.Lovl<U>_<addr>`
+    references. See `docs/HANDOFF-2026-09-16-session58.md` §2.
+  - 🚧 **The sequence-end crash reproduces (session 58)** — first time in the
+    port, deterministic: `SIGBUS` in `func_ovlC_8022C270 + 0x53A`
+    (`lw v0,0(v1)` at `0x8022C7A4`) on N64 thread 4, faulting guest
+    `0x7FFF43E8`, right after a `0x02 → 0x0D` visit at t≈78.1 s (4×). The crash
+    dump (`OGRE_DUMP_RDRAM=/tmp/s58-crash.bin`, regenerate with the same env var)
+    shows **`D_8018F1C0 = 0x0431` — step 1073, far past the decoded 19-step
+    table** — so the sequence has run off its script. Next lead: watch what the
+    script VM `func_80170974` (opcode `0x10`, store at `0x80170ADC`) writes at
+    the end of the script, and whether retail ends at step 19; a checkpoint at
+    t≈70 s makes that cheap. See `docs/HANDOFF-2026-09-16-session58.md` §3.
+  - ⬜ **Scene `0x16`'s content is uncaptured**: the scene runs, but nobody has
+    looked at what the closing movie shows (`docs/scenes.md` row 6). Capture it
+    and ask the developer — and whether retail visits `0x16` once (the port
+    cycles it ~4 times before the crash, which is itself a symptom of the step
+    running past 19).
   - ✅ **Live debug console (session 56, developer's suggestion)**: the running
     game can now be queried on demand instead of only at a bounded run's exit —
     a watched command file (`OGRE_CONSOLE_FILE`, default

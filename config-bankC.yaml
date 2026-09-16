@@ -96,32 +96,37 @@ segments:
       - [0x211CF0, data]
 
   # Record 10's *arena continuation*: the segment table entry 10 only describes
-  # the resident part (ROM 0x1F0A00..0x213AE0 -> RAM 0x801AD5C0..0x801D08 60);
+  # the resident part (ROM 0x1F0A00..0x213AE0 -> RAM 0x801AD5C0..0x801D0860);
   # the game streams more code into record 10's reserved arena
   # (RAM up to 0x801F7100, i.e. record 10's `ram_end` word) from ROM modules that
-  # live in the gap before record 11's ROM start. Two such modules are loaded for
-  # the scene that asks for mask 0x3C00 (see docs/DECISIONS.md):
+  # live in the gap before record 11's ROM start:
   #
-  #   ROM 0x213AE0 (0x16770) -> RAM 0x801D0860
-  #   ROM 0x23B1F0 (0x09580) -> RAM 0x801E6FD0
+  #   ROM 0x213AE0 (0x16770) -> RAM 0x801D0860   (unit I: bankRec10a)
+  #   ROM 0x23B1F0 (0x09580) -> RAM 0x801E6FD0   (this unit: bankRec10b)
+  #   ROM 0x244770 (0x07500) -> RAM 0x801D0860   (unit I: bankRec16, scene 0x16)
   #
-  # The four stubbed calls that made that scene bounce all land in the second
-  # module (0x801E6FD0, 0x801EE3E8, 0x801EE600, 0x801EE4A0). The modules are
-  # contiguous code, streamed by 0x200-byte DMA chunks, so they are compiled as
-  # ordinary (RAM-disjoint) sections of this unit and registered by the same
-  # DMA-driven mechanism.
-  - name: bankRec10a
-    type: code
-    start: 0x213AE0
-    vram: 0x801D0860
-    subsegments:
-      - [0x213AE0, asm]
-
-  # Gap: not loaded for this scene.
+  # bankRec10a and scene 0x16's module are two *banks* of RAM 0x801D0860, so
+  # both moved to unit I in session 58: a unit cannot hold overlapping records,
+  # and unit C may not define a range its own code calls into (the session-45
+  # rule - while bankRec10a was here, a call into that RAM from resident code
+  # was bound at build time to one bank's bodies). The four stubbed calls that
+  # made scene 0x0C bounce all land in bankRec10b (0x801E6FD0, 0x801EE3E8,
+  # 0x801EE600, 0x801EE4A0), which stays here. The modules are contiguous code,
+  # streamed by 0x200-byte DMA chunks, so they are compiled as ordinary
+  # (RAM-disjoint) sections of their unit and registered by the same DMA-driven
+  # mechanism.
+  # Gap: unit I's arena modules (ROM 0x213AE0..0x24BC70). This bin is
+  # load-bearing, not cosmetic: splat extends the `data` subsegment above to the
+  # *next* segment's start, and with no segment here it runs to bankRec11's ROM
+  # 0x24BC70 — which makes `.bankRec10`'s VMA overlap bankRec10b's and
+  # bankRec11's and re-emits their code as data (session 58, when bankRec10a
+  # moved out of this unit: "section .bankRec10b VMA overlaps .bankRec10").
   - type: bin
-    start: 0x22A250
-    vram: 0x22A250
+    start: 0x213AE0
+    vram: 0x213AE0
 
+  # Record 10's remaining arena module (bankRec10b); bankRec10a and scene
+  # 0x16's module (bankRec16) are unit I.
   - name: bankRec10b
     type: code
     start: 0x23B1F0
@@ -129,8 +134,8 @@ segments:
     subsegments:
       - [0x23B1F0, asm]
 
-  # Gap: records 18 (ROM 0x1BA020) and 15/overlay C (ROM 0x1CE040..0x1F0A00) are
-  # not part of this unit.
+  # Gap: records 18 (ROM 0x1BA020), 15/overlay C (ROM 0x1CE040..0x1F0A00) and
+  # unit I's bankRec10a/bankRec16 (ROM 0x213AE0..0x24BC70) are other units.
   - type: bin
     start: 0x244770
     vram: 0x244770

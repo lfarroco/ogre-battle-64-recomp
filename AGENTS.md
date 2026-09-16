@@ -98,8 +98,9 @@ wrong half of a function. Check these before blaming game logic:
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   *different* resident bank. `python3 tools/cross_bank.py report` lists sites;
   `dispatch --only …` is wired into `make recomp`. Bank code is compiled into
-  `Bank{A..H}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`
-  (unit H is the scene-`0x07` form module; `cross_bank.py`'s `overloaded()` had
+  `Bank{A..J}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`
+  (unit H is the scene-`0x07` form module; unit I is scene `0x16`'s closing
+  movie, unit J is the `bankRec10a` bank of the same RAM; `cross_bank.py`'s `overloaded()` had
   a `min`/`max` bug that hid its whole range until session 55).
   **`make bank-recomp` now runs `cross_bank.py check-banks`**, which fails if a
   unit defines a RAM range another bank can own *and* calls into it from another
@@ -133,7 +134,19 @@ wrong half of a function. Check these before blaming game logic:
   and read the `[console]` lines from the run's stdout — or press `1`..`9` with
   `OGRE_KEY_<n>` bound. Commands: `r`/`rh`/`rb`/`rk`, `d`, `f`, `fb`, `s`, `k`
   (checksum for A/B), `w` (a real write), `c` (scene/descriptor/mask/step),
-  `dump`. See `docs/guides/app-build.md` -> "The live console".
+  `dump`, `save`/`load`. See `docs/guides/app-build.md` -> "The live console".
+- **Replaying a scripted path to reach a scene is the slowest part of a test.
+  `save`/`load` are checkpoints** (session 58): `save` writes the whole RDRAM
+  image **plus the runtime's overlay state** (which recompiled body is mapped at
+  each RAM address — RDRAM alone would restore a later bank's function map and
+  run the wrong module's bodies), and `load` rewinds the machine to that instant
+  so the game re-runs from there. Both wrap the file I/O in a runtime
+  thread-park (`ultramodern::checkpoint_pause_begin`) because the game's N64
+  threads are 1:1 native threads: without it the image **tears** (session 58's
+  first attempts wrote a checkpoint whose own checksum did not match its bytes).
+  A checkpoint is only valid for the process/binary that wrote it. One pair at
+  the cathedral replaces a 45 s opening replay; `docs/guides/app-build.md` ->
+  "Checkpoints".
 - Chunk-DMA records may never be DMA'd at all (`0xD0` gap), and record BSS must be
   zeroed on load (`func_ovlE_…`; see `load_function_bank` and `RAM_END` in
   `tools/gen_bank_funcs.py`).
@@ -365,12 +378,16 @@ from here.
   order is **not** the scene order, so do not infer an on-screen position from a
   render of it — see `docs/guides/njpeg-backgrounds.md`);
   the assembled image at `0x80243E28` renders as the
-  cathedral, and the opening now runs to **scene `0x16`**, which chunk-DMAs an
-  **uncompiled module** (ROM `0x244770` → RAM `0x801D0860`, a `bin` gap in
-  `config-bankC.yaml` whose RAM `bankRec10a` also owns) and then spins on the
-  runtime's streamed stub — the concrete sequence-end wall (session 57 §2).
+  cathedral, and the opening runs to **scene `0x16`** (the closing movie), which
+  chunk-DMAs ROM `0x244770` (0x7500) → RAM `0x801D0860` — record 10's arena,
+  which `bankRec10a` (unit **J**) also owns. That module is **bank unit I**
+  (session 58; 43 functions), so the movie plays and the sequence advances; it
+  then **crashes** deterministically in `func_ovlC_8022C270 + 0x53A` with
+  `D_8018F1C0 = 0x0431` — step 1073, past the decoded 19-step table (session 58
+  §3).
   See `docs/HANDOFF-2026-09-15-session52.md`, `-session51.md` §1-§7,
-  `-session50.md` §5/§9 and `-session57.md`. **Other large backgrounds use the
+  `-session50.md` §5/§9, `-session57.md` and `-session58.md`. **Other large
+  backgrounds use the
   same machinery and the dominant one is the same size** — all 75 njpeg
   assets are enumerated (42 are 320x240) with the asset format, the tile
   geometry and the check recipe in `docs/guides/njpeg-backgrounds.md`; the

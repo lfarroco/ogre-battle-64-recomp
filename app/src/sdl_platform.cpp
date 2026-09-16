@@ -8,6 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
+
+#include <librecomp/overlays.hpp>
 
 #include <SDL.h>
 #if defined(__APPLE__)
@@ -627,6 +630,8 @@ static uint16_t gamecontroller_buttons(SDL_GameController* controller) {
 //   w  <addr> <value>        store a 32-bit word (A/B experiments)
 //   c  [bytes]               report the scene/descriptor/state words
 //   dump [path]              write the whole 8 MiB RDRAM image right now
+//   save [path]              write a checkpoint (RDRAM + overlay state)
+//   load [path]              restore a checkpoint written by this build
 //   help                     this list
 //
 // Addresses are guest KSEG0 (`0x80xxxxxx`) or bare hex; a leading `0x` is
@@ -702,6 +707,135 @@ inline uint8_t console_byte(const uint8_t* base, uint32_t addr) {
     return base[(addr & 0x1FFFFFFFu) ^ 3u];
 }
 
+// --- checkpoints -----------------------------------------------------------
+//
+// `save`/`load` are the fast-testing instrument: instead of replaying the whole
+// New Game opening (movie -> cathedral -> name form -> birthday -> personality
+// questions, ~45 s at 4x) to reach a scene, snapshot the machine once and jump
+// back to it. The file is the whole RDRAM image plus the runtime's overlay state
+// (which recompiled body runs at each RAM address, i.e. which streamed bank is
+// resident) — see recomp::overlays::get_overlay_state_blob. Without that second
+// half a restore would rewind the game's data but leave the function map on a
+// later bank, and the restored scene would run the wrong module's code.
+//
+// Everything else (the game's own RDRAM pointers, its framebuffers, the heap)
+// travels inside the image, so a checkpoint is a full machine rewind: the game
+// re-runs from that point on load.
+//
+// Limits, deliberately: the file is only valid for the binary that wrote it
+// (the overlay blob is versioned and checksummed), the console does not pause
+// the game threads, and the app's own knobs (`OGRE_TAP_*`, `OGRE_SCENE`, the
+// input schedule) keep their current position rather than being part of the
+// snapshot.
+constexpr char kCheckpointMagic[8] = {'O', 'G', 'R', 'E', 'C', 'K', 'P', 'T'};
+constexpr uint32_t kCheckpointVersion = 1;
+
+struct CheckpointHeader {
+    char magic[8];
+    uint32_t version;
+    uint32_t rdram_size;
+    uint32_t host_size;
+    uint32_t flags;
+    uint64_t checksum;  // FNV-1a over host blob + RDRAM image
+};
+
+uint64_t fnv1a_bytes(uint64_t hash, const void* data, size_t size) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < size; i++) {
+        hash ^= (uint64_t)p[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+constexpr uint64_t kFnv1aOffsetBasis = 14695981039346656037ull;
+constexpr uint32_t kRdramSize = 0x800000u;
+
+bool write_checkpoint(const char* path, uint8_t* rdram, std::string& error) {
+    const std::vector<uint8_t> host = recomp::overlays::get_overlay_state_blob();
+
+    CheckpointHeader header{};
+    memcpy(header.magic, kCheckpointMagic, sizeof(header.magic));
+    header.version = kCheckpointVersion;
+    header.rdram_size = kRdramSize;
+    header.host_size = (uint32_t)host.size();
+    header.flags = 0;
+    uint64_t hash = fnv1a_bytes(kFnv1aOffsetBasis, host.data(), host.size());
+    hash = fnv1a_bytes(hash, rdram, kRdramSize);
+    header.checksum = hash;
+
+    FILE* f = fopen(path, "wb");
+    if (f == nullptr) {
+        error = "could not open for writing";
+        return false;
+    }
+    bool ok = fwrite(&header, sizeof(header), 1, f) == 1 &&
+              fwrite(host.data(), 1, host.size(), f) == host.size() &&
+              fwrite(rdram, 1, kRdramSize, f) == kRdramSize;
+    fclose(f);
+    if (!ok) {
+        error = "short write";
+    }
+    return ok;
+}
+
+bool read_checkpoint(const char* path, uint8_t* rdram, std::string& error) {
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        error = "could not open for reading";
+        return false;
+    }
+    CheckpointHeader header{};
+    if (fread(&header, sizeof(header), 1, f) != 1) {
+        fclose(f);
+        error = "file is shorter than the header";
+        return false;
+    }
+    if (memcmp(header.magic, kCheckpointMagic, sizeof(header.magic)) != 0) {
+        fclose(f);
+        error = "bad magic (not an OGRE checkpoint)";
+        return false;
+    }
+    if (header.version != kCheckpointVersion) {
+        fclose(f);
+        error = "checkpoint version mismatch";
+        return false;
+    }
+    if (header.rdram_size != kRdramSize) {
+        fclose(f);
+        error = "checkpoint RDRAM size mismatch";
+        return false;
+    }
+    if (header.host_size > 64u * 1024u * 1024u) {
+        fclose(f);
+        error = "implausible overlay-state size";
+        return false;
+    }
+    std::vector<uint8_t> host(header.host_size);
+    std::vector<uint8_t> image(kRdramSize);
+    const bool read_ok = (host.empty() || fread(host.data(), 1, host.size(), f) == host.size()) &&
+                         fread(image.data(), 1, image.size(), f) == image.size();
+    fclose(f);
+    if (!read_ok) {
+        error = "short read";
+        return false;
+    }
+    uint64_t hash = fnv1a_bytes(kFnv1aOffsetBasis, host.data(), host.size());
+    hash = fnv1a_bytes(hash, image.data(), image.size());
+    if (hash != header.checksum) {
+        error = "checksum mismatch (truncated or edited file)";
+        return false;
+    }
+    // Overlay state first: if the runtime rejects the blob (a different binary),
+    // the RDRAM image has not been touched yet.
+    if (!recomp::overlays::restore_overlay_state_blob(host)) {
+        error = "overlay state rejected (checkpoint from another build?)";
+        return false;
+    }
+    memcpy(rdram, image.data(), image.size());
+    return true;
+}
+
 uint32_t range_check(uint32_t addr, uint32_t len) {
     return addr >= 0x80000000u && addr + len <= 0x80800000u;
 }
@@ -745,7 +879,11 @@ void console_exec(const std::string& line_in) {
     if (cmd == "help") {
         printf("[console] r/rh/rb/rk <addr> [n] | d <addr> [len] | f <value> [max] | fb <hex> [max]\n"
                "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c\n"
-               "[console] dump [path]  (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n");
+               "[console] dump [path]   (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n"
+               "[console] save [path]   (checkpoint: RDRAM + overlay state; bare `save` writes\n"
+               "[console]                /tmp/ogre-checkpoint-NNNN.ckpt)\n"
+               "[console] load [path]   (restore a checkpoint this build wrote; bare `load` uses\n"
+               "[console]                the most recent bare `save`)\n");
     } else if (cmd == "r" || cmd == "rw" || cmd == "rh" || cmd == "rb" || cmd == "rk") {
         const uint32_t addr = num(1, 0);
         uint32_t count = num(2, 1);
@@ -892,8 +1030,8 @@ void console_exec(const std::string& line_in) {
         const uint32_t pending = console_half(rdram, 0x800E8214u);
         const uint32_t desc = console_word(rdram, 0x800E8294u);
         const uint32_t mask = desc ? console_word(rdram, desc + 0x10u) : 0;
-        const uint32_t step = console_word(rdram, 0x8018F1C0u);
-        const uint32_t next = console_word(rdram, 0x8018F1C2u);
+        const uint32_t step = console_half(rdram, 0x8018F1C0u);
+        const uint32_t next = console_half(rdram, 0x8018F1C2u);
         const uint32_t spin = console_half(rdram, 0x800C4C26u);
         printf("[console] scene=0x%04X pending=0x%04X desc=0x%08X mask=0x%08X step=%u next=0x%04X spin=0x%04X\n",
                scene, pending, desc, mask, step, next, spin);
@@ -917,6 +1055,59 @@ void console_exec(const std::string& line_in) {
         } else {
             printf("[console] could not open %s\n", path.c_str());
         }
+    } else if (cmd == "save" || cmd == "load") {
+        // Checkpoints: see the block comment above `write_checkpoint`. The file
+        // carries the RDRAM image *and* the runtime's overlay state, so a load
+        // rewinds the machine to the instant of the save.
+        static uint32_t save_seq = 0;
+        static std::string last_save;
+        std::string path;
+        if (ntok > 1) {
+            path = tok[1];
+        } else if (cmd == "save") {
+            char auto_path[128];
+            snprintf(auto_path, sizeof(auto_path), "/tmp/ogre-checkpoint-%04u.ckpt", ++save_seq);
+            path = auto_path;
+            last_save = path;
+        } else if (!last_save.empty()) {
+            path = last_save;
+        } else {
+            path = "/tmp/ogre-checkpoint.ckpt";
+        }
+
+        std::string error;
+        // The game runs on its own host threads, so a multi-megabyte read or
+        // write here must wait for every thread executing recompiled code to
+        // park at a function boundary — otherwise the image tears (session 58:
+        // the game kept submitting RSP tasks and building frames *during* the
+        // write, so the file was a mix of frames). See
+        // ultramodern::checkpoint_pause_begin.
+        const int parked = ultramodern::checkpoint_pause_begin();
+        if (cmd == "save") {
+            if (write_checkpoint(path.c_str(), rdram, error)) {
+                printf("[console] checkpoint saved to %s (scene=0x%04X step=%u, %d thread(s) parked)\n",
+                       path.c_str(), (unsigned)console_half(rdram, 0x800E810Eu),
+                       (unsigned)console_half(rdram, 0x8018F1C0u), parked);
+            } else {
+                printf("[console] save failed: %s\n", error.c_str());
+            }
+        } else {
+            // Report the *pre-restore* state too: a load that silently does
+            // nothing is the failure mode that matters (checksum/version).
+            const uint32_t before_scene = console_half(rdram, 0x800E810Eu);
+            const uint32_t before_step = console_half(rdram, 0x8018F1C0u);
+            if (read_checkpoint(path.c_str(), rdram, error)) {
+                printf("[console] checkpoint loaded from %s (%d thread(s) parked)\n", path.c_str(),
+                       parked);
+                printf("[console]   scene 0x%04X step=%u -> scene 0x%04X step=%u\n",
+                       before_scene, before_step,
+                       (unsigned)console_half(rdram, 0x800E810Eu),
+                       (unsigned)console_half(rdram, 0x8018F1C0u));
+            } else {
+                printf("[console] load failed: %s\n", error.c_str());
+            }
+        }
+        ultramodern::checkpoint_pause_end();
     } else {
         printf("[console] unknown command \"%s\" (try help)\n", cmd.c_str());
     }
@@ -930,9 +1121,19 @@ bool tick() {
 
     // 1. The watched file. Written by an external tool (an agent can create it
     //    mid-run), read wholesale, then removed so it fires exactly once.
+    //    `OGRE_CONSOLE_AT_MS=<n>` delays every read until n ms of wall clock have
+    //    elapsed: a scripted run can leave the file in place at launch (no
+    //    background writer, no race with the harness) and the command still lands
+    //    on a chosen frame.
     {
         static const char* path = getenv("OGRE_CONSOLE_FILE") ? getenv("OGRE_CONSOLE_FILE")
                                                               : "/tmp/ogre-console.txt";
+        static const uint64_t boot_ticks = SDL_GetTicks64();
+        static const uint32_t at_ms = [] {
+            const char* v = getenv("OGRE_CONSOLE_AT_MS");
+            return (v != nullptr) ? (uint32_t)strtoul(v, nullptr, 10) : 0u;
+        }();
+        if (at_ms == 0 || (uint32_t)(SDL_GetTicks64() - boot_ticks) >= at_ms) {
         if (FILE* f = fopen(path, "rb")) {
             std::string text;
             char buf[512];
@@ -953,6 +1154,7 @@ bool tick() {
                 if (nl == std::string::npos) break;
                 pos = nl + 1;
             }
+        }
         }
     }
 

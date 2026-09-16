@@ -13,6 +13,8 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-16 (58) | **A save state is RDRAM *plus* the overlay state, and the two must be captured with the game threads parked.** `save`/`load` in the live console write/restore the whole 8 MiB image and the runtime's function map/bank records (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`). RDRAM alone is not a machine rewind: which recompiled body runs at each RAM address is host state, and a restore that leaves the map on a later bank runs the wrong module's bodies (the session-45/55 mis-binding class). The file I/O is wrapped in `ultramodern::checkpoint_pause_begin/end`, which parks every thread executing recompiled code at a function-entry boundary — the recompiled N64 threads are 1:1 native threads, and without the park the image **tears** (session 58: the checkpoint's own checksum did not match its bytes and its first `0x300` bytes were zeros while the game kept submitting RSP tasks during the write). A checkpoint is only valid in the process/binary that wrote it | `docs/guides/app-build.md` → "Checkpoints"; `docs/HANDOFF-2026-09-16-session58.md` §1 |
+| 2026-09-16 (58b) | **A streamed module that shares RAM with another record gets its own unit and the calls into it are `LOOKUP_FUNC` — scene `0x16`'s closing movie is bank unit I (ROM `0x244770` → RAM `0x801D0860`), and `bankRec10a` moved out of unit C to unit J because it is the *other bank* of that exact RAM.** `bankRec10a` could not stay in unit C (unit C's own code calls into that range — session 45's rule) and could not share unit I with `bankRec16` (overlapping records). Splat/N64Recomp hygiene this exposed: a unit's asm/assets must be cleared before `splat split` (splat never deletes a removed segment's output, and the ELF rule globs its inputs), `RecompiledFuncs/`/`Bank*Funcs/` must be cleared before regenerating (N64Recomp never deletes a previous run's file, so a symbol that changed section leaves a conflicting definition behind), a `data` subsegment needs an explicit following `bin` gap (splat extends it to the next segment otherwise), and `gen_bank_syms.py` must also see spimdisasm's `.Lovl<U>_<addr>` local-label references | `docs/HANDOFF-2026-09-16-session58.md` §2; `config-bankI.yaml`, `config-bankJ.yaml` |
 | 2026-09-16 (57) | **The njpeg readback's source is the game's own framebuffer choice (`state[0x64]`), not RT64's scratch word.** RT64's `OGRE_NJPEG_SCRATCH` `+8` is only *re*set by a YUV-texture-image-then-colour-image pair and is **never cleared**, so at the first pass of an assembly it still names the previous step's framebuffer — which by then holds the previous screen (the name/date-of-birth form). That is the intermittent stale-backdrop rectangle, not a render-vs-readback race. `tools/njpeg_readback.py` now keeps `state[0x64]` whenever `D_800C4BB8` matches an entry of the framebuffer table `0x800A8204`, and uses the scratch word only as the session-48 fallback. Measured over 10 runs / 120 stage-3 passes: old rule wrong **13** (always pass 0), new rule wrong **0** | `docs/HANDOFF-2026-09-16-session57.md` §1; `tools/njpeg_readback.py` |
 | 2026-09-16 (57b) | **A game-thread framebuffer readback is already ordered by the game's DP-completion wait, so no extra handshake is needed.** `sp_complete()` does run before `send_dl()` (`ultramodern/src/events.cpp:422`/`:429`), but the game waits on the **DP** event (`:432`, its registered queue is `0x800E8BF4`); delaying the display list 400 ms inside `send_dl` never let the readback run inside the delay, and an in-flight-gfx-task handshake implemented for the window never blocked once (reverted). `ogre_sync_framebuffers()` is what forces the RDP's pixels back to RDRAM before the copy | `docs/HANDOFF-2026-09-16-session57.md` §1, "Why the render-vs-readback race hypothesis is wrong" |
 | 2026-09-16 (56) | **Guest RAM is queried from a *running* game, not only from a bounded run's exit dump.** A live console in the app (`ogre::console`, `app/src/sdl_platform.cpp`) executes read/search/checksum/dump commands on the **main thread** (where a multi-megabyte write cannot race the game thread), triggered either by a watched command file (`OGRE_CONSOLE_FILE`, default `/tmp/ogre-console.txt`; lines run, file removed) or by the number keys `1`..`9` (`OGRE_KEY_<n>`). This exists because every "what is in RAM at the moment X happens" question in this project was previously answered by an exit dump that had already been overwritten (session 56's backdrop readback). Byte order follows `tools/rdram.py` (logical word = LE word at `addr-0x80000000`, logical byte = `addr ^ 3`) | `docs/guides/app-build.md` → "The live console"; `docs/HANDOFF-2026-09-16-session56.md` §4 |
@@ -42,6 +44,68 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-16 (session 58) — checkpoints (save/load) and scene `0x16`'s streamed module
+
+**Decision (1): the port gets save states, and a save state is the RDRAM image
+plus the runtime's overlay state.** `save`/`load` in the live console
+(`app/src/sdl_platform.cpp`) write and restore the whole 8 MiB image together
+with the loaded-section/function-bank records
+(`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`,
+`librecomp/src/overlays.cpp`). Function pointers are process-local, so the blob
+stores extents and the function map is rebuilt from the records of the current
+process; magic/version/size/fnv-1a reject a file from another build.
+
+**Why RDRAM alone is not enough.** Which recompiled body runs at each RAM address
+is `func_map`, host state. A restore that rewinds only the game's data leaves the
+map pointing at a *later* bank — so the restored scene would run the wrong
+module's bodies at those addresses, exactly the session-45/55 mis-binding class.
+The checkpoint closes that hole by construction.
+
+**Why the pause is required.** The recompiled N64 threads are 1:1 native threads,
+so the console's main thread writing 8 MiB raced the game thread that was
+mid-frame. The first attempts produced **torn images**: the stored checksum did
+not match the file's own bytes, the first `0x300` bytes were zeros, and stderr
+showed the game still submitting RSP tasks during the write.
+`ultramodern::checkpoint_pause_begin()` sets a flag that every recompiled
+function entry checks (the `recomp_trace_entry` hook N64Recomp already emits),
+parks the executing threads for the duration, and `checkpoint_pause_end()`
+releases them. Verified: a save's checksum now matches its bytes; a `load` 20 s
+later rewinds scene/step and the game continues from there (a checkpoint at the
+personality questions replays into scene `0x16`); a checkpoint from an earlier
+process loads too. `OGRE_CONSOLE_AT_MS` was added so a scripted run can leave the
+command file in place at launch instead of racing a background writer.
+
+**Decision (2): scene `0x16`'s module is bank unit I, and `bankRec10a` is unit J.**
+Scene `0x16` (descriptor `0x8018FC00`, mask `0x400`) chunk-DMAs ROM `0x244770`
+(0x7500, 59 × 0x200) → RAM `0x801D0860` — record 10's arena. `config-bankC.yaml`
+carried that ROM as a `bin` gap while unit C's `bankRec10a` owned the RAM, so the
+three calls resident code makes into it (`0x801D40D0`, `0x801D410C`,
+`0x801D62A0`) missed the function map and hit the streamed stub (session 57 §2).
+Session 45's model applies: the module is its own unit, and the other *bank* of
+the same RAM (`bankRec10a`) is another unit, because a unit cannot hold
+overlapping records and unit C may not define a range its own code calls into.
+The module's code/data split is splat's (`func_ovlI_801D7484` ends ROM
+`0x24B3E0`; data to the module end `0x801D7D60`).
+
+**Result.** Scene `0x16` loads, plays and **advances out of it** — repeated
+`0x02 → 0x0D → 0x16` cycles at 4x with no stub lines, `20 streamed-overlay
+record(s), 1975 function(s) armed`. It then reproduces the developer's
+end-of-sequence crash: `SIGBUS`, `func_ovlC_8022C270 + 0x53A`, faulting guest
+`0x7FFF43E8`, with `D_8018F1C0 = 0x0431` (step 1073, past the decoded 19-step
+table).
+
+**Build hygiene this exposed (all three are traps, not scene work).** `splat
+split` does not delete a segment that moved to another unit, and the bank ELF
+rule globs its inputs — so clearing `build/bank<U>/{asm,assets}` before the split
+is required. N64Recomp likewise never deletes a previous run's output, so
+`RecompiledFuncs/` and `Bank*Funcs/` are cleared before regenerating (a symbol
+that changed section left a conflicting definition behind). And a `data`
+subsegment needs an explicit following `bin` gap: splat extends it to the next
+segment, which re-emitted record 10's friends as data. `tools/gen_bank_syms.py`
+also had to learn spimdisasm's `.Lovl<U>_<addr>` local-label references.
 
 ---
 

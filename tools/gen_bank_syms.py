@@ -47,7 +47,13 @@ def main() -> int:
         defined.update(m.group(1) for m in DEF_RE.finditer(text))
         defined.update(m.group(1) for m in LOCAL_RE.finditer(text))
 
-    ref_re = re.compile(r"\bD_ovl" + re.escape(unit) + r"_([0-9A-Fa-f]{8})\b")
+    # A reference can be emitted under either name: splat's globals carry the
+    # unit prefix (`D_ovlI_801D7D70`), while a `%hi/%lo` pair whose target is not
+    # a global in the unit's layout can come out as spimdisasm's local label
+    # (`.LovlI_801D7D70`). Both are the same absolute address and both need a
+    # definition; session 58's unit I (`bankRec16`) links only with the `.L` form
+    # handled (the module's tail words are not emitted as data labels).
+    ref_re = re.compile(r"\.?L?D?_?ovl" + re.escape(unit) + r"_([0-9A-Fa-f]{8})\b")
     referenced: set[str] = set()
     for text in texts:
         referenced.update(m.group(0) for m in ref_re.finditer(text))

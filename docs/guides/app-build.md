@@ -318,12 +318,73 @@ Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
 | `w <addr> <value>` | store a word (A/B experiments; it is a real write) |
 | `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
 | `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
+| `save [path]` | write a **checkpoint** (whole RDRAM + the runtime's overlay state). A bare `save` writes `/tmp/ogre-checkpoint-NNNN.ckpt` and remembers it |
+| `load [path]` | **restore** a checkpoint this build wrote — the machine rewinds to the instant of the save and the game re-runs from there. A bare `load` uses the most recent bare `save` |
 | `help` | the list |
 
 `dump` is the one that fixes the "wrong moment" problem: run the game until the
 screen is in the state you want, then drop the command file (or press the bound
 key) and the image is written while that state is live. Pair it with
 `tools/rdram.py <dump> image …` / `diff …` as usual.
+
+`OGRE_CONSOLE_AT_MS=<n>` delays every watched-file read until `n` ms of wall
+clock have elapsed, so a scripted run can leave the command file in place at
+launch instead of racing it from a background writer.
+
+### Checkpoints — `save` / `load` (session 58)
+
+A checkpoint is a **full machine rewind**, so a long scripted path only has to be
+played once: reach the scene you are working on, `save`, then `load` it instead
+of replaying the New Game opening every run (the opening is ~45 s at 4x before
+the first form and ~60 s to the closing movie).
+
+```sh
+# leave `c\nsave /tmp/ck.ckpt\nc\n` in the watched file before launch:
+printf 'c\nsave /tmp/ck.ckpt\nc\n' > /tmp/ogre-console.txt
+OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1500 \
+  OGRE_TAP_BUTTON="start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a" \
+  OGRE_CONSOLE_AT_MS=30000 OGRE_EXIT_AFTER_MS=600000 \
+  ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
+# later, from another shell:
+printf 'load /tmp/ck.ckpt\nc\n' > /tmp/ogre-console.txt
+```
+
+The file is `[8-byte magic][u32 version][u32 rdram_size][u32 host_size][u32
+flags][u64 fnv1a][overlay-state blob][whole RDRAM image]` (8 MiB + a few KiB).
+`load` verifies magic/version/sizes/checksum and refuses a file from another
+build; a bare `dump` is still the plain image `tools/rdram.py` reads.
+
+Why it is not just "write RDRAM to a file":
+
+* **The function map is host state.** Which recompiled body runs at each RAM
+  address is the runtime's `func_map`, not RDRAM. Restoring RDRAM alone would
+  rewind the game's data but leave the map on a later bank, so the restored
+  scene would run the wrong module's bodies at those addresses (the
+  session-45/55 mis-binding class). The blob carries the loaded section and
+  function-bank records and rebuilds the map from them
+  (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`).
+* **The game runs on its own host threads**, so reading or writing 8 MiB from
+  the console's main thread raced the game thread that was mid-frame. Session
+  58's first attempts produced **torn images**: the visible symptoms were a
+  checkpoint whose own checksum did not match its bytes and whose first `0x300`
+  bytes were zeros while the game kept submitting RSP tasks and building frames
+  during the write. `save`/`load` now wrap the file I/O in
+  `ultramodern::checkpoint_pause_begin()` / `checkpoint_pause_end()`, which
+  parks every thread executing recompiled code at a function-entry boundary
+  (`recomp_trace_entry`, the hook the recompiler emits at every function start)
+  for the duration, then releases it. The console reports how many threads
+  parked.
+
+Verified (session 58): a checkpoint's stored checksum matches its own bytes; a
+`load` 20 s later puts scene/step back to the saved values and the game
+**continues from there** (a checkpoint taken at the personality questions
+replays forward into scene `0x16`, the closing movie); a save/load pair in the
+*same* run reproduces the rewind.
+
+Limits: valid only in the process that wrote it (function pointers are
+process-local) and for the same binary; the app's own knobs (`OGRE_TAP_BUTTON`
+position, `OGRE_SCENE`, `OGRE_STEP`) are not part of the snapshot; RT64's own
+render state is not rewound (the next frame redraws from the restored RDRAM).
 
 ### `tools/runlog.py <run.log>` — one screen per run
 

@@ -1,9 +1,3 @@
-diff --git a/N64Recomp b/N64Recomp
---- a/N64Recomp
-+++ b/N64Recomp
-@@ -1 +1 @@
--Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253
-+Subproject commit 81213c1831fab2521a6a5459c67b63437d67e253-dirty
 diff --git a/librecomp/include/librecomp/mods.hpp b/librecomp/include/librecomp/mods.hpp
 index 37556bd..eefe64b 100644
 --- a/librecomp/include/librecomp/mods.hpp
@@ -28,10 +22,18 @@ index 37556bd..eefe64b 100644
  };
  
 diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
-index 35703bd..0363904 100644
+index 35703bd..d817c03 100644
 --- a/librecomp/include/librecomp/overlays.hpp
 +++ b/librecomp/include/librecomp/overlays.hpp
-@@ -45,6 +45,43 @@ namespace recomp {
+@@ -6,6 +6,7 @@
+ #include <string>
+ #include <unordered_map>
+ #include <span>
++#include <vector>
+ #include "sections.h"
+ 
+ namespace recomp {
+@@ -45,6 +46,59 @@ namespace recomp {
  
          void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
  
@@ -71,6 +73,22 @@ index 35703bd..0363904 100644
 +        // Called by recomp::do_rom_read(): loads/relocates the streamed section
 +        // covering the DMA, then forwards to the app hook.
 +        void notify_rom_read(uint32_t rom_offset, uint32_t ram_addr, uint32_t size);
++
++        // --- Overlay-state checkpoints (Phase 4 tooling) --------------------
++        //
++        // An "overlay state blob" is the part of the emulated machine that does
++        // not live in RDRAM: which recompiled body runs at each RAM address
++        // (`func_map`) plus the records of what is loaded where. A save state is
++        // the whole RDRAM image *plus* this blob; restoring RDRAM alone would
++        // leave the function map on a later bank and run the wrong module's
++        // bodies at those addresses (the session-45/55 mis-binding class).
++        //
++        // The blob is self-describing (magic/version/size/checksum) but holds no
++        // function pointers, so a restore is only valid in the process that
++        // wrote it. The app drives this; see `save`/`load` in
++        // app/src/sdl_platform.cpp and docs/guides/app-build.md.
++        std::vector<uint8_t> get_overlay_state_blob();
++        bool restore_overlay_state_blob(std::span<const uint8_t> blob);
 +
          struct BasePatchedFunction {
              size_t patch_section;
@@ -181,7 +199,7 @@ index 0f7de83..6bbe537 100644
  #   error "Unsupported architecture"
  #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..2cca2d9 100644
+index 8c8e5d1..9610b33 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,10 @@
@@ -231,7 +249,7 @@ index 8c8e5d1..2cca2d9 100644
  static std::unordered_map<std::string, recomp_func_t*> base_exports{};
  static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
  static std::unordered_map<std::string, size_t> base_events;
-@@ -271,8 +297,139 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+@@ -271,8 +297,305 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
      }
  }
  
@@ -329,6 +347,172 @@ index 8c8e5d1..2cca2d9 100644
 +    streamed_dma_hook = hook;
 +}
 +
++// ---------------------------------------------------------------------------
++// Overlay-state checkpoints (Phase 4 tooling).
++//
++// A save state is the whole 8 MiB RDRAM *plus* the state that does not live in
++// RDRAM: `func_map` (which recompiled function body runs at each RAM address —
++// a bank record the game DMA'd) and the records describing what is loaded where
++// (`loaded_sections`, `loaded_function_banks`). Restoring RDRAM alone would
++// rewind the game's data while leaving the function map on the *later* bank, so
++// a restored scene would run the wrong module's bodies at those addresses —
++// exactly the session-45/55 mis-binding class (AGENTS §4).
++//
++// `func_map` is not serialised: it is exactly the unions of the two record
++// lists, so it is rebuilt from them on restore. `section_addresses` is derived
++// from `loaded_sections` too (`load_overlay` writes it). A blob is
++// self-describing enough to reject a mismatch (magic, version, byte count and
++// an FNV-1a over the blob's own bytes), because a checkpoint is only valid for
++// the binary that wrote it.
++//
++// The app drives this; see `save`/`load` in app/src/sdl_platform.cpp and
++// docs/guides/app-build.md -> "Checkpoints".
++// ---------------------------------------------------------------------------
++namespace {
++constexpr uint32_t kOverlayStateMagic = 0x4F565331u;  // "OVS1"
++constexpr uint32_t kOverlayStateVersion = 1u;
++
++struct OverlayStateHeader {
++    uint32_t magic;
++    uint32_t version;
++    uint64_t total_size;
++    uint64_t num_sections;
++    uint64_t num_banks;
++    uint64_t checksum;  // FNV-1a over the header (with this field zero) + body
++};
++
++uint64_t fnv1a_bytes(uint64_t hash, const void* data, size_t size) {
++    const uint8_t* p = static_cast<const uint8_t*>(data);
++    for (size_t i = 0; i < size; i++) {
++        hash ^= (uint64_t)p[i];
++        hash *= 1099511628211ull;
++    }
++    return hash;
++}
++
++constexpr uint64_t kFnv1aOffsetBasis = 14695981039346656037ull;
++
++struct SerializedSection {
++    int32_t loaded_ram_addr;
++    uint64_t section_table_index;
++};
++
++struct SerializedBank {
++    uint32_t rom_start;
++    int32_t ram_addr;
++    uint32_t size;
++    uint64_t count;
++};
++}  // namespace
++
++std::vector<uint8_t> recomp::overlays::get_overlay_state_blob() {
++    const size_t body_size = sizeof(OverlayStateHeader) +
++                             loaded_sections.size() * sizeof(SerializedSection) +
++                             loaded_function_banks.size() * sizeof(SerializedBank);
++    std::vector<uint8_t> blob(body_size, 0);
++    OverlayStateHeader header{};
++    header.magic = kOverlayStateMagic;
++    header.version = kOverlayStateVersion;
++    header.total_size = (uint64_t)body_size;
++    header.num_sections = (uint64_t)loaded_sections.size();
++    header.num_banks = (uint64_t)loaded_function_banks.size();
++    header.checksum = 0;
++    std::memcpy(blob.data(), &header, sizeof(header));
++
++    size_t offset = sizeof(header);
++    for (const LoadedSection& section : loaded_sections) {
++        SerializedSection out{};
++        out.loaded_ram_addr = section.loaded_ram_addr;
++        out.section_table_index = (uint64_t)section.section_table_index;
++        std::memcpy(blob.data() + offset, &out, sizeof(out));
++        offset += sizeof(out);
++    }
++    for (const LoadedFunctionBank& bank : loaded_function_banks) {
++        SerializedBank out{};
++        out.rom_start = bank.rom_start;
++        out.ram_addr = bank.ram_addr;
++        out.size = bank.size;
++        out.count = (uint64_t)bank.count;
++        std::memcpy(blob.data() + offset, &out, sizeof(out));
++        offset += sizeof(out);
++    }
++
++    // Checksum over the header with `checksum == 0` plus the whole body, so the
++    // app's copy is validated by the same value it stored.
++    header.checksum = fnv1a_bytes(kFnv1aOffsetBasis, blob.data(), blob.size());
++    std::memcpy(blob.data(), &header, sizeof(header));
++    return blob;
++}
++
++bool recomp::overlays::restore_overlay_state_blob(std::span<const uint8_t> blob) {
++    if (blob.size() < sizeof(OverlayStateHeader)) {
++        return false;
++    }
++    OverlayStateHeader header{};
++    std::memcpy(&header, blob.data(), sizeof(header));
++    if (header.magic != kOverlayStateMagic || header.version != kOverlayStateVersion) {
++        return false;
++    }
++    if (header.total_size != (uint64_t)blob.size()) {
++        return false;
++    }
++    const size_t expected = sizeof(OverlayStateHeader) +
++                            (size_t)header.num_sections * sizeof(SerializedSection) +
++                            (size_t)header.num_banks * sizeof(SerializedBank);
++    if (expected != blob.size()) {
++        return false;
++    }
++
++    // Rebuild the function map from the record lists rather than serialising it:
++    // `load_overlay` / the bank entries are what populate it, and replaying them
++    // in the stored order reproduces the same final map (later writes win, which
++    // is how a bank overwrites another bank's entries).
++    func_map.clear();
++    loaded_sections.clear();
++
++    // Function pointers are process-local (ASLR), so a bank's blob carries only
++    // its extent; its entries come from the `loaded_function_banks` record of
++    // *this* process. Keep that list aside while the bank list is rebuilt, then
++    // re-register the entries each record had. A checkpoint is therefore only
++    // valid within the run that wrote it, which is what the app documents.
++    std::vector<LoadedFunctionBank> previous_banks;
++    previous_banks.swap(loaded_function_banks);
++
++    size_t offset = sizeof(header);
++    for (uint64_t i = 0; i < header.num_sections; i++) {
++        SerializedSection in{};
++        std::memcpy(&in, blob.data() + offset, sizeof(in));
++        offset += sizeof(in);
++        const size_t index = (size_t)in.section_table_index;
++        if (index >= sections_info.num_code_sections) {
++            continue;
++        }
++        load_overlay(index, in.loaded_ram_addr);
++    }
++
++    for (uint64_t i = 0; i < header.num_banks; i++) {
++        SerializedBank in{};
++        std::memcpy(&in, blob.data() + offset, sizeof(in));
++        offset += sizeof(in);
++        const LoadedFunctionBank* source = nullptr;
++        for (const LoadedFunctionBank& bank : previous_banks) {
++            if (bank.rom_start == in.rom_start && bank.ram_addr == in.ram_addr &&
++                (uint64_t)bank.count == in.count) {
++                source = &bank;
++                break;
++            }
++        }
++        if (source == nullptr) {
++            continue;
++        }
++        for (size_t f = 0; f < source->count; f++) {
++            func_map[source->funcs[f].ram_addr] = source->funcs[f].func;
++        }
++        loaded_function_banks.push_back(*source);
++    }
++    return true;
++}
++
 +void recomp::overlays::notify_rom_read(uint32_t rom_offset, uint32_t ram_addr, uint32_t size) {
 +    if (sections_info.code_sections != nullptr) {
 +        for (size_t i = 0; i < sections_info.num_code_sections; i++) {
@@ -371,7 +555,7 @@ index 8c8e5d1..2cca2d9 100644
      section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
  
      // Sort the executable sections by rom address
-@@ -361,14 +518,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +684,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
@@ -1001,7 +1185,7 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..4142bdf 100644
+index 46aea61..2e0e49a 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
 @@ -23,7 +23,17 @@
@@ -1022,7 +1206,7 @@ index 46aea61..4142bdf 100644
      moodycamel::LightweightSemaphore initialized;
  };
  
-@@ -77,6 +87,64 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
+@@ -77,6 +87,88 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
  void wait_for_external_message(RDRAM_ARG1);
  void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
  
@@ -1073,6 +1257,30 @@ index 46aea61..4142bdf 100644
 +// Debug: print the tids in the scheduler running queue.
 +void debug_dump_running_queue(RDRAM_ARG1);
 +
++// --- checkpoints (Phase 4 tooling) -----------------------------------------
++//
++// A save state has to read the whole 8 MiB RDRAM image while the game is not
++// writing it, or the snapshot tears: the game thread keeps running on its own
++// host thread (the recompiled machine is 1:1 native threads), so a plain
++// `fwrite(rdram, ...)` from the main thread produced an image that was already
++// internally inconsistent when it landed (session 58: the first 0x300 bytes
++// were zeros and the write had raced the game's frame).
++//
++// `checkpoint_pause_begin()` sets a global flag and returns only once every
++// thread that is executing recompiled code has parked at a function-entry
++// boundary. Parked threads block in `recomp_trace_entry` (the hook the
++// recompiler emits at every function start) and resume on
++// `checkpoint_pause_end()`. Callers must pair the two calls, must not call
++// `begin` twice, and must not hold the RDRAM pointer across `end`.
++//
++// The barrier waits out a short grace window (a thread already inside a
++// recompiled function cannot park until that function returns), so `begin`
++// takes a few milliseconds. It returns the number of threads it parked, or -1
++// if a thread never acknowledged before the deadline (the app reports it; the
++// machine is still paused, so `end` is always required).
++int checkpoint_pause_begin();
++void checkpoint_pause_end();
++
 +// Debug: race-free scheduler event ring (see function_trace.cpp). Enable it
 +// before the game starts (OGRE_SCHED_TRACE=1), then dump at exit; `only_a` >= 0
 +// filters the dump to events involving that thread id.
@@ -1087,7 +1295,7 @@ index 46aea61..4142bdf 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -170,11 +238,33 @@ void set_callbacks(
+@@ -170,11 +262,33 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -1410,13 +1618,14 @@ index 2f1cfb5..1b6b971 100644
  
 diff --git a/ultramodern/src/function_trace.cpp b/ultramodern/src/function_trace.cpp
 new file mode 100644
-index 0000000..23a4ce1
+index 0000000..eb2e711
 --- /dev/null
 +++ b/ultramodern/src/function_trace.cpp
-@@ -0,0 +1,756 @@
+@@ -0,0 +1,816 @@
 +#include <array>
 +#include <atomic>
 +#include <chrono>
++#include <condition_variable>
 +#include <cstdio>
 +#include <mutex>
 +#include <thread>
@@ -1514,6 +1723,60 @@ index 0000000..23a4ce1
 +};
 +static std::array<EntryCounter, 256> entry_counts{};
 +
++// --- checkpoint pause barrier (session 58) ---------------------------------
++//
++// `checkpoint_pause_begin` (main thread) sets `checkpoint_pause_on`, waits for
++// every thread executing recompiled code to park at a function-entry boundary,
++// and returns; `checkpoint_pause_end` releases them. See the declarations in
++// ultramodern.hpp for why the save state needs this.
++//
++// The flag is read by every recompiled function entry, so it is a plain relaxed
++// atomic load and an almost-never-taken branch; the mutex/condvar protocol only
++// runs while a checkpoint is in progress.
++static std::atomic<bool> checkpoint_pause_on{false};
++static std::mutex checkpoint_mutex;
++static std::condition_variable checkpoint_cv;
++static int checkpoint_parked = 0;
++
++// Park the calling thread if a checkpoint is in progress. Called from
++// recomp_trace_entry, i.e. at a function boundary, so the guest state is a
++// consistent point to freeze.
++static void checkpoint_maybe_park() {
++    if (!checkpoint_pause_on.load(std::memory_order_relaxed)) {
++        return;
++    }
++    std::unique_lock<std::mutex> lock(checkpoint_mutex);
++    if (!checkpoint_pause_on.load(std::memory_order_relaxed)) {
++        return;
++    }
++    ++checkpoint_parked;
++    checkpoint_cv.notify_all();
++    checkpoint_cv.wait(lock, [] { return !checkpoint_pause_on.load(std::memory_order_relaxed); });
++    --checkpoint_parked;
++}
++
++int ultramodern::checkpoint_pause_begin() {
++    if (checkpoint_pause_on.exchange(true)) {
++        return -1;  // already paused: nested begin is a bug in the caller
++    }
++    // A thread already inside a recompiled function can only park when that
++    // function returns. The longest recompiled function in this ROM runs in
++    // microseconds, so a 50 ms grace window is far longer than any in-flight
++    // frame; after it, every thread executing game code has parked (and any
++    // thread that starts executing afterwards parks at its first entry).
++    std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    std::lock_guard<std::mutex> lock(checkpoint_mutex);
++    return checkpoint_parked;
++}
++
++void ultramodern::checkpoint_pause_end() {
++    {
++        std::lock_guard<std::mutex> lock(checkpoint_mutex);
++        checkpoint_pause_on.store(false, std::memory_order_relaxed);
++    }
++    checkpoint_cv.notify_all();
++}
++
 +// Set once by debug_profile_start(); forward-declared so the entry hook can
 +// feed the hot-function table without a second definition.
 +static std::atomic<bool> profile_on{false};
@@ -1559,6 +1822,11 @@ index 0000000..23a4ce1
 +
 +extern "C" void recomp_trace_entry(uint8_t *rdram, uint32_t func_vram, const char* func_name, uint32_t ra) {
 +    (void)rdram;
++    // Checkpoint support: park at a function boundary while the main thread
++    // reads or rewrites the whole RDRAM image. This is first because it must not
++    // depend on OGRE_TRACE_HOOKS, and it is a relaxed atomic load in the normal
++    // case (the branch below is never taken).
++    checkpoint_maybe_park();
 +    if (!trace_hooks_enabled()) {
 +        return;
 +    }

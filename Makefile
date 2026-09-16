@@ -72,6 +72,12 @@ build/assets/%.o: assets/%.bin
 	$(OBJCOPY) -I binary -O elf32-tradbigmips -B mips:3000 $< $@
 
 recomp: $(ELF)
+	@# N64Recomp only writes the files the new layout needs; it never deletes the
+	@# previous run's. A symbol that moved (e.g. static_17_8021F470 -> a data
+	@# label after a config change) therefore left its old definition behind and
+	@# the build failed with "conflicting types" in a file the new run no longer
+	@# emits (session 58, after moving bankRec10a out of unit C). Clear first.
+	rm -rf RecompiledFuncs
 	$(N64RECOMP) config.toml
 	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C
 
@@ -162,14 +168,21 @@ cross-bank-check:
 #   make bank        -> build/bank<U>.elf
 #   make bank-recomp -> Bank<U>Funcs/ + app/src/bank_funcs.inc
 # ---------------------------------------------------------------------------
-BANK_UNITS := A B C D E F G H
+BANK_UNITS := A B C D E F G H I J
 BANK_ELFS  := $(addprefix build/bank,$(addsuffix .elf,$(BANK_UNITS)))
 BANK_LDS   := $(addprefix build/bank,$(addsuffix .ld,$(BANK_UNITS)))
 
 bank-split: $(BANK_LDS)
 
+# splat only rewrites the files the new config names; it does not delete the
+# outputs of a segment that was moved to another unit. `build/bank<U>.elf`
+# globs its inputs, so a stale `.o` from the removed segment is still linked and
+# fails with "multiple definition" (or worse, links silently). Clear the unit's
+# own asm/assets before each split: session 58 moved bankRec10a out of unit C
+# into unit I and hit exactly this.
 build/bank%.ld: config-bank%.yaml
 	@mkdir -p build
+	@rm -rf build/bank$*/asm build/bank$*/assets
 	tools/venv/bin/splat split $<
 
 # The bank ELF is `bank-force`-driven on purpose: its `.o` inputs are found by
@@ -213,7 +226,10 @@ bank: bank-force
 bank-force: $(BANK_ELFS)
 
 bank-recomp: bank
-	@for u in $(BANK_UNITS); do $(N64RECOMP) config-bank$$u.toml || exit 1; done
+	@# Same stale-output trap as `recomp` above: clear each unit's generated tree
+	@# so a symbol that changed section (or moved to another unit) cannot leave a
+	@# definition behind. `Bank*Funcs/` is gitignored and regenerated here.
+	@for u in $(BANK_UNITS); do rm -rf Bank$${u}Funcs; $(N64RECOMP) config-bank$$u.toml || exit 1; done
 	python3 tools/gen_bank_funcs.py
 	@# The njpeg stage-3 readback has to copy the buffer its own YUV draw landed
 	@# in; the game's own pointer can be left at the framebuffer table's
