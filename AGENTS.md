@@ -275,58 +275,65 @@ from here.
   register contract (session 45's step-2 wall). Find unknown modules by logging
   every PI DMA destination in a run and diffing against `bank_funcs.inc`'s
   record table.
-- **The cathedral background is still black, but RT64's YUV16 decode is now
-  implemented (session 50); the remaining wall is render timing.** RT64's
-  `TextureDecoder.hlsli` returned `float4(0,0,0,1)` for every `G_IM_FMT_YUV` texel,
-  and the njpeg background is drawn as `fmt=1 siz=2` YUV16 — so the framebuffer
-  the game reads back was black *by construction*. Session 49's reverted attempt
-  invented a byte pairing; the **correct** layout comes from the code that writes
-  it, mupen64plus-rsp-hle `jpeg.c` `GetUYVY` (`jpeg_decode_OB`): in the 32-bit word
-  at byte offset `4*(2t + (s>>1))`, `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`,
-  `byte3 = Y(s odd)`; luma is sampled from the upper TMEM half (`OR 0x800`) with
-  the usual XOR-3/XOR-4 swap, chroma from the lower half. Convert with the matrix
-  **the game itself programs via `G_SETCONVERT`** (`OGRE_CONVERT_TRACE=1` shows
+- **The cathedral background now *draws*, but the sampled colours are still
+  wrong (session 51). The njpeg display list is an S2DEX2 list, and its `0xDA`
+  command is the draw.** The ucode at `0x800A5110` is **`S2DEX 2.08`**
+  (`GBIUCode::S2DEX2`): XXH3-64 of the game's own ucode text (0x18C0) and data
+  (0x390) reproduces RT64's DB entries `S2DEX2_FIFO_2_08`
+  (`0x9300F34F3B438634` / `0x50EF0DFBD3A8CD0F`) exactly. In an S2DEX2 list the
+  per-macroblock `0xDC`/`0xDA` are **`G_OBJ_MOVEMEM`** (`gSPObjSubMatrix`; the
+  matrix selector is `cmd0 & 0xFFFF`, `2` = sub matrix) and
+  **`G_OBJ_RECTANGLE_R`** (`gSPObjRectangleR`, the 24-byte `uObjSprite`), *not*
+  F3DEX2 `G_MOVEMEM`/`G_MTX`. RT64's `GBI_S2DEX2` mapped neither, so the geometry
+  was silently skipped and only the texture loads ran — **session 50 §9's "the
+  list carries no geometry" is wrong**; the app's own `OGRE_DL_ANALYZE`/
+  `OGRE_DL_DECODE` still say that because they decode every list as F3DEX2. Both
+  commands are now in the tree, and a live `OGRE_S2D_TRACE=1` shows 300 rectangles
+  tiling the 320x240 `G_SETCIMG` target exactly (one per macroblock).
+  **A YUV tile is the RDP's two-plane format**: one luma *byte* per texel at
+  `offset + stride*t + s` in the upper TMEM half and one U/V pair per two texels
+  in the lower, both at `stride = line << 3`; a YUV `LOADTILE` therefore
+  **de-interleaves** (`RDP::loadYUVTileToTMEM`), the sampler follows parallel-rdp's
+  `sample_texel_yuv16`, YUV16 tiles need raw-TMEM sampling, and the decoder's
+  source word is **`[U, Y(even), V, Y(odd)]`** (mupen64plus-rsp-hle `jpeg.c`
+  `GetUYVY` / `jpeg_decode_OB`, verified against a live macroblock dump) —
+  correcting session 50 §2's `[Y, V, U, Y]`. Convert with the matrix **the game
+  itself programs via `G_SETCONVERT`** (`OGRE_CONVERT_TRACE=1` shows
   `k0=175 k1=469 k2=423 k3=222`): `R = Y+K0*V>>8`, `G = Y+(K1*V+K2*U)>>8`,
-  `B = Y+K3*U>>8`. That decoder is in the tree (`sampleTMEMYUV16` /
-  `sampleTMEMWithConvert`) and the YUV arm is no longer a stub — do not replace it
-  with a guess again. **The remaining wall is render timing, and it is now
-  localised:** the port completes the emulated RSP task as soon as the display
-  list reaches RT64, so the game's CPU copy can run before the renderer has drawn.
-  `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) waits for
-  a game framebuffer; a wait on the *game* thread deadlocks. The readback that
-  matters runs in **scene `0x02`** (the four stage-3 copies in
-  `func_ovlE_8019976C`, which are the njpeg readback — sole caller bankE
-  `0x80199D80` inside `func_ovlE_80199D30`'s drive loop; the four sizes
-  320x240/176x240/320x144/176x144 are the four sub-images of one `'B5'` asset,
-  ROM `0x7CADAC`, not tiles of one image), and the draw whose pixels it needs is
-  the `0x800A5110` display list submitted in that same scene. **That list carries
-  texture loads and no geometry**: `OGRE_DL_ANALYZE=1` reports
-  `cmds=1821 tri1=0 tri2=0 quad=0 texrect=0 fill=0 settimg=300 unknown=0` for
-  `dl=2 ptr=0x80025C00`, and `OGRE_DL_DECODE=2` shows only
-  `SETOTHERMODE/SETCIMG/SETSCISSOR/SETCONVERT/SETCOMBINE` + 300 ×
-  `{SETTIMG YUV16, SETTILE t7 fmt=1 siz=2 line=2, LOADTILE, MOVEMEM, MTX}`. Session
-  46's "the renderer receives the 300 macroblock draws" counted `display list N`
-  lines and `[yuv]` lines and never checked for geometry — so `found=0` in
-  `[njwait]` is expected (RT64 is asked to load, not draw). The open question is
-  upstream of the renderer: what turns those loads into a picture on hardware.
-  See `docs/HANDOFF-2026-09-15-session50.md` §5/§9.
+  `B = Y+K3*U>>8`. Session 50's `sampleTMEMYUV16` (luma at `| 0x800` with an
+  XOR-3 swap, chroma via a half-word XOR, over a *linear* load) could never work:
+  the load never wrote the upper half, so luma was always zero. **Open: the
+  sampled colours** — the backdrop draws as blue banding instead of black, with
+  the geometry, the RDRAM source and the de-interleaved TMEM planes all verified
+  correct. Ranked next checks are in
+  `docs/HANDOFF-2026-09-15-session51.md` §7 (rect texcoords/tile size, raw-TMEM
+  vs decoded-texture A/B, chroma byte order, the `dsdx` convention). Also still
+  true: the port completes the emulated RSP task as soon as the display list
+  reaches RT64, so the game's CPU copy can run before the renderer has drawn —
+  `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) bounds
+  that wait, and a wait on the *game* thread deadlocks. The readback that matters
+  runs in **scene `0x02`** (the four stage-3 copies in `func_ovlE_8019976C`, sole
+  caller bankE `0x80199D80` inside `func_ovlE_80199D30`'s drive loop; the four
+  sizes 320x240/176x240/320x144/176x144 are the four sub-images of one `'B5'`
+  asset, ROM `0x7CADAC`).
+  See `docs/HANDOFF-2026-09-15-session51.md` §1-§7 and `-session50.md` §5/§9.
 - **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables
   `0x800AC050`; `data_size` = macroblocks, `yield_data_size` = quantization
   scale; asset `0x00183352` = ROM `0x7175A2`, magic `'HU'` + `'HUFF'`) → a
-  **second gfx ucode `0x800A5110`** — which, measured in session 50, **loads** one
-  16x16 YUV16 texture per macroblock into TMEM and emits **no geometry** (see the
-  cathedral fact above); it is *not* a draw → a **CPU framebuffer readback** →
-  assembly of a
+  **second gfx ucode `0x800A5110`** — which session 51 identified as **S2DEX2**
+  and whose per-macroblock `0xDA` command *is* the draw (see the cathedral fact
+  above; session 50's "loads and emits no geometry" is wrong) → a **CPU
+  framebuffer readback** → assembly of a
   `'B5'`-headed image at `0x80243E10` whose pixels (at `0x80243E28`) the blit
   reads. The microcode is recompiled (`make rsp-recomp` →
   `RspFuncs/njpeg_ucode.cpp`) and **runs by default** (`OGRE_NJPEG=0` forces the
   stub); all `mbs` blocks decode in 0–1 ms.
   See `docs/HANDOFF-2026-09-15-session47.md` (and `-session46.md`, superseded).
-  The **renderer** half is now implemented (session 50): RT64 samples YUV16 with
-  the layout from the RSP decoder and converts with the game's own `G_SETCONVERT`
-  matrix — see the cathedral fact above.
+  The **renderer** half is implemented in RT64 (sessions 50/51): the YUV16 tile
+  is loaded as the RDP's two-plane format and converted with the game's own
+  `G_SETCONVERT` matrix — see the cathedral fact above.
   [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
   ("Missing backgrounds in Ogre Battle 64 battles and also some cutscenes") was
   fixed upstream by the RSP-side `jpeg_decode_OB`, which this port already has.

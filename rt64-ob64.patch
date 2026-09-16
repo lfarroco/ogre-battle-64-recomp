@@ -1,3 +1,385 @@
+diff --git a/src/common/rt64_tmem_hasher.h b/src/common/rt64_tmem_hasher.h
+index 8c6af2b..a614e4e 100644
+--- a/src/common/rt64_tmem_hasher.h
++++ b/src/common/rt64_tmem_hasher.h
+@@ -203,7 +203,12 @@ namespace RT64 {
+             const uint32_t tmemSize = RGBA32 || (tlutFormat > 0) ? (TMEMBytes >> 1) : TMEMBytes;
+             const uint32_t lastRowBytes = width << std::min(loadTile.siz, uint8_t(G_IM_SIZ_16b)) >> 1;
+             const uint32_t bytesToHash = (loadTile.line << 3) * (height - 1) + lastRowBytes;
+-            return (bytesToHash > tmemSize);
++            // OGRE: a YUV16 tile lives in *both* halves of TMEM (the luma plane in
++            // the upper half, the chroma plane in the lower), so it must always be
++            // sampled from raw TMEM. The decoded-texture path bakes one RGBA image
++            // out of a single tile address and cannot express that addressing.
++            const bool isYUV16 = (loadTile.fmt == G_IM_FMT_YUV) && (loadTile.siz == G_IM_SIZ_16b);
++            return isYUV16 || (bytesToHash > tmemSize);
+         }
+     };
+ };
+\ No newline at end of file
+diff --git a/src/gbi/rt64_gbi_s2dex.cpp b/src/gbi/rt64_gbi_s2dex.cpp
+index 4b41bfa..13cd3c1 100644
+--- a/src/gbi/rt64_gbi_s2dex.cpp
++++ b/src/gbi/rt64_gbi_s2dex.cpp
+@@ -479,6 +479,201 @@ namespace RT64 {
+             memcpy(state->rsp->S2D.struct_buffer.data(), state->fromRDRAM(rdramAddress), loadSize);
+         }
+ 
++        // OGRE: the S2DEX 2D object commands (G_OBJ_MOVEMEM / G_OBJ_RECTANGLE*).
++        //
++        // Ogre Battle 64's njpeg backgrounds are drawn entirely with these: the
++        // game's display list loads one 16x16 decoded macroblock into TMEM per
++        // object and then issues `gSPObjSubMatrix` + `gSPObjRectangleR` for it
++        // (see docs/HANDOFF-2026-09-15-session51.md). Before this, the S2DEX2 GBI
++        // mapped neither command, so every macroblock was loaded and never drawn
++        // and the framebuffer the game reads back stayed empty.
++        //
++        // The structs are big-endian guest data, and RT64's RDRAM holds host-order
++        // 32-bit words (the two 16-bit halves of every word are therefore
++        // swapped), so the fields are split out of explicitly-read words instead
++        // of being cast from a struct.
++        uint32_t guestWord(const uint8_t *p) {
++            return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
++        }
++
++        struct ObjSprite {
++            int32_t objX, objY;            // s10.2
++            uint16_t scaleW, scaleH;       // u5.10
++            uint16_t imageW, imageH;       // u10.5
++            uint16_t imageStride;          // texture line, in 64-bit words
++            uint16_t imageAdrs;            // TMEM address, in 64-bit words
++            uint8_t imageFmt, imageSiz, imagePal, imageFlags;
++        };
++
++        ObjSprite decodeObjSprite(const uint8_t *p) {
++            const uint32_t w0 = guestWord(p + 0);
++            const uint32_t w1 = guestWord(p + 4);
++            const uint32_t w2 = guestWord(p + 8);
++            const uint32_t w3 = guestWord(p + 12);
++            const uint32_t w4 = guestWord(p + 16);
++            const uint32_t w5 = guestWord(p + 20);
++            ObjSprite sprite;
++            sprite.objX = int16_t(w0 >> 16);
++            sprite.scaleW = uint16_t(w0);
++            sprite.imageW = uint16_t(w1 >> 16);
++            sprite.objY = int16_t(w2 >> 16);
++            sprite.scaleH = uint16_t(w2);
++            sprite.imageH = uint16_t(w3 >> 16);
++            sprite.imageStride = uint16_t(w4 >> 16);
++            sprite.imageAdrs = uint16_t(w4);
++            sprite.imageFmt = uint8_t(w5 >> 24);
++            sprite.imageSiz = uint8_t(w5 >> 16);
++            sprite.imagePal = uint8_t(w5 >> 8);
++            sprite.imageFlags = uint8_t(w5);
++            return sprite;
++        }
++
++        // Draws one object sprite/rectangle as an RDP texture rectangle. The
++        // texture is already in TMEM (the game loads it with SETTIMG/SETTILE/
++        // LOADTILE right before the object command), so the render tile is set up
++        // from the sprite's own image description.
++        //
++        // `fullMatrix` selects the object matrix (G_OBJ_SPRITE / G_OBJ_LDTX_SPRITE
++        // / G_OBJ_RECTANGLE / G_OBJ_LDTX_RECT); the `...R` commands use only the
++        // object matrix's origin and base scale (the `uObjSubMtx` fields).
++        //
++        // TODO: the object matrix's rotation terms are read but not applied, and
++        // an RDP rectangle cannot express a rotated sprite. The `...R` commands
++        // Ogre Battle 64 uses cannot rotate, so this is exact for it; a rotated
++        // `gSPObjSprite` will be drawn axis-aligned.
++        void drawObjRectangle(State *state, const uint8_t *spriteData, bool fullMatrix) {
++            RDP *rdp = state->rdp.get();
++            const ObjSprite sprite = decodeObjSprite(spriteData);
++            const auto &mtx = state->rsp->S2D.objMtx;
++
++            const float imageW = sprite.imageW / 32.0f;
++            const float imageH = sprite.imageH / 32.0f;
++            const float scaleW = float(std::max<uint16_t>(sprite.scaleW, 1)) / 1024.0f;
++            const float scaleH = float(std::max<uint16_t>(sprite.scaleH, 1)) / 1024.0f;
++            const float objX = sprite.objX / 4.0f;
++            const float objY = sprite.objY / 4.0f;
++            const float objW = imageW / scaleW + objX;
++            const float objH = imageH / scaleH + objY;
++
++            const float mtxX = mtx.x / 4.0f;
++            const float mtxY = mtx.y / 4.0f;
++            const float baseScaleX = float(std::max(mtx.baseScaleX, 1)) / 1024.0f;
++            const float baseScaleY = float(std::max(mtx.baseScaleY, 1)) / 1024.0f;
++
++            float x0, y0, x1, y1;
++            if (fullMatrix && !mtx.subMtx) {
++                const float a = mtx.a / 65536.0f;
++                const float b = mtx.b / 65536.0f;
++                const float c = mtx.c / 65536.0f;
++                const float d = mtx.d / 65536.0f;
++                x0 = a * objX + b * objY + mtxX;
++                y0 = c * objX + d * objY + mtxY;
++                x1 = a * objW + b * objH + mtxX;
++                y1 = c * objW + d * objH + mtxY;
++            }
++            else {
++                x0 = mtxX + objX / baseScaleX;
++                y0 = mtxY + objY / baseScaleY;
++                x1 = mtxX + objW / baseScaleX;
++                y1 = mtxY + objH / baseScaleY;
++            }
++
++            // OGRE_S2D_TRACE=1: the first 40 object commands, with the sprite's
++            // texture description, the matrix-derived destination and the target
++            // colour image. This is the diagnostic that showed Ogre Battle 64's
++            // 300 macroblock rectangles tiling its 320x240 njpeg framebuffer.
++            if (getenv("OGRE_S2D_TRACE") != nullptr) {
++                static uint32_t s2dTrace = 0;
++                if (++s2dTrace <= 40) {
++                    fprintf(stderr,
++                            "[s2d] %s fmt=%u siz=%u img=%dx%d stride=%u adrs=%u mtx=(%.2f,%.2f,%.4f,%.4f) "
++                            "rect=(%.1f,%.1f)-(%.1f,%.1f) cimg=0x%08X texaddr=0x%08X\n",
++                            fullMatrix ? "obj" : "rectR", (unsigned)sprite.imageFmt, (unsigned)sprite.imageSiz,
++                            (int)imageW, (int)imageH, (unsigned)sprite.imageStride, (unsigned)sprite.imageAdrs,
++                            mtxX, mtxY, baseScaleX, baseScaleY, x0, y0, x1, y1,
++                            (unsigned)rdp->colorImage.address, (unsigned)rdp->texture.address);
++                    fflush(stderr);
++                }
++            }
++
++            // The render tile comes from the sprite: the texture line and TMEM
++            // address are the ones the microcode would program.
++            rdp->setTile(G_TX_RENDERTILE, sprite.imageFmt, sprite.imageSiz, int16_t(sprite.imageStride),
++                         sprite.imageAdrs, sprite.imagePal, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR,
++                         G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
++
++            // imageW/imageH are u10.5 (one texel is 32 units) and the RDP's tile
++            // size is in 1/4 texel units with an inclusive `lrs`/`lrt`, so a
++            // 16-texel macroblock is `16*4 - 4 = 60`.
++            const int32_t tileLrs = (int32_t(sprite.imageW) >> 3) - 4;
++            const int32_t tileLrt = (int32_t(sprite.imageH) >> 3) - 4;
++            rdp->setTileSize(G_TX_RENDERTILE, 0, 0, uint16_t(std::max(tileLrs, 0)), uint16_t(std::max(tileLrt, 0)));
++
++            // RT64's drawTexRect takes its gradients such that 1024 is exactly one
++            // texel per pixel (see drawRect's texcoord math), and the rectangle's
++            // coordinates are the RDP's 10.2 (1/4 pixel).
++            const float rectW = x1 - x0;
++            const float rectH = y1 - y0;
++            const int16_t dsdx = (rectW > 0.0f) ? int16_t(1024.0f * imageW / rectW) : int16_t(1024);
++            const int16_t dtdy = (rectH > 0.0f) ? int16_t(1024.0f * imageH / rectH) : int16_t(1024);
++            const bool flipS = (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPS) != 0;
++            const bool flipT = (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPT) != 0;
++            rdp->drawTexRect(int32_t(x0 * 4.0f), int32_t(y0 * 4.0f), int32_t(x1 * 4.0f), int32_t(y1 * 4.0f),
++                             G_TX_RENDERTILE, 0, 0, dsdx, dtdy, flipS != flipT);
++        }
++
++        uint32_t objSpriteAddress(State *state, DisplayList **dl) {
++            return state->rsp->fromSegmentedMasked((*dl)->w1) & RSP_DMA_MASK;
++        }
++
++        void objMoveMem(State *state, DisplayList **dl) {
++            // G_OBJ_MOVEMEM: the low 16 bits of w0 select the object matrix (0) or
++            // the object sub matrix (2); w1 is the address of the struct.
++            const uint32_t index = (*dl)->w0 & 0xFFFF;
++            const uint8_t *p = state->fromRDRAM(objSpriteAddress(state, dl));
++            auto &mtx = state->rsp->S2D.objMtx;
++            if (index == 0) {
++                // uObjMtx: s32 A,B,C,D; s16 X,Y; u16 BaseScaleX,BaseScaleY.
++                mtx.a = int32_t(guestWord(p + 0));
++                mtx.b = int32_t(guestWord(p + 4));
++                mtx.c = int32_t(guestWord(p + 8));
++                mtx.d = int32_t(guestWord(p + 12));
++                const uint32_t w4 = guestWord(p + 16);
++                const uint32_t w5 = guestWord(p + 20);
++                mtx.x = int16_t(w4 >> 16);
++                mtx.y = int16_t(w4);
++                mtx.baseScaleX = uint16_t(w5 >> 16);
++                mtx.baseScaleY = uint16_t(w5);
++                mtx.subMtx = false;
++            }
++            else if (index == 2) {
++                // uObjSubMtx: s16 X,Y; u16 BaseScaleX,BaseScaleY.
++                const uint32_t w0 = guestWord(p + 0);
++                const uint32_t w1 = guestWord(p + 4);
++                mtx.a = 0x10000;
++                mtx.b = 0;
++                mtx.c = 0;
++                mtx.d = 0x10000;
++                mtx.x = int16_t(w0 >> 16);
++                mtx.y = int16_t(w0);
++                mtx.baseScaleX = uint16_t(w1 >> 16);
++                mtx.baseScaleY = uint16_t(w1);
++                mtx.subMtx = true;
++            }
++        }
++
++        void objSprite(State *state, DisplayList **dl) {
++            drawObjRectangle(state, state->fromRDRAM(objSpriteAddress(state, dl)), true);
++        }
++
++        void objRectangle(State *state, DisplayList **dl) {
++            drawObjRectangle(state, state->fromRDRAM(objSpriteAddress(state, dl)), false);
++        }
++
++        void objRectangleR(State *state, DisplayList **dl) {
++            drawObjRectangle(state, state->fromRDRAM(objSpriteAddress(state, dl)), false);
++        }
++
+         void doLoadTxtr(State *state, const uObjTxtr *obj) {
+             // Not sure what this does yet so it's just left as the original register name.
+             // Maybe used for tracking what the most recent command was so it can insert syncs as needed?
+@@ -573,8 +768,7 @@ namespace RT64 {
+             doLoadTxtr(state, &obj->txtr);
+             
+             // Execute the sprite draw
+-            // TODO call doObjSprite(state, &obj->sprite) when it's implemented
+-            assert(false);
++            drawObjRectangle(state, state->fromRDRAM(objSpriteAddress(state, dl) + sizeof(uObjTxtr)), true);
+         #ifdef LOG_LOADTXTR_METHODS
+             RT64_LOG_PRINTF("objLoadTxSprite::end(0x%08X)", (*dl)->w1);
+         #endif
+@@ -592,8 +786,7 @@ namespace RT64 {
+             doLoadTxtr(state, &obj->txtr);
+             
+             // Execute the rect draw
+-            // TODO call doObjRectangle(state, &obj->sprite) when it's implemented
+-            assert(false);
++            drawObjRectangle(state, state->fromRDRAM(objSpriteAddress(state, dl) + sizeof(uObjTxtr)), false);
+         #ifdef LOG_LOADTXTR_METHODS
+             RT64_LOG_PRINTF("objLoadTxRect::end(0x%08X)", (*dl)->w1);
+         #endif
+@@ -611,8 +804,7 @@ namespace RT64 {
+             doLoadTxtr(state, &obj->txtr);
+             
+             // Execute the rect r draw
+-            // TODO call doObjRectangleR(state, &obj->sprite) when it's implemented
+-            assert(false);
++            drawObjRectangle(state, state->fromRDRAM(objSpriteAddress(state, dl) + sizeof(uObjTxtr)), false);
+         #ifdef LOG_LOADTXTR_METHODS
+             RT64_LOG_PRINTF("objLoadTxRectR::end(0x%08X)", (*dl)->w1);
+         #endif
+@@ -620,6 +812,18 @@ namespace RT64 {
+ 
+         void reset(State *state) {
+             state->rsp->objRenderMode = 0x0;
++            // The object transform starts as the identity (uObjMtx A/D = 1.0,
++            // base scale 1.0) until G_OBJ_MOVEMEM replaces it.
++            auto &mtx = state->rsp->S2D.objMtx;
++            mtx.a = 0x10000;
++            mtx.b = 0;
++            mtx.c = 0;
++            mtx.d = 0x10000;
++            mtx.x = 0;
++            mtx.y = 0;
++            mtx.baseScaleX = 1024;
++            mtx.baseScaleY = 1024;
++            mtx.subMtx = false;
+         }
+ 
+         void setup(GBI *gbi) {
+@@ -645,6 +849,10 @@ namespace RT64 {
+             gbi->map[S2DEX_G_OBJ_LDTX_SPRITE] = &objLoadTxSprite;
+             gbi->map[S2DEX_G_OBJ_LDTX_RECT] = &objLoadTxRect;
+             gbi->map[S2DEX_G_OBJ_LDTX_RECT_R] = &objLoadTxRectR;
++            gbi->map[S2DEX_G_OBJ_MOVEMEM] = &objMoveMem;
++            gbi->map[S2DEX_G_OBJ_SPRITE] = &objSprite;
++            gbi->map[S2DEX_G_OBJ_RECTANGLE] = &objRectangle;
++            gbi->map[S2DEX_G_OBJ_RECTANGLE_R] = &objRectangleR;
+             gbi->map[F3D_G_DL] = &GBI_F3D::runDl;
+             gbi->map[F3D_G_ENDDL] = &GBI_F3D::endDl;
+             gbi->map[F3D_G_MOVEWORD] = &moveWord;
+diff --git a/src/gbi/rt64_gbi_s2dex.h b/src/gbi/rt64_gbi_s2dex.h
+index 8de11eb..abd9fd2 100644
+--- a/src/gbi/rt64_gbi_s2dex.h
++++ b/src/gbi/rt64_gbi_s2dex.h
+@@ -8,6 +8,9 @@
+ 
+ #define S2DEX_G_BG_1CYC 0x01
+ #define S2DEX_G_BG_COPY 0x02
++#define S2DEX_G_OBJ_RECTANGLE 0x03
++#define S2DEX_G_OBJ_SPRITE 0x04
++#define S2DEX_G_OBJ_MOVEMEM 0x05
+ #define S2DEX_G_RDPHALF_0 0xE4
+ #define S2DEX_G_SELECT_DL 0xB0
+ #define S2DEX_G_OBJ_LOADTXTR 0xC1
+@@ -15,6 +18,7 @@
+ #define S2DEX_G_OBJ_LDTX_RECT 0xC3
+ #define S2DEX_G_OBJ_LDTX_RECT_R 0xC4
+ #define S2DEX_G_OBJ_RENDERMODE 0xB1
++#define S2DEX_G_OBJ_RECTANGLE_R 0xB2
+ #define S2DEX_G_BGLT_LOADBLOCK 0x0033
+ #define S2DEX_G_BGLT_LOADTILE 0xFFF4
+ #define S2DEX_G_BG_FLAG_FLIPS 0x01
+@@ -108,6 +112,13 @@ namespace RT64 {
+         void objLoadTxRect(State* state, DisplayList** dl);
+         void objLoadTxRectR(State* state, DisplayList** dl);
+         void rdpHalf0(State *state, DisplayList **dl);
++        // OGRE: the 2D-object commands themselves. `objMoveMem` is
++        // G_OBJ_MOVEMEM (the object / object-sub matrix load), and the three
++        // rectangle commands draw a sprite with the currently loaded matrix.
++        void objMoveMem(State *state, DisplayList **dl);
++        void objSprite(State *state, DisplayList **dl);
++        void objRectangle(State *state, DisplayList **dl);
++        void objRectangleR(State *state, DisplayList **dl);
+ 
+         void setup(GBI *gbi);
+     };
+diff --git a/src/gbi/rt64_gbi_s2dex2.cpp b/src/gbi/rt64_gbi_s2dex2.cpp
+index 23c5fc1..3f86f31 100644
+--- a/src/gbi/rt64_gbi_s2dex2.cpp
++++ b/src/gbi/rt64_gbi_s2dex2.cpp
+@@ -39,13 +39,22 @@ namespace RT64 {
+             state->rsp->S2D.struct_buffer.fill(0);
+             state->rsp->S2D.statuses.fill(0);
+             state->rsp->S2D.data_02AE = -128;
++            // The object transform starts as the identity until G_OBJ_MOVEMEM
++            // replaces it.
++            auto &mtx = state->rsp->S2D.objMtx;
++            mtx.a = 0x10000;
++            mtx.b = 0;
++            mtx.c = 0;
++            mtx.d = 0x10000;
++            mtx.x = 0;
++            mtx.y = 0;
++            mtx.baseScaleX = 1024;
++            mtx.baseScaleY = 1024;
++            mtx.subMtx = false;
+         }
+ 
+         void resetFromLoad(State* state) {
+-            state->rsp->objRenderMode = 0x0;
+-            state->rsp->S2D.struct_buffer.fill(0);
+-            state->rsp->S2D.statuses.fill(0);
+-            state->rsp->S2D.data_02AE = -128;
++            reset(state);
+         }
+ 
+         void setup(GBI *gbi) {
+@@ -71,6 +80,10 @@ namespace RT64 {
+             gbi->map[S2DEX2_G_OBJ_LDTX_SPRITE] = &GBI_S2DEX::objLoadTxSprite;
+             gbi->map[S2DEX2_G_OBJ_LDTX_RECT] = &GBI_S2DEX::objLoadTxRect;
+             gbi->map[S2DEX2_G_OBJ_LDTX_RECT_R] = &GBI_S2DEX::objLoadTxRectR;
++            gbi->map[S2DEX2_G_OBJ_MOVEMEM] = &GBI_S2DEX::objMoveMem;
++            gbi->map[S2DEX2_G_OBJ_SPRITE] = &GBI_S2DEX::objSprite;
++            gbi->map[S2DEX2_G_OBJ_RECTANGLE] = &GBI_S2DEX::objRectangle;
++            gbi->map[S2DEX2_G_OBJ_RECTANGLE_R] = &GBI_S2DEX::objRectangleR;
+             gbi->map[F3DEX2_G_DL] = &GBI_F3D::runDl;
+             gbi->map[F3DEX2_G_MOVEWORD] = &moveWord;
+             gbi->map[F3DEX2_G_SETOTHERMODE_H] = &GBI_F3DEX2::setOtherModeH;
+diff --git a/src/gbi/rt64_gbi_s2dex2.h b/src/gbi/rt64_gbi_s2dex2.h
+index afe6068..3d03372 100644
+--- a/src/gbi/rt64_gbi_s2dex2.h
++++ b/src/gbi/rt64_gbi_s2dex2.h
+@@ -15,6 +15,14 @@
+ #define S2DEX2_G_OBJ_LDTX_SPRITE 0x06
+ #define S2DEX2_G_OBJ_LDTX_RECT 0x07
+ #define S2DEX2_G_OBJ_LDTX_RECT_R 0x08
++// S2DEX2 reuses two of F3DEX2's RSP-side opcodes for its object commands and
++// adds two low ones (the `ifdef F3DEX_GBI_2` branch of the SDK's gs2dex.h).
++// G_OBJ_MOVEMEM takes over G_MOVEMEM and G_OBJ_RECTANGLE_R takes over G_MTX in
++// an S2DEX2 display list.
++#define S2DEX2_G_OBJ_RECTANGLE 0x01
++#define S2DEX2_G_OBJ_SPRITE 0x02
++#define S2DEX2_G_OBJ_RECTANGLE_R 0xDA
++#define S2DEX2_G_OBJ_MOVEMEM 0xDC
+ 
+ 
+ namespace RT64 {
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
 index ee8bc1f..1e581cd 100644
 --- a/src/hle/rt64_application.cpp
@@ -401,7 +783,7 @@ index 7de5b69..f894351 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..b106d92 100644
+index a10c11a..288792d 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -26,6 +26,14 @@
@@ -552,7 +934,63 @@ index a10c11a..b106d92 100644
  #   ifdef LOG_TEXTURE_IMAGE_METHODS
          RT64_LOG_PRINTF("RDP::setTextureImage(fmt %u, siz %u, width %u, address 0x%08X)", fmt, siz, width, address);
  #   endif
-@@ -1007,6 +1125,17 @@ namespace RT64 {
+@@ -471,6 +589,43 @@ namespace RT64 {
+         }
+     }
+ 
++    // OGRE: YUV is the one texture format whose TMEM layout is not a copy of the
++    // source. The RDP keeps a YUV tile in both halves of TMEM: one luma byte per
++    // texel in the upper half and one U/V pair per two texels in the lower half,
++    // both at the tile's row stride (see `sample_texel_yuv16` in parallel-rdp).
++    // A LOADTILE with `fmt=YUV siz=16b` therefore *de-interleaves* the source,
++    // which RT64's generic linear `loadToTMEMCommon` cannot express. Without this
++    // the luma plane is never written and the tile samples black.
++    //
++    // The source layout is the one the RSP njpeg decoder writes
++    // (mupen64plus-rsp-hle `GetUYVY`, confirmed against a live macroblock dump in
++    // docs/HANDOFF-2026-09-15-session51.md): guest bytes [U, Y(even), V, Y(odd)]
++    // per 32-bit word, i.e. two texels per word. RT64's RDRAM holds host-order
++    // words, so the same four bytes read [Y(odd), V, Y(even), U].
++    void RDP::loadYUVTileToTMEM(uint8_t *TMEM8, const uint8_t *RDRAM, uint32_t textureStart, uint32_t textureStride,
++        uint32_t tmemStart, uint32_t tmemStride, uint32_t rowCount) {
++        constexpr uint32_t UpperTMEM = RDP_TMEM_BYTES >> 1;
++        // Two texels per 32-bit word, so the row's word count follows the TMEM
++        // stride (which is one luma byte per texel, hence half the source row).
++        const uint32_t wordsPerRow = tmemStride / 2;
++        for (uint32_t row = 0; row < rowCount; row++) {
++            const uint8_t *src = RDRAM + textureStart + row * textureStride;
++            const uint32_t rowBase = (tmemStart + row * tmemStride) & RDP_TMEM_MASK8;
++            // The usual RDP 64-bit word flip on odd rows, matching what
++            // `implLoadTMEM` replays when it samples.
++            const uint32_t rowXor = ((row & 1) != 0) ? 4 : 0;
++            for (uint32_t w = 0; w < wordsPerRow; w++) {
++                const uint8_t *word = src + w * 4;
++                const uint32_t luma = ((rowBase + w * 2) ^ rowXor) | UpperTMEM;
++                const uint32_t chroma = (rowBase + w * 2) ^ rowXor;
++                TMEM8[luma + 0] = word[2];   // Y of the even texel
++                TMEM8[luma + 1] = word[0];   // Y of the odd texel
++                TMEM8[chroma + 0] = word[3]; // U (the pair's high byte)
++                TMEM8[chroma + 1] = word[1]; // V (the pair's low byte)
++            }
++        }
++    }
++
+     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
+         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
+@@ -501,7 +656,10 @@ namespace RT64 {
+             // Load into TMEM.
+             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
+             const uint8_t *RDRAM = state->RDRAM;
+-            if (RGBA32) {
++            if ((loadTile.fmt == G_IM_FMT_YUV) && (loadTile.siz == G_IM_SIZ_16b)) {
++                loadYUVTileToTMEM(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, rowCount);
++            }
++            else if (RGBA32) {
+                 loadToTMEMCommon<true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
+             }
+             else {
+@@ -1007,6 +1165,17 @@ namespace RT64 {
          convertK[3] = k3;
          convertK[4] = k4;
          convertK[5] = k5;
@@ -570,7 +1008,7 @@ index a10c11a..b106d92 100644
          state->updateDrawStatusAttribute(DrawAttribute::Convert);
      }
  
-@@ -1035,6 +1164,14 @@ namespace RT64 {
+@@ -1035,6 +1204,14 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
  #   endif
  
@@ -585,7 +1023,7 @@ index a10c11a..b106d92 100644
          // Filter out incorrect rectangles.
          if ((lrx < ulx) || (lry < uly)) {
              return;
-@@ -1197,6 +1334,52 @@ namespace RT64 {
+@@ -1197,6 +1374,52 @@ namespace RT64 {
              return;
          }
  
@@ -638,7 +1076,7 @@ index a10c11a..b106d92 100644
          // Check if framebuffer pair must be changed.
          checkFramebufferPair();
  
-@@ -1222,6 +1405,17 @@ namespace RT64 {
+@@ -1222,6 +1445,17 @@ namespace RT64 {
                  }
              }
          }
@@ -656,7 +1094,7 @@ index a10c11a..b106d92 100644
          
          bool flushedState = state->checkDrawState();
  
-@@ -1322,6 +1516,44 @@ namespace RT64 {
+@@ -1322,6 +1556,44 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
  #   endif
  
@@ -701,6 +1139,43 @@ index a10c11a..b106d92 100644
          // Check if the texture needs to be updated.
          DrawCall &drawCall = state->drawCall;
          if (!drawCall.textureOn || (drawCall.textureTile != tile) || (drawCall.textureLevels != 1)) {
+diff --git a/src/hle/rt64_rdp.h b/src/hle/rt64_rdp.h
+index 84f4e7c..7cb42da 100644
+--- a/src/hle/rt64_rdp.h
++++ b/src/hle/rt64_rdp.h
+@@ -160,6 +160,10 @@ namespace RT64 {
+         void clearTileReplacementHash(uint8_t tile);
+         void setTileReplacementHash(uint8_t tile, uint64_t replacementHash);
+         void loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred);
++        // OGRE: the YUV16 LOADTILE de-interleaves the source into the two TMEM
++        // halves (see the definition for why).
++        void loadYUVTileToTMEM(uint8_t *TMEM8, const uint8_t *RDRAM, uint32_t textureStart, uint32_t textureStride,
++            uint32_t tmemStart, uint32_t tmemStride, uint32_t rowCount);
+         void loadBlockOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred);
+         void loadTLUTOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred);
+         void loadTile(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt);
+diff --git a/src/hle/rt64_rsp.h b/src/hle/rt64_rsp.h
+index 61bb3b1..3402883 100644
+--- a/src/hle/rt64_rsp.h
++++ b/src/hle/rt64_rsp.h
+@@ -194,6 +194,17 @@ namespace RT64 {
+             std::array<uint32_t, 4> statuses;
+             // Seems to hold an id corresponding to the last command run.
+             int8_t data_02AE;
++            // OGRE: the S2DEX 2D-object transform, set by G_OBJ_MOVEMEM.
++            // `a`..`d` are the full `uObjMtx` rotation terms (s15.16), `x`/`y` its
++            // origin (s10.2) and `baseScaleX`/`baseScaleY` the base scale (u5.10).
++            // The `...R` rectangle commands use only the origin and base scale,
++            // which is what `uObjSubMtx` carries.
++            struct {
++                int32_t a, b, c, d;             // s15.16
++                int32_t x, y;                   // s10.2
++                int32_t baseScaleX, baseScaleY; // u5.10
++                bool subMtx;                    // true when the sub matrix was set last
++            } objMtx;
+         } S2D;
+ 
+         struct {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
 index 2970e71..1dfb34a 100644
 --- a/src/hle/rt64_state.cpp
@@ -1094,55 +1569,40 @@ index e7895c3..22cf404 100644
      
      // Color combiner.
 diff --git a/src/shaders/TextureDecoder.hlsli b/src/shaders/TextureDecoder.hlsli
-index dcc88b2..919fabf 100644
+index dcc88b2..14d3c79 100644
 --- a/src/shaders/TextureDecoder.hlsli
 +++ b/src/shaders/TextureDecoder.hlsli
-@@ -84,6 +84,70 @@ float4 sampleTMEMRGBA16(uint pixelValue16bit) {
+@@ -84,6 +84,55 @@ float4 sampleTMEMRGBA16(uint pixelValue16bit) {
      return RGBA16ToFloat4(col16);
  }
  
-+// OGRE: YUV16 texel fetch, replicating the RDP's TMEM layout for the format.
-+// YUV16 packs one luma byte per texel and one chroma pair per *two* texels, so a
-+// 16-bit chroma word at TMEM half-word `((rowByteOffset + (x & ~1)) / 2) ^ ((t & 1) << 1) ^ 1`
-+// holds (U << 8) | V, and the luma byte sits at `rowByteOffset + x` in the upper
-+// half of TMEM (OR 0x800 = the upper 4 KiB), XOR 3, plus the odd-row XOR 4.
-+// Layout and addressing follow parallel-rdp's `sample_texel_yuv16`
-+// (parallel-rdp/shaders/texture.h); RT64's high-level `sampleTMEM` computes a
-+// different (16-bit-per-texel) address for YUV, which is why YUV has to be
-+// sampled here instead.
++// OGRE: YUV16 texel fetch. The RDP keeps a YUV tile in both halves of TMEM: one
++// luma byte per texel in the upper half and one U/V pair per *two* texels in the
++// lower half, both at the tile's row stride, so a 16-texel row is 16 luma bytes
++// and 8 chroma words. This mirrors `sample_texel_yuv16` in parallel-rdp
++// (parallel-rdp/shaders/texture.h), expressed with RT64's byte-addressed TMEM:
++// `RDP::loadYUVTileToTMEM` has already de-interleaved the source into exactly
++// this layout, and the usual RDP 64-bit word flip applies to odd rows (bit 2 of
++// the byte offset within the row, as `implLoadTMEM` replays).
 +//
 +// Returns the four RDP channels in the order the hardware uses for YUV:
-+//   .r = V - 128, .g = U - 128, .b = Y, .a = Y   (all 0..255, biased)
++//   .r = V - 128, .g = U - 128, .b = Y, .a = Y   (all 0..255)
 +// The RDP's colour combiner turns these into RGB with the K0..K3 matrix that
 +// G_SETCONVERT programmed; this function applies that same matrix itself.
 +float4 sampleTMEMYUV16(uint s, uint t, uint stride, uint address, float3 convertRG, float3 convertBA, Texture1D<uint> TMEM) {
-+    // Byte layout, derived from the RSP decoder that writes it (mupen64plus-rsp-hle
-+    // `jpeg_decode_OB` -> `GetUYVY`, the upstream fix for OB64's backgrounds).
-+    // For a macroblock the decoder emits, per 32-bit word at RDRAM/TMEM offset
-+    // 4*(2t + (s >> 1)):  byte0 = Y(s even), byte1 = V, byte2 = U, byte3 = Y(s odd).
-+    // So a 16x16 texel tile interleaves two texel rows per 8-word line, and the
-+    // luma byte of texel (s,t) is:
-+    //   base = t*stride*8 (a line is 2 rows) ...
-+    // The RDP samples it as two planes: the luma byte in the upper TMEM half
-+    // (OR 0x800), the chroma pair in the lower half. The odd-row XOR is the same
-+    // XOR-1/XOR-4 swap `sampleTMEM16b` performs for 16-bit texels.
-+    const uint rowWord = (t >> 1u) * (stride >> 1u);
-+    const uint wordIndex = rowWord + (s >> 1u) + ((t & 1u) * (stride >> 2u));
-+    const uint wordBase = wordIndex << 2u;
++    const uint rowBase = address + stride * t;
++    const uint rowXor = ((t & 1u) != 0u) ? 4u : 0u;
++    // The XOR only ever flips bit 2 of the row-relative offset, and a tile's
++    // stride is a multiple of 8, so the result stays inside the row.
++    const uint lumaByte = rowBase + (s ^ rowXor);
++    const uint chromaByte = rowBase + (((s >> 1u) << 1u) ^ rowXor);
++    const uint luma = TMEM.Load(int2((lumaByte | 0x800u) & RDP_TMEM_MASK8, 0)) & 0xFFu;
++    const uint u = TMEM.Load(int2(chromaByte & RDP_TMEM_MASK8, 0)) & 0xFFu;
++    const uint v = TMEM.Load(int2((chromaByte + 1u) & RDP_TMEM_MASK8, 0)) & 0xFFu;
 +
-+    const uint lumaByteOffset = (wordBase + ((s & 1u) << 1u)) & 0x7FFu;
-+    const uint lumaIndex = (lumaByteOffset ^ ((t & 1u) << 2u) ^ 3u) | 0x800u;
-+    const uint luma = TMEM.Load(int2(lumaIndex, 0)) & 0xFFu;
-+
-+    // The chroma pair for texels 2n and 2n+1 is in the same word: byte 1 is V,
-+    // byte 2 is U. `gTMEM` is indexed in 32-bit words, so byte 0 is the low byte.
-+    const uint chromaHalfWord = ((wordBase >> 1u) ^ ((t & 1u) << 1u)) & 0x3FFu;
-+    const uint chromaWord = TMEM.Load(int2(chromaHalfWord >> 1u, 0));
-+    const uint chroma = ((chromaHalfWord & 1u) != 0u) ? (chromaWord >> 8u) : chromaWord;
-+
-+    const float u = float((chroma >> 8u) & 0xFFu) - 128.0f;
-+    const float v = float(chroma & 0xFFu) - 128.0f;
 +    const float y = float(luma);
++    const float uf = float(u) - 128.0f;
++    const float vf = float(v) - 128.0f;
 +
 +    // K2 arrives in the caller's scaled form; undo the caller's 1/32 to apply the
 +    // matrix exactly as G_SETCONVERT encodes it.
@@ -1168,7 +1628,7 @@ index dcc88b2..919fabf 100644
  float4 sampleTMEMIA16(uint pixelValue16bit) {
      const uint ia16 = pixelValue16bit;
      return IA16ToFloat4(ia16);
-@@ -146,7 +210,27 @@ float4 sampleTMEM32b(bool oddColumn, uint pixelValue0, uint pixelValue1, uint pi
+@@ -146,7 +195,27 @@ float4 sampleTMEM32b(bool oddColumn, uint pixelValue0, uint pixelValue1, uint pi
      }
  }
  

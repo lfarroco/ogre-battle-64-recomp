@@ -634,8 +634,10 @@ hardware. RT64 remains the primary native renderer throughout. See
     it). The fix uses the buffer the draw landed in rather than answering
     whether retail reaches the same mismatched state. See
     `docs/HANDOFF-2026-09-15-session48.md` §4.
-  - 🚧 **The cathedral scene's background pipeline (sessions 46/47; **session 50
-    implemented RT64's YUV16 decode**, the render-timing half is still open)**:
+  - 🚧 **The cathedral scene's background pipeline (sessions 46/47; session 50
+    implemented RT64's YUV16 decode; **session 51 found and implemented the
+    missing geometry — the draws happen now, the sampled colours are still
+    wrong**)**:
     the step-2 display list's first `G_TRI2`
     quads are a full-screen 320x240 RGBA16 blit from guest `0x80243E28`, and that
     buffer was uniform (`0x0843` in RT64, `0` in the null build). The image is an
@@ -651,25 +653,31 @@ hardware. RT64 remains the primary native renderer throughout. See
     IMEM DMA address `0x1080` (not `0x8009ED80`, whose low 13 bits rotated every
     `j` target by `0x300`); each task now writes all `mbs` blocks, the scene no
     longer stalls, and the decoder is **on by default** (`OGRE_NJPEG=0` forces the
-    stub). **Session 50 implemented the renderer half**: RT64's
-    `TextureDecoder.hlsli` returned `float4(0,0,0,1)` for every `G_IM_FMT_YUV`
-    texel, so the framebuffer the game read back was black by construction. YUV16
-    is now sampled with the layout the RSP decoder writes (mupen64plus-rsp-hle
-    `jpeg.c` `GetUYVY`: `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`,
-    `byte3 = Y(s odd)` in the word at `4*(2t + (s>>1))`, luma from the upper TMEM
-    half) and converted with the matrix the game itself programs via
-    `G_SETCONVERT` (`k0=175 k1=469 k2=423 k3=222`). The remaining wall is
-    **render timing**: the port completes the emulated RSP task as soon as RT64
-    has the display list, so the game's CPU copy can run before the draw renders;
-    `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) bounds
-    that wait — a wait on the game thread deadlocks. The readback's identity is
-    settled (static trace): the four `func_ovlE_8019976C` stage-3 copies **are**
-    the njpeg readback (sole caller bankE `0x80199D80` inside
-    `func_ovlE_80199D30`), and they run in scene `0x02` because `0x0D` streams a
-    different bank over unit E's RAM — so the open question is why the scene-`0x02`
-    `0x800A5110` draw produces no game framebuffer for that wait to see.
-    See `docs/HANDOFF-2026-09-15-session50.md`, and `-session47.md` /
-    `-session46.md` for the decoder fix and the superseded reading of it.
+    stub). **Session 50 implemented RT64's YUV16 decode** (its `G_IM_FMT_YUV` arm
+    returned black) and bounded the render wait on the RSP worker
+    (`Application::waitForGameFramebuffers`, `OGRE_NJ_WAIT_MS`). **Session 51
+    found why nothing was ever drawn and fixed it:** the `0x800A5110` ucode is
+    **`S2DEX 2.08`** (`GBIUCode::S2DEX2`; the ucode text and data hashes match
+    RT64's database exactly), so its per-macroblock `0xDC`/`0xDA` commands are
+    **`G_OBJ_MOVEMEM` (the sub matrix) and `G_OBJ_RECTANGLE_R` (the draw)** — not
+    F3DEX2 `G_MOVEMEM`/`G_MTX`, which is why the F3DEX2-named analyzer reported
+    "no geometry". RT64's `GBI_S2DEX2` mapped neither command; both are
+    implemented now, and a live trace shows **300 object rectangles tiling a
+    320x240 framebuffer exactly** (one per njpeg macroblock). The YUV16 TMEM
+    layout was redone too: a YUV `LOADTILE` de-interleaves into TMEM's upper
+    (luma, one byte per texel) and lower (U/V pairs per two texels) halves, and
+    the sampler follows the RDP's model (parallel-rdp `sample_texel_yuv16`) —
+    session 50's sampler read luma from a half the load never wrote, so it could
+    never have worked. The source word is `[U, Y(even), V, Y(odd)]`
+    (mupen64plus-rsp-hle `GetUYVY`, verified against a live macroblock dump),
+    converted with the matrix the game programs via `G_SETCONVERT`
+    (`k0=175 k1=469 k2=423 k3=222`). **Still open: the sampled colours** — the
+    background now draws as blue banding instead of black, with the geometry, the
+    RDRAM source and the de-interleaved TMEM planes all verified correct; the
+    ranked next checks are in the handoff.
+    See `docs/HANDOFF-2026-09-15-session51.md` (§7 for the next checks), and
+    `-session50.md` / `-session47.md` / `-session46.md` for the decoder fix and
+    the readings of the display list that session 51 §1/§6 corrects.
   - ✅ **The publisher screens now render correctly (session 32)**: the
     "Licensed by Nintendo", ATLUS and QUEST stills were drawn as 640x480
     (they are the game's hi-res mode) but scanned out with the runtime's dummy

@@ -1,5 +1,15 @@
 # Handoff — 2026-09-15, session 50: RT64's YUV16 decode is fixed (the black backdrop's cause); the readback's render timing is now isolated
 
+> **Corrected by session 51** (`docs/HANDOFF-2026-09-15-session51.md`): §2's byte
+> layout (`byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`, `byte3 = Y(s odd)`) is
+> wrong — the decoder writes `[U, Y(even), V, Y(odd)]` — and §9's "the
+> `0x800A5110` display list carries texture loads but no geometry" is wrong: the
+> ucode is **S2DEX2**, `0xDA` is `G_OBJ_RECTANGLE_R` (**the draw**), and RT64's
+> S2DEX2 map simply did not implement it. The sampler described in §2/§3 read the
+> luma plane from a TMEM half the tile load never wrote, so it could never work.
+> §6's render-timing wait on the RSP worker is still correct and still in the
+> tree.
+
 ## Goal and result
 
 **Goal:** the New Game cathedral (scene `0x0D` step 2) has a black background
