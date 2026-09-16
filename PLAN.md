@@ -752,11 +752,16 @@ hardware. RT64 remains the primary native renderer throughout. See
     script VM `func_80170974` (opcode `0x10`, store at `0x80170ADC`) writes at
     the end of the script, and whether retail ends at step 19; a checkpoint at
     t≈70 s makes that cheap. See `docs/HANDOFF-2026-09-16-session58.md` §3.
-  - ⬜ **Scene `0x16`'s content is uncaptured**: the scene runs, but nobody has
-    looked at what the closing movie shows (`docs/scenes.md` row 6). Capture it
-    and ask the developer — and whether retail visits `0x16` once (the port
-    cycles it ~4 times before the crash, which is itself a symptom of the step
-    running past 19).
+  - ✅ **Scene `0x16`'s content is confirmed** (session 58): the closing movie's
+    five shots all render, in order, and match the developer's retail
+    screenshots — `ATLUS USA / presents` → `Developed & licensed by Quest /
+    Nintendo` → `Ogre Battle Saga / Episode VI` → `Person of Lordly Caliber`
+    over the Lodis flower → a travel montage (campfire, the party on a cliff at
+    sunset, the parchment world map with the red route and dagger). Proofs:
+    `docs/proofs/native-newgame-movie-{atlus,quest,episode-vi,lodis,campfire,sunset,map}.png`;
+    the shot list is recorded in `docs/scenes.md` row 6. Open (uninvestigated,
+    and it may be the game's own letterbox rather than a defect): a 1-pixel
+    vertical line and grey bands in some transition frames.
   - ✅ **Live debug console (session 56, developer's suggestion)**: the running
     game can now be queried on demand instead of only at a bounded run's exit —
     a watched command file (`OGRE_CONSOLE_FILE`, default

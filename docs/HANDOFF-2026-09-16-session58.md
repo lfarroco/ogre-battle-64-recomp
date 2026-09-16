@@ -145,6 +145,41 @@ The sequence plays `0x16` and **advances out of it**: one 120 s run shows the
 the same point was a 17 439-iteration stub spin. Bank table now reports
 `20 streamed-overlay record(s), 1975 function(s) armed`.
 
+### The movie itself — confirmed against the developer's shot list
+
+The developer supplied the shot list (session 58) and retail screenshots
+(`docs/proofs/intro-movie-reference/retail-shot-1..4.png`):
+
+1. `ATLUS USA` / `presents`
+2. `Developed & licensed by` / `Quest / Nintendo`
+3. `Ogre Battle Saga` / `Episode VI`
+4. `Person of Lordly Caliber` over the flower (the symbol of Lodis)
+5. a montage of the player and friends travelling the kingdom (several scenes)
+
+A capture run (`OGRE_CAPTURE_PRESENT=/tmp/s16-caps/f OGRE_CAPTURE_EVERY=10
+OGRE_CAPTURE_AFTER=500`, the maintained 1500 ms tap route, `OGRE_SPEED=4`) was
+scanned for the movie (the shots are the only near-black frames): **all five
+shots draw, in order**, and match the retail screenshots:
+
+| shot | port frame | proof |
+|---|---|---|
+| 1 ATLUS USA | f.4350 | `docs/proofs/native-newgame-movie-atlus.png` |
+| 2 Quest / Nintendo | f.4400 | `docs/proofs/native-newgame-movie-quest.png` |
+| 3 Ogre Battle Saga / Episode VI | f.4500 | `docs/proofs/native-newgame-movie-episode-vi.png` |
+| 4 Person of Lordly Caliber + flower | f.4600 | `docs/proofs/native-newgame-movie-lodis.png` |
+| 5 montage: campfire | f.5100 | `docs/proofs/native-newgame-movie-campfire.png` |
+| 5 montage: party on a cliff at sunset | f.5200 | `docs/proofs/native-newgame-movie-sunset.png` |
+| 5 montage: parchment world map (red route, dagger, `Alta Región` / `Southern Coast` / `Zetegin Sea`) | f.5400 | `docs/proofs/native-newgame-movie-map.png` |
+
+Frames are the RT64 swap-chain readback (`OGRE_CAPTURE_PRESENT`), converted
+PPM→PNG with `sips -s format png … && sips -Z 640 …` (no PIL on this host).
+**Unverified observation, for a later session:** several of these frames carry a
+1-pixel vertical line and, in the transition frames, grey horizontal bands
+(e.g. the f.4900 castle shot); the campfire/sunset/map shots themselves are
+clean. Not investigated — it may be the game's own letterbox/border rather than
+a renderer defect, so measure before "fixing" it.
+
+
 ## 3. The crash (reproduced, deterministic)
 
 The developer's "crash at the end of the sequence" now reproduces, twice, at the
@@ -222,7 +257,12 @@ redirected on long runs (the periodic `[snap]` dump stalls boot otherwise).
 * `tools/gen_bank_syms.py` — also match `.Lovl<U>_<addr>` local-label references.
 * `docs/guides/app-build.md` — "Checkpoints" + `OGRE_CONSOLE_AT_MS` +
   `save`/`load` in the command table.
-* `PLAN.md`, `docs/scenes.md`, `docs/DECISIONS.md`, `AGENTS.md`, this file.
+* `docs/proofs/native-newgame-movie-{atlus,quest,episode-vi,lodis,campfire,sunset,map}.png`
+  (new) — the movie's five shots, captured from the port and matched to the
+  developer's shot list; `docs/proofs/intro-movie-reference/retail-shot-1..4.png`
+  are the developer's retail screenshots for shot 4 and the montage.
+* `PLAN.md`, `docs/scenes.md`, `docs/README.md`, `docs/DECISIONS.md`,
+  `AGENTS.md`, this file.
 
 Generated/regenerated (gitignored): `RecompiledFuncs/`, `Bank*Funcs/` (now A..J),
 `app/src/bank_funcs.inc`, `build/bank*.elf`, `BankEFuncs/funcs_0.c` (the njpeg
