@@ -417,7 +417,28 @@ from here.
   `0x84B0`, not the `0x8600` session 55 recorded). **A bank's size is its DMA's,
   and "do we know this module?" must compare the chunk's rom→ram delta, not just
   the ROM range** — that range test is what hid unit M behind unit H's
-  over-claimed size. See `docs/HANDOFF-2026-09-16-session59.md` §1-§4, then
+  over-claimed size. **Scene `0x05` is the map scene** (developer, session 60)
+  and it **renders** (`docs/proofs/native-newgame-map-scene.png`): it stayed on
+  the prologue's black fade because **no frames were produced** — the scene
+  update's `jal 0x8019AF0C` (`func_8017B858` @0x8017B8A0) and the scene hook's
+  `jal 0x801A103C` (`func_8017B9C8` @0x8017BA10) are calls into the RAM the
+  module occupies, and N64Recomp compiled each as *call the containing body +
+  early `return`* (its emission for a `jal` into a size-overridden body
+  interior). The early return abandons the caller's frame, so the frame-pump
+  thread (t4, `func_8008AFE0`) read its saved `$s0`/`$s1` from the wrong stack
+  slots; `$s1` is the message-type comparator `1`, so the type-1 dispatch stopped
+  matching and the pump died after two frames. **Signature: `D_800AEFA4` (frame
+  counter) frozen while `D_800C4BCC` (VI retrace) keeps counting, and only 2
+  display lists submitted.** Both targets are now in `make recomp`'s
+  `cross_bank.py dispatch --only` list, which also runs the tool's tail-call
+  repair (call-and-continue); `0x8019AF0C` resolves to unit **M**'s state-1
+  handler (scene `0x05`'s enter sets `0x801977E8 = 1`; scene `0x07`'s sets `3`
+  and takes the already-dispatched `0x8019B340`). To find a leaking call, log the
+  guest `$sp` (`ctx->r29`) before/after each call in the chain — a leak shows as
+  a lower `sp` after return. The no-`--only` full dispatch also fixes it (89
+  sites, 7 extra targets) and is the way to clear the remaining backlog. See
+  `docs/HANDOFF-2026-09-16-session60.md` §1-§3, then
+  `docs/HANDOFF-2026-09-16-session59.md` §1-§4, then
   `-session58.md`, `-session57.md`, `-session52.md`, `-session51.md` §1-§7,
   `-session50.md` §5/§9. **Other large
   backgrounds use the

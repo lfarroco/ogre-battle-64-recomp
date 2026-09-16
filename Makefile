@@ -79,7 +79,7 @@ recomp: $(ELF)
 	@# emits (session 58, after moving bankRec10a out of unit C). Clear first.
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x801A103C
 
 # ---------------------------------------------------------------------------
 # Cross-bank call routing (Phase 4).

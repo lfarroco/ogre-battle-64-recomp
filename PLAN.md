@@ -797,9 +797,32 @@ hardware. RT64 remains the primary native renderer throughout. See
     `is_known_module` now also requires the chunk's rom→ram delta, which is what
     had hidden this missing module (a plain ROM-range test matched unit H).
     Scene `0x05` shares scene `0x07`'s update/hook and its enter is a near-twin,
-    so it looks like another UI/form screen, but it renders **black** (static —
-    visible only with `OGRE_PRESENT_ALWAYS=1`) — **what should scene `0x05`
-    show?** (`docs/scenes.md` row 10.)
+    so it looks like another UI/form screen; it rendered **black** until
+    session 60 (next bullet).
+  - ✅ **The map scene renders (session 60)** — scene `0x05` is the **world map**
+    (developer): terrain, rivers, location labels, the route of dots, unit
+    markers and the `Flama` cursor in a stone frame
+    (`docs/proofs/native-newgame-map-scene.png`). It was black because **no
+    frames were produced**: two calls in the scene update/hook
+    (`func_8017B858` @0x8017B8A0 `jal 0x8019AF0C`; `func_8017B9C8` @0x8017BA10
+    `jal 0x801A103C`) were compiled as "call the containing body + early
+    `return`" (a `jal` into a size-overridden body interior), abandoning the
+    caller's frame each time. The frame-pump thread (t4, `func_8008AFE0`) then
+    read its saved `$s0`/`$s1` from the wrong stack slots; `$s1` is the
+    message-type comparator (1) and became 0, so the type-1 dispatch stopped
+    matching and the pump died after two frames — the signature is
+    `D_800AEFA4` (frame counter) frozen while `D_800C4BCC` (VI retrace) keeps
+    counting, with only 2 display lists submitted. Both targets are in the RAM
+    the scene module occupies and are now in `make recomp`'s
+    `cross_bank.py dispatch --only` list, which also triggers the tool's
+    tail-call repair (call-and-continue); `0x8019AF0C` resolves to unit **M**'s
+    state-1 handler (scene `0x05`'s enter sets `0x801977E8 = 1`; scene `0x07`'s
+    sets `3` and takes `0x8019B340`, which is why the form already worked).
+    Verified: forced `OGRE_SCENE=0x05` 2 → **124 display lists**; the natural
+    route submits **2296** and draws the map, with the movie and the Prologue
+    card unchanged. The no-`--only` full dispatch also fixes it (89 sites /
+    7 extra targets) and is the way to clear the remaining backlog.
+    `docs/HANDOFF-2026-09-16-session60.md`; `docs/scenes.md` row 10.
   - ✅ **`OGRE_CONSOLE_ON_SCENE` / `_STEP` / `_CMD` (session 58)** — run one
     console command the moment a chosen scene (and step) is live, e.g.
     `OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974

@@ -740,6 +740,8 @@ def rewrite_main(regions, only: set[int] | None = None) -> int:
     print(
         f"cross_bank: rewrite: {len(per_target)} distinct target(s) dispatched"
     )
+    for addr in sorted(per_target):
+        print(f"cross_bank:   dispatched 0x{addr:08X} ({per_target[addr]} site(s))")
     if repaired:
         print(
             f"cross_bank: rewrite: {repaired} tail-call site(s) repaired to "

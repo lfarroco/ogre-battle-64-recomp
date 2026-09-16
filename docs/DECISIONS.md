@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-16 (60) | **Every `jal` from the main ELF into RAM a scene module occupies must be dispatched (`LOOKUP_FUNC`), not left bound to overlay C's body — and a `jal` into a size-overridden body interior is emitted as "call the containing body + early `return`", which abandons the caller's frame.** That emission is not cosmetic: the early return dereferences the *caller's* epilogue, so each call leaks its frame and the caller reads its callee-saved registers from the wrong stack slots. The map scene was black because of two such sites in the scene update/hook; the frame-pump thread's `$s1` (the message-type comparator) was corrupted and the pump stopped, which presents as a frozen frame counter (`D_800AEFA4`) with the VI retrace (`D_800C4BCC`) still counting. `cross_bank.py dispatch` repairs the shape to call-and-continue; targets `0x8019AF0C` and `0x801A103C` are now in `make recomp`'s `--only` list | `docs/HANDOFF-2026-09-16-session60.md` §1-§3; `Makefile`; `tools/cross_bank.py` |
 | 2026-09-16 (59) | **Every bank of a swappable RAM gets its own unit, and the unit whose code calls into that RAM defines none of them — the record-14 arena has a *third* bank (ROM `0x286BA0` → RAM `0x8022ACB0`, the chapter animation's module), now unit K, with `bankRec14a` moved to unit L; scene `0x05`'s module (ROM `0x79750` → RAM `0x8019A7C0`, the other bank of unit H's RAM) is unit M.** A bank's extent is its DMA's own size, not a previous session's chunk-rounded figure (`bankRec14a` `0xE860` not `0xDE60`; `bankRec07` `0x84B0` not `0x8600`), and the "is this DMA a module we know?" test must compare the rom→ram delta, not just the ROM range — the range test hid unit M behind unit H's over-claimed size | `docs/HANDOFF-2026-09-16-session59.md`; `config-bankK/L/M.yaml`; `app/src/bank_overlays.cpp` |
 | 2026-09-16 (58) | **A save state is RDRAM *plus* the overlay state, and the two must be captured with the game threads parked.** `save`/`load` in the live console write/restore the whole 8 MiB image and the runtime's function map/bank records (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`). RDRAM alone is not a machine rewind: which recompiled body runs at each RAM address is host state, and a restore that leaves the map on a later bank runs the wrong module's bodies (the session-45/55 mis-binding class). The file I/O is wrapped in `ultramodern::checkpoint_pause_begin/end`, which parks every thread executing recompiled code at a function-entry boundary — the recompiled N64 threads are 1:1 native threads, and without the park the image **tears** (session 58: the checkpoint's own checksum did not match its bytes and its first `0x300` bytes were zeros while the game kept submitting RSP tasks during the write). A checkpoint is only valid in the process/binary that wrote it | `docs/guides/app-build.md` → "Checkpoints"; `docs/HANDOFF-2026-09-16-session58.md` §1 |
 | 2026-09-16 (58c) | **OB64's save hardware is the Controller Pak (`osPfs*`), and the port has no Controller Pak support at all — the runtime's `pak.cpp` is an upstream stub returning `PFS_ERR_NOPACK` for every entry point.** Evidence: 105 `jal`s from the main segment into the PFS cluster (`0x8009616C`..`0x80097DC0`) and the whole save menu as ROM text (`0x790EC..0x7967C`: `Controller Pak Menu`, `Save`/`Load`/`Erase`, `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to Controller Pak.`). The menu's strings are in **bank unit H** (`D_ovlH_801A260C`), the same UI module that draws the name/birthday forms, so the menu's *drawing* is likely already working and the missing piece is the device. `recomp::SaveType` (cartridge EEPROM/SRAM/FlashRAM) does not cover it, and `app/src/main.cpp` sets `SaveType::None` with a TODO. The game's own save system therefore needs a 32 KiB Controller Pak image (real PFS layout) + a real `osPfs*` implementation + the raw SI pak access, before the save scene is usable | `docs/HANDOFF-2026-09-16-session58.md` §3c; `tools/N64ModernRuntime/librecomp/src/pak.cpp`; `docs/scenes.md` row 9 |
@@ -46,6 +47,56 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-16 (session 60) — the map scene renders: two cross-bank calls were aborting the scene update/hook and killing the frame pump
+
+**Decision (1): a `jal` from the main ELF into RAM a scene module occupies must
+be dispatched, and the reason is not only "the wrong bank's body runs" — the
+recompiler's binding for a `jal` into a *size-overridden body interior* is
+`containing_body(rdram, ctx); recomp_trace_return(...); return;`, i.e. the call
+**abandons the caller's frame**. On the hardware the callee returns to the
+instruction after the delay slot; here the caller's epilogue never runs, so
+every call leaks `$sp` by the caller's frame size and the caller's
+callee-saved registers are read back from the wrong slots. In the map scene
+(scene `0x05`) the two sites were the scene update's `jal 0x8019AF0C`
+(`func_8017B858` @0x8017B8A0, leak 0x20) and the scene hook's `jal 0x801A103C`
+(`func_8017B9C8` @0x8017BA10, leak 0x18). The frame-pump thread (t4,
+`func_8008AFE0`) keeps its `$s0`/`$s1` on its own stack; `$s1` is the
+message-type comparator `1`, so once it is corrupted the thread's
+`msg->type == 1` test stops matching and **the pump stops after two frames**.
+That is the "frozen black screen": `D_800AEFA4` (frame counter) stops while
+`D_800C4BCC` (VI retrace) keeps counting, and only two display lists are
+submitted. `cross_bank.py dispatch` already detects this shape (early return
+plus the duplicated delay slot) and repairs it to call-and-continue; adding
+`0x8019AF0C` and `0x801A103C` to `make recomp`'s `--only` list is the fix.
+`0x8019AF0C` resolves to unit **M**'s state-1 handler — which is what the game
+asks for, since scene `0x05`'s enter sets `0x801977E8 = 1` while scene `0x07`'s
+sets `3` and takes the already-dispatched `0x8019B340`.
+`docs/HANDOFF-2026-09-16-session60.md` §1-§3.
+
+**Decision (2): the map scene is scene `0x05`, and it is where the Controller
+Pak save becomes reachable** (developer, session 60: *"the next scene after this
+prologue movie is an important one: it's the map scene. from there, it should be
+possible to save the game"*). The port now draws it
+(`docs/proofs/native-newgame-map-scene.png`); the save device itself is still
+unimplemented (session 58 §3c).
+
+**Diagnostic recorded:** the way to find a leaking call is to log the guest
+`$sp` (`ctx->r29`) before and after each call in the chain — a leaking callee
+shows as a lower `sp` after it returns, and the caller then reads garbage into
+its callee-saved registers. Grep the generated C for
+`recomp_trace_return(...); return;` followed by more statements in the same
+function. `OGRE_PROFILE=1` alone shows only idle threads; it is the state words
+(`D_800AEFA4`/`D_800C4BCC`) that identify the stall as "no frames produced".
+
+**Experiment (not adopted):** `python3 tools/cross_bank.py dispatch` with no
+`--only` clears the whole resolvable backlog (89 call sites, 7 extra targets,
+including calls into overlay C itself from streamedB) and also makes the map
+render; it is the eventual fix but changes many bindings at once, so only the
+two targets this wall needed were added and the full opening was re-verified
+instead.
 
 ---
 
