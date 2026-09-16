@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-16 (55) | **Scene `0x07`'s form module is streamed code with its own bank unit (H), and a call into a *streamed module's* RAM must be dispatched like any other swappable range.** The module is ROM `0x712A0` (`0x8600`) → RAM `0x8019A7C0`, chunk-DMA'd by `func_8017B794`, the enter of the real scene-`0x07` descriptor **`D_8018FDAC`** (mask `0x00000002`) — session 54's `D_8018FB98`/`func_80177F04`/`0x801A578C` reading was the wrong table entry. Its RAM overlaps record 3 (unit A) and overlay C (the main ELF), so build-time bindings ran overlay C's bodies: of the module's 24 internal `jal` targets, **0** were main-ELF function entries. The fix is session 45's model applied to a module that is not in the segment table: new unit H, and `make recomp`'s `--only` list carries the six calls into it. `tools/cross_bank.py`'s `overloaded()` also had to be fixed (`hi = min(c.hi)` → `max(c.hi)`; it hid the module's whole range behind record 3's earlier start). The form renders | `docs/HANDOFF-2026-09-16-session55.md`; `docs/proofs/native-newgame-name-entry.png` |
 | 2026-09-15 (52) | **The YUV→RGB conversion must sign-extend `G_SETCONVERT`'s 9-bit fields, scale them `2*K+1`, and pair `K1` with U.** The hardware coefficients are `K = 2*sext9(k)+1` (GLideN64 `gDPSetConvert`: `SIGN(k,9)<<1 + 1`; parallel-rdp `set_convert`: `2*sext<9>(k)+1`), giving `351/−85/−177/445` for the game's `k0..k3 = 175/469/423/222`, and the rows are `R = Y + K0*V'`, `G = Y + K1*U' + K2*V'`, `B = Y + K3*U'` (`U'=U-128`, `V'=V-128`). Session 51 used the raw **unsigned** fields directly and paired `K1` with V, so the green row exploded positive and the cathedral backdrop drew as blue banding; the geometry, the de-interleaved TMEM planes and the `[U, Y(even), V, Y(odd)]` source were all verified correct, so **session 51 §7's "the defect is in sampling/upload" is wrong**. `K4`/`K5` as *combiner* inputs stay the raw fields over 255 (GLideN64 `_FIXED2FLOATCOLOR(k,8)`) | `docs/HANDOFF-2026-09-15-session52.md` §1-§3 |
 | 2026-09-15 (51) | **The `0x800A5110` njpeg display list is an S2DEX2 list and its `0xDA` command is the draw.** The ucode is `S2DEX 2.08` (`GBIUCode::S2DEX2` — the game's ucode text/data hashes match RT64's `S2DEX2_FIFO_2_08` database entries exactly), so per macroblock `0xDC` = **`G_OBJ_MOVEMEM`** (`gSPObjSubMatrix`, the 8-byte `uObjSubMtx`) and `0xDA` = **`G_OBJ_RECTANGLE_R`** (`gSPObjRectangleR`, the 24-byte `uObjSprite`), not F3DEX2 `G_MOVEMEM`/`G_MTX`. RT64's `GBI_S2DEX2` mapped neither, so the geometry was skipped and only the texture loads ran — **session 50 §9's "the list carries no geometry" is wrong and is corrected here**. Both commands (plus `G_OBJ_SPRITE`/`G_OBJ_RECTANGLE` and the four `objLoadTx*` handlers that `assert(false)`'d) are implemented in RT64; a live trace shows 300 rectangles tiling the 320x240 `G_SETCIMG` target exactly. **A YUV tile must also be loaded as the RDP's two-plane format** — one luma byte per texel in TMEM's upper half, one U/V pair per two texels in the lower — so a YUV `LOADTILE` de-interleaves, the sampler follows parallel-rdp's `sample_texel_yuv16`, and YUV16 tiles require raw-TMEM sampling. The source word is `[U, Y(even), V, Y(odd)]`, correcting session 50 §2. Still open: the sampled colours (blue banding, not the backdrop) | `docs/HANDOFF-2026-09-15-session51.md` §1-§7 |
 | 2026-09-15 (50) | **RT64's YUV16 decode is implemented from the code that writes the format, not from a guessed byte pairing.** In the 32-bit word at `4*(2t + (s>>1))`: `byte0 = Y(s even)`, `byte1 = V`, `byte2 = U`, `byte3 = Y(s odd)` (mupen64plus-rsp-hle `jpeg.c` `GetUYVY` / `jpeg_decode_OB`); luma is sampled from the upper TMEM half (`OR 0x800`) with the XOR-3/XOR-4 swap, chroma from the lower half, converted with the matrix **the game programs via `G_SETCONVERT`** (`k0=175 k1=469 k2=423 k3=222`). The old stub returned black for every YUV texel, which is why the framebuffer the game read back was black. The remaining wall is **render timing**: the port completes the emulated RSP task as soon as the display list reaches RT64, so the game's CPU copy can run before the draw renders; wait on the **RSP worker** (`Application::waitForGameFramebuffers`), never on the game thread (it deadlocks). A follow-up static trace fixed the readback's identity: the four `func_ovlE_8019976C` stage-3 copies **are** the njpeg readback (sole caller bankE `0x80199D80` inside `func_ovlE_80199D30`), they are the four sub-images of one `'B5'` asset (ROM `0x7CADAC`), and they run in scene `0x02` as a preload because `0x0D` streams bankRec2 over unit E's RAM. ~~byte0 = Y(even), byte1 = V, byte2 = U, byte3 = Y(odd)~~ and ~~the sampler design (luma at `| 0x800` with an XOR-3 swap, chroma via a half-word XOR)~~ are **corrected by session 51**: the word is `[U, Y(even), V, Y(odd)]`, and the RDP keeps luma one byte per texel at `offset + stride*t + s` in the upper half with U/V pairs in the lower | `docs/HANDOFF-2026-09-15-session50.md` §2-§5; corrections in `docs/HANDOFF-2026-09-15-session51.md` §6 |
@@ -38,6 +39,63 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-16 (session 55) — scene `0x07`'s streamed form module is bank unit H, and its calls are dispatched
+
+**Decision.** Compile the code module scene `0x07` (the New Game name-entry
+form, descriptor `D_8018FDAC`) streams as its own bank unit **H**:
+
+    bankRec07  ROM 0x712A0 (0x8600) -> RAM 0x8019A7C0
+
+and route the six calls from resident code into it through the runtime bank map
+by adding them to `make recomp`'s `cross_bank.py dispatch --only` list
+(`0x8019A7C0`, `0x8019A884`, `0x8019B060`, `0x8019B340`, `0x8019C4A8`,
+`0x8019C69C`).
+
+**Why.** Scene 0x07 entered but rendered black (session 54). Two corrections to
+that session's diagnosis, both at instruction level:
+
+* The descriptor is `D_8018FDAC`, **not** `D_8018FB98`. `func_80075BC0` builds
+  the accessor table at startup (`0x80075C44`: `D_800AF028[7] = func_8017B600`),
+  and `func_8017B600` is `lui $v0,0x8019 / jr $ra / addiu $v0,$v0,0xFDAC`. Its
+  `+0x10` mask is `0x00000002`, and the live log agrees
+  (`scene=0x0007 descriptor=0x8018FDAC mask=0x00000002`). `func_80177F04` and
+  `0x801A578C` belong to the *other* table entry — session 54 matched an address
+  against the wrong layout, which is this project's most common bug class.
+* The module is not missing and is not zeroed: `func_8017B794` (the real enter)
+  chunk-DMAs `0x8600` bytes, ROM `0x712A0` → RAM `0x8019A7C0` (67 × `0x200`
+  chunks in `OGRE_DMA_TRACE`), and then calls `0x8019A884`, the first function
+  after the module's 0xC4-byte header.
+
+The port *did* have code at every module address — the main ELF's `.streamedC`
+(overlay C / record 15) and record 3 (unit A) both map there. N64Recomp binds a
+`jal` to a function it knows as a direct C call, so the resident code ran
+overlay C's bodies at the module's addresses. Measured: the module's 24 internal
+`jal` targets are **none** of them function entries in the main ELF (which has
+67 different entries in the same range). No crash, no display lists: a black
+screen.
+
+**A tooling bug this exposed.** `tools/cross_bank.py`'s `overloaded()` computed
+each region's ambiguous span as `hi = min(r.hi, min(c.hi for c in competitors))`.
+Because a region's competitor list includes regions that start *before* it, the
+span collapsed to the lowest competitor end: unit H's overlap was reported as
+`0x8019A7C0..0x8019F450` (record 3's start of overlap) instead of
+`0x8019A7C0..0x801A2DC0`, so `dispatch --only 0x8019A884` reported "matched no
+call site" and the module's calls were invisible to both `report` and `check`.
+The fix is `hi = min(r.hi, max(c.hi for c in competitors))`. The swappable
+ranges go 5 → 6 and the main unit's entries in swappable RAM go 78 → 250: the
+same addresses were always at risk; the model could not see them.
+
+**Result.** The form renders — name box (`Magnus`), `A–Z`/`a–z` grid,
+`◀ ▶ INS BS DEL END`, and the `Is the name Magnus acceptable? / Yes No` prompt —
+and confirming it hands the opening on to `0x02`/`0x0D`. Proof:
+`docs/proofs/native-newgame-name-entry.png`. The cathedral is unchanged
+(re-verified in the same run).
+
+**Corrects.** `docs/HANDOFF-2026-09-16-session54.md` §2-§5 (descriptor,
+`func_80177F04`, and "the code is not resident").
 
 ---
 

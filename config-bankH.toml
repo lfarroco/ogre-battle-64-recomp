@@ -1,0 +1,13 @@
+# N64Recomp config for streamed-overlay bank unit H (Phase 4).
+# See config-bankA.toml for the model; this unit holds the scene-0x07 form
+# module (ROM 0x712A0 -> RAM 0x8019A7C0, chunk-DMA'd), whose RAM overlaps
+# record 3 (unit A) and overlay C (the main ELF).
+
+[input]
+output_func_path = "BankHFuncs"
+elf_path = "build/bankH.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100

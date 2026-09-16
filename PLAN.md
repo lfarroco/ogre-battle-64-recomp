@@ -645,21 +645,27 @@ hardware. RT64 remains the primary native renderer throughout. See
     handoff is correct game behaviour**, and the movie-vtable dispatch session 53
     saw belongs to the `OGRE_STEP` shortcut, which skips step 1 and leaves the
     exit on its `otherwise` arm. See `docs/HANDOFF-2026-09-16-session54.md`.
-  - 🚧 **Scene `0x07` renders black, and the code it calls is not resident
-    (session 54)**: the handoff enters scene `0x07` (descriptor `D_8018FB98`,
-    `.streamedB` ROM `0x065A98`: enter `func_80177F04`, update `func_80177F20`,
-    hook `func_80177F3C`). Its enter calls `func_801A578C`, which `config.yaml`
-    places in overlay C's window (ROM `0x1CE040` → VRAM `0x80197B90`; file
-    `0x1DBC3C`), and in an `OGRE_DUMP_RDRAM` taken while `0x07` runs
-    `0x801A3000..0x801B0000` is **all zero**. `OGRE_DMA_TRACE=1` (new) shows the
-    four bases the game loads into that arena (`0x1CE040` boot; `0x066E30`,
-    `0x0E4910`, `0x06E680` later), and a conditional `watch.sh` on the word shows
-    the final zero written by the cutscene engine's own step interpreter
-    (`func_ovlC_8022B714` ← `func_ovlC_802282D8` ← `func_ovlC_80227030` ←
-    `func_ovlC_8022D1CC`). Two readings are open (the port never loads the
-    `0x07` module, or it loads a different record into that RAM); §8 of the
-    handoff names the discriminator. **The name-entry form is still not reached.**
-    See `docs/HANDOFF-2026-09-16-session54.md` §2-§5.
+  - ✅ **Scene `0x07` is the name-entry form, and it renders (session 55)** —
+    session 54's black screen is fixed and its diagnosis corrected. The scene's
+    descriptor is **`D_8018FDAC`** (streamedB ROM `0x65CAC`; `func_80075BC0`'s
+    accessor table maps id 7 → `func_8017B600` → it), **not** `D_8018FB98`;
+    enter `func_8017B794`, update `func_8017B858`, hook `func_8017B9C8`, mask
+    `0x00000002`. The enter chunk-DMAs a **0x8600-byte code module, ROM
+    `0x712A0` → RAM `0x8019A7C0`** (67 × `0x200` chunks) and calls it. The
+    module's RAM overlaps **record 3** (unit A) and **overlay C** (the main
+    ELF), so N64Recomp bound the calls to overlay C's bodies at those addresses
+    (of the module's 24 internal `jal` targets, **0** were main-ELF entries) and
+    the form drew nothing. The module is now **bank unit H**
+    (`config-bankH.yaml`/`.toml`, `BANK_UNITS` gains `H`; code/data split at ROM
+    `0x783C0`, where splat also puts it), and the six calls from resident code
+    into it are dispatched (`LOOKUP_FUNC`) from `make recomp`'s `--only` list.
+    `tools/cross_bank.py`'s `overloaded()` had a bug that hid the range
+    (`hi = min(c.hi)` instead of `max(c.hi)`); fixed. Verified: forced
+    `OGRE_SCENE=0x07` draws the form (50 frames, 219302 non-black, was 0), and
+    the title-driven opening reaches `0x07` at `t≈19.0 s`, draws it, and hands
+    off to `0x02`/`0x0D` at `t≈20.7 s`. Proof
+    `docs/proofs/native-newgame-name-entry.png`. See
+    `docs/HANDOFF-2026-09-16-session55.md`.
   - 🚧 **Why the game's own frame index lands on the placeholder is open
     (session 48)**: `D_800C4BB8` is the VI manager's "displayed buffer" word
     (written by `func_8007307C`, which `func_80089540` — N64 Thread 5 — calls

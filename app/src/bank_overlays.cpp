@@ -694,8 +694,9 @@ void report_unknown_module(uint32_t rom_offset, uint32_t ram_addr, uint32_t know
 // (ROM, RAM) base; `dump_dma_trace` prints it from the bounded-run exit path
 // (the process leaves through `_exit`, so an `atexit` dump never runs). The
 // `[bank]` line only fires for records the port knows, so a module the game
-// loads but the port has no record for — the scene-0x07 black screen — is
-// invisible without this (session 54).
+// loads but the port has no record for — how session 54's scene-0x07 black
+// screen was found, and how session 55 found the name-entry form module
+// (ROM 0x712A0 -> RAM 0x8019A7C0, bank unit H) — is invisible without this.
 struct DmaTraceEntry { uint32_t first = 0; uint32_t last = 0; uint32_t count = 0; };
 static std::map<std::pair<uint32_t, uint32_t>, DmaTraceEntry> dma_trace_chunks;
 static uint32_t dma_trace_events = 0;

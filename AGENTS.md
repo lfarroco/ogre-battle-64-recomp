@@ -98,7 +98,9 @@ wrong half of a function. Check these before blaming game logic:
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   *different* resident bank. `python3 tools/cross_bank.py report` lists sites;
   `dispatch --only …` is wired into `make recomp`. Bank code is compiled into
-  `Bank{A..G}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`.
+  `Bank{A..H}Funcs/` and registered at runtime in `app/src/bank_overlays.cpp`
+  (unit H is the scene-`0x07` form module; `cross_bank.py`'s `overloaded()` had
+  a `min`/`max` bug that hid its whole range until session 55).
   **`make bank-recomp` now runs `cross_bank.py check-banks`**, which fails if a
   unit defines a RAM range another bank can own *and* calls into it from another
   of its records (a direct call bound to the wrong bank's layout — session 45).
@@ -266,13 +268,19 @@ from here.
   "never advances / 1 GiB `memset`" is the **`OGRE_STEP` shortcut's** property:
   seeding step 2 skips step 1, so the exit takes its `otherwise` arm, re-enters
   `0x0D` at step 0 and selects the movie-mode branch. Drive the opening from the
-  title (`OGRE_TAP_BUTTON="start,a,start,a,…"`) instead of seeding a step. Scene
-  `0x07` then **renders black**: its enter `func_80177F04` calls `func_801A578C`,
-  which sits in overlay C's RAM window (`.streamedC`, ROM `0x1CE040` →
-  `0x80197B90`) and is **zero at runtime** — the game loads four other bases into
-  that arena (`OGRE_DMA_TRACE=1`) and the cutscene engine's step interpreter
-  zeroes it. Whether the `0x07` module is never loaded or loaded elsewhere is the
-  open question. Also open: the movie-engine branch (`F1C0 == 0`, gated by the
+  title (`OGRE_TAP_BUTTON="start,a,start,a,…"`) instead of seeding a step. **Session
+  55 corrects session 54's reading of scene `0x07`**: its descriptor is
+  **`D_8018FDAC`** (the accessor table maps id 7 → `func_8017B600`; enter
+  `func_8017B794`, mask `0x00000002`), *not* `D_8018FB98`, and the module it
+  streams is real — ROM `0x712A0` (`0x8600`) → RAM `0x8019A7C0`, chunk-DMA'd by
+  the enter. That RAM overlaps record 3 (unit A) and overlay C (the main ELF),
+  so the port's build-time bindings ran overlay C's bodies at the module's
+  addresses (of the module's 24 internal `jal` targets, none were main-ELF
+  entries). It is now **bank unit H** and the six calls into it are dispatched;
+  **the name-entry form renders** (`docs/proofs/native-newgame-name-entry.png`).
+  The general lesson: a **streamed module that is not in the segment table still
+  owns a swappable RAM range** and needs the session-45 treatment — and
+  `tools/cross_bank.py`'s overlap model had to be fixed to see it. Also open: the movie-engine branch (`F1C0 == 0`, gated by the
   word `0x80197794` — *not* `0x8019F794`, see session 43); menu `0x18` natural
   entry; scene `0x12` = Load Game (needs save pre-state); `OGRE_NO_AUDIO=1`
   early-boot crash; `osViFade`. Scene `0x17` = the Tutorial and runs (bank unit

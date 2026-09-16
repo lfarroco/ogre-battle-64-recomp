@@ -262,7 +262,16 @@ def overloaded(regions: list[dict]) -> list[dict]:
         if not competitors:
             continue
         lo = max(r["lo"], max(c["lo"] for c in competitors))
-        hi = min(r["hi"], min(c["hi"] for c in competitors))
+        # The overlap extends to the highest competitor end, not the lowest:
+        # `r` overlaps every competitor listed, so the ambiguous span runs from
+        # the latest start to the earliest *of the ends that can still cover
+        # that start*. Taking min(c["hi"]) under-reports whenever the region's
+        # own end is the largest (session 55: unit H's module, 0x8019A7C0..
+        # 0x801A2DC0, overlaps streamedC 0x80197B90..0x801BA550 and record 3
+        # 0x8019EE70..0x801AD5C0, but the min end 0x8019EE50 truncated the span
+        # to 0x8019F450 — so the module's own calls were invisible to the
+        # rewrite). Clamp to `r`'s end so the span stays a sub-range of `r`.
+        hi = min(r["hi"], max(c["hi"] for c in competitors))
         if lo < hi:
             out.append({"region": r, "lo": lo, "hi": hi, "competitors": competitors})
     return out

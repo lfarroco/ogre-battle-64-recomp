@@ -73,7 +73,7 @@ build/assets/%.o: assets/%.bin
 
 recomp: $(ELF)
 	$(N64RECOMP) config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C
 
 # ---------------------------------------------------------------------------
 # Cross-bank call routing (Phase 4).
@@ -121,9 +121,18 @@ recomp: $(ELF)
 # A lookup that misses the map is a no-op stub, so the scenes that never load
 # the owning record are unaffected. `make recomp` re-applies this after every
 # regen; with no bank data at all the step warns and leaves the tree alone.
+# 0x8019A7C0/0x8019A884/0x8019B060/0x8019B340/0x8019C4A8/0x8019C69C, the
+# scene-0x07 form module (session 55). Scene 0x07's descriptor (0x8018FDAC,
+# streamedB ROM 0x65CAC) enters through func_8017B794, which chunk-DMAs a
+# 0x8600-byte code module (ROM 0x712A0 -> RAM 0x8019A7C0) and calls it. The
+# module's RAM overlaps record 3 (unit A) and overlay C (the main ELF), so the
+# recompiler bound those calls to overlay C's bodies at the same addresses —
+# a different layout, which left the name-entry form black. Bank unit H is the
+# module; these six are every call the resident code makes into it. See
+# docs/HANDOFF-2026-09-16-session55.md.
 # The remaining targets stay on the recompiler's bindings (session 33's
 # behaviour); dispatching the other resolvable ones is still an opt-in
-# experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41).
+# experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41, 55).
 # ---------------------------------------------------------------------------
 cross-bank-report:
 	python3 tools/cross_bank.py report
@@ -153,7 +162,7 @@ cross-bank-check:
 #   make bank        -> build/bank<U>.elf
 #   make bank-recomp -> Bank<U>Funcs/ + app/src/bank_funcs.inc
 # ---------------------------------------------------------------------------
-BANK_UNITS := A B C D E F G
+BANK_UNITS := A B C D E F G H
 BANK_ELFS  := $(addprefix build/bank,$(addsuffix .elf,$(BANK_UNITS)))
 BANK_LDS   := $(addprefix build/bank,$(addsuffix .ld,$(BANK_UNITS)))
 

@@ -1,5 +1,13 @@
 # Handoff — 2026-09-16, session 54: the New Game opening advances to scene `0x07`; its form module is not in RAM
 
+> **Superseded in part by session 55** (`docs/HANDOFF-2026-09-16-session55.md`).
+> §2-§5's diagnosis of the black screen is wrong on two points: the scene-`0x07`
+> descriptor is **`D_8018FDAC`** (enter `func_8017B794`, mask `0x00000002`), not
+> `D_8018FB98` — session 54 matched `0x801A578C` against the wrong table entry —
+> and the form module **is** DMA'd in (ROM `0x712A0` → RAM `0x8019A7C0`,
+> `0x8600` bytes); it is now compiled as bank unit H and the form **renders**.
+> §1 (the route and the step reset) stands.
+
 ## Goal and result
 
 **Goal (developer, session 54):** continue from session 53 — the cathedral (New

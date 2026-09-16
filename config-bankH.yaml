@@ -1,0 +1,80 @@
+# Secondary splat config: streamed-overlay bank unit H (Phase 4).
+#
+# Unit H holds the code module scene 0x07 (the New Game name-entry form) streams
+# into record 1's arena *and into overlay C's RAM*:
+#
+#   bankRec07 ROM 0x712A0 (0x8600) -> RAM 0x8019A7C0
+#
+# The scene's enter `func_8017B794` DMAs it in 0x200-byte chunks (67 of them,
+# ROM 0x712A0..0x798A0 -> RAM 0x8019A7C0..0x801A2DC0), then copies the first
+# 0x8140 bytes to 0x801A18E0, where the module's own pointer table (at
+# 0x801A18F0, entries 0x801A1B7C..) expects the copied code to run.
+#
+# Why it needs its own unit: the module's RAM range overlaps both **record 3**
+# (unit A, RAM 0x8019EE70..0x801AD5C0) and **overlay C / record 15** (the main
+# ELF's `.streamedC`, RAM 0x80197B90..0x801BA730). The main ELF therefore has
+# its own compiled bodies at every module address, and calls from the scene's
+# resident code were bound at build time to those bodies — a different layout.
+# The unit is what makes those calls resolvable through the runtime bank map
+# (N64Recomp emits `LOOKUP_FUNC` when the target is not defined in the caller's
+# unit; see tools/cross_bank.py).
+#
+# See config-bankA.yaml for the model and docs/DECISIONS.md (session 55).
+
+name: Ogre Battle 64 - streamed overlay bank unit H
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankH
+  target_path: assets/ogre64.z64
+  elf_path: build/bankH.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankH/asm
+  build_path: build/bankH
+  asset_path: build/bankH/assets
+  ld_script_path: build/bankH.ld
+  undefined_syms_auto_path: build/bankH/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankH/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlH_$VRAM"
+  symbol_name_format_no_rom: "ovlH_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Scene 0x07's form module (chunk-DMA'd). It is code up to `func_ovlH_801A1884`
+  # (the last instruction is at ROM 0x783BC), then a data region: the pointer
+  # table at 0x801A18F0 (entries 0x801A1B7C/0x801A1B70/... point at the
+  # character tables), the name-entry character grid `ABCDEFGHIJ…`, the default
+  # name `Magnus`, and the form's layout tables. splat flags the same boundary
+  # ("symbol at vram 801A1884 ends with extra nops"), so the split is its
+  # suggestion, not a guess.
+  - name: bankRec07
+    type: code
+    start: 0x712A0
+    vram: 0x8019A7C0
+    subsegments:
+      - [0x712A0, asm]
+      - [0x783C0, data]
+
+  # Rest of the ROM: record 2 (ROM 0xE4910) and overlay C (ROM 0x1CE040) are
+  # other units, and are not part of this one.
+  - [0x798A0]
