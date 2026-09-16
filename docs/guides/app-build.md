@@ -331,6 +331,25 @@ key) and the image is written while that state is live. Pair it with
 clock have elapsed, so a scripted run can leave the command file in place at
 launch instead of racing it from a background writer.
 
+**`OGRE_CONSOLE_ON_SCENE` / `OGRE_CONSOLE_ON_STEP` / `OGRE_CONSOLE_ON_CMD`** run
+one console command on the first frame a chosen scene (and optionally that exact
+sequence step) is active — the deterministic alternative to timing a command
+against wall-clock taps:
+
+```sh
+OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974 \
+  OGRE_CONSOLE_ON_CMD='save /tmp/ck.ckpt' ./build-app/ogrebattle64 assets/ogre64.z64
+# [scene] console trigger: scene 0x000D step 974 -> save /tmp/ck.ckpt
+```
+
+`OGRE_CONSOLE_ON_SCENE` takes a name from the scene table (`new-game`, `tutorial`,
+`title`, …) or a hex id; `OGRE_CONSOLE_ON_STEP` is the value of the sequence step
+word `D_8018F1C0` (`docs/scenes.md` lists the opening's steps). It fires once per
+process. This exists because every tap route in this project is wall-clock while
+the game's own progress is not: a schedule tuned for a 2 s title lands in the
+attract loop when the title takes 9 s, and the trigger removes that failure mode
+(session 58).
+
 ### Checkpoints — `save` / `load` (session 58)
 
 A checkpoint is a **full machine rewind**, so a long scripted path only has to be
