@@ -850,6 +850,37 @@ hardware. RT64 remains the primary native renderer throughout. See
     (`a2=12`) are the same rect-vs-window class.
     `docs/HANDOFF-2026-09-16-session63.md`.
 
+  - 🚧 **The map's party, reframed: the port is faithful, so stop editing its
+    display lists (session 64).** *"How would an emulator handle it?"* Four
+    independent checks say the port is not the defect: the LZ decoder is exact
+    (13/13 assets end **on** their declared payload boundary), the port's
+    `state[+0x04]` buffer is **21128/21128 bytes identical** to an offline decode
+    of asset `0x01DD210A`, scene `0x05`'s ucode `0x8009F540` hashes (XXH3-64, raw,
+    len `0x1390`) to RT64's **`F3DEX2.fifo 2.08`** entry so the GBI choice is
+    right, and every constant was re-read out of the raw ROM. **Two session-61/62
+    mechanisms are withdrawn:** N64Recomp does *not* run a `jal` delay slot twice
+    (the duplicate is dead code after `goto after_N`), and the builder
+    `func_ovlM_8019F83C` emits **no** `G_SETTILESIZE` at all — the word at
+    `0x8019F990` is the TEXRECT's **s,t**, so there was never a second window
+    writer. **New model, ROM-verified:** the knight is *not* an asset — the map's
+    enter `malloc(0x18000)`s `state[+0x34]` (`0x8019A9E4`) and **composites** an
+    RGB555 LUT over an 8-bit index image into it, a **32-texel-wide** RGBA32 sheet
+    of **24 frames** (`0x1000` each = 8 directions x 3 frames, selected by
+    `3*state[0x1DC] + f`); `state[+0x04]` is asset `0x01DD210A`, the shadow
+    draw's `+0x1068` really is zero, and the only translucent-black art in any map
+    asset is at `+0x10AC` of that same asset. `state` is a **heap pointer** — read
+    `*(0x80197B18)`, never hardcode `0x801F1570`. **New top lead:** the sheet's
+    row stride is 128 B (`line` 16) while the draw's render tile declares
+    **`line=8`** — the game's own command, so this is a renderer-side question
+    about `G_LOADBLOCK`'s block/tile-line interaction, not a game-data one (call
+    1's `line=2` + `masks=3` + 7-texel window is *only* consistent read as
+    16-bit, the same question). Next: compare RT64's `setTile`/`loadBlock`/
+    sampler with GLideN64's and parallel-rdp's, and/or take a reference-emulator
+    RDRAM at the same screen (RetroArch + Mupen64Plus-Next is installed, and
+    GLideN64 ships `[OGREBATTLE64] graphics2D\enableTexCoordBounds=1` and
+    `hack_Ogre64`). **No code landed.** See `docs/guides/emulator-first.md`;
+    `docs/HANDOFF-2026-09-17-session64.md`.
+
   - 🚧 **The map's sprites are missing/garbled (session 60, developer spec)** —
     the developer supplied the retail screenshot
     (`docs/proofs/map-reference/retail-map-screen.png`) and the screen's spec:

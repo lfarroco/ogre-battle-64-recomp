@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (64) | **A display list, or a decoded asset, that the port produced is evidence about the *port*, never about the game's intent — establish the port's faithfulness first, and treat a difference that survives as a *state* question.** The five checks (which GBI; was an RSP task swallowed; is the code the code we compiled; are the bytes what hardware would have; is the recompiler faithful at this `jal`) partition "the port differs" into recompiler / ucode dispatch / renderer / RDRAM contents / game state. Two session-61/62 mechanisms are **withdrawn**: N64Recomp does **not** execute a `jal` delay slot twice (the duplicate after `goto after_N` is dead code — the delay slot runs once, *before* the callee), and the sprite builder `func_ovlM_8019F83C` emits **no `G_SETTILESIZE` at all** (the word at `0x8019F990` is the TEXRECT's **s,t**), so there was never a "second window writer". The map's artist data is likewise **not** the defect: the LZ decoder is exact (13/13 assets end on their declared payload boundary), the port's `state[+0x04]` is byte-identical to an offline decode of asset `0x01DD210A`, and scene `0x05`'s ucode `0x8009F540` hashes to RT64's `F3DEX2.fifo 2.08` entry. **Do not patch generated C to make a picture look right** (rule 7) | `docs/guides/emulator-first.md`; `docs/HANDOFF-2026-09-17-session64.md` §1-§2 |
 | 2026-09-16 (60) | **Every `jal` from the main ELF into RAM a scene module occupies must be dispatched (`LOOKUP_FUNC`), not left bound to overlay C's body — and a `jal` into a size-overridden body interior is emitted as "call the containing body + early `return`", which abandons the caller's frame.** That emission is not cosmetic: the early return dereferences the *caller's* epilogue, so each call leaks its frame and the caller reads its callee-saved registers from the wrong stack slots. The map scene was black because of two such sites in the scene update/hook; the frame-pump thread's `$s1` (the message-type comparator) was corrupted and the pump stopped, which presents as a frozen frame counter (`D_800AEFA4`) with the VI retrace (`D_800C4BCC`) still counting. `cross_bank.py dispatch` repairs the shape to call-and-continue; targets `0x8019AF0C` and `0x801A103C` are now in `make recomp`'s `--only` list | `docs/HANDOFF-2026-09-16-session60.md` §1-§3; `Makefile`; `tools/cross_bank.py` |
 | 2026-09-16 (59) | **Every bank of a swappable RAM gets its own unit, and the unit whose code calls into that RAM defines none of them — the record-14 arena has a *third* bank (ROM `0x286BA0` → RAM `0x8022ACB0`, the chapter animation's module), now unit K, with `bankRec14a` moved to unit L; scene `0x05`'s module (ROM `0x79750` → RAM `0x8019A7C0`, the other bank of unit H's RAM) is unit M.** A bank's extent is its DMA's own size, not a previous session's chunk-rounded figure (`bankRec14a` `0xE860` not `0xDE60`; `bankRec07` `0x84B0` not `0x8600`), and the "is this DMA a module we know?" test must compare the rom→ram delta, not just the ROM range — the range test hid unit M behind unit H's over-claimed size | `docs/HANDOFF-2026-09-16-session59.md`; `config-bankK/L/M.yaml`; `app/src/bank_overlays.cpp` |
 | 2026-09-16 (58) | **A save state is RDRAM *plus* the overlay state, and the two must be captured with the game threads parked.** `save`/`load` in the live console write/restore the whole 8 MiB image and the runtime's function map/bank records (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`). RDRAM alone is not a machine rewind: which recompiled body runs at each RAM address is host state, and a restore that leaves the map on a later bank runs the wrong module's bodies (the session-45/55 mis-binding class). The file I/O is wrapped in `ultramodern::checkpoint_pause_begin/end`, which parks every thread executing recompiled code at a function-entry boundary — the recompiled N64 threads are 1:1 native threads, and without the park the image **tears** (session 58: the checkpoint's own checksum did not match its bytes and its first `0x300` bytes were zeros while the game kept submitting RSP tasks during the write). A checkpoint is only valid in the process/binary that wrote it | `docs/guides/app-build.md` → "Checkpoints"; `docs/HANDOFF-2026-09-16-session58.md` §1 |
@@ -3569,6 +3570,16 @@ dump. Reuse it before writing another throwaway PI-DMA logger.
 
 ### Decision: a sprite *size* bug is proved by an entry-vs-rect A/B, not by the window (session 61)
 
+> **PARTLY CORRECTED BY SESSION 64.** The A/B method stands (the builder really
+> does emit `rect = entry's (W,H)`, so the rect names the slot the caller asked
+> for — still the fastest discriminator). But the corollary at the end is
+> **wrong**: there is **no second writer** of a tile-size command. The builder
+> `func_ovlM_8019F83C` emits no `G_SETTILESIZE` at all — the word at
+> `0x8019F990` read here as "the builder's UV arithmetic" is the TEXRECT's
+> **s,t** half (`u<<21 | v<<5`), and the caller's `0x0001C028` is the only
+> `SETTILESIZE`. See `docs/HANDOFF-2026-09-17-session64.md` §1b. Also note the
+> texture slot the party uses is **not an asset** (session 64 §3).
+
 When a 2D sprite renders at the wrong scale on this port, the fastest
 discriminator is **to compare the emitted `G_TEXRECT` with the sprite-table entry
 the builder actually read**, not to reason about the `G_SETTILESIZE` window.
@@ -3593,6 +3604,18 @@ only writer of a sprite's tile-size command.
 ---
 
 ## Session 63 — the map party's two draws are identified, and the knight samples a zeroed texture buffer
+
+> **CORRECTED IN PART BY SESSION 64 — the draw/role identification stands; the
+> "zeroed texture buffer / find the pass that fills it" framing does not.** The
+> **knight is not an un-filled asset**: the map's enter `malloc(0x18000)`s
+> `state[+0x34]` and **composites** it at runtime (a 32-texel-wide RGBA32 sheet
+> of 24 frames, `0x1000` bytes each, selected by `3*state[0x1DC] + f`), and it
+> **does** contain the knight. The buffer that is genuinely zero is the
+> **shadow's** `state[+0x04]+0x1068`, and `state` is a **heap pointer** — read it
+> from `*(0x80197B18)`; the `0x801F1570` used here is run-specific. Session 63's
+> "the caller's delay-slot store wins on hardware too" and its shadow `+0x10E0`
+> are also superseded. Full correction:
+> `docs/HANDOFF-2026-09-17-session64.md` §1, §3.
 
 **The correction (developer).** Sessions 61/62 identified the party's two builder
 calls backwards. In `func_ovlM_801A2A7C` the **second** call (ROM `0x81BFC`,
@@ -3647,6 +3670,20 @@ empty.
 removed after the experiments; every probe was regenerated away.
 
 ## Session 62 — the map's `G_SETTILESIZE` window is the caller's `jal` delay slot, and N64Recomp runs delay-slot display-list stores before the call
+
+> **CORRECTED BY SESSION 64 — do not act on this entry's mechanism.** Two of its
+> claims are false and were disproved at instruction level (see
+> `docs/HANDOFF-2026-09-17-session64.md` §1, and the session-64 entry below):
+> **(1)** N64Recomp does **not** execute a `jal` delay slot twice — the generated
+> C emits the delay-slot store *before* the call and the duplicate after
+> `goto after_N` is **dead code**; the delay slot runs once, *before* the callee,
+> as MIPS requires. So nothing "clobbers" the caller's store. **(2)** There was
+> never a second window writer: `func_ovlM_8019F83C` emits **no
+> `G_SETTILESIZE` at all**, and the word at `0x8019F990` this entry (and session
+> 61 §4a) read as "the builder's own window" is the TEXRECT's **s,t** half
+> (`u<<21 | v<<5`). The caller's `0x0001C028` is simply the game's own
+> `SETTILESIZE`, written once. The general rule this entry drew from it — *"check
+> the `jal` delay slot of the call site first"* — is withdrawn.
 
 > **Superseded in part by session 63.** The mechanism below is right (the
 > caller's delay-slot store is the window the RDP uses), but two of its
@@ -3713,3 +3750,57 @@ looking for a second writer in the game code.
 was part of the reverted fix and is **not** applied. The shadow's entry and the
 shadow's atlas region are still unidentified — the shadow is a *static* sprite,
 which rules out the "it is another animation frame" hypothesis.
+
+---
+
+## Session 64 (2026-09-17) — **correction**: the map's `G_SETTILESIZE` "two writers" story is wrong, and the emulator-first rule
+
+**What was decided.** Stop treating the port's own decoded display lists as
+evidence about the game's intent. Before any theory about what the game "meant"
+by a list, the port's faithfulness has to be established at four layers: the
+ucode/GBI dispatch (hash it), the RSP (was a task swallowed?), the recompiled vs.
+ROM instructions, and the decoded data (independent decoder + boundary
+invariant). Only if all four pass is a difference a *state* question, and a state
+question is answered against a reference emulator, not by editing generated C.
+Written up as `docs/guides/emulator-first.md`; applied in
+`docs/HANDOFF-2026-09-17-session64.md`.
+
+**Corrections to the two entries above.**
+
+1. **N64Recomp does NOT execute a `jal` delay slot twice.** The generated C emits
+   the delay-slot store *before* the call and then duplicates the block after a
+   `goto after_N` where it is **dead code** (the duplicate exists so a
+   fall-through entry at `jal+4` still works). The delay slot runs once, before
+   the callee — MIPS-correct. So nothing "clobbers" the caller's constant: the
+   caller's `0x0001C028` is written once and is what the RDP uses. The claim
+   *"On hardware the delay slot runs after the callee, so the callee's store
+   wins… check the `jal` delay slot of the call site first"* is **false** and is
+   withdrawn.
+2. **The builder emits no `G_SETTILESIZE`, so there was never a "second writer"
+   to find.** `func_ovlM_8019F83C` emits `G_RDPPIPESYNC`, the `G_TEXRECT`
+   (w0 = lower-right, w1 = upper-left), `G_RDPHALF_1` carrying **s,t**
+   (`u<<21 | v<<5`), `G_RDPHALF_2` with `dsdx = dtdy = 1.0`, and another
+   `G_RDPPIPESYNC`. The word at `0x8019F990` that session 61 §4(a) read as
+   "the builder's own window" is the TEXRECT's `s`/`t` half, not a tile size. The
+   "the builder's uv-derived window is degenerate for `u=v=0`" reasoning built on
+   it is void.
+
+**New, ROM-verified facts that bind the map work from here.**
+
+* `state[+0x34]` is **not a decoded asset**: the map's enter `malloc`s `0x18000`
+  bytes (`0x8019A9E4`) and **composites** an RGB555 LUT over an 8-bit index image
+  into it, producing a 32-texel-wide RGBA32 sprite sheet of 24 frames
+  (`0x1000` bytes each = 8 directions x 3 frames, selected by
+  `3*state[0x1DC] + f`). `state[+0x04]` *is* an asset (`0x01DD210A`, byte-verified
+  against an offline decode), and `state[+0x08]` is **never written** by the
+  enter, so its zero is not a failed decode.
+* The party's two draws are `func_ovlM_801A2A7C`'s calls at ROM `0x81B50`
+  (`a2=0xB` entry 11 `(144,23)`, texture `state[+0x04]+0x1068`, static, `line=2`,
+  `cms=WRAP masks=3`) and `0x81BFC` (`a2=0xA` entry 10 `(16,11)`, texture
+  `state[+0x34]+frame*0x1000`, `line=8`, `SETTILESIZE 31x31`). All constants
+  verified against the raw ROM, not just the ELF.
+* **`state` is a heap pointer**, not `0x801F1570`; read it from `*(0x80197B18)`.
+  Any note that hardcodes `0x801F1570` (sessions 60/63) is run-specific.
+* The map's gfx ucode `0x8009F540` hashes (XXH3-64, raw bytes, length `0x1390`)
+  to `0xCF55FAE288BFE48D` = RT64's `F3DEX2.fifo 2.08`, so RT64's GBI choice for
+  the map is correct.

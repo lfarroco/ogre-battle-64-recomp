@@ -17,6 +17,35 @@ Rules for this file:
 Status values: **renders** (matches the description), **partial**, **missing**,
 **crashes**, **unknown**.
 
+## How the game is organised: 25 scene types, a script, and a lot of content
+
+Worth reading before the tables, because it decides how much of the game is
+"linking" and how much is data. **`tools/scenemap.py` prints all of this from the
+ROM in ~3 s.**
+
+There are exactly **25 scene types** (`0x00`..`0x18`). The scene manager
+`func_80075BC0` builds `D_800AF028[0..24]` at boot from a hardcoded list of 25
+accessor stubs, each returning a 5-word descriptor (`enter`, `update`, `hook`,
+`leave`, bank-record `mask`). Beyond the code, the game has three layers:
+
+1. **The registry** (code, but fully enumerable) — 25 types, their descriptors and
+   their four hooks. Nothing here needs discovering by hand any more.
+2. **The transitions** (code, and small) — *every* place in the game that sets the
+   pending scene `D_800C4C26` is **39 sites in 30 functions**. That is the entire
+   scene-to-scene graph. Most are `I am done, go to X` at the end of a type's own
+   update/leave.
+3. **The content** (data, and huge) — an **1693-entry scripted step table** plus a
+   per-step asset. The 200+ dialogue scenes are *steps* in that table, driven by
+   the same few scene types (mainly `0x0D`, the movie/dialogue engine, and `0x02`,
+   its one-frame loader).
+
+So the flow is **not** 200 hand-linked scenes. It is 25 reusable types reading
+script data the game already ships; the work is decoding a *format* once, and it
+then applies to every dialogue in the game — the same shape as the 75 njpeg
+backgrounds (`docs/guides/njpeg-backgrounds.md`). The New Game opening is already
+an example of this: `title (0x04) → 0x02 → 0x0D → 0x02 → 0x0D → …`, one step per
+visit, with the step index in `D_8018F1C0`.
+
 ## Boot and attract
 
 | what | scene | source | status |
@@ -64,27 +93,37 @@ The developer's retail screenshot is `docs/proofs/map-reference/retail-map-scree
   current date in the italic serif face, e.g. `Sombra 1` (`Sombra` is the month
   name, `1` the day).
 
-**Status (session 63): the two party draws are identified; the knight samples a
-zeroed texture buffer. Nothing landed.** The terrain, the location labels, the
-road of dots and some unit markers draw. The developer corrected sessions 61/62
-about the party: the knight (**Magnus**) is the draw whose rect sits **above** the
-other — the **second** builder call (`func_ovlM_801A2A7C`, ROM `0x81BFC`,
-`a2=0xA`, rect `(a0-16, a1-24)`) — and it must be **`16x24`** (his hair is visible
-in some sprites); the **first** call (ROM `0x81B50`, `a2=0xB`, rect `(a0-8, a1)`)
-is the **shadow** and must be `16x11`. Live sprite-table entries are slot 12 =
-`(16,24)`, slot 10 = `(16,11)`, slot 11 = `(144,23)`, so the two calls currently
-name each other's entries — which is why the shadow drew as the row of ~18
-repeated ellipses (`144x23` over a `7x10`-texel window) and the knight as a small
-dark blob. The window mechanism is settled (the caller's `jal` delay-slot store
-lands on the same display-list word as the builder's own window and wins on
-hardware too). **The wall:** with rects and per-entry windows made consistent,
-both sprites are clean but flat **dark blocks**, because the buffer the knight's
-texture pointer names (`0x8021AC88`) is **all zero** in RDRAM — and a zero RGBA32
-texture under the map's alpha combiner renders flat. The pointer address matches
-the emitted display list, so it is the buffer's *content* that is missing. The
-cursor (`a2=6`) and the date panel (`a2=12`, `MONTH`/`DATE` box and day digit
-still absent) are the same rect-vs-window class. See
-`docs/HANDOFF-2026-09-16-session63.md`.
+**Status (session 64): the port is faithful here — the open lead is renderer-side,
+not game data. Nothing landed.** The terrain, the location labels, the road of dots
+and some unit markers draw. The developer corrected sessions 61/62 about the party:
+the knight (**Magnus**) is the draw whose rect sits **above** the other — the
+**second** builder call (`func_ovlM_801A2A7C`, ROM `0x81BFC`, `a2=0xA`, rect
+`(a0-16, a1-24)`) — and it must be **`16x24`** (his hair is visible in some
+sprites); the **first** call (ROM `0x81B50`, `a2=0xB`, rect `(a0-8, a1)`) is the
+**shadow** and must be `16x11`. Live sprite-table entries are slot 12 = `(16,24)`,
+slot 10 = `(16,11)`, slot 11 = `(144,23)`, so the two calls currently name each
+other's entries — which is why the shadow drew as the row of ~18 repeated ellipses
+(`144x23` over a `7x10`-texel window) and the knight as a small dark blob.
+
+**Session 64 supersedes the "zeroed texture buffer" reading.** The **knight is not
+an asset**: the map's enter `func_ovlM_8019A7C0` `malloc(0x18000)`s `state[+0x34]`
+and **composites** an RGB555 LUT over an 8-bit index image into it — a
+**32-texel-wide** RGBA32 sheet of **24 frames** (`0x1000` bytes each = 8 directions
+× 3 animation frames, selected by `3*state[0x1DC] + f`) — and it **does** contain
+the knight. What is genuinely zero is the **shadow's** `state[+0x04]+0x1068`
+(`state[+0x04]` *is* asset `0x01DD210A`, verified byte-for-byte against an offline
+decode; the only translucent-black shadow art in any map asset is at `+0x10AC` of
+that same asset). **`state` is a heap pointer — read it from `*(0x80197B18)`.**
+The port's decode, its GBI choice (`0x8009F540` → `F3DEX2.fifo 2.08`) and its
+recompiled code all check out, so the remaining defect is stated as a **renderer**
+question: the knight sheet's row stride is 128 B (`line` 16) while the draw's
+render tile declares **`line=8`**, and the shadow's `line=2` + `masks=3` +
+7-texel window is only self-consistent read as **16-bit** — a `G_LOADBLOCK`/
+tile-line semantics question, and it needs no game-data theory. The cursor
+(`a2=6`) and the date panel (`a2=12`, `MONTH`/`DATE` box and day digit still
+absent) are the same rect-vs-window class. Do **not** "fix" the entry indices or
+`0x1068` by editing generated C. See `docs/HANDOFF-2026-09-17-session64.md` and
+`docs/guides/emulator-first.md`.
 
 ### The map's `R` menu (developer, session 60)
 

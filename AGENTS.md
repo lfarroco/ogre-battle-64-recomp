@@ -7,7 +7,11 @@ session. Read this before you start, and follow it even when it feels redundant.
 
 Companion docs: `PLAN.md` (status + roadmap), `docs/README.md` (doc index),
 `DECISIONS.md` (decision log), `docs/HANDOFF-*.md` (per-session record, newest
-number wins), `docs/guides/app-build.md` (build/run + every `OGRE_*` knob).
+number wins), `docs/guides/app-build.md` (build/run + every `OGRE_*` knob),
+`docs/guides/emulator-first.md` (**read before theorising about what a display
+list "meant"** — what an emulator does differently, the five-check faithfulness
+list, how to hash a ucode into the GBI database, and how to borrow a reference
+emulator; see rule 8 below).
 
 ---
 
@@ -127,7 +131,10 @@ wrong half of a function. Check these before blaming game logic:
   RAM*); `tools/rdram.py <dump> image` (render a region as an N64 texture and
   say whether it is blank); `tools/rdram.py diff A B` (what a run changed,
   grouped by module); `tools/watch.sh <guest-addr>` (an lldb write watchpoint on
-  the right host address, with backtraces). All are documented in
+  the right host address, with backtraces); `tools/scenemap.py` (the 25 scene
+  types with their descriptor words, every writer of the pending-scene word, and
+  the scripted step table — ROM-only, ~3 s, no run needed; see the scene fact
+  below). All are documented in
   `docs/guides/app-build.md` -> "Diagnostics toolkit".
 - **When the question is "what is in RAM at the moment X happens", use the live
   console instead of a bounded run's exit dump** (session 56: an exit dump is
@@ -185,17 +192,60 @@ path only works with state the game never sets, that is a finding — write it d
 and say what it implies. A repair is only legitimate when it reproduces what the
 game's own code or data does.
 
-## 8. "Retail would / would not do X" needs hardware evidence
+## 8. "Retail would / would not do X" needs hardware evidence — and a display list the port emitted is *not* that evidence
 
-You cannot conclude retail behaviour from the port. Formulate both hypotheses and
-name the cheapest discriminating experiment. Options, in order of cost:
+You cannot conclude retail behaviour from the port. **Nor can you conclude the
+game's *intent* from a display list or decoded asset the port produced:** those
+are evidence about the *port* until the port's faithfulness is established.
+Sessions 60–63 lost four sessions to treating them as statements about the game
+("the descriptor was never filled", "the constant is stale") and then patching
+generated C so a picture looked better — which is rule 7 with extra steps.
+
+**Run the five faithfulness checks first.** They are cheap and they partition
+"the port differs from retail" into recompiler / ucode dispatch / renderer /
+RDRAM contents / game state. Recipes: **`docs/guides/emulator-first.md`**.
+
+1. **Which GBI did this list get?** Hash the task's ucode with XXH3-64 and look it
+   up in RT64's database (guide §3). **Never** infer a ucode from
+   `OGRE_DL_DECODE`/`OGRE_DL_ANALYZE` — they decode *every* list as F3DEX2 and
+   will print plausible wrong geometry (session 50 §9).
+2. **Did an RSP task go missing?** `tools/runlog.py <run.log>` flags non-gfx tasks
+   the stub swallowed. `app/src/rsp.cpp` is a **stub for every ucode except
+   njpeg**, so un-recompiled work produces no output at all.
+3. **Is the code the code we compiled?** `tools/rdram.py <dump> banks`
+   (which module is resident) and `make midfunc` (prologue-less tails).
+4. **Are the bytes what hardware would have?** Decode an asset with an
+   *independent* implementation and require the stream to end **on** its declared
+   payload boundary (`tools/ogrelz.py`; 13/13 for the map's assets). Do this
+   before blaming a buffer's contents.
+5. **Is the recompiler faithful at this call?** Compare the generated C at the
+   `jal`, the bank ELF, **and the raw ROM bytes**. A `jal` delay slot runs exactly
+   once, *before* the callee; the duplicate N64Recomp emits after `goto after_N`
+   is **dead code**. (Session 62 claimed the opposite and built a theory on it.)
+
+Then formulate both hypotheses and name the cheapest discriminating experiment:
 
 - A runtime watcher or probe (cheap, in-port).
 - A hardware watchpoint on the **correct host address**: print
   `ultramodern::get_rdram_base()` (the crash handler prints it) and watch
   `base + (guest_addr - 0x80000000)`, not an lldb expression evaluated at a bad
   stop.
-- An RDRAM dump (`OGRE_DUMP_RDRAM`) to see what the game left where.
+- An RDRAM dump (`OGRE_DUMP_RDRAM`) to see what the game left where — but it
+  fires **at exit**, so it is always too late, and it can also be too early
+  (session 64 read the map's `state` pointer as `0` from a dump taken at scene
+  entry, *after* 856 display lists had drawn). Use the live console (rule 4) for
+  "at the moment X happens".
+- **A reference emulator — usually the strongest option, and it is already on
+  this machine.** RetroArch plus `mupen64plus_next_libretro.dylib` /
+  `parallel_n64_libretro.dylib`, and
+  `~/Documents/RetroArch/system/Mupen64plus/mupen64plus.ini` is mupen64plus's
+  game database. `docs/guides/emulator-first.md` §5 has the savestate → RDRAM
+  recipe.
+
+**Other emulators carry per-game knowledge; read them before writing a decoder
+for this game.** GLideN64 ships `[OGREBATTLE64] graphics2D\enableTexCoordBounds=1`
+(*"prevents garbage due to fetching out of texture bounds"*) and `hack_Ogre64`;
+mupen64plus-rsp-hle knows OB64's JPEG ucode (`jpeg_decode_OB`, already ported).
 
 If nothing in the run ever writes a slot that a path needs, the path is dead in
 the port *and* on hardware for the same reasons — that is a legitimate
@@ -253,6 +303,33 @@ from here.
   are `+0x00` enter (once), `+0x04`/`+0x08` per-frame hooks, `+0x0C` leave,
   `+0x10` bank-record mask. `D_800C4C26` is the current/pending scene word
   (`0x8000|id`, plus `0xFFFC`/`0xFFFE` control values).
+- **There are exactly 25 scene types, and the whole scene graph is mechanically
+  extractable — `tools/scenemap.py` prints it from the ROM in ~3 s.** Do not hunt
+  a scene's address by hand. The structure has three layers and only the first
+  two are code:
+  1. **The registry.** `func_80075BC0` writes 25 accessor pointers into
+     `D_800AF028[0..24]` from an immediate list; each accessor is a 1-3
+     instruction stub returning a descriptor address, and the descriptor table is
+     **static ROM data** (`streamedB`, ROM `0x40E80` + (vram - `0x8016AF80`)).
+     The tool prints id → accessor → descriptor → enter/update/hook/leave/mask for
+     all 25 (20 resolve statically; ids 2, 3, 6, 8, 23 branch and are listed as
+     `(indirect accessor)`). It reproduces every address this project found by
+     hand: id 5 (map) → `0x8018FD70`, enter `0x8017B60C`, mask `0x2`; id 7 (form)
+     → `0x8018FDAC`, enter `0x8017B794`; id 13 (`0x0D`) → `0x8018FC3C`, mask
+     `0x40007C14`.
+  2. **The transitions.** Every store into `D_800C4C26` in the entire game is
+     **39 sites in 30 functions** (21 carry a statically-known value; the rest are
+     script-driven, because the scene-script VM writes `D_8018F1C2` and the
+     handler copies it). That is the whole scene-to-scene *code*.
+  3. **The content.** The scripted step table is asset `0x19A8804` (ROM
+     `0x1F3CA54`): a `u32` payload size `0x1A74`, then **1693** `u32` per-step
+     asset ids (1499 distinct), indexed by `D_8018F1C0 & 0xFFF`. **The 200+
+     dialogues are entries in this table, not scene types** — so decoding the
+     step-descriptor opcode format once covers all of them; there is no
+     per-dialogue linking to author. Same shape as the 75 njpeg assets: decode the
+     format once, then everything works.
+  `tools/scenemap.py` also has `scenes` / `transitions` / `steps` subcommands and
+  `--dump <rdram>` (read descriptors from a live image instead of the ROM).
 - **`0x0D`** (`D_8018FC3C`): enter `func_80178568`, update `func_80178954`,
   hook `func_80178B40`, leave `func_80178B7C`, mask `0x40007C14`.
   Its enter has **two modes** selected by `D_8018F1C0`:
@@ -446,6 +523,39 @@ from here.
   assets are enumerated (42 are 320x240) with the asset format, the tile
   geometry and the check recipe in `docs/guides/njpeg-backgrounds.md`; the
   stale-source fix is global to that path, not cathedral-specific.
+- **The map screen's sprites (scene `0x05`) — session 64 corrects sessions
+  60–63, and landed no code.** Four independent checks say the **port is
+  faithful** here: the LZ decoder is exact (13/13 map assets end *on* their
+  declared payload boundary), the live RDRAM at `state[+0x04]` is **21128/21128
+  bytes identical** to an offline decode of asset `0x01DD210A`, the map's gfx
+  ucode `0x8009F540` hashes (XXH3-64, **raw** bytes, length `0x1390`) to RT64's
+  **`F3DEX2.fifo 2.08`** database entry — so the GBI choice is right — and every
+  constant was re-read from the **raw ROM**, not just the ELF. **Two session
+  61/62 mechanisms are therefore withdrawn:** N64Recomp does **not** run a `jal`
+  delay slot twice (the duplicate after `goto after_N` is dead code), and the
+  builder `func_ovlM_8019F83C` emits **no `G_SETTILESIZE` at all** — the word at
+  `0x8019F990` that sessions 61/62 read as "the builder's own window" is the
+  TEXRECT's **s,t** half (`u<<21 | v<<5`), so there was never a second window
+  writer to find. **The knight is not a decoded asset:** the map's enter
+  `func_ovlM_8019A7C0` `malloc(0x18000)`s `state[+0x34]` (`0x8019A9E4`) and
+  **composites** an RGB555 LUT over an 8-bit index image into it — a
+  **32-texel-wide** RGBA32 sheet of **24 frames** (`0x1000` bytes each = 8
+  directions × 3 animation frames, selected by `3*state[0x1DC] + f`). `state[+0x04]`
+  *is* asset `0x01DD210A`; the shadow draw's `+0x1068` really is all zero, and the
+  only translucent-black shadow art in any map asset is at `+0x10AC` of that same
+  asset. **`state` is a heap pointer — read it from `*(0x80197B18)` in each image;
+  the `0x801F1570` of sessions 60/63 is run-specific.** The two party draws are
+  `func_ovlM_801A2A7C`'s calls at ROM `0x81B50` (`a2=0xB` = entry 11 `(144,23)`,
+  texture `state[+0x04]+0x1068`, static, `line=2`, `cms=WRAP masks=3`) and
+  `0x81BFC` (`a2=0xA` = entry 10 `(16,11)`, texture `state[+0x34] +
+  frame*0x1000`, `line=8`, `SETTILESIZE` 31×31). **The open lead is renderer-side:**
+  the sheet's row stride is 128 B (`line` 16) while the draw's render tile
+  declares **`line=8`** — the game's own command, hence a question about
+  `G_LOADBLOCK`/tile-line semantics, not game data (call 1's `line=2` + `masks=3`
+  + a 7-texel window is only self-consistent read as **16-bit**, which is the same
+  question). **Do not "fix" the entry indices or the `0x1068` offset by editing
+  generated C** — that is rule 7. See `docs/guides/emulator-first.md` and
+  `docs/HANDOFF-2026-09-17-session64.md`.
 - **The njpeg decoder is correct** (session 47): CPU Huffman decode
   (`func_8008B250`) → **four `M_NJPEGTASK` (type 4) RSP tasks** that decode in
   place to 16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables

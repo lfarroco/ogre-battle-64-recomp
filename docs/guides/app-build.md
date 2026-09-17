@@ -509,6 +509,40 @@ entry) in `ogrebattle64.elf`, but `func_ovlC_801B7EBC` (an entry) in `bankC.elf`
 and `func_ovlG_801B7EBC` in `bankG.elf`; which one is live is decided by the
 game's DMA.
 
+### `tools/scenemap.py` — the scene registry, the transitions, the script (session 64)
+
+```sh
+tools/scenemap.py                 # all three tables (~3 s, ROM-only, no run)
+tools/scenemap.py scenes          # 25 scene types -> accessor -> descriptor words
+tools/scenemap.py transitions     # every writer of the pending-scene word
+tools/scenemap.py steps           # the scripted step table summary
+tools/scenemap.py scenes --dump /tmp/map3.bin   # read descriptors from a live image
+```
+
+Answers *"do we have to link the scenes by hand?"* with numbers, and replaces
+hunting a scene's address one at a time. Three layers, only the first two code:
+
+1. **The registry** — `func_80075BC0` writes **25** accessor pointers into
+   `D_800AF028[0..24]`; each accessor is a 1-3 instruction stub returning a
+   descriptor, and the descriptor table is **static ROM data** (`streamedB`).
+   `scenes` prints `id → accessor → descriptor → enter/update/hook/leave/mask`
+   (20 resolve statically; ids 2, 3, 6, 8, 23 branch and say
+   `(indirect accessor)`). It reproduces every address earlier sessions found by
+   hand — id 5 → `0x8018FD70` (map), id 7 → `0x8018FDAC` (form), id 13 →
+   `0x8018FC3C` (the `0x0D` movie/dialogue engine).
+2. **The transitions** — every store into `D_800C4C26` in the game is
+   **39 sites in 30 functions**; 21 carry a statically-known value, the rest are
+   script-driven. That is the whole scene-to-scene *code*, so there is no graph
+   to author.
+3. **The content** — the scripted step table (asset `0x19A8804`, ROM
+   `0x1F3CA54`) holds **1693** per-step asset ids (1499 distinct), so the 200+
+   dialogues are *entries in one table* driven by the same few scene types, not
+   200 scene links.
+
+Pair it with `tools/guestmap.py <descriptor>` for the ROM offset and owning
+segment of a descriptor, and `tools/runlog.py` for which scenes a run actually
+entered.
+
 ### `tools/watch.sh <guest-addr>` — who writes this address?
 
 ```sh

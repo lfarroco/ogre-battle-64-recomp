@@ -44,6 +44,8 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x8022A9A4/8/AC` | `g_render_matrix_*` | written by the `0x80239874` render tail and consumed by its callers | medium |
 | `0x802395E0` | `g_rec14_arena` (RAM range `0x802395E0..0x80243DC0`) | record 14's arena: the game streams **two banks** here, `bankRec14b` (ROM `0x2AE390`, 0xA7E0 — scene `0x0D` visit 1 / the movie) and `bankRec14c` (ROM `0x2A8CF0`, 0x56A0 — steps ≥ 2); unit F / unit G, and the reason the arena's call sites must be `LOOKUP_FUNC` | high |
 | `0x80239C24` | `func_ovlG_80239C24` (rec14c) | descriptor-interpreter opcode 42 calls it (`jal` at `0x80229004`) with `(6, 0x20, 0x20)`; a real function in rec14c (`addiu sp,sp,-0x60`), a body interior of `func_ovlC_80239874` in rec14b — session 45's wall | high |
+| `0x80197B18` | `g_screen_state` (ptr) | the map's module entry stores `malloc(0x470)` here (`0x8019A82C`) and every map draw loads `state = *(0x80197B18)` from it (`func_ovlM_801A2A7C` `0x801A2ADC`). **It is a heap pointer that changes per run** — read it from this global, never hardcode an observed value (`0x801F1570` in sessions 60/63 is run-specific) | high |
+| `0x801A6FE0` | `g_sprite_table` (stride 8) | entries `{u16 W, u16 H, s16 u, s16 v}`, static module data (unit M's data half, byte-identical to ROM); the consumer is `sprite_rect_emit` (`0x8019F87C`: `(a2 & 0xFFFF)*8 + 0x801A6FE0`, `lhu`/`lh` the four fields). Live: slot 10 `(16,11)`, 11 `(144,23)`, 12-15 `(16,24)` | high |
 
 ## Functions worth naming
 
@@ -73,6 +75,10 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x800988A0` | `pack_f32x16_to_s16` | reads 16 floats from `a0`, writes 8+8 words packed to `a1` | medium |
 | `0x80098AA0` | `pack_f32x3_to_s16` | same shape, inputs in `a1`/`a2`/`a3` | low |
 | `0x80092C18` | `build_fixed_matrix` | builds the packed matrix then `func_800988A0` | medium |
+| `0x8009DD38` | `asset_decode` | `asset_size` (`0x8009DAF4`) → cache the payload size at `0x800BBD70` → `asset_load` (`0x8009DBB8`) into a temp → `lz_size` (`0x8007A7E0`) → `malloc` (`0x80070F30`) → `lz_decompress` (`0x8007A110`) → `free` the temp; **returns the decompressed buffer** (verified: the map's `state[+0x04]` equals an offline LZ decode of the id passed in, byte for byte). The map's module entry calls it ~17 times | high |
+| `0x8019A7C0` | `scene_05_enter` (map) | the module the scene-`0x05` enter `jal`s after its DMA; mallocs `g_screen_state` (`0x8019A7E4`-ish), decodes ~17 assets into its fields with **software-pipelined `asset_decode` calls** (each `jal`'s delay slot stores the *previous* return), then `malloc(0x18000)`s `state[+0x34]` and composites an RGB555 LUT (`+0x18`/`+0x20`) over an 8-bit index image (`+0x1C`/`+0x24`) into it as RGBA32 | high |
+| `0x8019F83C` | `sprite_rect_emit` | `(a0 = x, a1 = y, a2 = sprite-table index)`; emits `G_RDPPIPESYNC`, the `G_TEXRECT` (**w0 = lower-right `(x+W, y+H)`, w1 = upper-left `(x, y)`**, both in quarter-px), `G_RDPHALF_1` carrying **s,t** (`u<<21 \| v<<5`), `G_RDPHALF_2` with `dsdx = dtdy = 1.0`, `G_RDPPIPESYNC`. It emits **no `G_SETTILESIZE`** — the caller supplies that | high |
+| `0x801A2A7C` | `map_party_draw` | `(a0 = x, a1 = y)`; two `sprite_rect_emit` calls — **call 1 = the shadow** (ROM `0x81B50`, `a2=0xB`, origin `(x-8, y)`, texture `state[+0x04]+0x1068`, static) and **call 2 = the knight** (ROM `0x81BFC`, `a2=0xA`, origin `(x-16, y-24)`, texture `state[+0x34] + ((3*state[0x1DC] + f) << 12)`, i.e. 24 frames of `0x1000` bytes). Each call writes its own `SETTIMG`/`SETTILE`/`LOADBLOCK`/`SETTILESIZE` block into `g_dl_cursor` first | high |
 
 ## Shared tails (`jal` targets with no prologue)
 
