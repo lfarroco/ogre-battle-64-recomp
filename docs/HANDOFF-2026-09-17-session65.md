@@ -249,3 +249,53 @@ docs, and the pre-existing `tools/RT64` submodule modification.
    (`D_ovlM_801A6FD8`, 8-byte entries `(w, h, u, v)`) and the fact that
    `func_ovlM_801A2410` is the date panel (plate + month name + date digits) while
    `func_ovlM_801A2A7C` is the party + shadow.
+
+## 8. Addendum (same session) — the developer's drive confirms the fix, and two new walls
+
+**Confirmation (developer, in-game):** *"the scene looks perfect!"* — the
+screenshot they sent shows the party knight, the 4-dot route to the next
+location, the red pin, the crossed swords (next mission), the cursor and the full
+`MONTH/DATE | Sombra | 1` panel, all correctly placed; the elements session 64 §8b
+listed as "present on the real map and absent from forced captures" are all in
+place now. So §7.1's "expected but not yet verified" marker for the marker/route
+layer is resolved: those tables live in the same data half and the one-entry shift
+was their cause too. They also report that moving the cursor onto the next mission
+and selecting it **advances the game out of the map into the next scene**, and
+that it crashes when the mission actually starts — that is the next wall.
+
+**Artifacts taken (developer keys):** `/tmp/map-fixed.bin` (raw 8 MiB dump) and
+`/tmp/map-fixed.ckpt` (checkpoint), both at the real map. The dump checks out:
+`0x800E810E = 0x0005`, `0x800E8294 = 0x8018FD70`, `*(0x80197B18) = 0x801F1570`,
+and the sprite table at `0x801A6FD8` reads `(27,8)` with entry 10 = `(32,32)` —
+the ROM's table, as §2 says.
+
+**Wall A — the mission-start crash.** Not investigated here (the developer
+deferred it). Reaching it needs a playthrough to the map and the mission select;
+the crash output was not captured. **Next session: ask for the `[crash]`/`[snap]`
+block (or a run log) at the moment the mission starts**, then use the scene/step
+it dies on (`c`) and the faulting guest address. The map's exit is a
+`D_800C4C26` store like every other transition, so `tools/scenemap.py
+transitions` should name the target scene first.
+
+**Wall B — checkpoints are process-local, and the intended workflow needs them
+not to be.** The checkpoint the developer saved cannot be loaded by another run:
+`load` reports success and `c` shows scene `0x05`, then the process dies
+deterministically in `do_send` (`SIGSEGV`, `do_send + 0x54C`, garbage host
+address). A `save` + `load` pair **in the same run** at the same map works
+(verified). Cause: the image contains **host pointers** — `OSThread::context` is
+declared "an actual pointer regardless of platform" and written into guest RDRAM,
+one per N64 thread (7 found in `/tmp/map-fixed.bin` at `OSThread::context` =
+`base+0x20`, each with a plausible `id`/`sp`/`queue` around it), and the runtime's scheduler dereferences them after the
+rewind. So `/tmp/map-real.ckpt`, `/tmp/map-fixed.ckpt` and any checkpoint handed
+between sessions are **inert**; the recipe is `save` and `load` in one run.
+Fixing it means rebuilding the runtime's host state from the restored guest state
+(a per-thread `OSThread` → `UltraThreadContext*` registry installed by
+`osCreateThread`, rebound after `read_checkpoint`, plus a reset of the scheduler's
+blocked-thread host state) — a real milestone, worth doing because checkpoints
+are the project's main iteration accelerator. Recorded in `docs/DECISIONS.md`
+and in `docs/guides/app-build.md` → "Checkpoints".
+
+**One operational note:** the live console's watched file is global
+(`/tmp/ogre-console.txt`), so a *second* running instance silently eats the
+commands meant for yours. Use `OGRE_CONSOLE_FILE=/tmp/<name>.txt` per instance
+(this cost a few runs here while the developer's game was still open).

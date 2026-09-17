@@ -852,6 +852,32 @@ hardware. RT64 remains the primary native renderer throughout. See
     RGBA32 the RDP keeps 2 bytes per texel per TMEM half, so `line = 8` is 32
     texels per row — the sheet's row — and RT64's loader/sampler agree with
     angrylion (`docs/HANDOFF-2026-09-17-session65.md` §1–§4).
+    **Developer-confirmed in game (same session, §8):** *"the scene looks
+    perfect!"* — party, the 4-dot route, the red pin, the crossed swords, the
+    cursor and the full `MONTH/DATE | Sombra | 1` panel all correct; the marker
+    and route elements session 64 §8b could not see in forced captures are the
+    same one-entry shift. Selecting the next mission **advances out of the map
+    into the next scene**; **it crashes when the mission actually starts** — that
+    is the next wall (ask the developer for the `[crash]`/`[snap]` block at that
+    moment; `tools/scenemap.py transitions` should name the target scene).
+  - 🚧 **Checkpoints are process-local, so they cannot be handed between runs
+    (session 65).** A `save` + `load` pair **in the same run** at the map works
+    (verified on the live map, scene `0x05`, with every N64 thread active). Loading
+    the *same bytes* written by an **earlier process** (same binary, same build
+    id) dies deterministically right after the "loaded" message: `SIGSEGV` in
+    `do_send + 0x54C` on an N64 thread, with a garbage host address. The image
+    contains **host pointers** — `OSThread::context` is declared "an actual
+    pointer regardless of platform" and is written into guest RDRAM, one per N64
+    thread (7 found in `/tmp/map-fixed.bin` at `OSThread::context` = `base+0x20`) — and the scheduler dereferences them after the rewind. So
+    `/tmp/map-real.ckpt` and `/tmp/map-fixed.ckpt` (both from the developer's
+    process) are **inert in any other run**, and the docs' "one-command replay"
+    recipe only works within the run that saved. **Fix (a milestone, and worth it
+    — checkpoints are the project's main accelerator):** rebuild the runtime's
+    host state from the restored guest state — a per-thread `OSThread` →
+    `UltraThreadContext*` registry installed by `osCreateThread` and rebound after
+    `read_checkpoint`, plus a reset of the scheduler's blocked-thread host state
+    (session 58's "cross-process load" claim is corrected in `docs/DECISIONS.md`
+    and `docs/guides/app-build.md` → "Checkpoints").
   - 🚧 **The map's party: the two draws are identified (session 63); the wall is
     a zeroed texture buffer. Nothing landed.** *(Superseded by session 65: the
     entries were not "naming each other" — the whole table was read one entry

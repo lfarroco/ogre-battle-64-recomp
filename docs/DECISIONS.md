@@ -3855,3 +3855,43 @@ it before recompiling.
   ROM (`make elf-rom-check`) before theorising about the renderer or the game's
   data. AGENTS §8 check 5 says "compare the generated C, the bank ELF **and the
   raw ROM bytes**"; this session is why the ELF is in that list.
+
+## Session 65 addendum — checkpoints are process-local: `OSThread::context` is a host pointer inside the image
+
+**Decision: the `save`/`load` recipe is a *same-run* tool until the runtime
+rebuilds its host state on load; a checkpoint is not handoff material.** Recorded
+because sessions 58's verification note ("cross-process load") and the project's
+habit of handing checkpoints to the next session both assume otherwise.
+
+* **Measured (session 65).** `save` then `load` **in the same run** on the live
+  map (scene `0x05`, every N64 thread active) restores and continues cleanly.
+  Loading `/tmp/map-fixed.ckpt` — written moments earlier by the *developer's*
+  process, same binary and build id — reports `checkpoint loaded … (1 thread(s)
+  parked)` and `c` confirms scene `0x05`, then dies deterministically:
+  `SIGSEGV` at `do_send + 0x54C` (`lock incq 0x18(%rbx)`) on an N64 thread, with a
+  garbage host address. The same happened for `/tmp/map-real.ckpt`.
+* **Cause.** `ultramodern/ultra64.h` declares `OSThread::context` as
+  `UltraThreadContext*` — "An actual pointer regardless of platform" — i.e. a
+  **host** address stored in guest RDRAM, set in `osCreateThread`
+  (`ultramodern/src/threads.cpp`). The checkpoint writes the whole RDRAM image,
+  so the image carries host addresses (session 65 found 7
+  in `/tmp/map-fixed.bin`, one per thread, at `OSThread::context` = `base+0x20`) that are meaningful only in the writing process. After a
+  rewind in another process, `schedule_running_thread`/`wake_blocked_head`
+  dereference them. It is the *only* host pointer in guest memory (checked: no
+  other field is declared as a real pointer, and no other host object is stored
+  into RDRAM), which is why the pointer rebind is a tractable fix.
+* **Fix sketch (not implemented).** Keep a registry of `(PTR(OSThread),
+  UltraThreadContext*)` filled by `osCreateThread` and pruned by
+  `osDestroyThread`; add `ultramodern::rebind_thread_contexts(RDRAM_ARG1)` that
+  walks it and rewrites `t->context`; call it from the app's `load` path right
+  after `read_checkpoint`, while the checkpoint pause still holds every thread at
+  a function entry. Expect a second half: the host-side scheduler/blocked-thread
+  state (parked external sends, threads waiting on a queue) is derived from the
+  *old* timeline and is not restored by the image, so a rebind alone may turn the
+  crash into a hang. Also note `build_id` remains necessary regardless: the
+  overlay state (which recompiled body is mapped where) is the other thing the
+  image cannot carry across builds.
+* **Operational corollary.** The live console's watched file is
+  `OGRE_CONSOLE_FILE` (default `/tmp/ogre-console.txt`) and is *global*: with two
+  instances running, the other one silently consumes your commands. Use a
+  per-instance file.

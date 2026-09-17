@@ -430,6 +430,23 @@ Verified (session 58): a checkpoint's stored checksum matches its own bytes; a
 replays forward into scene `0x16`, the closing movie); a save/load pair in the
 *same* run reproduces the rewind.
 
+Verified again, and bounded, at the map (session 65): a `save` + `load` pair in
+the **same run**, taken on the live map (scene `0x05`, a busy screen with every
+N64 thread active), restores and continues with no crash. Loading the *same
+bytes* written by an **earlier process** (the developer's run, same binary)
+crashes deterministically and immediately in `do_send` (`SIGSEGV` at
+`do_send + 0x54C`, on an N64 thread, with a garbage host address) even though the
+load reports success and `c` shows the restored scene. Reason: the image holds
+**host pointers** — `OSThread::context` is "an actual pointer regardless of
+platform" and is written into guest RDRAM, one per N64 thread (~10 in a map
+image, values in the `0x00007F…` range in the file). Same process ⇒ still valid;
+another process ⇒ a stale address the scheduler dereferences. So a checkpoint
+is **not transferable between runs** yet — a session cannot hand one to the next
+one, and a `load` recipe must `save` and `load` in the same run. Making it
+transferable means rebuilding the runtime's host state from the restored guest
+state after the rewind (rebind a per-thread context registry, and reset the
+scheduler/blocked-thread host state), not just the RDRAM image.
+
 Limits: valid only in the process that wrote it (function pointers are
 process-local) and for the same binary — the file carries an FNV-1a hash of the
 running executable (`version 2`), so a **rebuild invalidates every checkpoint**
