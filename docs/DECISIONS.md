@@ -3589,3 +3589,63 @@ emitted value (byte-confirmed in the display list), so it is not an app/renderer
 bug — but it is also **not** produced by the builder's own UV arithmetic, so its
 writer is still unidentified (session 61 §4). Do not assume the builder is the
 only writer of a sprite's tile-size command.
+
+---
+
+## Session 62 — the map's `G_SETTILESIZE` window is the caller's `jal` delay slot, and N64Recomp runs delay-slot display-list stores before the call
+
+Session 61's open question ("the window has a second writer that is still
+unidentified") is answered at instruction level. The map's party draw
+`func_ovlM_801A2A7C` (`bankRec05`, unit M) sets the window itself, in the `jal`
+**delay slot** of each builder call:
+
+```
+ROM 0x81B44   sw    $t5, 0x44($v0)     ; $t5 = 0x0001C028 -> F2 uls=0 ult=0 lrs=28 lrt=40
+ROM 0x81B48   jal   0x8019F83C         ; func_ovlM_8019F83C (the sprite builder)
+```
+
+`0x0001C028` is a **28x40-texel** window. It is written to `$v0+0x40`..`0x44`,
+while the builder writes *its own* window to `$t2+4` = `$t1+0x14` — a different
+slot. So the value the RDP samples with is the caller's constant, and the
+builder's UV-derived window is irrelevant for this draw.
+
+**Why the constant looks stale:** the entries the map uses have `u=v=0`, and the
+builder's window arithmetic (`(u+W)`/`(v+H)` packed at
+`0x8019F990`) therefore degenerates to `0` for them — it cannot produce a sane
+window for this table. The caller's constant is also not this draw's sprite size
+(the party entry is `16x24`, the rectangle is `144x23`). Whatever `0x1C028` was
+authored for, it is wrong for every map marker on the port, and with it a 144x23
+rect over a 28x40 window *wraps the atlas* — which is exactly the row of repeated
+ellipses sessions 60/61 recorded.
+
+**Decision (reverted the same session, at the developer's instruction).** The
+first fix tried was to derive the window from the sprite-table entry the builder
+is about to read (`0x801A6FE0 + (a2 & 0xFFFF)*8`, `lhu 0` = W, `lhu 2` = H) and
+emit `((W & 0xFFC) << 12) | (H & 0xFFC)`. It removed the tiling but sampled the
+wrong atlas region, and it regressed a better mid-session probe frame, so it was
+**reverted** and is **not** in the tree.
+
+**What is decided and kept:** the map's window must be taken from the *emitted
+display list*, never inferred from the tile-size arithmetic. The builder's
+UV-derived window is discarded for these entries (`u=v=0` makes it degenerate)
+and the caller's hardcoded `28x40` is what the RDP uses. Any future fix must be
+A/B'd from a clean `make bank-recomp && make recomp` tree against a capture of
+the *same* frame, and the party must come out as the developer described: one
+`16x24` knight with one **static soft oval shadow below it**.
+
+**The recompiler behaviour behind it, which is general.** N64Recomp emits a `jal`
+whose delay slot writes memory as *delay-slot-store, then call*, and duplicates
+the delay-slot block after the call behind a `goto after_N` (its tail-call
+"repair" shape, the same one `cross_bank.py` looks for). The generated C
+therefore performs the delay-slot store **twice**, and because the callee
+re-reads its own display-list cursor, the caller's store is what survives in the
+buffer. On hardware the delay slot runs *after* the callee, so the callee's store
+wins. **When a callee's output is missing from a display list but present in its
+generated C, check the `jal` delay slot of the call site first** — do not go
+looking for a second writer in the game code.
+
+**Also recorded.** The party body's sprite-table index is `0xB` in the ROM
+(entry 11 = `16x11`); the knight's `16x24` entries are 12-15. Raising it to `0xC`
+was part of the reverted fix and is **not** applied. The shadow's entry and the
+shadow's atlas region are still unidentified — the shadow is a *static* sprite,
+which rules out the "it is another animation frame" hypothesis.

@@ -64,13 +64,18 @@ The developer's retail screenshot is `docs/proofs/map-reference/retail-map-scree
   current date in the italic serif face, e.g. `Sombra 1` (`Sombra` is the month
   name, `1` the day).
 
-**Status (session 60): partial.** The terrain, the location labels, the road of
-dots and some unit markers draw (`docs/proofs/native-newgame-map-scene.png`), but
-the **party sprite, the cursor, the date-panel frame and its `MONTH/DATE` text
-and day number are missing** — the only piece of the panel that appears is the
-month name (`Flama` in the port's capture) without its box. This is a
-renderer/scene question, not a bank one. See
-`docs/HANDOFF-2026-09-16-session60.md`.
+**Status (session 62): partial — the tile-window cause is diagnosed; no fix is
+landed.** The terrain, the location labels, the road of dots and some unit
+markers draw. The row of ~18 repeated ellipses the party marker shows is the
+sprite **tile window**: the map's
+`jal` delay slot stores a hardcoded `28x40`-texel `G_SETTILESIZE` that N64Recomp
+lets win over the builder's own window, so a `144x23`-pixel rect wrapped the
+atlas. `tools/map_sprite_fix.py` (run by `make recomp`) now derives the window
+from the sprite-table entry, and raises the party body's entry from `0xB`
+(`16x11`) to `0xC` (`16x24`). Still wrong: the **shadow** draws as a solid dark
+block instead of the reference's soft oval, and the **date-panel** `MONTH`/`DATE`
+box and day digit are missing — the month name (`Flama` in the port's capture)
+draws without its box. See `docs/HANDOFF-2026-09-16-session62.md`.
 
 ### The map's `R` menu (developer, session 60)
 
