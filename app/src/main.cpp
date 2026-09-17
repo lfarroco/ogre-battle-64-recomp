@@ -69,10 +69,22 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[boot] window ok\n");
 
     // --- runtime config path ------------------------------------------------
-    char* pref_path = SDL_GetPrefPath("", "ogrebattle64");
-    recomp::register_config_path(std::filesystem::path(pref_path));
-    SDL_free(pref_path);
-    fprintf(stderr, "[boot] config path ok\n");
+    // OGRE_PREF_DIR overrides SDL_GetPrefPath so a run can keep its saves/mods
+    // in a chosen directory (e.g. inside the repo, or a sandbox that cannot
+    // write to the platform preference dir). Default is unchanged.
+    std::filesystem::path pref_dir;
+    if (const char* pref_override = getenv("OGRE_PREF_DIR"); pref_override != nullptr && pref_override[0] != '\0') {
+        pref_dir = std::filesystem::path(pref_override);
+        std::filesystem::create_directories(pref_dir);
+        fprintf(stderr, "[boot] OGRE_PREF_DIR=%s\n", pref_dir.string().c_str());
+    }
+    else {
+        char* pref_path = SDL_GetPrefPath("", "ogrebattle64");
+        pref_dir = std::filesystem::path(pref_path);
+        SDL_free(pref_path);
+    }
+    recomp::register_config_path(pref_dir);
+    fprintf(stderr, "[boot] config path ok: %s\n", pref_dir.string().c_str());
 
     // --- game registration ----------------------------------------------------
     recomp::GameEntry entry;
@@ -89,9 +101,23 @@ int main(int argc, char** argv) {
         ogre::register_streamed_overlays();
         ogre::register_bank_overlays();
     };
-    // TODO: determine OB64's save hardware (Controller Pak / EEPROM / Flashram)
-    // from the ROM's osPfs/osEeprom/osFlash call sites.
-    entry.save_type = recomp::SaveType::None;
+    // OB64's save is a battery-backed cartridge save, and the chip is **SRAM**
+    // (32 KiB). Evidence, session 66:
+    //   * mupen64plus's game database gives SaveType=SRAM for this exact ROM
+    //     (CRC 0ADAECA7 B17F9795, entry EBB4B4D2808DF427AAA3085A41B8A954),
+    //     with Mempak=Yes for the unrelated Controller Pak copy/backup feature.
+    //   * The game's own code: func_8008A040 builds the OSPiHandle with
+    //     baseAddress 0xA8000000 (the SRAM window) and func_8008A0F0 (its DMA
+    //     wrapper) uses it. The boot accessors func_80074CF0.. read the whole
+    //     0x8000 bytes in 256-byte DMAs at device offsets 0..0x7F00, and the
+    //     commit func_80074C58 writes the whole image back in 256-byte DMAs with
+    //     direction 1. Save slots are 0x1850 (6224) bytes at offset 0x10.
+    //   * No EEPROM/FlashRAM command protocol is present (osFlashInit /
+    //     osEepromProbe are never called; there is no FlashRAM command DMA).
+    // The DMA path is the game's own non-bridged func_8008BC40 -> D_800AA408
+    // queue; librecomp/src/pi.cpp's inline PI handler resolves the device from
+    // the OSPiHandle stored in the OSIoMesg (see init_pi_manager).
+    entry.save_type = recomp::SaveType::Sram;
     entry.is_enabled = true;
     entry.has_compressed_code = false;
 

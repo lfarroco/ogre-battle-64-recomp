@@ -97,6 +97,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_TAP_NOT_SCENE=<list>` | the complement of the above. `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the title and goes silent the moment New Game is confirmed — no `OGRE_TAP_MAX` tuning |
 | `OGRE_TAP_BUTTON=<list>` | which pad buttons the synthetic taps press, cycled one per tap (`start`, `a`, `b`, `down`, …; `none` skips a tap). **The list shape matters, and so does the form (developer, session 64): a tap that lands while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the sequence from advancing.** The name-entry form (scene `0x07`) is where this bites. The recorded working shape is **a few `start,a` pairs then a long run of plain `a`** — e.g. `"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` (see the checkpoint and `OGRE_NJREAD_LOG` recipes below). An *endless* `start,a` alternation stalls there forever: a scripted run that shows no crash, no stub call, and a final scene of `0x07` is almost always this. If a schedule keeps stalling, drive the run by hand and take a checkpoint instead |
 | `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
+| `OGRE_PREF_DIR=<dir>` | use `<dir>` instead of `SDL_GetPrefPath` as the runtime config dir, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write `~/Library/Application Support`). Default is unchanged; the boot log prints the resolved path |
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces, including `[pi] inline DMA` for every streamed-overlay load (very chatty) |
 | `OGRE_DEBUG_VI=1` | with `OGRE_DEBUG_TRACES`, log every `osViSetMode` (mode pointer + decoded geometry) and every VI geometry change (`[vi-debug]`) |
 | `OGRE_DL_ANALYZE=1` | per-submission F3DEX2 workload counts (commands, triangles, texrects, textures) |
@@ -460,6 +461,67 @@ questions), but one taken at a scene/step **transition** (e.g. during the brief
 restores into the "no step" movie-mode branch and the sequence bounces between
 `0x00` and `0x0D` instead of continuing — so save *inside* the step you want to
 replay, and check `c` reports the step you expect before `save` (session 58).
+
+### Saves — the cartridge battery (SRAM), and emulator interchange (session 66)
+
+**OB64 saves to the cartridge battery, and the chip is SRAM: 32 KiB, no
+Controller Pak and no EEPROM/FlashRAM.** The Controller Pak strings
+(`Controller Pak Menu`, `Data saved to Controller Pak.`) are the game's
+*copy/backup* feature, not the save. `app/src/main.cpp` sets
+`entry.save_type = recomp::SaveType::Sram`; the evidence is in the comment there.
+
+The runtime keeps the image at
+
+```
+<config>/saves/<game id>.bin          # ogrebattle64-us-rev1.bin, exactly 32768 bytes
+# macOS default: ~/Library/Application Support/ogrebattle64/saves/
+# or set OGRE_PREF_DIR=<dir> to relocate it
+```
+
+and the game's own DMA path reaches it: `func_8008BC40` queues an `OSIoMesg` to
+`D_800AA408`, and the runtime completes it inline in `librecomp/src/pi.cpp`
+(`pi_perform_dma`) — **the device is chosen from the OSPiHandle the message
+carries**, not from the address: the save handle `func_8008A040` builds has
+`baseAddress 0xA8000000` (physical `0x08000000` = the SRAM window), the cart one
+from `osCartRomInit` is `0xA0000000`. The game reads the whole image at boot in
+256-byte DMAs at device offsets `0..0x7F00` (`func_80074CF0` and friends) and
+writes it back the same way when its dirty flag is set (`func_80074BF0` →
+`func_80074C58`). Save slots are `0x1850` (6224) bytes at `0x10 + n*0x1850`; the
+device signature and slot-0 magic are the ASCII `QuestOG3`.
+
+Diagnostics: the runtime prints one `[save]` line when it loads/creates the file,
+one on the game's first read and first write of the window, and one when the
+saving thread writes the file (`[save] wrote …`); a failed write also prints
+`[save] FAILED to write …` to stderr before its message box.
+
+**Bringing an emulator save in.** Ports/emulators all hold the same 32 KiB of
+logical bytes but wrap them differently, so use `tools/sramsave.py` rather than
+guessing:
+
+```sh
+tools/sramsave.py check  ~/Downloads/save.srm        # what is in the file
+tools/sramsave.py import ~/Downloads/save.srm \
+  "$HOME/Library/Application Support/ogrebattle64/saves/ogrebattle64-us-rev1.bin"
+tools/sramsave.py export <that .bin> out.sra         # 32-bit byteswapped, .sra-style
+```
+
+`import` finds the SRAM by its magic at any offset and byte order. It was
+written for a **parallel-n64** dump: 296960 bytes, SRAM at **0x20800**, every
+32-bit word byte-reversed (so the magic reads `seuQ3GOt`). mupen64plus/RetroArch
+`.srm` dumps are the bare logical 32 KiB (offset 0, "logical") and import
+unchanged. It never invents data: a file without the magic is refused.
+
+Verified (session 66, all on this build): boot with no file → the game formats a
+blank battery and the port writes a real 32768-byte image with the `QuestOG3`
+signature; restart → the game reads it back and does **not** re-write it (it is
+accepted); overwrite the file with `0xA5`-garbled bytes → the game reads,
+rejects and repairs it, and the file is valid again; a converted parallel-n64
+save with real progress → the game reads it and does not re-write it (accepted).
+A `[save]` write is followed by `[save] wrote <path>` unless the directory is
+unwritable, which raises the runtime's "Failed to write to the save file" box —
+**from the saving thread**, so a run that cannot write its `saves/` directory
+stalls (that is what the sandboxed first attempt of session 66 hit; use
+`OGRE_PREF_DIR`).
 
 ### `tools/runlog.py <run.log>` — one screen per run
 

@@ -1032,16 +1032,34 @@ hardware. RT64 remains the primary native renderer throughout. See
     rows of soldiers) and the `Grey-Haired Old Man` / `Magnus` dialogue render
     (`docs/proofs/native-newgame-received-for-duty.png`, `-magnus-old-man.png`),
     then the sequence reaches scene `0x05` (`docs/scenes.md` row 8/10).
+  - ✅ **The battery save works end to end (session 66) — the chip is 32 KiB of
+    SRAM, and the runtime now owns it.** Session 65's correction stands (the save
+    is a battery, not a Controller Pak; the pak strings are the copy/backup
+    feature) and is now resolved: `entry.save_type = recomp::SaveType::Sram`
+    (`app/src/main.cpp`). Evidence for SRAM: mupen64plus's database
+    (`SaveType=SRAM` for this ROM's CRC) and the game's own code — `func_8008A040`
+    builds the save `OSPiHandle` with `baseAddress 0xA8000000` (physical
+    `0x08000000`), the boot accessors `func_80074CF0..` read the whole 32 KiB in
+    256-byte DMAs at offsets `0..0x7F00`, and `func_80074BF0` → `func_80074C58`
+    writes it back the same way with direction 1. That path is the game's own
+    non-bridged DMA (`func_8008BC40` → the `D_800AA408` queue), so
+    `librecomp/src/pi.cpp`'s inline handler now picks the device from the
+    `OSPiHandle` in each `OSIoMesg` (`pi_perform_dma`) instead of treating every
+    transfer as ROM. Verified: no file → the game formats the blank battery and
+    the port writes a real 32768-byte image (`QuestOG3` signature); restart → the
+    game reloads it and does not rewrite it; a garbled image → the game repairs
+    and rewrites it; a converted parallel-n64 save with progress → the game
+    accepts it, and with it the **title's `Load Game` entry appears and its cursor
+    defaults to it** (same taps with no save enter New Game): `0x04 → 0x12 →
+    0x05`, dev-confirmed loaded. **New tool `tools/sramsave.py`** imports/exports
+    emulator wrappings of the same 32 KiB (parallel-n64's container has the SRAM
+    at `0x20800`, 32-bit byteswapped). New knob `OGRE_PREF_DIR` relocates the
+    config/save dir. See `docs/guides/app-build.md` → "Saves" and
+    `docs/HANDOFF-2026-09-17-session66.md`.
   - ⚠️ **Correction (developer, session 65): the game's own save is a
     *battery-backed cartridge save* (SRAM/FlashRAM/EEPROM), not a Controller Pak.**
     The pak strings are the *copy/backup* feature (`Data loaded to Game Pak.`).
-    The map's R → Save therefore fails because the app still sets
-    `entry.save_type = recomp::SaveType::None` (`app/src/main.cpp`) — the runtime
-    reports no save device, which is why that flow draws its dialog and then does
-    nothing (no PI DMA, no scene change). **Next: identify the chip
-    (`osEepromProbe` / `osFlashInit` / raw PI DMA to `0x08000000`), set
-    `SaveType`, rebuild, re-drive the map Save**; the runtime's `save_context`
-    (`librecomp/src/pi.cpp`) then owns `<config>/saves/<game id>.bin`.
+    **Resolved in session 66** — the chip is SRAM; see the entry above.
   - 🚧 **The Controller Pak device is implemented (session 65) — this is the
     *copy/backup* path, not the save.** The missing link for it is the *pak menu*,
     which only unit H's scene can reach. `pak.cpp` in the

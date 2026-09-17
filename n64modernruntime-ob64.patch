@@ -934,10 +934,18 @@ index 0be1513..2aa72a6 100644
      ctx->r2 = 1; // PFS_ERR_NOPACK
  }
 diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
-index 43509ba..81ba211 100644
+index 43509ba..bb9dc4e 100644
 --- a/librecomp/src/pi.cpp
 +++ b/librecomp/src/pi.cpp
-@@ -8,6 +8,7 @@
+@@ -1,6 +1,7 @@
+ #include <memory>
+ #include <fstream>
+ #include <array>
++#include <atomic>
+ #include <cstring>
+ #include <string>
+ #include <mutex>
+@@ -8,6 +9,7 @@
  #include "librecomp/addresses.hpp"
  #include "librecomp/game.hpp"
  #include "librecomp/files.hpp"
@@ -945,7 +953,7 @@ index 43509ba..81ba211 100644
  #include <ultramodern/ultra64.h>
  #include <ultramodern/ultramodern.hpp>
  
-@@ -39,6 +40,9 @@ extern "C" void __osPiGetAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
+@@ -39,6 +41,9 @@ extern "C" void __osPiGetAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
  extern "C" void __osPiRelAccess_recomp(uint8_t* rdram, recomp_context* ctx) {
  }
  
@@ -955,7 +963,7 @@ index 43509ba..81ba211 100644
  extern "C" void osCartRomInit_recomp(uint8_t* rdram, recomp_context* ctx) {
      OSPiHandle* handle = TO_PTR(OSPiHandle, recomp::cart_handle);
      handle->type = 0; // cart
-@@ -58,7 +62,120 @@ extern "C" void osDriveRomInit_recomp(uint8_t * rdram, recomp_context * ctx) {
+@@ -58,7 +63,176 @@ extern "C" void osDriveRomInit_recomp(uint8_t * rdram, recomp_context * ctx) {
  }
  
  extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
@@ -975,19 +983,98 @@ index 43509ba..81ba211 100644
 +// -----------------------------------------------------------------------------
 +// PI-manager emulation for the game's own (non-bridged) DMA path.
 +//
-+// func_8008BC40 (the game's DMA-request starter) is called both via function
-+// pointers (routed to func_8008BC40_recomp, the synchronous ROM read) and
-+// directly from game code (e.g. func_80089F80's chunked DMA). The direct calls
-+// run the recompiled body, which sends the OSIoMesg to the queue stored in
-+// D_800AA408 and relies on D_800AA400 being non-zero. We emulate that queue:
-+// do_send() detects sends to it and completes the DMA inline.
++// func_8008BC40 (the game's DMA-request starter) is called from game code (e.g.
++// func_80089F80's chunked DMA and func_8008A0F0's wrapper) and sends the
++// OSIoMesg to the queue stored in D_800AA408; it relies on D_800AA400 being
++// non-zero. We emulate that queue: do_send() detects sends to it and completes
++// the DMA inline.
++//
++// **The device is selected by the OSIoMesg's PI handle, not by the address.**
++// The game keeps two handles: the cartridge one from osCartRomInit (bridged;
++// baseAddress 0xB0000000, physical 0x10000000) and, for the battery save, the
++// one func_8008A040 builds with baseAddress **0xA8000000** (physical
++// 0x08000000 = the SRAM window). OB64's save is 32 KiB SRAM and it goes through
++// this same path: the boot accessors func_80074CF0.. read the whole image in
++// 256-byte DMAs at device offsets 0..0x7F00, and the commit func_80074C58
++// writes it back the same way with direction 1 (OSIoMesg type 0x10 = EDMAWRITE;
++// 0xF = EDMAREAD). Session 66; see app/src/main.cpp entry.save_type.
 +// -----------------------------------------------------------------------------
++
++// Defined below, after save_context; used by the inline DMA handler.
++void save_write(RDRAM_ARG PTR(void) rdram_address, uint32_t offset, uint32_t count);
++void save_read(RDRAM_ARG PTR(void) rdram_address, uint32_t offset, uint32_t count);
 +
 +// Queue address (KSEG0) the game sends DMA requests to. Lives in the reserved
 +// MMIO scratch page (see recomp.h recomp_mem_addr), which nothing else uses.
 +// Declared as int32 so TO_PTR's sign-extension (PTR() values) works on 64-bit.
 +static constexpr int32_t PI_REQUEST_QUEUE = (int32_t)0x9F800000;  // rdram offset 0x1F800000
 +static constexpr int32_t PI_MANAGER_STRUCT = (int32_t)0x9F800020; // __osPiDevMgr stand-in
++
++// OSIoMesgHdr.type values (libultra): what the game stores in func_8008BC40
++// from its direction argument.
++static constexpr uint16_t OS_MESG_TYPE_EDMAREAD = 0xF;
++static constexpr uint16_t OS_MESG_TYPE_EDMAWRITE = 0x10;
++
++// Perform the transfer an OSIoMesg describes, selecting the device from the PI
++// handle the message carries (libultra OSIoMesg.piHandle@0x14, whose
++// OSPiHandle.baseAddress is at +0xC):
++//   * baseAddress 0xA8000000 -> physical 0x08000000 = the battery-backed SRAM
++//     window (OB64's save). Reads/writes go to the runtime save image.
++//   * anything else (the cart handle from osCartRomInit: 0 or 0x10000000) -> ROM.
++// `force_dir` is func_8008BC40's direction argument (0 = device->RDRAM,
++// 1 = RDRAM->device) when the caller knows it; pass -1 to use the message type.
++static void pi_perform_dma(uint8_t* rdram, uint32_t mesg_addr, int force_dir) {
++    // OSIoMesg layout: hdr.type@0 (half), hdr.pri@2 (byte), hdr.retQueue@4,
++    // dramAddr@8, devAddr@0xC, size@0x10, piHandle@0x14.
++    uint16_t type     = (uint16_t)MEM_H(0x00, (gpr)(int32_t)mesg_addr);
++    uint32_t dramAddr = (uint32_t)MEM_W(0x08, (gpr)(int32_t)mesg_addr);
++    uint32_t devAddr  = (uint32_t)MEM_W(0x0C, (gpr)(int32_t)mesg_addr);
++    uint32_t size     = (uint32_t)MEM_W(0x10, (gpr)(int32_t)mesg_addr);
++    uint32_t handle   = (uint32_t)MEM_W(0x14, (gpr)(int32_t)mesg_addr);
++
++    // A zero handle means an older caller that did not record one: fall back to
++    // the historical ROM-only behaviour.
++    uint32_t base_phys = (handle != 0) ? ((uint32_t)MEM_W(0x0C, (gpr)(int32_t)handle) & 0x1FFFFFFF) : 0;
++    uint32_t phys = base_phys + devAddr;
++
++    OGRE_TRACE("[pi] inline DMA dram=0x%08X dev=0x%08X size=0x%X type=0x%X handle=0x%08X base=0x%08X\n",
++               dramAddr, devAddr, size, type, handle, base_phys);
++
++    if (base_phys == recomp::sram_base) {
++        // SRAM is at physical 0x08000000; the game addresses it in 256-byte
++        // DMAs covering the whole 32 KiB image.
++        if (!recomp::sram_allowed()) {
++            ultramodern::error_handling::message_box("Attempted to use SRAM saving with other save type");
++            ULTRAMODERN_QUICK_EXIT();
++        }
++        bool write = (force_dir >= 0) ? (force_dir != 0) : (type == OS_MESG_TYPE_EDMAWRITE);
++        if (write) {
++            static std::atomic_bool logged_write{false};
++            if (!logged_write.exchange(true)) {
++                printf("[save] game writes the battery (SRAM) save: dev=0x%08X size=0x%X\n", devAddr, size);
++                fflush(stdout);
++            }
++            save_write(PASS_RDRAM (PTR(void))(int32_t)dramAddr, phys - recomp::sram_base, size);
++        }
++        else {
++            static std::atomic_bool logged_read{false};
++            if (!logged_read.exchange(true)) {
++                printf("[save] game reads the battery (SRAM) save: dev=0x%08X size=0x%X\n", devAddr, size);
++                fflush(stdout);
++            }
++            save_read(PASS_RDRAM (PTR(void))(int32_t)dramAddr, phys - recomp::sram_base, size);
++        }
++    }
++    else if (devAddr == 0 || size == 0) {
++        OGRE_TRACE("[pi] inline DMA with zero dev/size; completing anyway\n");
++    }
++    else {
++        // ROM: devAddr is the cart offset (the cart handle's base is 0 or
++        // 0x10000000, so phys lands below the SRAM window).
++        uint32_t dev_off = (phys >= recomp::rom_base) ? (phys - recomp::rom_base) : devAddr;
++        recomp::do_rom_read(rdram, (gpr)(int32_t)dramAddr, recomp::rom_base + dev_off, size);
++    }
++}
 +
 +void init_pi_manager(uint8_t* rdram) {
 +    // Write the game's PI-manager globals (D_800AA400/D_800AA408).
@@ -1004,22 +1091,9 @@ index 43509ba..81ba211 100644
 +    q->msg = (PTR(OSMesg))(int32_t)(PI_REQUEST_QUEUE + 0x18);
 +
 +    ultramodern::set_pi_request_queue(PI_REQUEST_QUEUE, [](uint8_t* rdram, uint32_t mesg_addr) {
-+        // Game's OSIoMesg layout: type@0 (half), pri@2 (byte), mq@4, dramAddr@8,
-+        // devAddr@0xC, size@0x10 (all words).
-+        uint32_t mq       = (uint32_t)MEM_W(0x04, (gpr)(int32_t)mesg_addr);
-+        uint32_t dramAddr = (uint32_t)MEM_W(0x08, (gpr)(int32_t)mesg_addr);
-+        uint32_t devAddr  = (uint32_t)MEM_W(0x0C, (gpr)(int32_t)mesg_addr);
-+        uint32_t size     = (uint32_t)MEM_W(0x10, (gpr)(int32_t)mesg_addr);
++        uint32_t mq = (uint32_t)MEM_W(0x04, (gpr)(int32_t)mesg_addr);
 +
-+        OGRE_TRACE("[pi] inline DMA dram=0x%08X dev=0x%08X size=0x%X mq=0x%08X\n",
-+                   dramAddr, devAddr, size, mq);
-+
-+        if (devAddr == 0 || size == 0) {
-+            OGRE_TRACE("[pi] inline DMA with zero dev/size; completing anyway\n");
-+        } else {
-+            uint32_t dev_off = (devAddr >= recomp::rom_base) ? (devAddr - recomp::rom_base) : devAddr;
-+            recomp::do_rom_read(rdram, (gpr)(int32_t)dramAddr, recomp::rom_base + dev_off, size);
-+        }
++        pi_perform_dma(rdram, mesg_addr, -1);
 +
 +        // Complete the request synchronously: wake the caller's completion queue.
 +        if (mq != 0) {
@@ -1034,41 +1108,31 @@ index 43509ba..81ba211 100644
 +
 +// func_8008BC40 (OB64 game code): the game's DMA-request starter. On real
 +// hardware it queues the OSIoMesg to the PI thread. The runtime's
-+// osCreatePiManager is an empty stub, so the game's PI-manager globals
-+// (D_800AA400/D_800AA408) are never initialized; the game's own DMA path then
-+// bails out and the blocking callers (func_80089F80 / func_8008A0F0) wait
-+// forever on their completion queue (the boot's first streamed-code load
-+// deadlocks here). Reimplemented as a synchronous ROM read: copy the requested
-+// bytes straight from the ROM and complete the OSIoMesg immediately.
++// osCreatePiManager is stubbed, so init_pi_manager installs the game's
++// PI-manager globals (D_800AA400/D_800AA408) and intercepts sends to that queue
++// in do_send; direct callers therefore already work. This entry point exists for
++// a caller that reaches the function through the recompiled function table
++// instead: it performs the same transfer synchronously via pi_perform_dma (ROM
++// or battery save, chosen from the message's PI handle) and completes the queue.
 +extern "C" void func_8008BC40_recomp(uint8_t* rdram, recomp_context* ctx) {
-+    // a0 = PI handle (unused), a1 = OSIoMesg*, a2 = dir (0 = read, 1 = write).
++    // a0 = PI handle, a1 = OSIoMesg*, a2 = dir (0 = read, 1 = write).
 +    uint32_t mesg = (uint32_t)ctx->r5;
 +    if (mesg == 0) {
 +        ctx->r2 = (gpr)-1;
 +        return;
 +    }
 +
-+    // Game's OSIoMesg layout: type@0 (half), pri@2 (byte), mq@4, dramAddr@8,
-+    // devAddr@0xC, size@0x10 (all words).
-+    uint32_t mq       = MEM_W(0x04, (gpr)(int32_t)mesg);
-+    uint32_t dramAddr = MEM_W(0x08, (gpr)(int32_t)mesg);
-+    uint32_t devAddr  = MEM_W(0x0C, (gpr)(int32_t)mesg);
-+    uint32_t size     = MEM_W(0x10, (gpr)(int32_t)mesg);
-+    uint32_t dir      = (uint32_t)ctx->r6;
++    uint32_t mq  = MEM_W(0x04, (gpr)(int32_t)mesg);
++    uint32_t dir = (uint32_t)ctx->r6;
 +
 +    printf("[pi] func_8008BC40 dir=%u dram=0x%08X dev=0x%08X size=0x%X mq=0x%08X\n",
-+           dir, dramAddr, devAddr, size, mq);
++           dir, MEM_W(0x08, (gpr)(int32_t)mesg), MEM_W(0x0C, (gpr)(int32_t)mesg),
++           MEM_W(0x10, (gpr)(int32_t)mesg), mq);
 +    fflush(stdout);
 +
-+    if (dir == 0) {
-+        // devAddr is a raw ROM offset (or possibly a full physical address).
-+        // Use do_rom_read so the big-endian ROM bytes are byte-swapped into
-+        // host-order RDRAM words (MEM_B), matching the recompiled MEM_W access.
-+        uint32_t dev_off = (devAddr >= recomp::rom_base) ? (devAddr - recomp::rom_base) : devAddr;
-+        recomp::do_rom_read(rdram, (gpr)(int32_t)dramAddr, recomp::rom_base + dev_off, size);
-+    } else {
-+        fprintf(stderr, "[pi] func_8008BC40: unsupported DMA write dir=%u (dev=0x%08X size=0x%X)\n", dir, devAddr, size);
-+    }
++    // Same device selection as the queue path: ROM, or the battery save when
++    // the message carries the SRAM handle (see pi_perform_dma).
++    pi_perform_dma(rdram, mesg, (int)dir);
 +
 +    // Complete the request synchronously so the caller's osRecvMesg returns.
 +    osSendMesg(rdram, (int32_t)mq, (OSMesg)(int32_t)mesg, OS_MESG_NOBLOCK);
@@ -1077,7 +1141,7 @@ index 43509ba..81ba211 100644
  }
  
  void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
-@@ -67,6 +184,13 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
+@@ -67,6 +241,13 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
      // TODO handle misaligned DMA
      assert((physical_addr & 0x1) == 0 && "Only PI DMA from aligned ROM addresses is currently supported");
      assert((ram_address & 0x7) == 0 && "Only PI DMA to aligned RDRAM addresses is currently supported");
@@ -1091,6 +1155,38 @@ index 43509ba..81ba211 100644
      uint8_t* rom_addr = rom.data() + physical_addr - recomp::rom_base;
      for (size_t i = 0; i < num_bytes; i++) {
          MEM_B(i, ram_address) = *rom_addr;
+@@ -129,8 +310,15 @@ void update_save_file() {
+         saving_failed = !recomp::finalize_output_file_with_backup(ultramodern::get_save_file_path());
+     }
+     if (saving_failed) {
++        fprintf(stderr, "[save] FAILED to write %s\n", ultramodern::get_save_file_path().string().c_str());
++        fflush(stderr);
+         ultramodern::error_handling::message_box("Failed to write to the save file. Check your file permissions and whether the save folder has been moved to Dropbox or similar, as this can cause issues.");
+     }
++    else {
++        printf("[save] wrote %s (%zu bytes)\n", ultramodern::get_save_file_path().string().c_str(),
++               save_context.save_buffer.size());
++        fflush(stdout);
++    }
+ }
+ 
+ extern std::atomic_bool exited;
+@@ -233,11 +421,15 @@ void read_save_file() {
+     std::ifstream save_file = recomp::open_input_file_with_backup(save_file_path, std::ios_base::binary);
+     if (save_file.good()) {
+         save_file.read(save_context.save_buffer.data(), save_context.save_buffer.size());
++        printf("[save] loaded %s (%zu bytes)\n", save_file_path.string().c_str(), save_context.save_buffer.size());
+     }
+     else {
+         // Otherwise clear the save file to all zeroes.
+         std::fill(save_context.save_buffer.begin(), save_context.save_buffer.end(), 0);
++        printf("[save] no save file at %s; starting with a blank image (%zu bytes)\n",
++               save_file_path.string().c_str(), save_context.save_buffer.size());
+     }
++    fflush(stdout);
+ }
+ 
+ void ultramodern::init_saving(RDRAM_ARG1) {
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
 index ea1c49b..74bd907 100644
 --- a/librecomp/src/recomp.cpp

@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (66) | **OB64's save is 32 KiB of battery-backed SRAM (not a Controller Pak, not EEPROM/FlashRAM), and the *device* of a game-issued PI DMA is chosen by the `OSPiHandle` the `OSIoMesg` carries, never by the address.** `func_8008A040` builds the save handle with `baseAddress 0xA8000000` (physical `0x08000000`); the boot accessors `func_80074CF0..` read the whole image in 256-byte DMAs at offsets `0..0x7F00` and `func_80074BF0` → `func_80074C58` writes it back the same way (direction 1 = `OSIoMesg` type `0x10`; `0xF` = read). `entry.save_type = recomp::SaveType::Sram`, and `librecomp/src/pi.cpp`'s inline handler (`pi_perform_dma`) routes the window; mupen64plus's database agrees (`SaveType=SRAM`, with `Mempak=Yes` for the unrelated copy/backup device). Emulator files wrap the same logical bytes differently, so `tools/sramsave.py` imports them by magic at any offset/byte order (a parallel-n64 dump has the SRAM at `0x20800`, 32-bit byteswapped) | `app/src/main.cpp`; `librecomp/src/pi.cpp`; `tools/sramsave.py`; `docs/guides/app-build.md` → "Saves"; `docs/HANDOFF-2026-09-17-session66.md` |
 | 2026-09-17 (64) | **A display list, or a decoded asset, that the port produced is evidence about the *port*, never about the game's intent — establish the port's faithfulness first, and treat a difference that survives as a *state* question.** The five checks (which GBI; was an RSP task swallowed; is the code the code we compiled; are the bytes what hardware would have; is the recompiler faithful at this `jal`) partition "the port differs" into recompiler / ucode dispatch / renderer / RDRAM contents / game state. Two session-61/62 mechanisms are **withdrawn**: N64Recomp does **not** execute a `jal` delay slot twice (the duplicate after `goto after_N` is dead code — the delay slot runs once, *before* the callee), and the sprite builder `func_ovlM_8019F83C` emits **no `G_SETTILESIZE` at all** (the word at `0x8019F990` is the TEXRECT's **s,t**), so there was never a "second window writer". The map's artist data is likewise **not** the defect: the LZ decoder is exact (13/13 assets end on their declared payload boundary), the port's `state[+0x04]` is byte-identical to an offline decode of asset `0x01DD210A`, and scene `0x05`'s ucode `0x8009F540` hashes to RT64's `F3DEX2.fifo 2.08` entry. **Do not patch generated C to make a picture look right** (rule 7) | `docs/guides/emulator-first.md`; `docs/HANDOFF-2026-09-17-session64.md` §1-§2 |
 | 2026-09-16 (60) | **Every `jal` from the main ELF into RAM a scene module occupies must be dispatched (`LOOKUP_FUNC`), not left bound to overlay C's body — and a `jal` into a size-overridden body interior is emitted as "call the containing body + early `return`", which abandons the caller's frame.** That emission is not cosmetic: the early return dereferences the *caller's* epilogue, so each call leaks its frame and the caller reads its callee-saved registers from the wrong stack slots. The map scene was black because of two such sites in the scene update/hook; the frame-pump thread's `$s1` (the message-type comparator) was corrupted and the pump stopped, which presents as a frozen frame counter (`D_800AEFA4`) with the VI retrace (`D_800C4BCC`) still counting. `cross_bank.py dispatch` repairs the shape to call-and-continue; targets `0x8019AF0C` and `0x801A103C` are now in `make recomp`'s `--only` list | `docs/HANDOFF-2026-09-16-session60.md` §1-§3; `Makefile`; `tools/cross_bank.py` |
 | 2026-09-16 (59) | **Every bank of a swappable RAM gets its own unit, and the unit whose code calls into that RAM defines none of them — the record-14 arena has a *third* bank (ROM `0x286BA0` → RAM `0x8022ACB0`, the chapter animation's module), now unit K, with `bankRec14a` moved to unit L; scene `0x05`'s module (ROM `0x79750` → RAM `0x8019A7C0`, the other bank of unit H's RAM) is unit M.** A bank's extent is its DMA's own size, not a previous session's chunk-rounded figure (`bankRec14a` `0xE860` not `0xDE60`; `bankRec07` `0x84B0` not `0x8600`), and the "is this DMA a module we know?" test must compare the rom→ram delta, not just the ROM range — the range test hid unit M behind unit H's over-claimed size | `docs/HANDOFF-2026-09-16-session59.md`; `config-bankK/L/M.yaml`; `app/src/bank_overlays.cpp` |
@@ -3969,3 +3970,99 @@ are the *copy between the cartridge save and a pak*, a backup feature. So:
   or a raw PI DMA to the `0x08000000` save window), set `recomp::SaveType` to it,
   rebuild, and re-drive the map's Save; the runtime's existing `save_context`
   (`librecomp/src/pi.cpp`) then persists `<config>/saves/<game id>.bin`.
+
+## Session 66 (2026-09-17) — the save chip is SRAM, and the *save* is the battery; the title's `Load Game` reads it
+
+Session 65 ended with the right correction (battery, not Controller Pak) and the
+right next step (identify the chip). This session found the chip and wired it.
+
+### The chip: 32 KiB SRAM
+
+Two independent sources agree, and neither is inference from a generated file:
+
+* **mupen64plus's game database** (`~/Documents/RetroArch/system/Mupen64plus/mupen64plus.ini`)
+  gives `SaveType=SRAM` for this exact ROM (`CRC=0ADAECA7 B17F9795`, entry
+  `EBB4B4D2808DF427AAA3085A41B8A954`, "(U) (V1.1) [!]"), with `Mempak=Yes` for the
+  unrelated Controller Pak copy/backup device. Emulators carry this per-game
+  knowledge precisely because it cannot be read off the ROM header.
+* **The game's own code.** `func_8008A040`, called once at boot from
+  `func_80071EB0` (`0x80071F4C`), builds an `OSPiHandle` at `0x800BE110` with
+  `baseAddress 0xA8000000` (physical `0x08000000`, the SRAM window) and publishes
+  it at `0x800E79AC`; `func_8008A0F0(devOffset, dramAddr, size, dir)` DMAs through
+  it. The boot accessors `func_80074CF0`.. (13 of them, each with the same
+  "read the whole image once into `*(0x800B83B8)`" prologue) read 0x8000 bytes in
+  256-byte DMAs at device offsets `0..0x7F00`, and the commit
+  `func_80074BF0` → `func_80074C58` writes the same 0x8000 bytes back with
+  direction 1. Slot `n` is `0x1850` (6224) bytes at `0x10 + n*0x1850`; the device
+  signature (0x04) and slot-0 magic (0x14) are the ASCII `QuestOG3`. There is no
+  EEPROM/FlashRAM protocol anywhere (no `osFlashInit`/`osEepromProbe` call, no
+  FlashRAM command DMA), so `SaveType` is not ambiguous.
+
+### The mechanism: the device is the handle, not the address
+
+`func_8008BC40` queues an `OSIoMesg` to `D_800AA408` and the runtime completes it
+inline (`librecomp/src/pi.cpp`). The old handler treated *every* transfer as a
+ROM read at `devAddr`, so the boot save read pulled ROM bytes `0..0x7FFF` and the
+game "repaired" that garbage — which is what made the battery path look absent.
+The fix is one rule: **resolve the device from the `OSPiHandle` the message
+carries** (`OSIoMesg.piHandle` at +0x14 → `OSPiHandle.baseAddress` at +0xC).
+`baseAddress 0xA8000000` → the SRAM window → `save_read`/`save_write`
+(`save_context`, 0x8000 bytes for `SaveType::Sram`); anything else → ROM at
+`devAddr`, exactly as before. Direction comes from `OSIoMesg.hdr.type`
+(`0xF` = EDMAREAD, `0x10` = EDMAWRITE) or from `func_8008BC40`'s `a2`. Handles of
+0 (the AI helper `func_8008C360` records none) keep the old ROM behaviour, and
+the game's *cart* handle (`osCartRomInit`, bridged) has base 0 or 0x10000000, so
+its `devAddr` is still a raw ROM offset — verified over a run: 1290 ROM DMAs
+unchanged, 384 SRAM reads and 128 SRAM writes.
+
+### Verification (all on the built app)
+
+* **No file** → `[save] no save file … starting with a blank image (32768 bytes)`;
+  the game reads the window, finds it blank, formats it, and the port writes a
+  real 32768-byte file whose 0x04/0x14 magics are `QuestOG3`.
+* **Restart with that file** → `[save] loaded …`; the game reads it and does
+  **not** rewrite it (accepted; file hash unchanged).
+* **File overwritten with `0xA5`-garbled bytes** → the game reads, rejects and
+  rewrites it; the magics come back.
+* **A real emulator save with progress** (developer, parallel-n64) → converted
+  with `tools/sramsave.py` and loaded: the game accepts it and does not rewrite
+  it, and the **title menu's `Load Game` entry appears with the cursor on it**.
+  A/B on the same `title` + Start tap schedule: no save → New Game
+  (`0x04 → 0x02 → 0x0D`); the progress save → `0x04 → 0x12` (Load Game) →
+  `0x05` (the map), i.e. **the loaded game comes up**, dev-confirmed.
+  This corrects `docs/scenes.md`'s "when a Controller Pak save exists": the
+  title's `Load Game` reads the **battery** save; the pak is only the
+  copy/backup device.
+
+### Emulator interchange: `tools/sramsave.py`
+
+Every port/emulator holds the same 32 KiB of logical bytes, but the file
+wrapping differs, so a save cannot be dropped in blind:
+
+* port / mupen64plus-RetroArch `.srm`: the bare 32 KiB, "QuestOG3" literal;
+* some `.sra` writers and **parallel-n64**: every 4-byte group reversed
+  (`seuQ3GOt`), and parallel-n64's dump is a **296960-byte combined image with
+  the SRAM at 0x20800** (FlashRAM 0x20000 + EEPROM 0x800 before it).
+
+The tool finds the SRAM by magic at any offset and byte order (`check`),
+converts to the port's logical image (`import`) or to a byteswapped `.sra`
+(`export`), and refuses a file with no magic rather than inventing an image. It
+is how the developer's save above was imported; `import` of it is byte-identical
+to the image the port then loaded.
+
+### Two operational notes
+
+* `OGRE_PREF_DIR=<dir>` relocates the runtime config dir (saves + mods). It was
+  added because a **failed save write is a modal raised from the saving thread**,
+  which stalls the game and (in that first sandboxed attempt) ended in the
+  periodic `[snap]` dump crashing. The runtime now also prints
+  `[save] wrote <path>` / `[save] FAILED to write <path>` to make the outcome
+  unambiguous. **Open, not investigated: a failed write should not be able to
+  take the process down** — the modal-off-the-main-thread plus the `[snap]` race
+  are the suspects.
+* The save is rewritten even when its content is unchanged: a load-then-play run
+  printed `[save] wrote …` and the file hash was identical afterwards. Harmless
+  (the runtime's saving thread coalesces writes and uses temp+`.bak`), but it
+  means "the game wrote the save" is not by itself evidence of new progress —
+  compare the bytes.
+

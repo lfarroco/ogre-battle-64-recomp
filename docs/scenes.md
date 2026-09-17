@@ -57,9 +57,19 @@ visit, with the step index in `D_8018F1C0`.
 | attract unit-info book | `0x0C` | code | renders |
 
 The title menu (no save) is **New Game / Tutorial / Stereo**, with
-`Load Game` inserted as the second entry when a Controller Pak save exists
+`Load Game` inserted as the second entry when a save exists
 (`New Game / Load Game / Tutorial / Stereo`). `Stereo` is toggled with
 left/right, it is not a screen. See session 43 for the counter mapping.
+
+**Correction (session 66, dev-confirmed): that save is the cartridge battery
+(SRAM), not a Controller Pak.** A/B on the same `title` + Start tap schedule:
+with **no** save file the menu enters **New Game** (`0x04 → 0x02 → 0x0D`); with a
+converted emulator battery save whose slot 0 has data, the same taps enter
+**Load Game** (`0x04 → 0x12`) and then the **map** (`0x05`) — the developer
+watched the loaded game come up. So the title's `Load Game` and its default
+cursor read the **battery** save, and the Controller Pak is only the
+copy/backup device (session 65 §9-§10). See
+`docs/HANDOFF-2026-09-17-session66.md` §3.
 
 ## New Game — the opening sequence (developer, session 44)
 
@@ -136,11 +146,15 @@ While on the map, pressing **R** opens a horizontal menu:
 | 3 | **Settings** | a window with game/text speed and misc settings |
 | 4 | **Save** | a window with **two slots stacked vertically**; selecting one shows the confirmation *"Any existing data will be overwritten. Proceed?"* with **Yes/No** (Yes is the default). Choosing Yes saves the game |
 
-### The title's `Load Game` entry (developer, session 60)
+### The title's `Load Game` entry (developer, session 60; save device corrected session 66)
 
-When a save exists on the Controller Pak, the title menu's cursor **starts on
-`Load Game`** (instead of `New Game`), and selecting it goes to the **Load Game
-screen**, which lists the two saves.
+When a save exists, the title menu's cursor **starts on `Load Game`** (instead of
+`New Game`), and selecting it goes to the **Load Game screen**, which lists the
+two saves. **Session 66 corrects the device: it is the cartridge battery
+(SRAM), not the Controller Pak** — verified A/B on the same tap schedule (no save
+→ New Game; a converted emulator battery save with slot 0 populated → Load Game
+`0x12` → the map `0x05`, dev-confirmed). See
+`docs/HANDOFF-2026-09-17-session66.md` §3.
 
 The step table's commands suggest (unverified) that steps 2 and 9 (`-3`) are the
 dialogue parts, the `-10` steps (3–8, 14–16) the forms, and the single `-4`
