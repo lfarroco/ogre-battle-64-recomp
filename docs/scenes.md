@@ -178,13 +178,36 @@ scene `0x07`'s form sets `3`) and allocates the `0xC000`-byte 320x240 buffer at
 |---|---|---|
 | the mission map: 3D terrain, cliffs, woods, rivers, the road; the 2D party sprite with its selection brackets | dev (session 67 reference) | **renders** (session 67): `docs/proofs/native-mission-scene.png` |
 | the UI: the `Stronghold` tooltip + the `R` button hint; the unit panel (`No. / FRIENDLY / STATUS`, `1. Magnus`, `STRONGHOLD / Zemio`, `START ^ FATIGUE`) | dev + proof | **renders** (session 67): `docs/proofs/native-mission-unit-panel.png` |
-| the `NOTE` losing-condition tooltip, the mission `MISSION` banners, the `R` menu inside a mission | dev (session 67 reference) | unknown — not seen in the captures yet |
+| the **intro sequence**: the camera pans from the party's fort to the enemy fort, the `NOTE` *winning condition* appears, the camera goes back, the `NOTE` *losing condition* appears, then `MISSION START`, then the mission is playable. The target fort is drawn as a **framed illustration + its place label** (`Theodricus Mine` in the session-68 capture) with a red pin. The camera pans on its own and **each phase waits for an `A` press** (developer, session 68) | dev (session 68) | **renders on the natural route** (session 68): `docs/proofs/native-mission-intro-natural.png`, `-natural-pan.png`. Before session 68 the fort drew garbled and `A` did nothing at all (see below) |
+| the mission `MISSION` banners along the bottom | dev + proof | renders |
+| the `NOTE` losing-condition tooltip, the `R` menu inside a mission | dev (session 67 reference) | unknown — not seen in the captures yet |
 
-**How it is reached (session 67):** the developer's suspend save
-(`assets/save-mission-1.srm`) resumes straight into it from the title's
-`Load Game`, so the mission can be tested without driving the map's cursor or the
-briefing. Without a suspend save the route is map (`0x05`) → swords → briefing
-(`0x06`, still uncompiled) → dialogue → mission.
+**How it is reached, and the two routes are *not* the same code.** The suspend
+save (`assets/save-mission-1.srm`; the game **deletes** it when the suspend slot
+is resumed, so re-import with `tools/sramsave.py import`) resumes straight into
+scene `0x03`, so it never plays the sequence in front of it. The natural route
+is longer — measured session 68 with `OGRE_SCENE_LOG=1`:
+
+```
+0x04 title -> 0x12 Load Game -> 0x05 map --A on the mission location-->
+0x02 -> 0x0D   (a scripted "story" dialogue; the step word D_8018F1C0 = 10)
+0x02 -> 0x0D -> 0x16   (the closing movie the New Game opening also plays)
+0x02 -> 0x0D -> 0x03   (the mission)
+```
+
+and it streams a **different bank of record 9's arena** than the suspend route
+does (ROM `0x195430` → RAM `0x80214FA0` — now bank **unit R**; the suspend route
+loads unit Q's bank at the same RAM). That bank is the mission's **enemy/unit
+constructor**; without it the fort was built from stale bytes and the intro's
+state machine waited forever. This is the general hazard: **a scene that works
+from a save may still be missing code when played to**, and the run log's
+`[bank] UNKNOWN module` / `streamed function stub called @ …` is the diagnosis.
+See `docs/HANDOFF-2026-09-17-session68.md`.
+
+**On the map, `A` only works with the cursor *on* a location** (the location
+label, e.g. `Tenne Plains`, is shown), and a `START` press opens a **tooltip**
+that blocks everything until it is dismissed.
+
 
 **The wall it was (session 67):** the three segment-table records it streams
 (7/8/9) were uncompiled and its arena streams two more modules (units P and Q),

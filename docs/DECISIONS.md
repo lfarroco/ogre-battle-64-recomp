@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (68) | **A scene that works from a suspend save may still be missing code when it is played to: the two routes stream *different banks* of the same arena, and the run log's `[bank] UNKNOWN module` + `[overlays] streamed function stub called @ …` is the whole diagnosis.** The mission's natural route (map `0x05` → `0x02`/`0x0D` story → scene `0x16` movie → `0x02`/`0x0D` → `0x03`) makes unit N's own loader (`func_ovlN_801AE880+0x764`, ROM `0x1036E4`) DMA **ROM `0x195430` (`0x2380`) → RAM `0x80214FA0`** and `jal` its entry `0x80215C38` — a **third bank** of record 9's arena, alongside units P (`0x171EC0`) and Q (`0x165FE0`), which the suspend save's mission loads instead. Uncompiled, the stub returned into the intro's state machine: the target fort was built from stale bytes (the garbled draw), the winning-condition `NOTE` never advanced and the camera never panned. It is now **bank unit R** (`config-bankR.yaml`/`.toml`, one forced entry in `symbol_addrs-bankR.txt`, `BANK_UNITS += R`); the module is the mission's enemy/unit constructor (`No free space on TCharacterEnemyData.` / `EnemySolderData.`), and the natural route now runs the whole intro with **0 UNKNOWN modules and 0 stub calls**. Two driving knobs landed with it: `OGRE_TAP_SCENE_BUTTON` (a **scene-keyed** tap schedule — the wall-clock slot schedule lands on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s) and the live console's `press <buttons> [polls] [x] [y]` (synthetic pad + analog stick; **the game polls input far faster than 60 Hz, so a few hundred polls is one cursor step**) | `config-bankR.yaml`, `symbol_addrs-bankR.txt`, `Makefile`; `app/src/sdl_platform.cpp`; `docs/proofs/native-mission-intro-natural.png`; `docs/HANDOFF-2026-09-17-session68.md` |
 | 2026-09-17 (67) | **The mission scene (`0x03`) renders, and the reason it did not was the same swappable-RAM class as sessions 45/55/59 — in two new shapes.** (1) The three records it streams (segment table 7/8/9, `0x101D00`/`0x145230`/`0x14EC00` → RAM `0x801AD5C0`/`0x801F4050`/`0x801FDA90`) were uncompiled: **unit N**. (2) Unit A's record 3 called `0x801AD6BC` — record 6's RAM — and both records being in unit A, N64Recomp bound it directly to unit A's record-6 body; scene `0x03`'s mask `0x38C` loads record 3 **without** record 6 (record 7 is resident), so the wrong bank ran and the process died on wild pointers that moved between runs. Record 6 moved to **unit O**, and the call compiles as `LOOKUP_FUNC`. (3) Record 9's arena streams **two more banks** (units **P** `0x171EC0` and **Q** `0x165FE0`, both → RAM `0x80214FA0`). **A `LOOKUP_FUNC` onto a non-entry is a silent no-op** (`get_function` has no interior fallback), and a cross-*record* `jal` leaves no trace while the target record is disassembled, so the entries are forced with `symbol_addrs_path` files (`symbol_addrs-bank{N,O,P,Q}.txt`) — a subsegment split at the same address would insert the assembler's 16-byte `.text` padding and break the ELF-vs-ROM identity | `config-bankN/O/P/Q.yaml`, `symbol_addrs-bank*.txt`; `docs/proofs/native-mission-scene.png`; `docs/HANDOFF-2026-09-17-session67.md` |
 | 2026-09-17 (67b) | **`tools/cross_bank.py check-banks` was a silent no-op, and its rule needs the scene masks.** `parse_yaml_segments` matched `- name: bankRecX` with its item-line branch and dropped the name, so every record was `"?"` and `record_of(target) == record_of(caller)` was vacuously true — the session-45 invariant had been unchecked for as long as the configs have used the one-line form. Fixed, and refined: a same-unit cross-record call is only a hazard when **some scene's descriptor mask loads the caller's record without the target's** (1728 such calls, 23 genuine), and the genuine pre-existing unit-C backlog is an explicit allowlist (`tools/cross_bank_known_hazards.txt`) that still hard-fails on anything new | `tools/cross_bank.py`; `tools/cross_bank_known_hazards.txt`; `docs/HANDOFF-2026-09-17-session67.md` §6 |
 | 2026-09-17 (66) | **OB64's save is 32 KiB of battery-backed SRAM (not a Controller Pak, not EEPROM/FlashRAM), and the *device* of a game-issued PI DMA is chosen by the `OSPiHandle` the `OSIoMesg` carries, never by the address.** `func_8008A040` builds the save handle with `baseAddress 0xA8000000` (physical `0x08000000`); the boot accessors `func_80074CF0..` read the whole image in 256-byte DMAs at offsets `0..0x7F00` and `func_80074BF0` → `func_80074C58` writes it back the same way (direction 1 = `OSIoMesg` type `0x10`; `0xF` = read). `entry.save_type = recomp::SaveType::Sram`, and `librecomp/src/pi.cpp`'s inline handler (`pi_perform_dma`) routes the window; mupen64plus's database agrees (`SaveType=SRAM`, with `Mempak=Yes` for the unrelated copy/backup device). Emulator files wrap the same logical bytes differently, so `tools/sramsave.py` imports them by magic at any offset/byte order (a parallel-n64 dump has the SRAM at `0x20800`, 32-bit byteswapped) | `app/src/main.cpp`; `librecomp/src/pi.cpp`; `tools/sramsave.py`; `docs/guides/app-build.md` → "Saves"; `docs/HANDOFF-2026-09-17-session66.md` |
@@ -4145,3 +4146,90 @@ to the image the port then loaded.
   means "the game wrote the save" is not by itself evidence of new progress —
   compare the bytes.
 
+
+---
+
+## Session 68 (2026-09-17) — the mission's intro works on the natural route: unit R
+
+### The finding
+
+The mission entered from the developer's **suspend save** (session 67) is not the
+same program as the mission **played to**. The suspend save resumes straight into
+scene `0x03`; the natural route is
+
+```
+0x04 title -> 0x12 Load Game -> 0x05 map --A on the mission location-->
+0x02 -> 0x0D   (a scripted "story" dialogue)
+0x02 -> 0x0D -> 0x16   (the closing movie the New Game opening also plays)
+0x02 -> 0x0D -> 0x03   (the mission)
+```
+
+and at the mission the old build logged exactly two lines:
+
+```
+[bank] UNKNOWN module rom=0x195430 ram=0x80214FA0 (0x80214FA0 is also where rom=0x171EC0 loads)
+[overlays] streamed function stub called @ 0x80215C38 (not yet loaded)
+```
+
+`0x80214FA0` is record 9's arena. Units **P** (`rec9b`, ROM `0x171EC0`) and **Q**
+(`rec9c`, ROM `0x165FE0`) were already its banks — the suspend route loads Q —
+and the natural route loads a **third** one, ROM `0x195430`, size `0x2380`.
+
+Instruction-level, in unit N (record 7) at ROM `0x1036E4`
+(`func_ovlN_801AE880+0x764`):
+
+```asm
+801aefa4: lui a0,0x19 ; addiu a0,a0,0x5430    ; ROM 0x195430
+801aefac: lui a1,0x8021 ; addiu a1,a1,0x4fa0  ; RAM 0x80214FA0
+801aefb4: lui a2,0x19 ; addiu a2,a2,0x77b0    ; end 0x1977B0
+801aefbc: jal 8009da50                        ; size = 0x1977B0 - 0x195430 = 0x2380
+801aefe4: jal 80215c38                        ; the module's entry — the stub above
+```
+
+The cache-op pair bracketing the DMA (`func_800900C0(0x80214FA0, …)` /
+`func_80090010(0x80217290, 0x90)`) confirms the span `0x80214FA0..0x80217320`.
+The module's data half names it: `No free space on TCharacterEnemyData.`,
+`No free space on EnemySolderData.`, and a name table starting `Mitsuiye` — the
+mission's **enemy/unit constructor**. With the stub returning, the target fort
+was built from stale bytes (the garbled draw) and the intro's state machine
+waited forever for a value nothing set. That is why the same frames sat still for
+minutes with `A`/`START` doing nothing, while the suspend route (whose mission
+never runs the intro) looked fine.
+
+### The fix
+
+New **bank unit R**: `config-bankR.yaml` / `config-bankR.toml`,
+`symbol_addrs-bankR.txt` (one forced entry, `0x80215C38`; the module's other four
+entries, `0x80214FA0`/`0x802150DC`/`0x80215360`/`0x8021592C`, are reachable from
+`jal`s inside the module, and the whole module is disassembled as `asm` like unit
+P), `BANK_UNITS += R`. `bankR.elf` is byte-identical to the ROM (0 differing
+bytes, 180 address-named symbols at their address), `cross_bank.py check-banks`
+passes, and the natural route now reports **0 `UNKNOWN module` and 0 stub calls**.
+
+### The generalisation (the part to remember)
+
+**A screen that works from a save can still be missing code when played to**,
+because the route decides which bank of a shared arena the game streams. Before
+theorising, compare the two runs' `[bank] loading overlay record …` lines — the
+`UNKNOWN module` / `streamed function stub called @` pair in the log names the
+missing bank and the exact entry.
+
+### Two driving knobs, and what they were needed for
+
+* `OGRE_TAP_SCENE_BUTTON="<scene>:<buttons>[:<count>],…"` — the **scene-keyed**
+  sibling of `OGRE_TAP_BUTTON`. The existing schedule advances its slot index on
+  **wall time**, so the same "title → Load Game → map" route landed on the map in
+  one run and in the attract loop in the next: the boot reaches the title anywhere
+  between 1.6 s and 15 s, because the forced-scene poke races the publisher
+  stills. Keyed on the dispatcher's scene instead, the route is stable.
+* the live console's `press <buttons> [polls] [x] [y]` — a synthetic pad press
+  **plus analog stick** with a lifetime in input polls. This is what made the map
+  drivable: `press right 8` (8 polls) is invisible and `press right 2000` (8192
+  polls) walks the cursor across the world, because **the game polls input far
+  faster than 60 Hz**. The watched console file must be written atomically
+  (`printf … > f.tmp && mv f.tmp f`) or the reader can consume an empty file and
+  delete the command.
+
+Also recorded: a `START` press on the map opens a **location tooltip** that
+blocks all other input until it is dismissed, and `A` only selects with the
+cursor *on* a location (the location name, e.g. `Tenne Plains`, is shown).

@@ -1032,6 +1032,28 @@ hardware. RT64 remains the primary native renderer throughout. See
     rows of soldiers) and the `Grey-Haired Old Man` / `Magnus` dialogue render
     (`docs/proofs/native-newgame-received-for-duty.png`, `-magnus-old-man.png`),
     then the sequence reaches scene `0x05` (`docs/scenes.md` row 8/10).
+  - ✅ **The mission's intro plays on the *natural* route (session 68) — the wall
+    was a fourth bank of record 9's arena.** The suspend save (session 67) enters
+    scene `0x03` without the sequence that precedes it, so it never exercised the
+    module the map -> story -> mission route loads: **ROM `0x195430`
+    (`0x2380`) -> RAM `0x80214FA0`**, a bank of the *same* RAM as units P and Q.
+    Unit N's own loader (`func_ovlN_801AE880+0x764`, ROM `0x1036E4`) DMAs it and
+    calls its entry `0x80215C38`; with no code for it the port logged
+    `[bank] UNKNOWN module` + `[overlays] streamed function stub called @
+    0x80215C38`, and the mission's intro hung on a garbled target-fort draw whose
+    winning-condition NOTE never advanced. It is now **bank unit R**
+    (`config-bankR.yaml`/`.toml`, `symbol_addrs-bankR.txt`), and the natural route
+    runs the whole intro — camera pan, winning condition, panic back, losing
+    condition, `MISSION START` — with **0 UNKNOWN modules and 0 stub calls**
+    (`docs/proofs/native-mission-intro-win-natural.png`,
+    `docs/proofs/native-mission-intro-fort-natural.png`). The route is
+    `map (0x05) -> 0x02/0x0D story -> scene 0x16 (movie) -> 0x02/0x0D -> 0x03`.
+    Also landed: two driving knobs for scripted runs, `OGRE_TAP_SCENE_BUTTON`
+    (a scene-keyed tap schedule — wall-clock slots land on the map in one run and
+    in the attract loop in the next) and the live console's `press <buttons>
+    [polls] [x] [y]` (a synthetic pad press + analog stick), which is what made
+    the map drivable (`press right` needs a long hold — the game polls input far
+    faster than 60 Hz). See `docs/HANDOFF-2026-09-17-session68.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —

@@ -3,6 +3,7 @@
 #include "bank_overlays.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -202,6 +203,126 @@ const TapSchedule& tap_schedule() {
         return parse_tap_schedule(spec);
     }();
     return schedule;
+}
+
+// `OGRE_TAP_SCENE_BUTTON=<scene>:<buttons>[:<count>],...` - the scene-keyed
+// sibling of `OGRE_TAP_BUTTON`.
+//
+// `OGRE_TAP_BUTTON`'s slot index advances with **wall time**, so a route that
+// crosses several scenes has to be hand-tuned to how long each took: session 67's
+// "title -> Load Game -> map" schedule landed on the map in one run and in the
+// attract loop in the next, because the boot reaches the title anywhere between
+// 1.6 s and 15 s (the forced-scene poke races the publisher stills). This knob
+// keys the button on the **dispatcher's active scene** instead, so a route says
+// what each screen wants rather than when:
+//
+//   OGRE_TAP_MS=1000 OGRE_TAP_SCENE_BUTTON="title:start:2,0x12:a:1,0x05:right:3,0x05:a:1"
+//
+// presses Start twice while the title runs, A once on the Load Game screen, then
+// three Rights and one A on the map - however long each screen took to appear.
+// An entry's `count` is how many presses it may spend (default: unlimited); an
+// entry with none left is skipped, and the first entry that still matches the
+// active scene wins. Entries in the same scene are consumed in order, so
+// `0x05:right:3,0x05:a:1` is "walk right three times, then press A once".
+struct SceneButton {
+    std::string scene;   // a `kScenes` name or a hex id
+    uint16_t buttons = 0;
+    long count = -1;     // -1 = unlimited
+    long used = 0;
+};
+
+std::string describe_buttons(uint16_t mask);  // defined below
+
+std::vector<SceneButton>& scene_button_schedule() {
+    static std::vector<SceneButton> schedule = [] {
+        std::vector<SceneButton> out;
+        const char* spec = getenv("OGRE_TAP_SCENE_BUTTON");
+        if (spec == nullptr || spec[0] == '\0') {
+            return out;
+        }
+        const std::string text(spec);
+        size_t start = 0;
+        while (start <= text.size()) {
+            const size_t comma = text.find(',', start);
+            const std::string entry = text.substr(
+                start, (comma == std::string::npos) ? std::string::npos : comma - start);
+            // `scene:buttons` with an optional `:count`.
+            const size_t colon = entry.find(':');
+            const size_t colon2 = (colon == std::string::npos)
+                                      ? std::string::npos
+                                      : entry.find(':', colon + 1);
+            if (colon != std::string::npos) {
+                SceneButton item;
+                item.scene = trim(entry.substr(0, colon));
+                const std::string buttons = trim(entry.substr(
+                    colon + 1, (colon2 == std::string::npos) ? std::string::npos : colon2 - colon - 1));
+                bool ok = true;
+                item.buttons = parse_button_combo(buttons, ok);
+                if (colon2 != std::string::npos) {
+                    item.count = strtol(entry.c_str() + colon2 + 1, nullptr, 0);
+                }
+                if (!ok) {
+                    fprintf(stderr, "[SDL] OGRE_TAP_SCENE_BUTTON: unrecognised button in '%s'; skipping\n",
+                            entry.c_str());
+                } else if (item.scene.empty()) {
+                    fprintf(stderr, "[SDL] OGRE_TAP_SCENE_BUTTON: no scene in '%s'; skipping\n",
+                            entry.c_str());
+                } else {
+                    out.push_back(item);
+                }
+            } else {
+                fprintf(stderr, "[SDL] OGRE_TAP_SCENE_BUTTON: '%s' is not <scene>:<buttons>[:<count>]\n",
+                        entry.c_str());
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+        for (const SceneButton& item : out) {
+            fprintf(stderr, "[SDL] OGRE_TAP_SCENE_BUTTON: scene %s -> %s%s\n", item.scene.c_str(),
+                    describe_buttons(item.buttons).c_str(),
+                    (item.count < 0) ? "" : " (counted)");
+        }
+        fflush(stderr);
+        return out;
+    }();
+    return schedule;
+}
+
+// The scene-keyed tap, or 0 when no entry applies this interval. Reports how
+// many presses the winning entry has spent through `press_number` so the caller
+// can log once per press. The result is cached per tap interval, because the
+// game polls input more than once per frame and a count must not burn twice.
+uint16_t scene_button_tap(uint64_t tap, long& press_number) {
+    static uint64_t consumed_tap = ~0ull;
+    static uint16_t cached = 0;
+    static long cached_press = 0;
+    if (tap == consumed_tap) {
+        press_number = cached_press;
+        return cached;
+    }
+    consumed_tap = tap;
+    cached = 0;
+    cached_press = 0;
+    std::vector<SceneButton>& schedule = scene_button_schedule();
+    if (!schedule.empty()) {
+        const uint16_t scene = ogre::active_scene_id();
+        for (SceneButton& item : schedule) {
+            if ((item.count >= 0) && (item.used >= item.count)) {
+                continue;
+            }
+            if (!ogre::scene_list_matches(item.scene.c_str(), scene)) {
+                continue;
+            }
+            item.used++;
+            cached = item.buttons;
+            cached_press = item.used;
+            break;
+        }
+    }
+    press_number = cached_press;
+    return cached;
 }
 
 std::string describe_buttons(uint16_t mask) {
@@ -519,6 +640,22 @@ static uint16_t automation_buttons() {
     if (phase >= kTapHoldMs) {
         return 0;
     }
+    // `OGRE_TAP_SCENE_BUTTON`: the scene-keyed schedule replaces the wall-clock
+    // slot schedule entirely when it is set (`tap_schedule()` above).
+    if (getenv("OGRE_TAP_SCENE_BUTTON") != nullptr) {
+        long press = 0;
+        const uint16_t buttons = scene_button_tap(tap, press);
+        static uint64_t logged_scene_taps = ~0ull;
+        if (buttons != 0 && tap != logged_scene_taps) {
+            logged_scene_taps = tap;
+            fprintf(stderr,
+                    "[SDL] automation scene tap %ld at %llums scene=0x%04X buttons=%s\n",
+                    press, (unsigned long long)elapsed, (unsigned)ogre::active_scene_id(),
+                    describe_buttons(buttons).c_str());
+            fflush(stderr);
+        }
+        return buttons;
+    }
     // `OGRE_TAP_MAX=<n>`: stop tapping after tap number n (tap 0 is the boot
     // window). Lets a run press Start through the title and then go silent, so
     // later taps cannot drive the scene's own scripted leave before the run has
@@ -547,10 +684,13 @@ static uint16_t automation_buttons() {
     return buttons;
 }
 
+// Defined below (with the console's `press` command); declared here because the
+// game thread's input poll consumes the hold.
+uint16_t console_input_take(float* x, float* y);
+
 static uint16_t keyboard_buttons() {
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     uint16_t buttons = 0;
-
     auto is_down = [&](SDL_Scancode scancode) { return keys[scancode] != 0; };
 
     if (is_down(SDL_SCANCODE_X)) buttons |= N64_BTN_A;
@@ -571,6 +711,35 @@ static uint16_t keyboard_buttons() {
     buttons |= automation_buttons();
 
     return buttons;
+}
+
+// The live console's `press <buttons> [polls] [x] [y]` hold: a synthetic press
+// that lasts a fixed number of input polls and then releases, so an external
+// tool can walk a menu interactively ("press right", look at the capture,
+// "press a") instead of guessing a wall-clock tap schedule. `x`/`y` set the
+// analog stick (screens that move a cursor with the stick rather than the
+// D-pad, e.g. the world map). Written from the console on the main thread, read
+// from the game thread's poll, hence the atomics.
+std::atomic<uint16_t> g_console_buttons{0};
+std::atomic<int> g_console_polls{0};
+std::atomic<float> g_console_x{0.0f};
+std::atomic<float> g_console_y{0.0f};
+
+void console_press(uint16_t buttons, int polls, float x, float y) {
+    g_console_buttons.store(buttons, std::memory_order_relaxed);
+    g_console_x.store(x, std::memory_order_relaxed);
+    g_console_y.store(y, std::memory_order_relaxed);
+    g_console_polls.store(polls, std::memory_order_relaxed);
+}
+
+uint16_t console_input_take(float* x, float* y) {
+    if (g_console_polls.load(std::memory_order_relaxed) <= 0) {
+        return 0;
+    }
+    g_console_polls.fetch_sub(1, std::memory_order_relaxed);
+    *x = g_console_x.load(std::memory_order_relaxed);
+    *y = g_console_y.load(std::memory_order_relaxed);
+    return g_console_buttons.load(std::memory_order_relaxed);
 }
 
 static uint16_t gamecontroller_buttons(SDL_GameController* controller) {
@@ -943,11 +1112,28 @@ void console_exec(const std::string& line_in) {
     if (cmd == "help") {
         printf("[console] r/rh/rb/rk <addr> [n] | d <addr> [len] | f <value> [max] | fb <hex> [max]\n"
                "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c\n"
+               "[console] press <buttons> [polls] [x] [y]  (hold a synthetic pad press and analog\n"
+               "[console]                stick, e.g. `press a`, `press start+down`, `press none 60 -1 0`)\n"
                "[console] dump [path]   (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n"
                "[console] save [path]   (checkpoint: RDRAM + overlay state; bare `save` writes\n"
                "[console]                /tmp/ogre-checkpoint-NNNN.ckpt)\n"
                "[console] load [path]   (restore a checkpoint this build wrote; bare `load` uses\n"
                "[console]                the most recent bare `save`)\n");
+    } else if (cmd == "press") {
+        bool ok = true;
+        const uint16_t mask = (ntok > 1) ? parse_button_combo(tok[1], ok) : 0;
+        const int polls = (ntok > 2) ? (int)num(2, 8) : 8;
+        const float sx = (ntok > 3) ? (float)atof(tok[3].c_str()) : 0.0f;
+        const float sy = (ntok > 4) ? (float)atof(tok[4].c_str()) : 0.0f;
+        if (!ok || ntok < 2) {
+            printf("[console] press <buttons> [polls] [stickx] [sticky]: buttons are `+`-joined names"
+                   " (start,a,b,up,down,left,right,cu,cd,cl,cr,zl,zr,l,r,none);"
+                   " `press none 60 -1 0` is a full-left analog stick for 60 polls\n");
+        } else {
+            console_press(mask, polls, sx, sy);
+            printf("[console] pressing %s for %d poll(s), stick=(%.2f,%.2f)\n",
+                   describe_buttons(mask).c_str(), polls, sx, sy);
+        }
     } else if (cmd == "r" || cmd == "rw" || cmd == "rh" || cmd == "rb" || cmd == "rk") {
         const uint32_t addr = num(1, 0);
         uint32_t count = num(2, 1);
@@ -1275,9 +1461,16 @@ static void poll_input() {
 static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     uint16_t out_buttons = 0;
     bool connected = false;
+    *x = 0.0f;
+    *y = 0.0f;
+    // The live console's synthetic press/stick, if one is armed.
+    float console_x = 0.0f, console_y = 0.0f;
+    uint16_t console = 0;
 
     if (controller_num == 0) {
         out_buttons |= keyboard_buttons();
+        console = console_input_take(&console_x, &console_y);
+        out_buttons |= console;
         connected = true;
     }
 
@@ -1294,6 +1487,13 @@ static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y)
         *x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX) * axis_scale;
         *y = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) * axis_scale;
         connected = true;
+    }
+
+    // The console's stick wins over an idle pad, so a scripted run can move a
+    // cursor that is stick-driven (the world map) with no hardware attached.
+    if (console != 0 || console_x != 0.0f || console_y != 0.0f) {
+        *x = console_x;
+        *y = console_y;
     }
 
     if (!connected) {

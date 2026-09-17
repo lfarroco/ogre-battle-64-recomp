@@ -96,6 +96,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_TAP_SCENE=<list>` | press `OGRE_TAP_MS`/`OGRE_TAP_BUTTON` only while the dispatcher's scene (`D_800E810E`) is in the list — names from `kScenes` (`title`, `new-game`, …) or hex, `,`/`+`-separated. Scopes a scripted tap to **game state instead of wall time**, so `OGRE_SPEED` and capture readback no longer break the schedule |
 | `OGRE_TAP_NOT_SCENE=<list>` | the complement of the above. `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the title and goes silent the moment New Game is confirmed — no `OGRE_TAP_MAX` tuning |
 | `OGRE_TAP_BUTTON=<list>` | which pad buttons the synthetic taps press, cycled one per tap (`start`, `a`, `b`, `down`, …; `none` skips a tap). **The list shape matters, and so does the form (developer, session 64): a tap that lands while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the sequence from advancing.** The name-entry form (scene `0x07`) is where this bites. The recorded working shape is **a few `start,a` pairs then a long run of plain `a`** — e.g. `"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` (see the checkpoint and `OGRE_NJREAD_LOG` recipes below). An *endless* `start,a` alternation stalls there forever: a scripted run that shows no crash, no stub call, and a final scene of `0x07` is almost always this. If a schedule keeps stalling, drive the run by hand and take a checkpoint instead |
+| `OGRE_TAP_SCENE_BUTTON=<scene>:<button>[:<count>],…` | the **scene-keyed** sibling of `OGRE_TAP_BUTTON` (session 68). `OGRE_TAP_BUTTON`'s slot index advances with **wall time**, so a route across several scenes has to be hand-tuned to how long each takes — the same "title → Load Game → map" schedule landed on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s (the forced-scene poke races the publisher stills). This one keys the button on the dispatcher's active scene (`D_800E810E`; names from `kScenes` or hex) and presses it every `OGRE_TAP_MS` while that scene runs, at most `<count>` times (default unlimited). Entries in one scene are consumed in order, so `OGRE_TAP_MS=1500 OGRE_TAP_SCENE_BUTTON="title:start:5,0x12:a:3,0x05:right:3,0x05:a:1"` is "Start up to five times on the title (early presses are sometimes swallowed; the scene change stops it), A three times on the Load Game screen, then walk the map cursor right three times and press A". Requires `OGRE_TAP_MS`; it replaces the slot schedule entirely |
 | `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
 | `OGRE_PREF_DIR=<dir>` | use `<dir>` instead of `SDL_GetPrefPath` as the runtime config dir, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write `~/Library/Application Support`). Default is unchanged; the boot log prints the resolved path |
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces, including `[pi] inline DMA` for every streamed-overlay load (very chatty) |
@@ -351,6 +352,7 @@ Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
 | `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
 | `save [path]` | write a **checkpoint** (whole RDRAM + the runtime's overlay state). A bare `save` writes `/tmp/ogre-checkpoint-NNNN.ckpt` and remembers it |
 | `load [path]` | **restore** a checkpoint this build wrote — the machine rewinds to the instant of the save and the game re-runs from there. A bare `load` uses the most recent bare `save` |
+| `press <buttons> [polls] [x] [y]` | **hold a synthetic pad press** for `polls` input polls and then release it, so an external tool can walk a menu interactively ("press right", look at the capture, "press a") instead of guessing a wall-clock tap schedule (session 68). `<buttons>` is the `+`-joined `OGRE_TAP_BUTTON` vocabulary (`start`, `a`, `up`, `left`, …), `polls` and the stick values are parsed as **hex** for the poll count and `atof` for `x`/`y`, so `press a 400` is 1024 polls and `press none 60 -1 0` is a full-left analog stick. **A short press is much shorter than it looks: the game polls input far faster than 60 Hz — `press right 8` is invisible, `press right 2000` walks the map cursor across the world; budget a few hundred polls per cursor step** |
 | `help` | the list |
 
 `dump` is the one that fixes the "wrong moment" problem: run the game until the
@@ -361,6 +363,12 @@ key) and the image is written while that state is live. Pair it with
 `OGRE_CONSOLE_AT_MS=<n>` delays every watched-file read until `n` ms of wall
 clock have elapsed, so a scripted run can leave the command file in place at
 launch instead of racing it from a background writer.
+
+**Write the watched file atomically** (`printf … > f.tmp && mv f.tmp f`). The app
+polls the path, opens, reads and **removes** it; a plain `> f` truncates before
+the write, so the reader can catch an empty file, delete it and the bytes land in
+an unlinked inode — the command silently never runs (session 68 lost two rounds
+to this).
 
 **`OGRE_CONSOLE_ON_SCENE` / `OGRE_CONSOLE_ON_STEP` / `OGRE_CONSOLE_ON_CMD`** run
 one console command on the first frame a chosen scene (and optionally that exact

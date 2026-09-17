@@ -1,0 +1,15 @@
+// Function entries for streamed-overlay bank unit R (bankRec9d), forced with
+// `symbol_addrs_path` in config-bankR.yaml.
+//
+// Same reason as symbol_addrs-bankN.txt / -bankP.txt / -bankQ.txt: unit N's
+// record 7 calls the module's entry, but the module is disassembled on its own,
+// so an address that is only a `jal` target from another record is emitted as a
+// label inside the preceding body instead of a function entry — and the runtime
+// then has no entry to dispatch, so `LOOKUP_FUNC` lands on the logging stub.
+//
+// The port's `[overlays] streamed function stub called @ 0x80215C38` named this
+// one; the module's other three entries (0x80214FA0, 0x802150DC, 0x80215360,
+// 0x8021592C) are reachable from `jal`s inside the module, so spimdisasm finds
+// them itself.
+
+func_ovlR_80215C38 = 0x80215C38; // type:func
