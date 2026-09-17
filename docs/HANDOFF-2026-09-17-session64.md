@@ -290,3 +290,195 @@ into `/tmp/emu-research/` were read; nothing was copied into the repo.
    fabricating game data (AGENTS §7) and must not be the first move.
 5. The cursor (`func_ovlM_801A1C50`, `a2=6`) and the date panel (`a2=12`) are the
    same rect-vs-window class and should be re-examined once §4 is settled.
+
+## 8. Addendum — "is the map missing save/army data?" (developer, end of session)
+
+**The hypothesis is partly right, and the split matters.**
+
+* **Save/army-dependent, so plausibly absent on a forced or fresh New Game
+  entry:** the party's map *position* and everything keyed off the army record.
+  The party draw `func_ovlM_801A2A7C` is called at `0x801A18F0` with coordinates
+  read out of the screen state — `state[+0x40]`/`state[+0x44]` (32-bit) and
+  `state[+0x5C]`/`state[+0x5E]` (`lh`/signed 16-bit) — and those are written from
+  the map's per-frame logic, not by the enter. In the forced-scene dump they hold
+  `0xA4`/`0x46` and `0x011A`/`0x9D`. Unit markers, the route of dots, mission
+  availability and the date panel are the same class.
+* **NOT save-dependent — the sprite *art*:** the knight's 32-texel-wide, 24-frame
+  sheet is `malloc(0x18000)`d and composited **by the map's own enter**
+  (`func_ovlM_8019A7C0`, §3). That is why a *forced* scene still produced a
+  correct knight sheet. **So a fuller save state will not fix the party-sprite
+  defect** (§4's `line=8` / the shadow's `+0x1068`) — those live in the enter's
+  constants and the draw's own commands, both of which are identical on every
+  entry.
+
+**"I'll need a dump or save state at that screen" — what already exists.**
+
+* `save` / `load` checkpoints do exactly this (session 58): RDRAM **plus** the
+  runtime's overlay state, one console command:
+  `OGRE_SCENE=… OGRE_CONSOLE_ON_SCENE=0x05 OGRE_CONSOLE_ON_CMD='save /tmp/map.ckpt'`.
+  **Save *inside* a stable step, not at a transition** (`docs/guides/app-build.md`
+  → "Checkpoints"; session 58's trap where a checkpoint taken at a `0x02` visit
+  bounces between scenes). The map has no step, so verify with `c` and prefer
+  saving a few frames in.
+* **A real retail save cannot be loaded yet.** OB64 saves to the **Controller
+  Pak**, and the port has no `osPfs*` implementation at all (`pak.cpp` is an
+  upstream stub returning `PFS_ERR_NOPACK`; `app/src/main.cpp` sets
+  `SaveType::None`) — the session-58c durable decision. That is also why scene
+  `0x12` (Load Game) is unreachable and why the Save menu is inert. Getting
+  "load a save at the map" therefore means implementing the Controller Pak
+  (32 KiB PFS image + the `osPfs*` cluster + raw SI pak access) — a real
+  milestone, not a shortcut.
+
+**What was run (and the trap it hit).** The natural route was attempted:
+
+```sh
+OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1500 \
+  OGRE_TAP_BUTTON="start,a,(alternating x45)" OGRE_TAP_NOT_SCENE=0x05 OGRE_SCENE_LOG=1 \
+  OGRE_PRESENT_ALWAYS=1 OGRE_DUMP_RDRAM=/tmp/map-natural.bin OGRE_EXIT_AFTER_MS=200000
+```
+
+It reached `title (0x04) -> 0x02 -> 0x0D -> 0x02 -> 0x0D -> 0x07` (the **name-entry
+form**) at `t~26 s` emulated and **stalled there**. No crash, no stub calls.
+
+**The cause is now known (developer, end of session): a synthetic tap that lands
+while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the
+sequence from advancing.** The recorded working shape is **a few `start,a` pairs
+then a long run of plain `a`** — `docs/guides/app-build.md` has two real
+schedules (`"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` in the
+checkpoint recipe, and `"start,a,start,a,start,a,start,a,start,a,a,a,a"` in the
+`OGRE_NJREAD_LOG` one). An *endless* alternation never produces that run, so it
+toggles the tooltip instead of advancing. This is recorded in the `OGRE_TAP_BUTTON`
+row of the env-var table so the next session does not rediscover it.
+
+**The better route (developer offer, adopted): drive the run by hand and take the
+dump at the real map screen with the live console's number keys.** No autoplayer
+to tune:
+
+```sh
+OGRE_KEY_1='c'                        \
+OGRE_KEY_2='save /tmp/map-real.ckpt'  \
+OGRE_KEY_3='dump /tmp/map-real.bin'   \
+./build-app/ogrebattle64 assets/ogre64.z64
+# on the map: press 1 (confirm scene 0x05 / descriptor 0x8018FD70 / mask 0x2),
+# then 2 (checkpoint: RDRAM + overlay state, for one-command replay),
+# then 3 (raw 8 MiB image, the format tools/rdram.py reads).
+```
+
+`save` is the artifact that matters long-term (a replayable machine state);
+`dump` is the one the offline tools read. Then:
+
+* `tools/rdram.py diff /tmp/map3.bin /tmp/map-real.bin` (grouped by module) — what
+  a forced entry never builds.
+* `tools/rdram.py <img> word 0x80197B18` for the state pointer, then compare the
+  struct and the party-position fields (`+0x40`/`+0x44`, `+0x5C`/`+0x5E`) against
+  the forced values (`0xA4`/`0x46`, `0x011A`/`0x9D`).
+
+### §8 result — the real map dump **refutes** the pre-state explanation for the sprite defect
+
+The developer drove a real playthrough to the map and dumped with the live console
+(`/tmp/map-real.bin`, raw 8 MiB; `/tmp/map-real.ckpt`, checkpoint). Verified as the
+map, not a look-alike: `0x800E810E` (active scene) = `0x0005`, `0x800E8294`
+(descriptor) = `0x8018FD70`, and `*(0x80197B18)` = `0x801F1570` — the *same* state
+address as the forced run, so the comparison is direct.
+
+| what | forced (`/tmp/map3.bin`) | real (`/tmp/map-real.bin`) | verdict |
+|---|---|---|---|
+| knight sheet `state[+0x34]` | `0x80250D00` | `0x80243E10` | present in **both**; rendered, both are the same 32-wide knight sheet |
+| **shadow source `state[+0x04]+0x1068`** | **all zero** | **all zero** | **identical — the defect is not missing pre-state** |
+| party position `+0x40`/`+0x44` | `0xA4`/`0x46` | `0x90`/`0x6C` | differs (party is elsewhere on the map) |
+| second position `+0x5C` (+`+0x5E`) | `0x011A009D` | `0x014000CF` | differs |
+| counters `+0x108` / `+0x114` | `0x348` / `0` | `0x15E` / `0x1E` | differ (frame/tick state) |
+| anim/state word `+0x1DC` | `0x01000102` | `0x07000102` | low byte (the direction `lbu` reads) is **`0x02` in both** |
+| one RDP-shaped word `+0x0A0` | `0x24000000` | `0x07000000` | differs |
+
+**Only 9 of the struct's 284 words differ**, and neither the sprite source data nor
+the knight's direction is among them. So:
+
+* **The `$0x1068` shadow region really is empty on a fully-populated map.** The
+  game reads zeros there on the natural route too, which means the open question
+  stays exactly where §4 put it — the **renderer / RDP tile semantics** (`line=8`
+  for a 128-byte-stride sheet; a shadow tile whose `line=2` + `masks=3` +
+  7-texel window is only coherent read as 16-bit), not a missing save structure.
+* What pre-state *does* supply is the party's **map position and the tick
+  counters** — so unit markers, the route dots, mission availability and the date
+  panel can still be pre-state-dependent (untested; a forced entry places the
+  party at a different spot).
+* A whole-image `tools/rdram.py diff` is dominated by heap noise (18.3% of bytes,
+  29108 runs, almost all "heap/stack/asset space") because the malloc layout
+  differs run to run. **Compare the state struct and named globals, not the image.**
+
+**Checkpoint validity (developer's question).** The guard is
+`kCheckpointVersion` (a *format* version, currently 2) **plus** `build_id` =
+FNV-1a of the whole executable (`app/src/sdl_platform.cpp`, `executable_fingerprint`).
+The reason the build id exists is real and is AGENTS §4's class: the checkpoint
+carries the runtime's **overlay state** — which recompiled body is mapped at each
+RAM address — so restoring it under a build whose function map differs would run
+the wrong module's bodies *silently*.
+
+The developer's instinct that this is coarser than necessary is correct: what the
+blob actually needs to be valid against is the **recompiled function/bank layout**
+(`Bank*Funcs/`, `RecompiledFuncs/`, `kBankRecords`), not the bytes of the whole
+binary. A doc-only, renderer-only or UI-only rebuild cannot make the mapping
+wrong, yet it invalidates every checkpoint today. A narrower fingerprint (over the
+bank record table + the recompiled function address list) would keep the guard
+where it matters. **Not changed this session** — recorded as a lead.
+Practically: `/tmp/map-real.ckpt` stays loadable **until the next `build-app`
+rebuild**, and at ~8 MiB keeping one per build is cheap.
+
+### §8b — the real map **confirms the `line` hypothesis**, and pre-state *does* matter (for other elements)
+
+The developer supplied a screenshot of the real map and described it: *"the party is
+rect with random colors, there's multiple shadow sprites. the red pin and the
+crossed swords with the location of the next mission show up. the 4 small gray dots
+that create a dotted line between the party and the next location are rendered in
+the wrong location, the lower left. multiple of these elements were not present when
+booting directly into this scene."*
+
+**1. The party garble is the row stride — proven offline from the real dump.**
+
+`state[+0x34]` (the composited sheet) is `0x80243E10`; the draw selects
+`direction = lbu(state[+0x1DC]) = 7`, `f = ((state[+0x108]*0xAAAAAAAB)>>34)&3 = 2`,
+so `frame = 3*7 + 2 = 23` and the texture base is `0x8025AE10`. Rendering that
+frame at the two candidate row widths settles it:
+
+| render | meaning | result |
+|---|---|---|
+| `docs/proofs/party-sheet-correct-stride-line16.png` | 32 texels/row = 128 B = **`line` 16** | **a clean, complete knight** |
+| `docs/proofs/party-sheet-declared-stride-line8.png` | 16 texels/row = 64 B = **`line` 8**, what the draw declares | the knight **split into two half-width columns** |
+
+The declared `line=8` is **half** the sheet's true 128-byte row, so the sampler
+walks 64 bytes per drawn row and alternates between the left and right halves of
+successive sheet rows — a horizontally fractured sprite, which is exactly the
+developer's "rect with random colors". The party rect (entry 10, `16x11`) renders
+from the same sheet and fractures the same way.
+
+This is the game's own command (ROM `0x81BD4`, `0xF5181000`, `line = p0(9,9) = 8`),
+so it is **not** a recompiler or data error. The question is now sharp and
+renderer-only: **what does the RDP do with a render tile's `line` when the tile was
+filled by `G_LOADBLOCK`?** Modern emulators sidestep it — GLideN64's texture cache
+keys a texture on (address, format, size, width) and samples at the *image's* own
+width, so the tile `line` never decides the stride; this port's RT64 apparently
+honours it. That is the A/B to run next, and it needs no game-data theory. It very
+plausibly covers the shadow (`line=2`), the black ellipse row and the panel's
+striped box as well — all four are "a small window sampled out of a wide buffer".
+
+**2. Pre-state is confirmed for the mission/marker/route layer — and my §8
+"refuted" conclusion needs narrowing.** The crossed swords (next mission), the red
+pins, the route of dots and the cursor are **present on the real map and absent from
+forced-scene captures**. So a forced entry is *not* a valid reproduction for
+anything keyed off the army/mission record — the sessions 60–63 captures were
+missing those elements, and their "the panel is absent" readings need re-checking
+against the real map. What §8 refuted stands only for the **sprite art** (the sheet
+and its compositor), which is rebuilt by the map's enter on every entry.
+
+**3. New symptom, not yet explained: the route dots are in the wrong place.** They
+should run from the party to the next location; they draw at the **lower left**.
+Same family as §8's differing position fields (`+0x40`/`+0x44` vs `+0x5C`/`+0x5E`),
+and worth attacking *after* the `line` question, since a broken stride also
+misplaces sampled content.
+
+**4. Correction.** §8's table said the direction byte is `0x02` in both runs. It is
+not: `lbu(state[+0x1DC])` is **7** on the real map and **1** in the forced run (the
+0x02 is a different byte in the same word). So the animation frame genuinely
+differs between the two runs — frame 23 real vs frame 5 forced — which is another
+reminder that a forced scene is a different game state, not just a different entry.

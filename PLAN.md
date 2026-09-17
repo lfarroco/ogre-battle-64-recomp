@@ -881,6 +881,46 @@ hardware. RT64 remains the primary native renderer throughout. See
     `hack_Ogre64`). **No code landed.** See `docs/guides/emulator-first.md`;
     `docs/HANDOFF-2026-09-17-session64.md`.
 
+  - 🚧 **Pre-state: the map needs army/save data that a forced entry never builds
+    (session 64 addendum).** The developer's hypothesis is partly right and the
+    split matters: the party's **map position** (`state[+0x40]`/`[+0x44]`,
+    `state[+0x5C]`/`[+0x5E]`, read at the party draw's call site `0x801A18F0`),
+    the unit markers, the route of dots, mission availability and the date panel
+    are all keyed off the army record — so a forced/fresh entry plausibly lacks
+    them. But the **sprite art is not**: the knight's 32-wide, 24-frame sheet is
+    `malloc(0x18000)`d and composited *by the map's own enter*, which is why a
+    forced scene still draws a correct knight sheet. **A fuller save state will
+    not fix the party-sprite defect.** Checkpoints (`save`/`load`) already give
+    "a save state at that screen", but **a retail save cannot be loaded yet** —
+    OB64 saves to the Controller Pak and the port has no `osPfs*` at all
+    (session-58c decision; also why scene `0x12` Load Game is unreachable).
+    **Route to a real map state:** drive it by hand and dump with the live
+    console's number keys (`OGRE_KEY_1='c'`, `_2='save /tmp/map-real.ckpt'`,
+    `_3='dump /tmp/map-real.bin'`) — an autoplayer stalls on the name-entry form
+    (`0x07`) because **a synthetic tap landing in a text field opens a tooltip
+    that blocks the advance** (developer); the recorded working shape is a few
+    `start,a` pairs then a long run of `a`. **Result (developer dump, same
+    session): the pre-state explanation is REFUTED for the sprite defect** — on a
+    real playthrough to the map the shadow's source region
+    (`state[+0x04]+0x1068`) is **still all zero**, and the knight sheet is present
+    and identical. Only 9 of the state struct's 284 words differ (party position,
+    tick counters, the sheet's heap address); the sprite source and the knight's
+    direction do not. So the defect stays a **renderer/RDP tile-semantics**
+    question, and pre-state only explains the markers/route/date. A whole-image
+    diff is heap noise — compare the struct, not the dump. **And pre-state IS
+    confirmed for the *mission/marker* layer**: from the real map the crossed
+    swords (next mission), the red pins, the route dots and the cursor are all
+    present, and all were **absent from forced captures** — so a forced scene is
+    not a valid repro for anything keyed off the army record. **The party garble
+    itself is the row stride, proven offline:** the sheet's frame 23 rendered at
+    the declared 16 texels/row splits into two half-columns, and at the true 32
+    texels/row it is a clean knight (`docs/proofs/party-sheet-{declared-stride-line8,correct-stride-line16}.png`).
+    The draw declares `line=8` for a 128-byte row (ROM-verified) — so the open
+    question is purely renderer-side: what the RDP does with a render tile's
+    `line` for a `G_LOADBLOCK`-filled tile (GLideN64 keys textures at their image
+    width and never consults it; RT64 honours it). **That is the next A/B.**
+    `docs/HANDOFF-2026-09-17-session64.md` §8, §8b.
+
   - 🚧 **The map's sprites are missing/garbled (session 60, developer spec)** —
     the developer supplied the retail screenshot
     (`docs/proofs/map-reference/retail-map-screen.png`) and the screen's spec:
