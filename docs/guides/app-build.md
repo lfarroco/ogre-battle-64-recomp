@@ -280,6 +280,35 @@ Four offline tools answer the questions every session otherwise re-derives by
 hand. None of them needs a CUDA/GPU/game run except where noted. The **live
 console** below is the fifth, and the only one that queries a *running* game.
 
+### `make elf-rom-check` — is the linked code the ROM's code? (session 65)
+
+`tools/elfcheck.py` compares every `CONTENTS` section of every linked ELF
+(`build/bank*.elf`, `build/ogrebattle64.elf`) with the ROM at the same ROM offset,
+and `--syms` (what the target passes) also asserts that every symbol whose *name*
+ends in eight hex digits is defined at that address — free, because the project
+names labels `D_ovlM_801A6FD8` / `func_ovlM_801A2A7C`.
+
+```
+$ make elf-rom-check
+bankM.elf: 0 differing bytes of 553504
+bankM.elf: 479 address-named symbols all at their named address
+ogrebattle64.elf: 0 differing bytes of 41943040
+ogrebattle64.elf: 4224 address-named symbols all at their named address
+```
+
+Run it whenever a scene draws the wrong *size*, the wrong *slice* or the wrong
+*string* from a table — before blaming the renderer or the game's data. Session 65
+found unit M's whole `.data` subsegment 8 bytes high this way: `mips-linux-gnu-as`
+pads `.text` to 16 bytes, unit M's code/data boundary is only 8-byte aligned, so
+the data subsegment moved up 8 and **every** `lui/%lo` data reference in the
+recompiled module read 8 bytes too high — which put the map's sprite table one
+entry late and made the party, the shadow, the cursor and the date panel all draw
+their neighbours' sizes for four sessions. A misalignment is fixed in the unit's
+config (`align`/`subalign`, or by ending the `asm` subsegment on the 16-byte
+boundary as unit M's now does), never in the generated `.s` or the generated C.
+`make bank-recomp` runs the check before recompiling, so a misaligned link fails
+the build instead of producing a scene that looks wrong.
+
 ### The live console — query a running game (session 56)
 
 The offline tools can only look at a dump, and a bounded run can only dump at its

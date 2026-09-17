@@ -823,8 +823,41 @@ hardware. RT64 remains the primary native renderer throughout. See
     card unchanged. The no-`--only` full dispatch also fixes it (89 sites /
     7 extra targets) and is the way to clear the remaining backlog.
     `docs/HANDOFF-2026-09-16-session60.md`; `docs/scenes.md` row 10.
+  - ✅ **The map's sprites are FIXED (session 65) — the cause was a linker
+    artifact, not the renderer, the asset or the game's constants.** Unit M's
+    `.data` subsegment was linked **8 bytes above** its ROM address, so every
+    `lui/%lo` data reference in the recompiled module read 8 bytes too high —
+    including the map's sprite table base: the ROM's builder
+    (`func_ovlM_8019F83C`, ROM `0x7E804`) says `addiu v0,v0,0x6FD8`, the bank ELF
+    said `0x6FE0`, and `nm` defined `D_ovlM_801A6FD8` at `0x801A6FE0` (150 of the
+    unit's 480 address-named symbols were +8). **Every sprite descriptor was read
+    one entry late**, which is exactly the "the two calls name each other's
+    entries" of sessions 61–63: with the correct table at RAM `0x801A6FD8`,
+    `a2=10` = `(32,32)` = **the party** (the full knight sheet frame), `a2=11` =
+    `(16,11)` = **the shadow**, `a2=12` = `(144,23)` = **the date plate**, and
+    `a2=6` = `(16,16)` = the cursor. The cause of the shift: `mips-linux-gnu-as`
+    pads `.text` to 16 bytes and the module's code/data boundary (ROM `0x85838` =
+    RAM `0x801A68A8`) is only 8-byte aligned, so the data subsegment started 8
+    bytes high. **Fix (config only): the `asm` subsegment now ends at `0x85840`**
+    (the 8 zeros there are the module's own padding and nothing references
+    `0x801A68A8`), which makes the assembler's pad real bytes and restores every
+    label. Result: the party is a 32x32 knight with its 16x11 shadow, the cursor
+    is one 24x23 arrow, and the panel is the full `MONTH/DATE | Sombra | 1` plate
+    (`docs/proofs/native-newgame-map-scene.png`, **replaced**; the broken render
+    is kept as `docs/proofs/map-sprites-before-offby8.png`). **New guard:**
+    `tools/elfcheck.py` / `make elf-rom-check` (ELF-vs-ROM byte comparison +
+    address-named-symbol audit) — after the fix **all 13 bank ELFs and the main
+    ELF are byte-identical to the ROM**; `make bank-recomp` runs it before
+    recompiling. Session 64's renderer-side `line = 8` lead is **withdrawn**: for
+    RGBA32 the RDP keeps 2 bytes per texel per TMEM half, so `line = 8` is 32
+    texels per row — the sheet's row — and RT64's loader/sampler agree with
+    angrylion (`docs/HANDOFF-2026-09-17-session65.md` §1–§4).
   - 🚧 **The map's party: the two draws are identified (session 63); the wall is
-    a zeroed texture buffer. Nothing landed.** The developer corrected sessions
+    a zeroed texture buffer. Nothing landed.** *(Superseded by session 65: the
+    entries were not "naming each other" — the whole table was read one entry
+    late because unit M's data labels were 8 bytes high; the "zeroed buffer" was
+    the shadow's own `+0x1068` region read through the 16x11 rect that was in
+    fact the shadow's correct entry.)* The developer corrected sessions
     61/62: the party (Magnus, the knight) is the **second** builder call
     (`func_ovlM_801A2A7C`, ROM `0x81BFC`, `a2=0xA`, rect `(a0-16, a1-24)`) — the
     rect **above** the other — and it needs **`16x24`** (his hair is visible in
@@ -851,7 +884,13 @@ hardware. RT64 remains the primary native renderer throughout. See
     `docs/HANDOFF-2026-09-16-session63.md`.
 
   - 🚧 **The map's party, reframed: the port is faithful, so stop editing its
-    display lists (session 64).** *"How would an emulator handle it?"* Four
+    display lists (session 64).** *(Superseded by session 65: the four checks
+    were right that the LZ decode, the RDRAM contents, the GBI and the *raw ROM*
+    constants are faithful — but they do not cover the **bank ELF**, and unit M's
+    data labels were 8 bytes high, so the *recompiled code* read the sprite table
+    one entry late. §4's `line = 8` lead is also withdrawn: for RGBA32, `line = 8`
+    is 32 texels per row. See `docs/HANDOFF-2026-09-17-session65.md`.)*
+    *"How would an emulator handle it?"* Four
     independent checks say the port is not the defect: the LZ decoder is exact
     (13/13 assets end **on** their declared payload boundary), the port's
     `state[+0x04]` buffer is **21128/21128 bytes identical** to an offline decode

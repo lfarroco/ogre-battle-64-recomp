@@ -225,7 +225,23 @@ bank: bank-force
 
 bank-force: $(BANK_ELFS)
 
+# `make elf-rom-check`: every linked ELF must be byte-identical to the ROM at the
+# same ROM offset, and every symbol whose name ends in eight hex digits must be
+# defined at that address. Session 65: unit M's data subsegment was linked 8
+# bytes high (the assembler pads `.text` to 16 bytes, while the ROM's code/data
+# boundary is only 8-aligned), so every data label was +8 and the recompiled
+# `lui/%lo` pairs read 8 bytes too high — the map's sprite table came out
+# shifted by one entry. The tool names the section and the first differing
+# offset, so the fix goes in the config, never in the generated `.s`.
+# See tools/elfcheck.py.
+elf-rom-check:
+	python3 tools/elfcheck.py --syms
+.PHONY: elf-rom-check
+
 bank-recomp: bank
+	@# A misplaced section is invisible in the generated C and only shows up as a
+	@# scene misbehaving, so check the link before recompiling it (session 65).
+	python3 tools/elfcheck.py --syms >/dev/null || { python3 tools/elfcheck.py --syms; exit 1; }
 	@# Same stale-output trap as `recomp` above: clear each unit's generated tree
 	@# so a symbol that changed section (or moved to another unit) cannot leave a
 	@# definition behind. `Bank*Funcs/` is gitignored and regenerated here.

@@ -71,14 +71,28 @@ segments:
     vram: 0x0
 
   # Scene 0x05's module: code to the module's last `jr ra` (ROM 0x85838),
-  # then its data half.
+  # then its data half (whose first 8 bytes are alignment padding — see below).
   - name: bankRec05
     type: code
     start: 0x79750
     vram: 0x8019A7C0
+    # The module's last function ends at ROM 0x85838 (RAM 0x801A68A8): `jr ra`
+    # at 0x85830, delay slot at 0x85834. **The data subsegment deliberately
+    # starts at 0x85840, not 0x85838** (session 65). `mips-linux-gnu-as` aligns
+    # `.text` to 16 bytes and pads the section to that boundary, so an `asm`
+    # subsegment of 0xC0E8 bytes assembles to 0xC0F0 and every data label would
+    # land 8 bytes above its ROM address (150 of unit M's 480 address-named
+    # symbols were +8). The `lui/%lo` pairs that reference them then read 8
+    # bytes too high at runtime: the sprite table `D_ovlM_801A6FD8` was read at
+    # 0x801A6FE0, shifting every sprite descriptor by one entry — the map's
+    # party drew a 16x11 crop of the 32x32 knight sheet, the shadow drew as the
+    # 144x23 party band, and the date plate drew as a 16x24 sliver. Ending the
+    # `asm` subsegment on the next 16-byte boundary makes the pad real ROM bytes
+    # (8 zeros at 0x85838, the module's alignment padding) and restores every
+    # data label. `make bank-recomp` then regenerates the correct immediates.
     subsegments:
       - [0x79750, asm]
-      - [0x85838, data]
+      - [0x85840, data]
 
   # Unit H's bankRec07 (ROM 0x712A0, the other bank of this RAM) precedes; the
   # next module in the ROM starts here.

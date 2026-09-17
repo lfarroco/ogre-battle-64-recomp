@@ -3804,3 +3804,54 @@ Written up as `docs/guides/emulator-first.md`; applied in
 * The map's gfx ucode `0x8009F540` hashes (XXH3-64, raw bytes, length `0x1390`)
   to `0xCF55FAE288BFE48D` = RT64's `F3DEX2.fifo 2.08`, so RT64's GBI choice for
   the map is correct.
+
+## Session 65 (2026-09-17) — the map's sprites were an 8-byte linker misplacement in unit M; compare every ELF with the ROM
+
+**Decision: a bank ELF must be byte-identical to the ROM, and a misalignment is
+fixed in the *config*, never in generated code.** `make elf-rom-check`
+(`tools/elfcheck.py`) now asserts it for every unit and `make bank-recomp` runs
+it before recompiling.
+
+* **What broke.** Unit M's `.data` subsegment was linked 8 bytes above its ROM
+  address. `mips-linux-gnu-as` aligns `.text` to 16 bytes and pads the section to
+  that boundary; the module's code/data boundary (ROM `0x85838` = RAM
+  `0x801A68A8`) is only 8-byte aligned, so the 0xC0E8-byte code object assembled
+  to 0xC0F0 and the data subsegment began at 0x801A68B0 instead of 0x801A68A8.
+  **Only the `lui/%lo` immediates that name data labels changed** — 150 of unit
+  M's 480 address-named symbols were +8, and nothing else was — so the generated C
+  looked plausible and every data read in the recompiled module was 8 bytes high.
+* **The symptom.** The map's sprite table base is `D_ovlM_801A6FD8` (the raw ROM
+  instruction at `0x7E804` is `addiu v0,v0,0x6FD8`); the port read `0x801A6FE0`,
+  **shifting every sprite descriptor by one entry**. Sessions 60–63 spent four
+  sessions on the result: the party drew a 16x11 crop of the 32x32 knight sheet
+  ("rect with random colors"), the 16x11 shadow drew as a 144x23 band of repeated
+  ellipses ("multiple shadow sprites"), the cursor drew as 16x16 instead of 24x23,
+  the date plate as a 16x24 sliver (with `masks=2` wrap → the "striped box"), and
+  the panel's month came from the wrong string-table entry (`Flama`, not
+  `Sombra`). With the corrected table: `a2=10` = `(32,32)` party, `a2=11` =
+  `(16,11)` shadow, `a2=12` = `(144,23)` date plate, `a2=6` = `(16,16)` cursor.
+* **The fix.** `config-bankM.yaml`: the data subsegment starts at `0x85840`, not
+  `0x85838`. The 8 bytes at `0x85838` are zeros, are not referenced by any code
+  (the symbol count drops 480 → 479), and are the module's own alignment padding;
+  absorbing them into the `asm` subsegment makes its size 16-aligned so the
+  assembler emits no pad and every label lands on its ROM address.
+* **Correction to the session-64 entry above.** Its "new, ROM-verified facts"
+  bullet lists the party's calls as `a2=0xB` → entry 11 `(144,23)` and `a2=0xA` →
+  entry 10 `(16,11)`. Those are the *shifted* table readings (they came from the
+  bank ELF). The ROM's table at RAM `0x801A6FD8` has entry 10 `(32,32)` (party),
+  entry 11 `(16,11)` (shadow), entry 12 `(144,23)` (date plate). Reading a bank's
+  data table from its ELF was only unsafe because of this bug; with the check in
+  place the ELF equals the ROM again, but the *live RDRAM dump* remains the right
+  source for anything the game patches.
+* **Withdrawn: session 64 §4's renderer-side `line = 8` lead.** For a 32-bit RGBA
+  texture the RDP stores 2 bytes per texel in each TMEM half, so a tile `line` of
+  8 (64-bit words) is a 64-byte half-row = **32 texels** — the sheet's row. RT64's
+  `loadBlockOperation` (`0x800 / dxt` words per TMEM row ⇒ `dxt = 0x80` = 128
+  source bytes) and its sampler (`pixelAddress = t*(line<<3) + x*2`, high half at
+  `| 0x800`) agree with angrylion's `get_tmem_idx`. No renderer change is needed
+  for the party, cursor or panel.
+* **New rule for the record:** when a scene draws the wrong *size*, the wrong
+  *slice* or the wrong *string* from a table, check the ELF's layout against the
+  ROM (`make elf-rom-check`) before theorising about the renderer or the game's
+  data. AGENTS §8 check 5 says "compare the generated C, the bank ELF **and the
+  raw ROM bytes**"; this session is why the ELF is in that list.
