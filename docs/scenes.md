@@ -208,6 +208,45 @@ See `docs/HANDOFF-2026-09-17-session68.md`.
 label, e.g. `Tenne Plains`, is shown), and a `START` press opens a **tooltip**
 that blocks everything until it is dismissed.
 
+### The mission's `R` menu, and the **Organize Screen** (scene `0x06`)
+
+While the mission is playable, **holding `R`** opens a horizontal icon menu over
+the map. It is a **hold** menu: it is drawn only while `R` is down and closes on
+release (so a screenshot after a tap shows nothing). The entries read off
+interactively in session 69, in cursor order:
+
+| # | label | what it does |
+|---|---|---|
+| 1 | `Dispatch` (the entry the menu opens on) | |
+| 5 | `Mission Objective` | |
+| 7 | `End` | ends the practice / the unit's turn — the tutorial's practice stage returns to the Tutorial (`0x17`) |
+
+The full ordered list is **not** transcribed yet (developer, please fill in);
+`→` `A` on the **Organize Screen** entry enters scene `0x06`.
+
+The **Organize Screen** is the player's army-management screen — the one the
+`map → mission` route also shows before a battle (session 67 met scene `0x06`
+there and called it "the briefing"; it is this screen).
+
+| what | source | status |
+|---|---|---|
+| three counters across the top: `SOLDIER 030`, `CHARACTER 25`, `UNIT 03` | dev (session 69 capture) | **renders** |
+| the **formation grid**: characters on a chequered floor of stepped tiles, a blue block of tiles and a lone gold tile among the cream ones | dev (session 69 capture) | **renders** |
+| the selected entry's name plate, bottom-right (`Scarlet Magi` in the capture) | dev (session 69 capture) | **renders** |
+| the `WAR FUNDS` / `0001000 Goth` plate, bottom-left | dev (session 69 capture) | **renders** |
+| the screen's **controls** (what the cursor does; which button assigns / removes / relocates a character) | **not asked yet** | unknown |
+
+The descriptor is **`0x8018FD84`** (mask `0x2`), or **`0x8018FD98`** (mask
+`0x40002`) when `*(0x80193700)` is non-zero — both share enter `func_8017B6D0`,
+update `func_8017B858`, hook `func_8017B9C8`, leave `0`. The enter DMAs **ROM
+`0x87220` (`0x56D60`) → RAM `0x8019A7C0 … 0x801F1520`** (no BSS) and `jal`s the
+module's entry `0x801C19B0`; with `*(0x801977E8) = 2` the generic update/hook call
+`0x801C214C` and `0x801B7FC0`. Uncompiled, those three stubs made the scene return
+to `0x03` **68 ms** after entering — the developer's *"the screen just reloads"*.
+It is now **bank unit S**; the proof is
+`docs/proofs/native-organize-screen.png`. See
+`docs/HANDOFF-2026-09-17-session69.md`.
+
 
 **The wall it was (session 67):** the three segment-table records it streams
 (7/8/9) were uncompiled and its arena streams two more modules (units P and Q),

@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (69) | **Scene `0x06` — the Organize Screen — is bank unit S, and the swappable-RAM rule applies a fourth time.** Its enter `func_8017B6D0` DMAs **ROM `0x87220` (`0x56D60`) → RAM `0x8019A7C0 … 0x801F1520`** (`bss_start == bss_end`, so no BSS) and `jal`s the module's entry `0x801C19B0`; the **generic** scene update `func_8017B858` and hook `func_8017B9C8`, which scenes `0x05`/`0x06`/`0x07` share, dispatch on `*(0x801977E8)` — scene `0x06`'s enter sets **2**, so `jal 0x801C214C` (update) and `jal 0x801B7FC0` (hook). All three callers are in `.streamedB` (the main unit) while the callees live in a **different bank of RAM the main unit also occupies** (overlay C has its own real function at `0x801B7FC0`), so all three had to be **dispatched** (`cross_bank.py dispatch --only`) rather than left bound. Uncompiled, the three stubs made the scene return to `0x03` **68 ms** after entering — the developer's "the screen just reloads". Two operational facts: the mission's `R` menu is a **hold** menu (only a capture *during* the hold sees it), and the **keyboard's `R` shoulder button is `E`** — the letter `R` is not mapped at all. And a diagnostic trap: `on_streamed_dma`'s "DMA onto a known module base from an unknown ROM" heuristic fires on **any** `0x200`-byte chunk, so a large module produces a phantom second `UNKNOWN module` (here `0x9A020`→`0x801AD5C0`, chunk 151) — count modules, do not count lines | `config-bankS.yaml`/`.toml`, `symbol_addrs-bankS.txt`, `Makefile`, `app/src/bank_overlays.cpp`; `docs/proofs/native-organize-screen.png`; `docs/HANDOFF-2026-09-17-session69.md` |
 | 2026-09-17 (68) | **A scene that works from a suspend save may still be missing code when it is played to: the two routes stream *different banks* of the same arena, and the run log's `[bank] UNKNOWN module` + `[overlays] streamed function stub called @ …` is the whole diagnosis.** The mission's natural route (map `0x05` → `0x02`/`0x0D` story → scene `0x16` movie → `0x02`/`0x0D` → `0x03`) makes unit N's own loader (`func_ovlN_801AE880+0x764`, ROM `0x1036E4`) DMA **ROM `0x195430` (`0x2380`) → RAM `0x80214FA0`** and `jal` its entry `0x80215C38` — a **third bank** of record 9's arena, alongside units P (`0x171EC0`) and Q (`0x165FE0`), which the suspend save's mission loads instead. Uncompiled, the stub returned into the intro's state machine: the target fort was built from stale bytes (the garbled draw), the winning-condition `NOTE` never advanced and the camera never panned. It is now **bank unit R** (`config-bankR.yaml`/`.toml`, one forced entry in `symbol_addrs-bankR.txt`, `BANK_UNITS += R`); the module is the mission's enemy/unit constructor (`No free space on TCharacterEnemyData.` / `EnemySolderData.`), and the natural route now runs the whole intro with **0 UNKNOWN modules and 0 stub calls**. Two driving knobs landed with it: `OGRE_TAP_SCENE_BUTTON` (a **scene-keyed** tap schedule — the wall-clock slot schedule lands on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s) and the live console's `press <buttons> [polls] [x] [y]` (synthetic pad + analog stick; **the game polls input far faster than 60 Hz, so a few hundred polls is one cursor step**) | `config-bankR.yaml`, `symbol_addrs-bankR.txt`, `Makefile`; `app/src/sdl_platform.cpp`; `docs/proofs/native-mission-intro-natural.png`; `docs/HANDOFF-2026-09-17-session68.md` |
 | 2026-09-17 (67) | **The mission scene (`0x03`) renders, and the reason it did not was the same swappable-RAM class as sessions 45/55/59 — in two new shapes.** (1) The three records it streams (segment table 7/8/9, `0x101D00`/`0x145230`/`0x14EC00` → RAM `0x801AD5C0`/`0x801F4050`/`0x801FDA90`) were uncompiled: **unit N**. (2) Unit A's record 3 called `0x801AD6BC` — record 6's RAM — and both records being in unit A, N64Recomp bound it directly to unit A's record-6 body; scene `0x03`'s mask `0x38C` loads record 3 **without** record 6 (record 7 is resident), so the wrong bank ran and the process died on wild pointers that moved between runs. Record 6 moved to **unit O**, and the call compiles as `LOOKUP_FUNC`. (3) Record 9's arena streams **two more banks** (units **P** `0x171EC0` and **Q** `0x165FE0`, both → RAM `0x80214FA0`). **A `LOOKUP_FUNC` onto a non-entry is a silent no-op** (`get_function` has no interior fallback), and a cross-*record* `jal` leaves no trace while the target record is disassembled, so the entries are forced with `symbol_addrs_path` files (`symbol_addrs-bank{N,O,P,Q}.txt`) — a subsegment split at the same address would insert the assembler's 16-byte `.text` padding and break the ELF-vs-ROM identity | `config-bankN/O/P/Q.yaml`, `symbol_addrs-bank*.txt`; `docs/proofs/native-mission-scene.png`; `docs/HANDOFF-2026-09-17-session67.md` |
 | 2026-09-17 (67b) | **`tools/cross_bank.py check-banks` was a silent no-op, and its rule needs the scene masks.** `parse_yaml_segments` matched `- name: bankRecX` with its item-line branch and dropped the name, so every record was `"?"` and `record_of(target) == record_of(caller)` was vacuously true — the session-45 invariant had been unchecked for as long as the configs have used the one-line form. Fixed, and refined: a same-unit cross-record call is only a hazard when **some scene's descriptor mask loads the caller's record without the target's** (1728 such calls, 23 genuine), and the genuine pre-existing unit-C backlog is an explicit allowlist (`tools/cross_bank_known_hazards.txt`) that still hard-fails on anything new | `tools/cross_bank.py`; `tools/cross_bank_known_hazards.txt`; `docs/HANDOFF-2026-09-17-session67.md` §6 |
@@ -52,6 +53,106 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-17 (session 69) — the Organize Screen: scene `0x06`'s 355 KB module was never compiled
+
+**The developer's report** was *"press `R`, the cursor goes over `Organize
+Screen`, press `A` — currently the screen just reloads, but the expected is
+another screen where you can organize your army."* The reload is literal and it is
+measurable: with `OGRE_SCENE_LOG=1`, scene `0x06` is entered and left again
+**68 ms** later.
+
+### What scene `0x06` is
+
+`tools/scenemap.py` already had the graph: id 6 is one of the three *indirect*
+accessors. `func_8017B5DC` reads `*(0x80193700)` and returns descriptor
+**`0x8018FD84`** (mask `0x2`) or **`0x8018FD98`** (mask `0x40002`); both share
+**enter `0x8017B6D0`**, update `0x8017B858`, hook `0x8017B9C8`, leave `0`.
+
+Session 67 met the same scene on the `map → mission` route and called it *"the
+briefing"*. It is the **Organize Screen**: the army-management screen the player
+gets before a battle and from the mission's `R` menu. The developer's capture
+(`docs/proofs/native-organize-screen.png`) shows the three counters
+(`SOLDIER 030` / `CHARACTER 25` / `UNIT 03`), the chequered formation grid with a
+blue block of tiles and a gold tile, the selected entry's name plate
+(`Scarlet Magi`) and the `WAR FUNDS 0001000 Goth` plate.
+
+### The enter, at instruction level (`func_8017B6D0`, `.streamedB`)
+
+```
+8017b708  a0 = 0x00087220
+8017b710  a1 = 0x8019A7C0
+8017b718  a2 = 0x000DDF80
+8017b724  subu a2, a2, a0   -> 0x56D60
+8017b720  jal 0x8009DA50                          -> DMA 0x56D60 -> RAM 0x8019A7C0
+8017b728  a0 = a1 = 0x801F1520, beql -> skip      -> bss_start == bss_end: NO BSS
+8017b774  jal 0x801C19B0                          -> the module's ENTRY
+8017b77c  *(0x801977E8) = 2
+```
+
+So the module owns RAM `0x8019A7C0 .. 0x801F1520`.
+
+`func_8017B858` is the **generic** scene update that scenes `0x05`, `0x06` and
+`0x07` share (sessions 55/60 established the shape): it switches on
+`*(0x801977E8)`. Because scene `0x06`'s enter sets state **2**, its own update is
+the `state == 2` arm — `jal 0x801C214C` at `0x8017B8F4` — and the generic hook's
+`state == 2` arm is `jal 0x801B7FC0` at `0x8017BA24`. Those two, plus the enter's
+`jal 0x801C19B0`, are the module's three externally-called entry points.
+
+### The bug, and the fix
+
+All three were uncompiled, so each landed on the runtime's logging stub:
+
+```
+[bank] UNKNOWN module rom=0x087220 ram=0x8019A7C0 (0x8019A7C0 is also where rom=0x0712A0 loads)
+[overlays] streamed function stub called @ 0x801C19B0 (not yet loaded)
+[overlays] streamed function stub called @ 0x801C214C (not yet loaded)
+[scene] t=334921ms id=0x0003            <- 68 ms after entering 0x0006
+```
+
+The screen was never built and the state machine read the stub's return as "this
+scene is done", which is the "reload". **Bank unit S**
+(`config-bankS.yaml`/`.toml`, `symbol_addrs-bankS.txt` with the three entries,
+`BANK_UNITS += S`, and the three targets appended to `make recomp`'s
+`cross_bank.py dispatch --only` list) fixes it: 406 functions, and the main unit's
+three `jal`s now compile as `LOOKUP_FUNC`.
+
+**Why a unit and not just a config entry:** `0x8019A7C0..0x801F1520` is a
+**swappable arena** — record 7 (`0x101D00` → `0x801AD5C0`, unit N), record 3
+(`0x0EBBD0` → `0x8019EE70`), overlay C (`0x1CE040` → `0x80197B90`) and units H
+(`0x712A0`) and M (`0x79750`) live in it too, and the **main unit has its own real
+function at `0x801B7FC0`**. Leaving that call bound to overlay C's body is the
+session-45 failure mode; dispatching it is what makes the runtime's DMA-driven bank
+map choose. The swap is safe in both directions because the game re-streams the
+mission's banks on the way out — measured in the same run: `0x0E4910`, `0x0EBBD0`
+and `0x101D00` all re-load within the same frame as the `0x06 → 0x03` transition.
+
+### Verification and the two traps
+
+Developer-confirmed live from the natural route (tutorial → practice stage →
+mission → hold `R` → `→` → `A`): *"I checked it myself. it works!"*.
+`tools/elfcheck.py --syms`: `bankS.elf: 0 differing bytes of 909184`, 1382
+address-named symbols all at their named address; `make bank-recomp` reports
+19 units / 29 records / 3094 functions and `check-banks` is OK. **No probes were
+used.** A forced `OGRE_SCENE=0x06` is **not** evidence here (developer): the enter
+builds the screen from the party/character state the route sets up, so a boot-time
+forced entry has nothing to display.
+
+Two traps that cost real time, both worth keeping:
+
+* **The mission's `R` menu is a *hold* menu.** It is drawn while `R` is held and
+  closes on release, so a screenshot taken after a synthetic tap shows nothing —
+  which reads exactly like "the button does not work". Holding `E` (the keyboard's
+  `R` shoulder) with `osascript … key down "e"` and sending the D-pad from the live
+  console works, because `console_input_take()` is **OR'd** with the keyboard
+  state; a console `press` on its own replaces the held mask and closes the menu.
+  The letter `R` is not mapped to anything.
+* **The port's chunk-DMA heuristic produces phantom `UNKNOWN module` lines.**
+  `0x9A020 - 0x87220 == 0x12E00 == 0x801AD5C0 - 0x8019A7C0`, so chunk **151** of
+  this one DMA lands exactly on record `0x1F0A00`'s base and `on_streamed_dma`
+  reports a second missing module that does not exist. Count modules, not lines.
 
 ---
 

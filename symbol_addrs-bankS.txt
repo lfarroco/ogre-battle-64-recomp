@@ -1,0 +1,25 @@
+// Function entries for streamed-overlay bank unit S (bankRec06), forced with
+// `symbol_addrs_path` in config-bankS.yaml.
+//
+// Same reason as symbol_addrs-bankN.txt / -bankP.txt / -bankQ.txt / -bankR.txt:
+// the callers are in the **main unit** (`.streamedB`), but the module is
+// disassembled on its own, so an address that is only a `jal` target from
+// another segment is emitted as a label inside the preceding body instead of a
+// function entry — and the runtime then has no entry to dispatch, so the
+// main unit's dispatched `LOOKUP_FUNC` lands on the logging stub.
+//
+// The run named two of them (`[overlays] streamed function stub called @
+// 0x801C19B0`, `@ 0x801C214C`); the third is the scene hook's target, which the
+// game never reached because the entry stubbed out first:
+//
+//   0x801C19B0  scene 0x06's enter  `func_8017B6D0` @0x8017B774
+//   0x801C214C  the generic scene update `func_8017B858` state 2 @0x8017B8F4
+//   0x801B7FC0  the generic scene hook   `func_8017B9C8` state 2 @0x8017BA24
+//
+// All three are also in the `recomp` target's `cross_bank.py dispatch --only`
+// list, so the main unit's `jal`s compile as `LOOKUP_FUNC` and the runtime's
+// DMA-driven bank map picks unit S when it is resident.
+
+func_ovlS_801C19B0 = 0x801C19B0; // type:func
+func_ovlS_801C214C = 0x801C214C; // type:func
+func_ovlS_801B7FC0 = 0x801B7FC0; // type:func

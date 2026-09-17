@@ -1054,6 +1054,24 @@ hardware. RT64 remains the primary native renderer throughout. See
     [polls] [x] [y]` (a synthetic pad press + analog stick), which is what made
     the map drivable (`press right` needs a long hold — the game polls input far
     faster than 60 Hz). See `docs/HANDOFF-2026-09-17-session68.md`.
+  - ✅ **The Organize Screen renders (session 69) — scene `0x06`'s 355 KB module
+    is now bank unit S.** Picking `Organize Screen` from the mission's `R` menu
+    (hold `R`; entry 1 `Dispatch`, 5 `Mission Objective`, 7 `End`) entered scene
+    `0x06` and bounced back to `0x03` in **68 ms** — the developer's *"the screen
+    just reloads"*. The scene's enter `func_8017B6D0` DMAs **ROM `0x87220`
+    (`0x56D60`) → RAM `0x8019A7C0 … 0x801F1520`** (no BSS) and `jal`s the module's
+    entry `0x801C19B0`; the generic scene update `func_8017B858` and hook
+    `func_8017B9C8` (shared by scenes `0x05`/`0x06`/`0x07`) dispatch on
+    `*(0x801977E8)`, which the enter sets to **2**, so they `jal` `0x801C214C` and
+    `0x801B7FC0`. All three stubbed out, so the screen was never built and the
+    state machine took its done arm. The RAM is a **swappable arena** (record 7's
+    `0x101D00`, record 3's `0x0EBBD0`, overlay C `0x1CE040`, units H and M — and
+    the main unit has its *own* real function at `0x801B7FC0`), so all three calls
+    are `cross_bank.py dispatch --only` targets. Now: 406 functions,
+    `bankS.elf` byte-identical to the ROM with 1382 symbols at their addresses,
+    **19 units / 29 records / 3094 functions**, developer-confirmed live
+    (`docs/proofs/native-organize-screen.png`). See
+    `docs/HANDOFF-2026-09-17-session69.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —
