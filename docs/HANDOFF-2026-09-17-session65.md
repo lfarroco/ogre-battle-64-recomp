@@ -1,5 +1,13 @@
 # Handoff — 2026-09-17, session 65: **the map's sprites were a linker artifact** — unit M's data labels were 8 bytes high
 
+> **Read §10 first if you are here for save/load.** The developer corrected the
+> premise at the end of this session: **OB64's save is a battery-backed cartridge
+> save (SRAM/FlashRAM/EEPROM), *not* a Controller Pak.** The Controller Pak — and
+> everything §9 implements — is the **copy/backup** device (the strings
+> `Controller Pak Menu`, `1 note 25 pages to save.`, `Data loaded to Game Pak.`).
+> The actual blocker for the map's R → Save is therefore
+> `entry.save_type = recomp::SaveType::None` in `app/src/main.cpp`.
+
 ## Goal and result
 
 **Goal (developer):** continue session 64, whose top lead was renderer-side (the
@@ -299,3 +307,161 @@ and in `docs/guides/app-build.md` → "Checkpoints".
 (`/tmp/ogre-console.txt`), so a *second* running instance silently eats the
 commands meant for yours. Use `OGRE_CONSOLE_FILE=/tmp/<name>.txt` per instance
 (this cost a few runs here while the developer's game was still open).
+
+## 9. Addendum 2 — the **copy/backup** device (Controller Pak) is implemented; it is not the save path (§10)
+
+**What landed (this session, after §8):** the runtime now has a real Controller
+Pak **copy/backup** device, and the game is told a pak is inserted. (This is the
+`Data loaded to Game Pak.` / `Data saved to Controller Pak.` feature — §10.)
+
+* `tools/N64ModernRuntime/librecomp/src/pak.cpp` (in the gitignored runtime tree;
+  captured in `n64modernruntime-ob64.patch`) implements a **flat 32 KiB image**
+  accessed in 32-byte blocks, with block addresses `>= 1024` (byte `0x8000`, the
+  bank/enable register) **ignored** — which is why libultra's own bank probe
+  (`__osRepairPackId`) reports `banks == 1`, the value its inode/directory layout
+  expects. The model and the fresh-pak format follow mupen64plus
+  (`src/device/controllers/paks/mempak.c`) and cen64 (`si/pak.c`), so the image is
+  interchangeable with emulator `.mpk` dumps. Blocks 1..6 (the ID block, its three
+  backups, the label/reserved slots) are write-protected unless `force == 1` —
+  `PFS_LABEL_AREA = 7` and `PFS_FORCE = 1`, **read out of this ROM's own**
+  `__osContRamWrite` (`0x80097DC0`: `sltiu v1,a0,7`).
+* The image is `<config>/saves/<game id>.mpk`
+  (`~/Library/Application Support/ogrebattle64/saves/ogrebattle64-us-rev1.mpk`),
+  loaded at first use and written back with the runtime's temp+`.bak` helpers; a
+  missing or wrong-sized file is formatted like mupen's `format_mempak` (ID at
+  page-0 block 1 + copies at 3/4/6, the page-1 index table with its checksum,
+  the page-2 mirror).
+* **Only three functions needed bridging** — the game's PFS is libultra the ROM
+  already contains and `make recomp` already compiles, so there was no filesystem
+  to port. The three that touch the SI/PIF hardware (which the port does not
+  emulate: KSEG1 MMIO is aliased into a scratch page, `recomp.h`) are now
+  reimplemented and bound: `__osContRamRead` `0x80097BD0`,
+  `__osContRamWrite` `0x80097DC0`, `__osPfsGetStatus` `0x80096EC0`
+  (`symbol_addrs.txt` + N64Recomp's `reimplemented_funcs`; the generated C calls
+  `*_recomp` at all six sites and the old bodies are gone).
+* `app/src/sdl_platform.cpp` reports `Pak::ControllerPak` for controller 0
+  (a new enum value in `ultramodern/include/ultramodern/input.hpp`), so
+  `osContInit` sets `CONT_CARD_ON` and `__osMotorAccess` still only rumbles for
+  `RumblePak`.
+
+**Where the game's save flow actually goes (new, instruction-level):**
+
+* The Controller Pak menu **is not in the map module**. It is in **unit H** (the
+  form/UI module, RAM `0x8019A7C0`): `func_ovlH_8019C69C` calls the pak API
+  (`0x8008AC70`, `0x8008A6A0`, …) and the three pak-menu screens are
+  `func_ovlH_8019DBA4`/`0x8019DC88`/`0x8019DEB4` (the "No Data"/"Game Data"
+  strings exist **only** in unit H's ROM half; unit M has only "No Data").
+* It is entered through the **scene descriptor's extra callbacks**. Scene `0x07`'s
+  descriptor (`0x8018FDAC`) has `+0x14 = func_8017BA60`, **`+0x18 =
+  func_8017BB28`**, `+0x1C = func_8017BB54`; `func_8017BB28` is a one-line
+  wrapper: `jal 0x8019C69C` — i.e. **scene `0x07`'s `+0x18` callback is the
+  Controller Pak menu**, and `+0x14` is the form (it loads unit H and calls
+  `func_ovlH_8019A884`). Scene `0x05`'s (the map's) callbacks are the generic
+  `0x8017B6D0`/`0x8017B858`/`0x8017B9C8` — no pak entry.
+* **The map module (unit M) never calls the pak API**: of its 13 calls into the
+  main segment only cache/queue/utility helpers (`0x80093380`, `0x80093060`,
+  `0x80091AB0`, …) are involved, and no module except **unit H** calls the pak API
+  or the pak-command sender (`func_80089CF8`). Unit H is the *only* caller.
+
+**Therefore, in a *forced* map entry the save cannot reach the device**, and it
+does not: driving R → right×3 → A (Save) → A (slot) → A (Yes) on `OGRE_SCENE=0x05`
+draws the map's slot window and "WARNING … existing data will be overwritten …
+Proceed? Yes/No", then returns to the map, having — verifiably —
+* called none of the three bridged device functions (lldb breakpoints on all
+  three were never hit; the `[pak]` load/format line never appears),
+* issued **no DMA** (with `OGRE_DMA_TRACE=1 OGRE_DMA_TRACE_FULL=1`: the only
+  arena DMA in the whole run is the map module's own `rom=0x79750 →
+  0x8019A7C0`; unit H's `rom=0x712A0` is never streamed),
+* changed **no scene** (`c` during the prompt: `scene=0x0005 pending=0x0005`),
+* and called the **pak manager not at all** (host-symbol breakpoints on
+  `func_8008AD60`/`func_8008A910`/`func_8008AC30`/`func_8008AC70`/`func_8008ACA0`
+  never hit; `func_8008AF60`, which the dispatcher `func_80075BC0` calls on every
+  scene change, *is* hit, so the manager framework is alive).
+
+The explanation is the same one this session used for the mission markers: a
+**forced entry has no army/save state**, which the save/battery path needs, and the
+Controller Pak menu itself lives in `scene 0x07` — so the map's save in the real
+game must route through the form module, which a forced entry never does. A
+**natural** run to the map is therefore required to exercise the device (and the
+title's `Load Game` entry, which appears only once a save exists).
+
+**What to run next (developer):** play to the map naturally with this build, open
+R → right×3 → A (Save) → A (slot) → A (Yes), then report (a) the on-screen
+message (`Saving data.` / `Data saved to Controller Pak.` vs `Saving data has
+failed.` / `Insert Controller Pak.`), (b) whether the log prints
+`[pak] formatted a new Controller Pak at …` or `[pak] loaded …`, and (c) whether
+`~/Library/Application Support/ogrebattle64/saves/ogrebattle64-us-rev1.mpk`
+appears (32768 bytes). A real 32 KiB `.mpk` from an emulator or console can simply
+be dropped at that path for the Load half.
+
+**Addendum to §9 (same round).** Two more facts, both instruction-level, and one
+open puzzle:
+
+* The pak-presence wiring is *verifiable*: the app now prints
+  `[input] controller 1: Controller Pak inserted` once per process (from
+  `get_connected_device_info`, `app/src/sdl_platform.cpp`), so a run's log says
+  whether the game was told a pak is inserted even when the device is never
+  touched. Verified on a title run: the line appears, and `osContInit` therefore
+  sets `CONT_CARD_ON` for controller 1 (the game's own controller scan at
+  `0x8008A2E8` tests `type & 0x1F07 == 5` and `errno == 0`; the pak bit is the
+  `status` byte the save code reads).
+* Scene `0x07`'s descriptor (`0x8018FDAC`) has three extra words:
+  `+0x14 = func_8017BA60` (the form: it loads unit H and calls
+  `func_ovlH_8019A884`), **`+0x18 = func_8017BB28`** (`jal 0x8019C69C` — the
+  Controller Pak menu), `+0x1C = func_8017BB54`. Scene `0x05`'s are the generic
+  `0x8017B6D0`/`0x8017B858`/`0x8017B9C8`.
+* **The puzzle:** a scan of the *whole ROM* shows that the current-descriptor
+  global `0x800E8294` is loaded in exactly **8** places, all in the main segment,
+  and they read only `+0x00`, `+0x04`, `+0x08`, `+0x0C` and `+0x10` — i.e. the
+  documented enter/update/hook/leave/mask. **Nothing in the ROM reads
+  `+0x14`/`+0x18`/`+0x1C`**, and `func_8017BB28` is referenced *only* by that
+  descriptor word (no `jal` to it anywhere, and the pointer value appears exactly
+  once, in the descriptor table at ROM `0x65CC4`). So either the dispatcher for
+  those three words lives in a module the port does not compile, or they are not
+  callbacks at all. Worth resolving with the developer's knowledge of *where* the
+  Controller Pak menu appears in the game (`docs/scenes.md` row 9 says "reached
+  from a later scene", and the map's R→Save is a *map* dialog): if they can say
+  which screen/flow shows `Controller Pak Menu` / `Save`/`Load`/`Erase`/`Exit`,
+  that names the scene to attack next.
+
+## 10. Correction (developer, end of session 65) — the game's **save is a battery**, not a Controller Pak
+
+The developer: *"ob64 saved the game in a battery, not in a controller pak."*
+
+**This reframes the save/load milestone.** Everything in §9 is still true and still
+useful — the Controller Pak device, the three bridged SI functions and the
+presence bit are the **copy/backup** path, not the save path. The string table
+says so once you look for it: `Controller Pak Menu`, `1 note 25 pages to save.`,
+`Insufficient pages to copy game.`, **`Data loaded to Game Pak.`** and
+`Data saved to Controller Pak.` are a *copy between the cartridge ("Game Pak")
+and a pak*, exactly the "copy/backup" feature most N64 games shipped. The
+*primary* save (the map's R → Save → Yes, which session 58's recon assumed was
+the pak) is **battery-backed cartridge save** = SRAM/FlashRAM/EEPROM.
+
+**So the actual blocker for the map's save is `recomp::SaveType`.** The app still
+sets `entry.save_type = recomp::SaveType::None` (`app/src/main.cpp`, with a
+`TODO`), so the runtime tells the game there is no cartridge save device — which
+is exactly consistent with everything §9 measured on the save flow: it draws its
+dialog and prompt, then issues **no** device call, **no** PI DMA, **no** scene
+change and no pak-manager call. The pak device was never the gate.
+
+**Next step (concrete, small):**
+1. Identify the chip from the game's own code: look for `osEepromProbe`
+   (runtime `librecomp/src/eep.cpp`), `osFlashInit`/`osFlashReadId`/`osFlashReadStatus`
+   (runtime `librecomp/src/pi.cpp` handles `SaveType::Flashram`), or raw PI DMAs
+   to the save window `0x08000000` (SRAM has no probe) — and see which of those
+   functions the ROM actually calls (`symbol_addrs.txt` names the bridged
+   libultra set; `grep` the recompiled tree for `osEepromProbe_recomp`,
+   `osFlashInit_recomp`, or a `pi.cpp` save-window DMA).
+2. Set `entry.save_type` to that value (`recomp::SaveType::Sram` /
+   `Flashram` / `Eep16k`) and rebuild — the runtime then owns the save image in
+   `<config>/saves/<game id>.bin` through the existing `save_context`
+   (`pi.cpp`: `save_buffer`, `update_save_file()`, temp+`.bak`).
+3. Re-run the map's R → Save → Yes (the same tap schedule used in §9) and expect
+   the file to appear and the game's own "saving…/saved" message; then re-enter
+   the map / restart and confirm the game *loads* it.
+4. The pak work stays as-is for the copy/backup path (`Load Game` on the title is
+   documented as appearing "when a Controller Pak save exists", so the title
+   entry belongs to that path, not to the battery).
+
+Also recorded in `docs/DECISIONS.md` and corrected in `PLAN.md`.

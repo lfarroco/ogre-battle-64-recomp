@@ -809,7 +809,7 @@ index c228433..ad0c6b8 100644
  
      // Terminate the function
 diff --git a/src/symbol_lists.cpp b/src/symbol_lists.cpp
-index 9c8f27d..c18b9c9 100644
+index 9c8f27d..a061ad3 100644
 --- a/src/symbol_lists.cpp
 +++ b/src/symbol_lists.cpp
 @@ -21,6 +21,13 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
@@ -834,3 +834,18 @@ index 9c8f27d..c18b9c9 100644
      "__osSpSetPc",
      // Controller functions
      "osContInit",
+@@ -36,6 +44,14 @@ const std::unordered_set<std::string> N64Recomp::reimplemented_funcs {
+     "osContStartQuery",
+     "osContGetQuery",
+     "osContSetCh",
++    // Controller Pak device functions (session 65). OB64's PFS filesystem is
++    // libultra the ROM contains and this recompiles; these three are the only
++    // ones that talk to the SI/PIF hardware, which the port does not emulate, so
++    // they are reimplemented over a host 32 KiB pak image
++    // (librecomp/src/pak.cpp, symbol_addrs.txt).
++    "__osContRamRead",
++    "__osContRamWrite",
++    "__osPfsGetStatus",
+     // EEPROM functions
+     "osEepromProbe",
+     "osEepromWrite",

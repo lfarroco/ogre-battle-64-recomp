@@ -1322,6 +1322,20 @@ static ultramodern::input::connected_device_info_t get_connected_device_info(int
 
     if (controller_num == 0) {
         info.connected_device = ultramodern::input::Device::Controller;
+        // OB64 saves to a Controller Pak; the device itself (a flat 32 KiB image
+        // kept in `<config>/saves/<game id>.mpk`) is in
+        // librecomp/src/pak.cpp, which bridges __osContRamRead/__osContRamWrite/
+        // __osPfsGetStatus. This bit is what osContInit reports and what the
+        // game's save menu checks for "Insert Controller Pak." (session 65).
+        info.connected_pak = ultramodern::input::Pak::ControllerPak;
+        // One line per process so a run's log says whether the game was told a
+        // pak is inserted (the device itself logs `[pak]` on its first access).
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            fprintf(stderr, "[input] controller 1: Controller Pak inserted\n");
+            fflush(stderr);
+        }
         return info;
     }
 

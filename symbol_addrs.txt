@@ -92,6 +92,26 @@ osGetTime = 0x80094C90;             // type:func
 osSetTime = 0x80094D20;             // type:func
 osSetTimer = 0x80094D40;            // type:func
 
+// Batch 7 (2026-09-17, session 65): the Controller Pak's SI-touching functions.
+// OB64 saves to a Controller Pak, and its PFS filesystem (osPfsInitPak,
+// osPfsAllocateFile, osPfsFindFile, osPfsReadWriteFile, osPfsChecker, ...) is
+// libultra that the ROM already contains and the port already recompiles — it
+// needs no porting. Only these three functions talk to the SI/PIF hardware,
+// which the port does not emulate (KSEG1 MMIO is aliased to a scratch page in
+// recomp.h), so they are bridged to the host 32 KiB pak image in
+// `librecomp/src/pak.cpp`. Identified from the disassembly:
+//   __osContRamRead 0x80097BD0 — 23 call sites, `do { ... } while (retry-- >= 0)`,
+//     `__osSiGetAccess`, PIF ram 0x800F86C0, the `addr >> 3` / `addr << 5`
+//     address pair, a `__osContDataCrc` verify, `bcopy(ptr + 6, data, 32)`.
+//   __osContRamWrite 0x80097DC0 — same shape plus the ROM's own label-area guard
+//     (`address < 7 && address != 0` unless `force == 1`); called by
+//     `__osPfsSelectBank` (0x800970D0) with block 1024 = the bank register.
+//   __osPfsGetStatus 0x80096EC0 — `__osPfsInodeCacheBank = 250`, a one-channel
+//     status query, and the only other raw-SI user on the PFS path.
+__osContRamRead = 0x80097BD0;       // type:func
+__osContRamWrite = 0x80097DC0;      // type:func
+__osPfsGetStatus = 0x80096EC0;      // type:func
+
 // Batch 5 (2026-08-25): event registration. The boot trace shows the game
 // thread (thread 3) blocking in func_8008A1B0 -> func_80089AB0 ->
 // func_80089A30 on an audio request response that never arrives. The audio

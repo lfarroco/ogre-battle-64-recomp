@@ -957,8 +957,11 @@ hardware. RT64 remains the primary native renderer throughout. See
     forced scene still draws a correct knight sheet. **A fuller save state will
     not fix the party-sprite defect.** Checkpoints (`save`/`load`) already give
     "a save state at that screen", but **a retail save cannot be loaded yet** —
-    OB64 saves to the Controller Pak and the port has no `osPfs*` at all
-    (session-58c decision; also why scene `0x12` Load Game is unreachable).
+    **corrected in session 65: OB64 saves to a battery-backed cartridge save**
+    (SRAM/FlashRAM/EEPROM), and the port still sets
+    `entry.save_type = recomp::SaveType::None`, so the game sees no save device
+    at all (the Controller Pak is only the *copy/backup* path, and scene `0x12`
+    Load Game is documented as appearing once a *pak* save exists).
     **Route to a real map state:** drive it by hand and dump with the live
     console's number keys (`OGRE_KEY_1='c'`, `_2='save /tmp/map-real.ckpt'`,
     `_3='dump /tmp/map-real.bin'`) — an autoplayer stalls on the name-entry form
@@ -1029,22 +1032,58 @@ hardware. RT64 remains the primary native renderer throughout. See
     rows of soldiers) and the `Grey-Haired Old Man` / `Magnus` dialogue render
     (`docs/proofs/native-newgame-received-for-duty.png`, `-magnus-old-man.png`),
     then the sequence reaches scene `0x05` (`docs/scenes.md` row 8/10).
-  - ⬜ **The game's own save system is the Controller Pak — recon done, nothing
-    implemented (session 58)**. The developer: *"the game has a save system,
-    which we should arrive in one of the next scenes."* The device is the
-    **Controller Pak** (`osPfs*`), not cartridge SRAM/Flash: 105 `jal`s from the
-    main segment into the PFS cluster (`0x8009616C`..`0x80097DC0`) and the whole
-    menu as ROM text (`0x790EC..0x7967C` — `Controller Pak Menu`, `Save`/`Load`/
-    `Erase`, `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to
-    Controller Pak.`, `Game Data 1`/`2`). The strings live in **bank unit H**
-    (`D_ovlH_801A260C`), the same UI module as the name/birthday forms, so the
-    menu's *drawing* should already work. Missing: `librecomp/src/pak.cpp` is
-    upstream's stub returning `PFS_ERR_NOPACK` for every entry point,
-    `recomp::SaveType` has no Controller Pak, and `app/src/main.cpp` sets
-    `SaveType::None` with a TODO — so the game currently sees "no pak inserted".
-    Plan: a 32 KiB pak image in the real PFS layout (interchangeable with
-    emulator/hardware dumps) + a real `osPfs*` implementation + the raw SI pak
-    access (`__osContRamRead`/`Write`, presence bits) + a save file for it.
+  - ⚠️ **Correction (developer, session 65): the game's own save is a
+    *battery-backed cartridge save* (SRAM/FlashRAM/EEPROM), not a Controller Pak.**
+    The pak strings are the *copy/backup* feature (`Data loaded to Game Pak.`).
+    The map's R → Save therefore fails because the app still sets
+    `entry.save_type = recomp::SaveType::None` (`app/src/main.cpp`) — the runtime
+    reports no save device, which is why that flow draws its dialog and then does
+    nothing (no PI DMA, no scene change). **Next: identify the chip
+    (`osEepromProbe` / `osFlashInit` / raw PI DMA to `0x08000000`), set
+    `SaveType`, rebuild, re-drive the map Save**; the runtime's `save_context`
+    (`librecomp/src/pi.cpp`) then owns `<config>/saves/<game id>.bin`.
+  - 🚧 **The Controller Pak device is implemented (session 65) — this is the
+    *copy/backup* path, not the save.** The missing link for it is the *pak menu*,
+    which only unit H's scene can reach. `pak.cpp` in the
+    (gitignored) runtime is no longer upstream's stub: it is a real device — a
+    flat 32 KiB image in 32-byte blocks, block addresses `>= 1024` ignored (the
+    bank/enable register, which is why libultra's own bank probe reports
+    `banks == 1`), blocks 1..6 write-protected unless `force == 1`
+    (`PFS_LABEL_AREA = 7`, `PFS_FORCE = 1`, read out of this ROM's own
+    `__osContRamWrite`), a fresh image formatted like mupen64plus
+    `format_mempak`, and the image persisted to
+    `<config>/saves/<game id>.mpk` (interchangeable with emulator `.mpk` dumps).
+    **Only three functions needed bridging**, because the game's PFS is libultra
+    the ROM already contains and `make recomp` already compiles: the SI-touching
+    `__osContRamRead` `0x80097BD0`, `__osContRamWrite` `0x80097DC0`,
+    `__osPfsGetStatus` `0x80096EC0` (`symbol_addrs.txt` + N64Recomp's
+    `reimplemented_funcs`). `osContInit` now reports a pak in controller 1
+    (`Pak::ControllerPak`). **The gate:** the pak API is called from **unit H
+    only** (the form/UI module) — `func_ovlH_8019C69C` and the three screens
+    `0x8019DBA4`/`0x8019DC88`/`0x8019DEB4` — and the pak menu is *scene `0x07`'s
+    descriptor callback `+0x18`* (`0x8018FDAC` → `func_8017BB28` → `jal
+    0x8019C69C`; `+0x14` is the form). The map's module never calls the pak API,
+    and a **forced** map entry's Save (R → right×3 → A → A → Yes) draws the map's
+    slot window and the overwrite prompt and then stops: no device call (lldb
+    breakpoints never hit), no DMA (`OGRE_DMA_TRACE_FULL=1`: unit H's `0x712A0`
+    is never streamed), no scene change (`c`: `pending=0x0005`) and no pak-manager
+    call. So a **natural** run to the map is required to exercise the device (a
+    forced entry has no army/save state — the same caveat as the mission markers).
+    Next: drive `R → Save → Yes` on a natural map and read the log
+    (`[pak] formatted/loaded …`) and the on-screen message; drop a real 32 KiB
+    `.mpk` at the path above for the Load half. See
+    `docs/HANDOFF-2026-09-17-session65.md` §8–§9 and
+    `docs/HANDOFF-2026-09-16-session58.md` §3c.
+  - ⬜ **The save-system recon (session 58)**, kept for the entry-point map — but
+    note its premise is **corrected in session 65**: the *save* is a battery-backed
+    cartridge save (SRAM/FlashRAM/EEPROM); what follows describes the
+    **Controller Pak copy/backup** path (`osPfs*`), not the save. 105
+    `jal`s from the main segment into the PFS cluster
+    (`0x8009616C`..`0x80097DC0`); the whole menu is ROM text
+    (`0x790EC..0x7967C` — `Controller Pak Menu`, `Save`/`Load`/`Erase`,
+    `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to
+    Controller Pak.`, `Game Data 1`/`2`) which **exists in unit H's ROM half
+    only** (unit M has just `No Data`), because the menu is unit H's code.
     See `docs/HANDOFF-2026-09-16-session58.md` §3c and `docs/scenes.md` row 9.
   - ✅ **Scene `0x16`'s content is confirmed** (session 58): the closing movie's
     five shots all render, in order, and match the developer's retail

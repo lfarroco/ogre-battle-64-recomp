@@ -620,6 +620,319 @@ index 8c8e5d1..9610b33 100644
  }
  
  std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {
+diff --git a/librecomp/src/pak.cpp b/librecomp/src/pak.cpp
+index 0be1513..2aa72a6 100644
+--- a/librecomp/src/pak.cpp
++++ b/librecomp/src/pak.cpp
+@@ -4,6 +4,308 @@
+ #include "recomp.h"
+ #include "helpers.hpp"
+ 
++#include "librecomp/files.hpp"
++#include "librecomp/game.hpp"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <vector>
++
++// ---------------------------------------------------------------------------
++// Controller Pak (mempak) device — session 65.
++//
++// OB64 saves to a **Controller Pak**, not cartridge SRAM/EEPROM/FlashRAM. The
++// PFS filesystem on top of it (osPfsInitPak, osPfsAllocateFile, osPfsFindFile,
++// osPfsReadWriteFile, osPfsChecker, ...) is *libultra*, and it is already
++// recompiled from the ROM into this port's code — there is no need to port it.
++// Only three of its functions touch the SI/PIF hardware, which the port does not
++// emulate (KSEG1 MMIO is aliased into a scratch page, see recomp.h), so those
++// three are bridged to the host device below (see `symbol_addrs.txt`):
++//
++//   __osContRamRead  0x80097BD0  s32 (OSMesgQueue*, s32 channel, u16 block, u8* data)
++//   __osContRamWrite 0x80097DC0  s32 (..., u16 block, u8* data, s32 force)
++//   __osPfsGetStatus 0x80096EC0  s32 (OSMesgQueue*, s32 channel)
++//
++// The device model is the one mupen64plus (`src/device/controllers/paks/mempak.c`)
++// and cen64 (`si/pak.c`) implement, and it is what makes the image
++// interchangeable with emulator `.mpk` files:
++//
++//  * the pak is a **flat 32 KiB** (256 Kbit) byte space accessed in 32-byte
++//    blocks (`block` here is a block index; libultra builds the wire address as
++//    `block * 32`);
++//  * block addresses >= 1024 (byte 0x8000) are the bank/enable register and are
++//    **ignored** — which is why `__osRepairPackId`'s bank probe (it writes block
++//    0 with each bank selected, then re-reads it with bank 0) finds bank 0's data
++//    disturbed and reports `banks == 1`. libultra then places the inode tables at
++//    page 1, the mirror at page 2, the directory at page 3 and the first data
++//    page at page 5 — exactly the layout mupen's formatter writes;
++//  * blocks 1..6 (the ID block, its three backups and the label/reserved slots)
++//    are write-protected unless `force == PFS_FORCE (1)`. That guard is read out
++//    of this ROM's own `__osContRamWrite` (`address < 7 && address != 0`).
++//
++// A fresh image is formatted the way mupen formats one (`format_mempak`), so a
++// save written by this port is a valid retail-style pak and a pak written by an
++// emulator or a real console can be dropped in. The image lives next to the
++// cartridge save as `<config>/saves/<game id>.mpk`.
++// ---------------------------------------------------------------------------
++
++namespace {
++    constexpr size_t kPakSize = 0x8000;                      // 256 Kbit = 32 KiB
++    constexpr size_t kBlockSize = 32;
++    constexpr uint32_t kBlockCount = kPakSize / kBlockSize;  // 1024
++    constexpr uint16_t kLabelArea = 7;                       // PFS_LABEL_AREA (blocks 1..6 are protected)
++    constexpr s32 kForce = 1;                                // PFS_FORCE
++    constexpr s32 kPfsErrNopack = 1;                         // PFS_ERR_NOPACK
++    constexpr int kPakChannel = 0;                           // the pak is in controller 1
++    constexpr auto kFlushInterval = std::chrono::milliseconds(250);
++
++    struct PakDevice {
++        std::vector<uint8_t> image;
++        std::filesystem::path path;
++        std::mutex mutex;
++        bool loaded = false;
++        bool dirty = false;
++        std::chrono::steady_clock::time_point last_flush{};
++    };
++
++    PakDevice pak;
++
++    void store_be16(uint8_t* out, uint16_t value) {
++        out[0] = uint8_t(value >> 8);
++        out[1] = uint8_t(value & 0xFF);
++    }
++
++    void store_be32(uint8_t* out, uint32_t value) {
++        out[0] = uint8_t(value >> 24);
++        out[1] = uint8_t(value >> 16);
++        out[2] = uint8_t(value >> 8);
++        out[3] = uint8_t(value & 0xFF);
++    }
++
++    // The 32-byte ID block libultra validates: 24 serial bytes, a device id with
++    // bit 0 set (bit 0 clear means "repair me"), the bank count, a version, and
++    // the two checksums (`__osIdCheckSum`: the sum of the big-endian halfwords
++    // before the checksum, and the sum of their complements).
++    void write_id_block(uint8_t* out, uint8_t banks, uint8_t version) {
++        static const uint32_t kSerial[6] = { 0x4F424B36, 0x34474C4F, 0x42414C4C, 0x00000001, 0x00000000, 0x00000000 };
++        for (int i = 0; i < 6; i++) {
++            store_be32(out + 4 * i, kSerial[i]);
++        }
++        store_be16(out + 24, 0x0001);   // device id, bit 0 set = usable
++        out[26] = banks;
++        out[27] = version;
++        uint16_t sum = 0;
++        for (int i = 0; i < 28; i += 2) {
++            sum = uint16_t(sum + uint16_t((out[i] << 8) | out[i + 1]));
++        }
++        store_be16(out + 28, sum);
++        store_be16(out + 30, uint16_t(0xFFF2 - sum));
++    }
++
++    // mupen64plus `format_mempak` for a 1-bank (32 KiB) pak: the ID at page-0
++    // block 1 with copies at blocks 3/4/6, the page-1 index table (pages 5..127
++    // free, the first entry holding the checksum of the rest), its page-2 mirror,
++    // and zeros from page 3 on.
++    void format_image(std::vector<uint8_t>& image) {
++        constexpr size_t kPageSize = 256;
++        constexpr size_t kFirstDataPage = 5;
++        constexpr size_t kLastPage = 128;
++
++        image.assign(kPakSize, 0);
++        uint8_t* page0 = image.data() + 0 * kPageSize;
++        uint8_t* page1 = image.data() + 1 * kPageSize;
++        uint8_t* page2 = image.data() + 2 * kPageSize;
++
++        write_id_block(page0 + 1 * kBlockSize, /*banks=*/1, /*version=*/1);
++        std::memcpy(page0 + 3 * kBlockSize, page0 + 1 * kBlockSize, kBlockSize);
++        std::memcpy(page0 + 4 * kBlockSize, page0 + 1 * kBlockSize, kBlockSize);
++        std::memcpy(page0 + 6 * kBlockSize, page0 + 1 * kBlockSize, kBlockSize);
++
++        for (size_t page = kFirstDataPage; page < kLastPage; page++) {
++            store_be16(page1 + 2 * page, 0x0003);  // empty page marker
++        }
++        uint8_t index_checksum = 0;
++        for (size_t i = 2 * kFirstDataPage; i < 2 * kLastPage; i++) {
++            index_checksum = uint8_t(index_checksum + page1[i]);
++        }
++        page1[1] = index_checksum;
++        std::memcpy(page2, page1, kPageSize);
++    }
++
++    std::filesystem::path image_path() {
++        std::u8string name = recomp::current_game_id();
++        name += u8".mpk";
++        return recomp::get_config_path() / u8"saves" / name;
++    }
++
++    void flush_locked() {
++        if (!pak.dirty) {
++            return;
++        }
++        pak.dirty = false;
++        pak.last_flush = std::chrono::steady_clock::now();
++
++        std::error_code ec;
++        std::filesystem::create_directories(pak.path.parent_path(), ec);
++        std::ofstream file = recomp::open_output_file_with_backup(pak.path, std::ios_base::binary);
++        if (!file.good()) {
++            fprintf(stderr, "[pak] could not write %s\n", pak.path.string().c_str());
++            return;
++        }
++        file.write(reinterpret_cast<const char*>(pak.image.data()), pak.image.size());
++        file.close();
++        if (!recomp::finalize_output_file_with_backup(pak.path)) {
++            fprintf(stderr, "[pak] could not finalize %s\n", pak.path.string().c_str());
++        }
++    }
++
++    // Lazily load the image; a missing or wrong-sized (unformatted) file is
++    // formatted like a fresh retail Controller Pak.
++    void ensure_loaded_locked() {
++        if (pak.loaded) {
++            return;
++        }
++        pak.loaded = true;
++        pak.path = image_path();
++
++        if (!pak.path.empty()) {
++            std::ifstream file = recomp::open_input_file_with_backup(pak.path, std::ios_base::binary);
++            if (file.good()) {
++                std::vector<uint8_t> loaded(kPakSize);
++                file.read(reinterpret_cast<char*>(loaded.data()), loaded.size());
++                if (file.gcount() == std::streamsize(kPakSize)) {
++                    pak.image = std::move(loaded);
++                    fprintf(stderr, "[pak] loaded %s\n", pak.path.string().c_str());
++                    return;
++                }
++            }
++        }
++
++        format_image(pak.image);
++        pak.dirty = true;
++        fprintf(stderr, "[pak] formatted a new Controller Pak at %s\n", pak.path.string().c_str());
++        flush_locked();
++    }
++
++    void touch(RDRAM_ARG PTR(u8) dst, const uint8_t* src, size_t size) {
++        for (size_t i = 0; i < size; i++) {
++            MEM_B(i, dst) = src[i];
++        }
++    }
++
++    void fetch(RDRAM_ARG uint8_t* dst, PTR(u8) src, size_t size) {
++        for (size_t i = 0; i < size; i++) {
++            dst[i] = MEM_BU(i, src);
++        }
++    }
++
++    bool pak_present(s32 channel) {
++        return channel == kPakChannel;
++    }
++
++    // Bridge of `__osContRamRead`: `block` is a 32-byte block index.
++    s32 pak_read(RDRAM_ARG1, s32 channel, uint16_t block, PTR(u8) data) {
++        if (!pak_present(channel)) {
++            return kPfsErrNopack;
++        }
++
++        std::lock_guard<std::mutex> lock(pak.mutex);
++        ensure_loaded_locked();
++
++        uint8_t buffer[kBlockSize];
++        const uint32_t offset = uint32_t(block) * kBlockSize;
++        if (offset < kPakSize) {
++            std::memcpy(buffer, pak.image.data() + offset, kBlockSize);
++        }
++        else {
++            // The bank/enable register and anything past the end reads as zero.
++            std::memset(buffer, 0, kBlockSize);
++        }
++        touch(PASS_RDRAM data, buffer, kBlockSize);
++        return 0;
++    }
++
++    // Bridge of `__osContRamWrite`; the guard and the protected block range are
++    // this ROM's own (`__osContRamWrite` 0x80097DC0: `address < 7 && address != 0`
++    // unless `force == 1`).
++    s32 pak_write(RDRAM_ARG1, s32 channel, uint16_t block, PTR(u8) data, s32 force) {
++        if (!pak_present(channel)) {
++            return kPfsErrNopack;
++        }
++        if (force != kForce && block < kLabelArea && block != 0) {
++            return 0;
++        }
++
++        std::lock_guard<std::mutex> lock(pak.mutex);
++        ensure_loaded_locked();
++
++        const uint32_t offset = uint32_t(block) * kBlockSize;
++        if (offset >= kPakSize) {
++            // Bank select / pak enable: the hardware has no such memory, and
++            // ignoring it is what makes the bank probe report one bank.
++            return 0;
++        }
++
++        uint8_t buffer[kBlockSize];
++        fetch(PASS_RDRAM buffer, data, kBlockSize);
++        if (std::memcmp(pak.image.data() + offset, buffer, kBlockSize) != 0) {
++            std::memcpy(pak.image.data() + offset, buffer, kBlockSize);
++            pak.dirty = true;
++        }
++        return 0;
++    }
++
++    // Bridge of `__osPfsGetStatus`: 0 when a pak is in the channel, else
++    // PFS_ERR_NOPACK. Used by `osPfsInitPak` and at the end of every
++    // `osPfsReadWriteFile`, which makes it a natural point to flush the image.
++    s32 pak_status(s32 channel) {
++        if (!pak_present(channel)) {
++            return kPfsErrNopack;
++        }
++
++        std::lock_guard<std::mutex> lock(pak.mutex);
++        ensure_loaded_locked();
++        if (pak.dirty && std::chrono::steady_clock::now() - pak.last_flush > kFlushInterval) {
++            flush_locked();
++        }
++        return 0;
++    }
++}
++
++extern "C" void __osContRamRead_recomp(uint8_t* rdram, recomp_context* ctx) {
++    const s32 channel = _arg<1, s32>(rdram, ctx);
++    const uint16_t block = _arg<2, u16>(rdram, ctx);
++    PTR(u8) data = _arg<3, PTR(u8)>(rdram, ctx);
++
++    _return<s32>(ctx, pak_read(PASS_RDRAM channel, block, data));
++}
++
++extern "C" void __osContRamWrite_recomp(uint8_t* rdram, recomp_context* ctx) {
++    const s32 channel = _arg<1, s32>(rdram, ctx);
++    const uint16_t block = _arg<2, u16>(rdram, ctx);
++    PTR(u8) data = _arg<3, PTR(u8)>(rdram, ctx);
++    const s32 force = _arg<4, s32>(rdram, ctx);
++
++    _return<s32>(ctx, pak_write(PASS_RDRAM channel, block, data, force));
++}
++
++extern "C" void __osPfsGetStatus_recomp(uint8_t* rdram, recomp_context* ctx) {
++    const s32 channel = _arg<1, s32>(rdram, ctx);
++
++    _return<s32>(ctx, pak_status(channel));
++}
++
++// ---------------------------------------------------------------------------
++// Upstream's `osPfs*` stubs are kept but unused: the game's own PFS above them
++// is recompiled and runs. They only matter if a future game config bridges the
++// PFS entry points, which would then need a real filesystem implementation.
++// ---------------------------------------------------------------------------
++
+ extern "C" void osPfsInitPak_recomp(uint8_t * rdram, recomp_context* ctx) {
+     ctx->r2 = 1; // PFS_ERR_NOPACK
+ }
 diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
 index 43509ba..81ba211 100644
 --- a/librecomp/src/pi.cpp
@@ -1169,6 +1482,23 @@ index 5593172..c99c729 100644
      "${CMAKE_CURRENT_SOURCE_DIR}/src/input.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/mesgqueue.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/misc_ultra.cpp"
+diff --git a/ultramodern/include/ultramodern/input.hpp b/ultramodern/include/ultramodern/input.hpp
+index 1dab1b8..2e9f83d 100644
+--- a/ultramodern/include/ultramodern/input.hpp
++++ b/ultramodern/include/ultramodern/input.hpp
+@@ -15,7 +15,11 @@ namespace ultramodern {
+         enum class Pak {
+             None,
+             RumblePak,
+-            // ControllerPak,
++            // Session 65: a 32 KiB Controller Pak (mempak). `osContInit` reports
++            // any non-None pak as inserted, and `__osMotorAccess` only rumbles
++            // for `RumblePak`, so this is the "a memory pak is in the slot" bit
++            // OB64's save menu checks.
++            ControllerPak,
+             // TransferPak
+         };
+ 
 diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
 index d60c4ec..77c1df4 100644
 --- a/ultramodern/include/ultramodern/renderer_context.hpp

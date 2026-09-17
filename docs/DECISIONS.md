@@ -17,7 +17,7 @@ handoff holds the evidence.
 | 2026-09-16 (60) | **Every `jal` from the main ELF into RAM a scene module occupies must be dispatched (`LOOKUP_FUNC`), not left bound to overlay C's body — and a `jal` into a size-overridden body interior is emitted as "call the containing body + early `return`", which abandons the caller's frame.** That emission is not cosmetic: the early return dereferences the *caller's* epilogue, so each call leaks its frame and the caller reads its callee-saved registers from the wrong stack slots. The map scene was black because of two such sites in the scene update/hook; the frame-pump thread's `$s1` (the message-type comparator) was corrupted and the pump stopped, which presents as a frozen frame counter (`D_800AEFA4`) with the VI retrace (`D_800C4BCC`) still counting. `cross_bank.py dispatch` repairs the shape to call-and-continue; targets `0x8019AF0C` and `0x801A103C` are now in `make recomp`'s `--only` list | `docs/HANDOFF-2026-09-16-session60.md` §1-§3; `Makefile`; `tools/cross_bank.py` |
 | 2026-09-16 (59) | **Every bank of a swappable RAM gets its own unit, and the unit whose code calls into that RAM defines none of them — the record-14 arena has a *third* bank (ROM `0x286BA0` → RAM `0x8022ACB0`, the chapter animation's module), now unit K, with `bankRec14a` moved to unit L; scene `0x05`'s module (ROM `0x79750` → RAM `0x8019A7C0`, the other bank of unit H's RAM) is unit M.** A bank's extent is its DMA's own size, not a previous session's chunk-rounded figure (`bankRec14a` `0xE860` not `0xDE60`; `bankRec07` `0x84B0` not `0x8600`), and the "is this DMA a module we know?" test must compare the rom→ram delta, not just the ROM range — the range test hid unit M behind unit H's over-claimed size | `docs/HANDOFF-2026-09-16-session59.md`; `config-bankK/L/M.yaml`; `app/src/bank_overlays.cpp` |
 | 2026-09-16 (58) | **A save state is RDRAM *plus* the overlay state, and the two must be captured with the game threads parked.** `save`/`load` in the live console write/restore the whole 8 MiB image and the runtime's function map/bank records (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`). RDRAM alone is not a machine rewind: which recompiled body runs at each RAM address is host state, and a restore that leaves the map on a later bank runs the wrong module's bodies (the session-45/55 mis-binding class). The file I/O is wrapped in `ultramodern::checkpoint_pause_begin/end`, which parks every thread executing recompiled code at a function-entry boundary — the recompiled N64 threads are 1:1 native threads, and without the park the image **tears** (session 58: the checkpoint's own checksum did not match its bytes and its first `0x300` bytes were zeros while the game kept submitting RSP tasks during the write). A checkpoint is only valid in the process/binary that wrote it | `docs/guides/app-build.md` → "Checkpoints"; `docs/HANDOFF-2026-09-16-session58.md` §1 |
-| 2026-09-16 (58c) | **OB64's save hardware is the Controller Pak (`osPfs*`), and the port has no Controller Pak support at all — the runtime's `pak.cpp` is an upstream stub returning `PFS_ERR_NOPACK` for every entry point.** Evidence: 105 `jal`s from the main segment into the PFS cluster (`0x8009616C`..`0x80097DC0`) and the whole save menu as ROM text (`0x790EC..0x7967C`: `Controller Pak Menu`, `Save`/`Load`/`Erase`, `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to Controller Pak.`). The menu's strings are in **bank unit H** (`D_ovlH_801A260C`), the same UI module that draws the name/birthday forms, so the menu's *drawing* is likely already working and the missing piece is the device. `recomp::SaveType` (cartridge EEPROM/SRAM/FlashRAM) does not cover it, and `app/src/main.cpp` sets `SaveType::None` with a TODO. The game's own save system therefore needs a 32 KiB Controller Pak image (real PFS layout) + a real `osPfs*` implementation + the raw SI pak access, before the save scene is usable | `docs/HANDOFF-2026-09-16-session58.md` §3c; `tools/N64ModernRuntime/librecomp/src/pak.cpp`; `docs/scenes.md` row 9 |
+| 2026-09-16 (58c) | *(**Corrected in session 65**: the save is a battery-backed cartridge save; the Controller Pak is the copy/backup device — see the session-65 entry.)* **OB64's save hardware is the Controller Pak (`osPfs*`), and the port has no Controller Pak support at all — the runtime's `pak.cpp` is an upstream stub returning `PFS_ERR_NOPACK` for every entry point.** Evidence: 105 `jal`s from the main segment into the PFS cluster (`0x8009616C`..`0x80097DC0`) and the whole save menu as ROM text (`0x790EC..0x7967C`: `Controller Pak Menu`, `Save`/`Load`/`Erase`, `Insert Controller Pak.`, `1 note 25 pages to save.`, `Data saved to Controller Pak.`). The menu's strings are in **bank unit H** (`D_ovlH_801A260C`), the same UI module that draws the name/birthday forms, so the menu's *drawing* is likely already working and the missing piece is the device. `recomp::SaveType` (cartridge EEPROM/SRAM/FlashRAM) does not cover it, and `app/src/main.cpp` sets `SaveType::None` with a TODO. The game's own save system therefore needs a 32 KiB Controller Pak image (real PFS layout) + a real `osPfs*` implementation + the raw SI pak access, before the save scene is usable | `docs/HANDOFF-2026-09-16-session58.md` §3c; `tools/N64ModernRuntime/librecomp/src/pak.cpp`; `docs/scenes.md` row 9 |
 | 2026-09-16 (58b) | **A streamed module that shares RAM with another record gets its own unit and the calls into it are `LOOKUP_FUNC` — scene `0x16`'s closing movie is bank unit I (ROM `0x244770` → RAM `0x801D0860`), and `bankRec10a` moved out of unit C to unit J because it is the *other bank* of that exact RAM.** `bankRec10a` could not stay in unit C (unit C's own code calls into that range — session 45's rule) and could not share unit I with `bankRec16` (overlapping records). Splat/N64Recomp hygiene this exposed: a unit's asm/assets must be cleared before `splat split` (splat never deletes a removed segment's output, and the ELF rule globs its inputs), `RecompiledFuncs/`/`Bank*Funcs/` must be cleared before regenerating (N64Recomp never deletes a previous run's file, so a symbol that changed section leaves a conflicting definition behind), a `data` subsegment needs an explicit following `bin` gap (splat extends it to the next segment otherwise), and `gen_bank_syms.py` must also see spimdisasm's `.Lovl<U>_<addr>` local-label references | `docs/HANDOFF-2026-09-16-session58.md` §2; `config-bankI.yaml`, `config-bankJ.yaml` |
 | 2026-09-16 (57) | **The njpeg readback's source is the game's own framebuffer choice (`state[0x64]`), not RT64's scratch word.** RT64's `OGRE_NJPEG_SCRATCH` `+8` is only *re*set by a YUV-texture-image-then-colour-image pair and is **never cleared**, so at the first pass of an assembly it still names the previous step's framebuffer — which by then holds the previous screen (the name/date-of-birth form). That is the intermittent stale-backdrop rectangle, not a render-vs-readback race. `tools/njpeg_readback.py` now keeps `state[0x64]` whenever `D_800C4BB8` matches an entry of the framebuffer table `0x800A8204`, and uses the scratch word only as the session-48 fallback. Measured over 10 runs / 120 stage-3 passes: old rule wrong **13** (always pass 0), new rule wrong **0** | `docs/HANDOFF-2026-09-16-session57.md` §1; `tools/njpeg_readback.py` |
 | 2026-09-16 (57b) | **A game-thread framebuffer readback is already ordered by the game's DP-completion wait, so no extra handshake is needed.** `sp_complete()` does run before `send_dl()` (`ultramodern/src/events.cpp:422`/`:429`), but the game waits on the **DP** event (`:432`, its registered queue is `0x800E8BF4`); delaying the display list 400 ms inside `send_dl` never let the readback run inside the delay, and an in-flight-gfx-task handshake implemented for the window never blocked once (reverted). `ogre_sync_framebuffers()` is what forces the RDP's pixels back to RDRAM before the copy | `docs/HANDOFF-2026-09-16-session57.md` §1, "Why the render-vs-readback race hypothesis is wrong" |
@@ -3895,3 +3895,77 @@ habit of handing checkpoints to the next session both assume otherwise.
   `OGRE_CONSOLE_FILE` (default `/tmp/ogre-console.txt`) and is *global*: with two
   instances running, the other one silently consumes your commands. Use a
   per-instance file.
+
+## Session 65 (2026-09-17) — Controller Pak: bridge the three SI functions, not the filesystem; flat 32 KiB image
+
+**Decision: the port owns the Controller Pak *device*, and keeps the game's own
+recompiled PFS above it.** Three findings drove it:
+
+1. **The PFS is already in the ROM and already recompiled.** `osPfsInitPak`,
+   `osPfsAllocateFile`, `osPfsFindFile`, `osPfsReadWriteFile`, `osPfsChecker`, …
+   are libultra functions in the main segment (`0x8009616C`..`0x80097DC0`) that
+   `make recomp` compiles. Porting a filesystem would have been strictly worse
+   than leaving the game's own code in place.
+2. **Only three functions touch hardware the port lacks.** `__osContRamRead`
+   (`0x80097BD0`, 23 call sites), `__osContRamWrite` (`0x80097DC0`) and
+   `__osPfsGetStatus` (`0x80096EC0`) build PIF/SI commands and wait on the SI
+   message queue; the port has no SI emulation (KSEG1 MMIO is aliased into a
+   scratch page by `recomp.h`), so they are reimplemented in
+   `librecomp/src/pak.cpp` and bound via `symbol_addrs.txt` + N64Recomp's
+   `reimplemented_funcs`. Everything else — inode tables, directory, notes,
+   checksums, the bank probe — stays the ROM's own code.
+3. **The device model is flat 32 KiB.** mupen64plus
+   (`src/device/controllers/paks/mempak.c`) and cen64 (`si/pak.c`) both implement
+   the pak as a flat 32 KiB byte space accessed in 32-byte blocks, where
+   addresses `>= 0x8000` are the bank/enable register and are ignored. That is why
+   libultra's `__osRepairPackId` bank probe (write block 0 with bank *j*, re-read
+   it with bank 0) finds bank 0 disturbed and reports **`banks == 1`** — the value
+   its layout expects (inode tables at page 1, mirror at page 2, directory at
+   page 3, first data page 5). A fresh image is therefore formatted exactly like
+   mupen's `format_mempak` with `banks = 1`, which makes the port's `.mpk` files
+   interchangeable with emulator/console dumps in both directions.
+4. **The write guard is the ROM's, not a guess.** `__osContRamWrite` protects
+   the ID/label blocks: `address < 7 && address != 0` unless the caller passes
+   `force == PFS_FORCE`, i.e. **`PFS_LABEL_AREA = 7`, `PFS_FORCE = 1`**, read out
+   of this ROM's instruction at `0x80097DF4` (`sltiu v1,a0,7`) rather than from a
+   header. The device implements the same guard so it cannot diverge from the
+   game's expectations.
+5. **The image is a separate device file**: `<config>/saves/<game id>.mpk`
+   (32 KiB), written with the runtime's temp+`.bak` helpers. It is *not* the
+   cartridge-save `save_buffer`/`SaveType` plumbing, which stays `None` — a
+   Controller Pak is a different device with its own image.
+
+**Where it is reachable from (new):** the pak API is called by **unit H** only
+(the form/UI module), and the Controller Pak menu is **scene `0x07`'s descriptor
+callback `+0x18`** (`0x8018FDAC` → `func_8017BB28` → `jal 0x8019C69C`, unit H's
+`func_ovlH_8019C69C`); `+0x14` of the same descriptor is the name/birthday form.
+The map's module (unit M) never calls the pak API, and a *forced* map entry's
+Save never reaches scene `0x07` (no DMA, no scene change, no device call), so the
+device can only be exercised from a **natural** map run — the same "a forced
+entry has no army/save state" caveat as the map's mission markers.
+
+## Session 65 (2026-09-17) — **correction**: OB64's save is a battery-backed cartridge save; the Controller Pak is the *copy/backup* device
+
+**The developer (end of session 65): "ob64 saved the game in a battery, not in a
+controller pak."** Session 58's recon read the Controller Pak strings
+(`Controller Pak Menu`, `1 note 25 pages to save.`, `Insufficient pages to copy
+game.`, `Data saved to Controller Pak.`) and the PFS cluster and concluded the
+save device was the pak. The string that gives it away is
+**`Data loaded to Game Pak.`** — "Game Pak" is the cartridge, and those strings
+are the *copy between the cartridge save and a pak*, a backup feature. So:
+
+* the **primary save** (the map's R → Save → Yes, and whatever the title reads) is
+  **battery-backed cartridge save** = SRAM / FlashRAM / EEPROM, and the port's
+  `entry.save_type = recomp::SaveType::None` (`app/src/main.cpp`) is why that flow
+  silently does nothing: the runtime reports no save device, so the game never
+  issues the PI DMA. Everything session 65 measured on that flow (dialog + prompt
+  drawn, then no device call, no DMA, no scene change) follows from this.
+* the **Controller Pak device implemented in session 65 is not wasted**: it is the
+  copy/backup device, and the "Controller Pak Menu" (Save/Load/Erase/Exit) plus
+  the titie's `Load Game` entry ("when a Controller Pak save exists") belong to
+  that path. With `SaveType` fixed, the *next* question is whether the copy
+  feature's own scene is reachable.
+* **Next step**: identify the chip (`osEepromProbe`, `osFlashInit`/`osFlashReadId`,
+  or a raw PI DMA to the `0x08000000` save window), set `recomp::SaveType` to it,
+  rebuild, and re-drive the map's Save; the runtime's existing `save_context`
+  (`librecomp/src/pi.cpp`) then persists `<config>/saves/<game id>.bin`.
