@@ -4,10 +4,12 @@
 # 0x80197B90) at its RAM address. The game's other streamed overlays are loaded
 # into the *same* RAM, so their code cannot share overlay C's VMAs in one ELF.
 # This config disassembles the records of the bank that the game swaps in at
-# t~95s (segment table entries 2, 3 and 6 at ROM 0x387C0) at their true RAM
+# t~95s (segment table entries 2 and 3 at ROM 0x387C0) at their true RAM
 # addresses, in isolation, so spimdisasm can follow their `jal` targets and find
 # real function boundaries, and so every absolute reference matches the RAM the
-# game DMA's them to.
+# game DMA's them to. Record 6 (also part of that bank) moved to unit O in
+# session 67 — record 3's code calls into record 6's RAM, and a unit may not
+# define a swappable range its own code calls into (see config-bankO.yaml).
 #
 # The result is linked into its own ELF (build/ogrebank.elf), recompiled by
 # N64Recomp with config-bankA.toml into BankFuncs/, and registered by
@@ -86,17 +88,10 @@ segments:
     start: 0xFA010
     vram: 0xFA010
 
-  # Bank record 6: ROM 0xFA600..0x101D00 -> RAM 0x801AD5C0.
-  # code 0x5DF0 (-> 0x801B33B0), data 0x1910 (-> 0x801B4CC0), bss 0xA0.
-  # 0x801AD5C0 is the streamed-stub address the session-32 run aborted on.
-  - name: bankRec6
-    type: code
-    start: 0xFA600
-    vram: 0x801AD5C0
-    subsegments:
-      - [0xFA600, asm]
-      - [0x1003F0, data]
-
-  # Remaining bank records (7..9, 18) are not recompiled yet; the declared ROM
-  # ends here (splat only needs the ranges it is told about).
+  # Bank record 6 (ROM 0xFA600..0x101D00 -> RAM 0x801AD5C0) moved to **unit O**
+  # in session 67. It stayed here it made N64Recomp bind record 3's call to
+  # 0x801AD6BC (ROM 0x8019F4AC) to unit A's own record-6 body, but scene 0x03
+  # (the mission, mask 0x38C) loads record 3 *without* record 6 — record 7
+  # (unit N) occupies 0x801AD5C0 — so the wrong bank's code ran and the run died
+  # on a wild pointer. See config-bankO.yaml. The declared ROM ends here.
   - [0x101D00]

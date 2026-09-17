@@ -652,6 +652,52 @@ Pair it with `tools/guestmap.py <descriptor>` for the ROM offset and owning
 segment of a descriptor, and `tools/runlog.py` for which scenes a run actually
 entered.
 
+### Adding a streamed bank unit (the session-67 recipe)
+
+When a scene reaches RAM the port has no code for, the run says so — take it in
+this order, because each step is cheaper than the next and the later ones
+mislead if the earlier one is skipped.
+
+1. **The port names the missing module by itself.**
+   `[bank] UNKNOWN module rom=0x… ram=0x…` (a *segment-table* record the port
+   has no unit for) or `[overlays] streamed function stub called @ 0x…` (a
+   `LOOKUP_FUNC` onto an address nothing registered). Run it, read the address,
+   and only then look for the DMA.
+2. **Add the unit.** `config-bank<U>.yaml` (splat: `type: code`, `start`/`vram`,
+   `[start, asm]` + `[<code end>, data]`, `symbol_name_format: "ovl<U>_$VRAM"`)
+   and `config-bank<U>.toml` (N64Recomp), then `BANK_UNITS += <U>` in the
+   `Makefile`. A **bank's size is its DMA size**, and the code/data boundary is
+   its last `jr ra` **rounded up to a 16-byte boundary** — otherwise the
+   assembler pads `.text` and `make bank-recomp`'s ELF check fails loudly (the
+   session-65 trap; that is exactly what it is for).
+3. **Give records their BSS.** If the segment table's `ram_end` word is past
+   `ram start + rom size`, add the record to `RAM_END` in
+   `tools/gen_bank_funcs.py`; the runtime then zeroes it on load as the game's
+   loader does.
+4. **Declare cross-record function entries.** `symbol_addrs-bank<U>.txt`
+   (`name = 0xADDR; // type:func`, wired with `symbol_addrs_path` in the splat
+   config) for every address the game *calls* that the target record never `jal`s
+   from inside itself. Each record is disassembled as its own segment, so such an
+   address is emitted as a label inside the preceding body, N64Recomp has no
+   entry there, and `LOOKUP_FUNC` becomes the **no-op** streamed stub
+   (`get_function` has no interior fallback). Derive the list mechanically —
+   every `LOOKUP_FUNC(0x…)` in `Bank<U>Funcs/` whose target is inside the unit's
+   own RAM ranges and is not already a `recomp_trace_entry`. Do **not** try a
+   subsegment split at the same address: the assembler's 16-byte `.text` padding
+   breaks the ELF-vs-ROM identity.
+5. **Watch for a bank the trace cannot see.** `OGRE_DMA_TRACE=1
+   OGRE_DMA_TRACE_FULL=1` names the transfers, but its own overhead changes which
+   path the run takes — in session 67 it showed one arena bank and the clean runs
+   loaded a different one. A one-line probe in `recomp::do_rom_read` (log reads
+   whose destination is the arena, or whose source is the ROM region) is
+   lighter and found the second bank immediately.
+6. **Fix the binding, not the symptom.** If a call runs the wrong bank's body,
+   the unit that *contains* the target record is the problem: move the target
+   record to a unit that does not call it, so the caller compiles as
+   `LOOKUP_FUNC`. `make cross-bank-check` is the audit, and
+   `tools/cross_bank_known_hazards.txt` is the explicit allowlist of accepted
+   pre-existing hazards (a *new* one still fails `make bank-recomp`).
+
 ### `tools/watch.sh <guest-addr>` — who writes this address?
 
 ```sh

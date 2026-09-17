@@ -122,9 +122,9 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x0FA010u, (int32_t)0x8019EE70u, 0x0005E0u, true  },  //  4 (bank unit C)
     { 0x0FA5F0u, (int32_t)0x8019EE70u, 0x000010u, false },  //  5
     { 0x0FA600u, (int32_t)0x801AD5C0u, 0x007700u, true  },  //  6 (bank unit)
-    { 0x101D00u, (int32_t)0x801AD5C0u, 0x043530u, false },  //  7
-    { 0x145230u, (int32_t)0x801F4050u, 0x0099D0u, false },  //  8
-    { 0x14EC00u, (int32_t)0x801FDA90u, 0x0173E0u, false },  //  9
+    { 0x101D00u, (int32_t)0x801AD5C0u, 0x043530u, true  },  //  7 (bank unit N, mission scene 0x03)
+    { 0x145230u, (int32_t)0x801F4050u, 0x0099D0u, true  },  //  8 (bank unit N)
+    { 0x14EC00u, (int32_t)0x801FDA90u, 0x0173E0u, true  },  //  9 (bank unit N)
     { 0x1F0A00u, (int32_t)0x801AD5C0u, 0x0230E0u, true  },  // 10 (bank unit C)
     { 0x24BC70u, (int32_t)0x801F7100u, 0x0131F0u, true  },  // 11 (bank unit C)
     { 0x25EE60u, (int32_t)0x8020A300u, 0x0169C0u, true  },  // 12 (bank unit C)

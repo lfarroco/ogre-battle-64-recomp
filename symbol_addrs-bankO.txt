@@ -1,0 +1,17 @@
+// Function entries for streamed-overlay bank unit O (bankRec6), forced with
+// `symbol_addrs_path` in config-bankO.yaml.
+//
+// Record 6's disassembly runs into these addresses as fall-through tails of the
+// functions above (they are not `jal` targets *within* record 6, so spimdisasm
+// would not start functions there), but record 3 — `func_ovlA_8019EE70`, which
+// is resident together with record 6 in scene 0x0B — calls each of them. The
+// same four addresses are ordinary function entries in record 7's layout (unit
+// N), so the runtime's `LOOKUP_FUNC` has to resolve them in whichever bank of
+// RAM 0x801AD5C0 is loaded. Declaring them here makes N64Recomp emit an entry
+// without inserting a `.text` subsegment boundary (which would add the
+// assembler's 16-byte padding and break the ELF-vs-ROM check).
+
+func_ovlO_801AD6BC = 0x801AD6BC; // type:func
+func_ovlO_801AE880 = 0x801AE880; // type:func
+func_ovlO_801B0654 = 0x801B0654; // type:func
+func_ovlO_801B0714 = 0x801B0714; // type:func

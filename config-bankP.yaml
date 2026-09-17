@@ -1,0 +1,78 @@
+# Secondary splat config: streamed-overlay bank unit P (Phase 4).
+#
+# Unit P holds a module the **mission scene (0x03)** streams into record 9's
+# arena, which the segment table does not describe (it is an explicit chunk DMA,
+# not a segment-table record — the same shape as bankRec10a/10b and
+# bankRec14a/b/d, sessions 45/58/59):
+#
+#   ROM 0x171EC0 (0x6200) -> RAM 0x80214FA0 .. 0x8021B1A0
+#
+# It is loaded right after record 9 (`rom 0x14EC00 -> ram 0x801FDA90`, ends at
+# RAM 0x80214E70) fills the rest of the arena, and its RAM is also owned by unit
+# C's bankRec12 (0x8020A300..0x80220CC0), so it is a bank of that arena and gets
+# its own unit — a unit may not define a swappable range its own code calls into
+# (session 45), and unit N's record 7 calls into it.
+#
+# How it was found (session 67): with records 7/8/9 compiled, the mission no
+# longer crashed but the port logged
+# `[overlays] streamed function stub called @ 0x80216E50` /
+# `@0x80214FA0` / `@0x80216D1C` — addresses **beyond record 9's declared size**
+# (0x14EC00 + 0x173E0 = 0x80214E70), i.e. in its bss/arena — with real MIPS at
+# them, so something had DMA'd code there. `OGRE_DMA_TRACE=1
+# OGRE_DMA_TRACE_FULL=1` on the same run named the transfer exactly:
+# `rom=0x171EC0 ram=0x80214FA0` in 49 contiguous 0x200-byte chunks.
+#
+# The module is disassembled whole as `asm` (it mixes code and small data/pointer
+# tables); its function entries that record 7 calls are forced through
+# `symbol_addrs-bankP.txt` for the reason in symbol_addrs-bankN.txt.
+#
+# See config-bankA.yaml for the model.
+
+name: Ogre Battle 64 - streamed overlay bank unit P
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankP
+  target_path: assets/ogre64.z64
+  elf_path: build/bankP.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankP/asm
+  build_path: build/bankP
+  asset_path: build/bankP/assets
+  ld_script_path: build/bankP.ld
+  undefined_syms_auto_path: build/bankP/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankP/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - symbol_addrs-bankP.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlP_$VRAM"
+  symbol_name_format_no_rom: "ovlP_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # The mission's record-9 arena continuation. Whole module as code; spimdisasm's
+  # own analysis splits the embedded data.
+  - name: bankRec9b
+    type: code
+    start: 0x171EC0
+    vram: 0x80214FA0
+    subsegments:
+      - [0x171EC0, asm]
+
+  - [0x1780C0]

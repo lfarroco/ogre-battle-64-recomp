@@ -34,6 +34,9 @@ debug/out/
 __pycache__/
 *.pyc
 
+# Local `OGRE_PREF_DIR` sandboxes (saves/, mods/) used by scripted runs
+.ogre-prefs*/
+
 
 # OS junk
 .DS_Store

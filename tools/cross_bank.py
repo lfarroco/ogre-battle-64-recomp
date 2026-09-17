@@ -98,6 +98,108 @@ class ToolError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Scene record masks
+# ---------------------------------------------------------------------------
+#
+# A direct call from one record into another record of the *same* unit is only
+# wrong when the game can have the caller resident while the target record is
+# not: the target RAM then holds a different bank and the call runs the wrong
+# body. Whether two records can be split is a property of the scene descriptors'
+# `+0x10` record-mask words (bit N = segment-table record N), which the game's
+# loader uses to decide what to DMA — so the check below reads them instead of
+# flagging every same-unit cross-record call (1728 of those, most of them safe
+# because the records are always loaded together).
+#
+# This table is that ROM data, from `tools/scenemap.py scenes`: every scene
+# descriptor's mask (both branches of the indirect accessors, so scenes 3 and 6
+# appear twice). It is static ROM data; `tools/scenemap.py` regenerates it.
+SCENE_DESCRIPTOR_MASKS: dict[int, int] = {
+    0x800A872C: 0x0000000C,  # scene 0 (boot)
+    0x8018FB04: 0x00000001,  # 1
+    0x8018FB40: 0x00008000,  # 4 (title)
+    0x8018FD70: 0x00000002,  # 5 (map)
+    0x8018FD84: 0x00000002,  # 6 branch A
+    0x8018FD98: 0x00040002,  # 6 branch B
+    0x8018FDAC: 0x00000002,  # 7 (name-entry form)
+    0x8018FB70: 0x00008000,  # 9
+    0x8018FB84: 0x00008000,  # 10 (publishers)
+    0x8018F380: 0x0000004C,  # 11 (attract story)
+    0x8018FB58: 0x00003C00,  # 12
+    0x8018FC3C: 0x40007C14,  # 13 (0x0D, the step engine)
+    0x8018FB2C: 0x00003C00,  # 14
+    0x8018F3A0: 0x0000000C,  # 15
+    0x8018FB98: 0x00008000,  # 16 (closing movie)
+    0x8018FBAC: 0x00008000,  # 17 (tutorial)
+    0x8018FBC0: 0x00008000,  # 18
+    0x8018FBD4: 0x00008000,  # 19
+    0x8018FBE8: 0x00013C14,  # 20
+    0x8018FB18: 0x00000001,  # 21
+    0x8018FC00: 0x00000400,  # 22 (0x16)
+    0x8018FC64: 0x40004000,  # 8
+    0x8018F350: 0x0000038C,  # 3 branch A (the mission)
+    0x8018F364: 0x0004038C,  # 3 branch B
+    0x8018FDC0: 0x00000002,  # 24
+}
+
+RECORD_NAME_RE = re.compile(r"bankRec(\d+)")
+
+
+def scene_record_sets() -> list[frozenset[int]]:
+    """The record set each scene loads, from the descriptor mask words."""
+    return [frozenset(n for n in range(32) if (mask >> n) & 1)
+            for mask in SCENE_DESCRIPTOR_MASKS.values()]
+
+
+def record_number(name: str | None) -> int | None:
+    """`bankRec14b` -> 14, `bankRec3` -> 3; None when the name is not a record."""
+    m = RECORD_NAME_RE.match(name or "")
+    return int(m.group(1)) if m else None
+
+
+def records_always_co_loaded(caller_rec: str | None, target_rec: str | None,
+                             scene_sets: list[frozenset[int]]) -> bool:
+    """True when no scene loads `caller_rec` without `target_rec`.
+
+    A call whose records cannot be identified is reported (returns False): the
+    check must fail safe, not silently skip an unknown layout.
+    """
+    caller_n = record_number(caller_rec)
+    target_n = record_number(target_rec)
+    if caller_n is None or target_n is None:
+        return False
+    return not any(caller_n in s and target_n not in s for s in scene_sets)
+
+
+# Accepted, pre-existing hazards. The mask-aware check (session 67) is the first
+# version that could see this class at all — `parse_yaml_segments` dropped the
+# `name:` on `- name: bankRecX` lines before, so every record was named "?" and
+# the same-record test was vacuously true. Turning it on exposes a backlog in
+# unit C that predates this session and has not been observed to misbehave (its
+# records are loaded together by the scenes that use them); the mission wall
+# (`unit A rec3 -> rec6`) was fixed by moving record 6 to unit O.
+#
+# Each line is `<caller vram> <target vram>` — the pair `check` would otherwise
+# fail on. Anything not listed is a hard failure, so a *new* violation still
+# stops `make bank-recomp`. Removing entries as the unit-C records are split
+# into non-calling units is the cleanup path (see config-bankF.yaml).
+KNOWN_HAZARDS_PATH = ROOT / "tools" / "cross_bank_known_hazards.txt"
+
+
+def known_hazards() -> set[tuple[int, int]]:
+    if not KNOWN_HAZARDS_PATH.exists():
+        return set()
+    out: set[tuple[int, int]] = set()
+    for line in KNOWN_HAZARDS_PATH.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            out.add((int(parts[0], 16), int(parts[1], 16)))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Region model
 # ---------------------------------------------------------------------------
 
@@ -147,7 +249,13 @@ def parse_yaml_segments(path: Path) -> list[dict]:
             if m:
                 cur["type"] = "end"
                 cur["start"] = int(m.group(1), 16)
-            continue
+                continue
+            # A segment can start on the item line itself (`- name: bankRec3`,
+            # `- type: bin`). Without this the name is dropped, every record is
+            # named "?" and `check`'s same-record test becomes vacuously true --
+            # which is exactly how unit A's call from record 3 into record 6's
+            # RAM (the mission wall, session 67) went unreported.
+            stripped = rest
         if cur is None:
             continue
         m = re.match(r"([a-z_]+):\s*(.+)$", stripped)
@@ -868,8 +976,11 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
     reported but only fail with `--strict`.
     """
     bank_bad: list[str] = []
+    bank_known: list[str] = []
     main_bad: list[tuple[int, str]] = []
     bank_total = 0
+    scene_sets = scene_record_sets()
+    known = known_hazards()
 
     for unit_dir in sorted(ROOT.glob("Bank*Funcs")):
         if not unit_dir.is_dir():
@@ -883,12 +994,22 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
                 if not in_ranges(target, swap_ranges):
                     continue
                 bank_total += 1
-                if record_of(target, records) == record_of(caller, records):
+                caller_rec = record_of(caller, records)
+                target_rec = record_of(target, records)
+                if caller_rec == target_rec:
                     continue  # same bank: resident whenever the caller runs
-                bank_bad.append(
-                    f"{path.relative_to(ROOT)}:{line_no}: {caller_name} (0x{caller:08X}) calls "
-                    f"0x{target:08X} directly, but that RAM is swappable"
-                )
+                # A different record of the same unit is only a hazard when a
+                # scene can load the caller without the target (see
+                # scene_record_sets); otherwise both are resident together.
+                if target_rec is not None and records_always_co_loaded(
+                        caller_rec, target_rec, scene_sets):
+                    continue
+                line = (f"{path.relative_to(ROOT)}:{line_no}: {caller_name} (0x{caller:08X}) calls "
+                        f"0x{target:08X} directly, but that RAM is swappable")
+                if (caller, target) in known:
+                    bank_known.append(line)
+                else:
+                    bank_bad.append(line)
 
     for path in sorted(RECOMP_DIR.glob("*.c")):
         for caller, caller_name, target, line_no in direct_calls(path):
@@ -898,6 +1019,9 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
 
     for line in bank_bad[:60]:
         print(f"cross_bank:   {line}")
+    if bank_known:
+        print(f"cross_bank: bank units: {len(bank_known)} accepted pre-existing hazard call(s) "
+              f"(listed in {KNOWN_HAZARDS_PATH.relative_to(ROOT)})")
     print(f"cross_bank: bank units: {bank_total} direct call(s) into swappable RAM, "
           f"{len(bank_bad)} outside their own record")
     if main_bad:

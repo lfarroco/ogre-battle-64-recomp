@@ -1032,6 +1032,32 @@ hardware. RT64 remains the primary native renderer throughout. See
     rows of soldiers) and the `Grey-Haired Old Man` / `Magnus` dialogue render
     (`docs/proofs/native-newgame-received-for-duty.png`, `-magnus-old-man.png`),
     then the sequence reaches scene `0x05` (`docs/scenes.md` row 8/10).
+  - ✅ **The mission renders (session 67).** The developer's **suspend save**
+    (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
+    the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —
+    and it now enters, runs and draws: 3D terrain, cliffs, woods and rivers, the
+    2D party sprite with its selection brackets, the `Stronghold` tooltip and the
+    unit panel (`docs/proofs/native-mission-scene.png`,
+    `docs/proofs/native-mission-unit-panel.png`). Reaching it took four fixes,
+    all of the swappable-RAM class: (1) records **7/8/9** were uncompiled →
+    **unit N**; (2) unit A's record 3 called `0x801AD6BC` (record 6's RAM) and —
+    both records being in unit A — the recompiler bound it to unit A's record-6
+    body, but scene `0x03` loads record 3 **without** record 6 → record 6 moved to
+    **unit O** so the call dispatches; (3) cross-*record* `jal` targets are
+    invisible to the per-record disassembler, and a `LOOKUP_FUNC` onto a
+    non-entry is a **silent no-op** (`get_function` has no interior fallback), so
+    the entries are declared in `symbol_addrs-bank{N,O,P,Q}.txt` (a subsegment
+    split would insert the assembler's 16-byte `.text` padding and break the
+    ELF-vs-ROM check); (4) record 9's arena streams **two more banks** the segment
+    table does not describe — units **P** (ROM `0x171EC0`) and **Q** (ROM
+    `0x165FE0`), both → RAM `0x80214FA0` — found from the port's stub log and a
+    light `do_rom_read` probe (the full DMA trace perturbs the run onto the other
+    bank). Also fixed: **`tools/cross_bank.py check-banks` was a silent no-op**
+    (its YAML parser dropped the `name:` on `- name: bankRecX` lines), so the
+    session-45 invariant had been unchecked; it now parses names, uses the scene
+    record masks to tell "always loaded together" from a real split (1728 → 23),
+    and allowlists the pre-existing unit-C backlog. See
+    `docs/HANDOFF-2026-09-17-session67.md`.
   - ✅ **The battery save works end to end (session 66) — the chip is 32 KiB of
     SRAM, and the runtime now owns it.** Session 65's correction stands (the save
     is a battery, not a Controller Pak; the pak strings are the copy/backup

@@ -1,0 +1,11 @@
+// Function entries for streamed-overlay bank unit Q (bankRec9c), forced with
+// `symbol_addrs_path` in config-bankQ.yaml.
+//
+// Same reason as symbol_addrs-bankN.txt / symbol_addrs-bankP.txt: unit N's
+// record 7 calls into this module at addresses it never `jal`s from inside the
+// module, so spimdisasm emits them as interiors of a merged body. The port's
+// `[overlays] streamed function stub called @ ...` log named them.
+
+func_ovlQ_8021954C = 0x8021954C; // type:func
+func_ovlQ_80216DC0 = 0x80216DC0; // type:func
+func_ovlQ_8021DC80 = 0x8021DC80; // type:func

@@ -1,0 +1,68 @@
+// Function entries for streamed-overlay bank unit N (records 7, 8, 9), forced
+// with `symbol_addrs_path` in config-bankN.yaml.
+//
+// Record 7's code calls these addresses in record 9's RAM. Spimdisasm analyses each
+// record as its own segment, so a `jal` that crosses from one record to another is
+// not seen while the target record is disassembled and the target is emitted as a
+// label inside the preceding function's body. N64Recomp then has no function entry
+// there, the call compiles as `LOOKUP_FUNC`, and `get_function` has no interior
+// fallback: it returns the logging no-op streamed stub. Records 7, 8 and 9 are only
+// ever loaded together (scene masks 0x38C and 0x4038C), so all of these belong to
+// this unit and simply need declaring. Session 67 found them from the port's own
+// `[overlays] streamed function stub called @ ...` log.
+
+// All of a record's own `jal` targets the analyser already found are entries; the
+// addresses below were derived by taking every `LOOKUP_FUNC` in BankNFuncs/ whose
+// target lies inside unit N's RAM and is not itself an entry.
+
+func_ovlN_80214FA0 = 0x80214FA0; // type:func
+func_ovlN_8021511C = 0x8021511C; // type:func
+func_ovlN_8021535C = 0x8021535C; // type:func
+func_ovlN_80215360 = 0x80215360; // type:func
+func_ovlN_80215390 = 0x80215390; // type:func
+func_ovlN_8021552C = 0x8021552C; // type:func
+func_ovlN_802156F4 = 0x802156F4; // type:func
+func_ovlN_8021592C = 0x8021592C; // type:func
+func_ovlN_80215C38 = 0x80215C38; // type:func
+func_ovlN_80215D80 = 0x80215D80; // type:func
+func_ovlN_802163D8 = 0x802163D8; // type:func
+func_ovlN_802165F0 = 0x802165F0; // type:func
+func_ovlN_80216D1C = 0x80216D1C; // type:func
+func_ovlN_80216D58 = 0x80216D58; // type:func
+func_ovlN_80216DC0 = 0x80216DC0; // type:func
+func_ovlN_80216E50 = 0x80216E50; // type:func
+func_ovlN_80217088 = 0x80217088; // type:func
+func_ovlN_802170EC = 0x802170EC; // type:func
+func_ovlN_802173D0 = 0x802173D0; // type:func
+func_ovlN_80217660 = 0x80217660; // type:func
+func_ovlN_8021766C = 0x8021766C; // type:func
+func_ovlN_80217690 = 0x80217690; // type:func
+func_ovlN_80217BE4 = 0x80217BE4; // type:func
+func_ovlN_80217C88 = 0x80217C88; // type:func
+func_ovlN_80217E50 = 0x80217E50; // type:func
+func_ovlN_80217EF4 = 0x80217EF4; // type:func
+func_ovlN_80218160 = 0x80218160; // type:func
+func_ovlN_802183A8 = 0x802183A8; // type:func
+func_ovlN_80218720 = 0x80218720; // type:func
+func_ovlN_80218FE8 = 0x80218FE8; // type:func
+func_ovlN_8021905C = 0x8021905C; // type:func
+func_ovlN_8021954C = 0x8021954C; // type:func
+func_ovlN_80219594 = 0x80219594; // type:func
+func_ovlN_80219600 = 0x80219600; // type:func
+func_ovlN_80219F6C = 0x80219F6C; // type:func
+func_ovlN_8021A0C4 = 0x8021A0C4; // type:func
+func_ovlN_8021A290 = 0x8021A290; // type:func
+func_ovlN_8021A39C = 0x8021A39C; // type:func
+func_ovlN_8021AE48 = 0x8021AE48; // type:func
+func_ovlN_8021AFAC = 0x8021AFAC; // type:func
+func_ovlN_8021AFF8 = 0x8021AFF8; // type:func
+func_ovlN_8021B0AC = 0x8021B0AC; // type:func
+func_ovlN_8021B1D0 = 0x8021B1D0; // type:func
+func_ovlN_8021C15C = 0x8021C15C; // type:func
+func_ovlN_8021CC88 = 0x8021CC88; // type:func
+func_ovlN_8021CD80 = 0x8021CD80; // type:func
+func_ovlN_8021D220 = 0x8021D220; // type:func
+func_ovlN_8021D848 = 0x8021D848; // type:func
+func_ovlN_8021DC80 = 0x8021DC80; // type:func
+func_ovlN_8021E970 = 0x8021E970; // type:func
+func_ovlN_8021EA70 = 0x8021EA70; // type:func

@@ -1,0 +1,33 @@
+# Accepted, pre-existing cross-bank hazards for `tools/cross_bank.py check-banks`.
+#
+# Format: <caller vram> <target vram>   # caller -> target
+#
+# `check` skips these pairs and fails on anything not listed. They are the
+# unit-C backlog the mask-aware check exposed in session 67; the records are
+# always loaded together by the scenes that use them, and the mission wall
+# (unit A record 3 -> record 6) was fixed by moving record 6 to unit O.
+# Remove entries as those records are split into units that do not call them.
+
+0x801AFC2C 0x8020B050
+0x801AFE50 0x8020B050
+0x801B00D0 0x8020B0B8
+0x801B0790 0x8020B200
+0x801B2C28 0x8020B200
+0x801E7474 0x80217E3C
+0x801E77E4 0x80217E3C
+0x801E7BE4 0x8021804C
+0x801E7EC4 0x8020B104
+0x801EE254 0x8020B124
+0x801EE3E8 0x8020B050
+0x801EE4A0 0x8020B0B8
+0x802258B0 0x801AFE50
+0x802258B0 0x801C8884
+0x802258B0 0x801C88EC
+0x80225A3C 0x8020B2BC
+0x80226110 0x8020B2BC
+0x802263E4 0x801C8870
+0x80226FA8 0x801C5910
+0x802270DC 0x801C5958
+0x802273A0 0x801C5958
+0x802282D8 0x801AD994
+0x802282D8 0x8020DCCC

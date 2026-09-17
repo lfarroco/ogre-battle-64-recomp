@@ -168,7 +168,7 @@ cross-bank-check:
 #   make bank        -> build/bank<U>.elf
 #   make bank-recomp -> Bank<U>Funcs/ + app/src/bank_funcs.inc
 # ---------------------------------------------------------------------------
-BANK_UNITS := A B C D E F G H I J K L M
+BANK_UNITS := A B C D E F G H I J K L M N O P Q
 BANK_ELFS  := $(addprefix build/bank,$(addsuffix .elf,$(BANK_UNITS)))
 BANK_LDS   := $(addprefix build/bank,$(addsuffix .ld,$(BANK_UNITS)))
 

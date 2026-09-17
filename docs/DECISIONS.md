@@ -13,6 +13,8 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (67) | **The mission scene (`0x03`) renders, and the reason it did not was the same swappable-RAM class as sessions 45/55/59 — in two new shapes.** (1) The three records it streams (segment table 7/8/9, `0x101D00`/`0x145230`/`0x14EC00` → RAM `0x801AD5C0`/`0x801F4050`/`0x801FDA90`) were uncompiled: **unit N**. (2) Unit A's record 3 called `0x801AD6BC` — record 6's RAM — and both records being in unit A, N64Recomp bound it directly to unit A's record-6 body; scene `0x03`'s mask `0x38C` loads record 3 **without** record 6 (record 7 is resident), so the wrong bank ran and the process died on wild pointers that moved between runs. Record 6 moved to **unit O**, and the call compiles as `LOOKUP_FUNC`. (3) Record 9's arena streams **two more banks** (units **P** `0x171EC0` and **Q** `0x165FE0`, both → RAM `0x80214FA0`). **A `LOOKUP_FUNC` onto a non-entry is a silent no-op** (`get_function` has no interior fallback), and a cross-*record* `jal` leaves no trace while the target record is disassembled, so the entries are forced with `symbol_addrs_path` files (`symbol_addrs-bank{N,O,P,Q}.txt`) — a subsegment split at the same address would insert the assembler's 16-byte `.text` padding and break the ELF-vs-ROM identity | `config-bankN/O/P/Q.yaml`, `symbol_addrs-bank*.txt`; `docs/proofs/native-mission-scene.png`; `docs/HANDOFF-2026-09-17-session67.md` |
+| 2026-09-17 (67b) | **`tools/cross_bank.py check-banks` was a silent no-op, and its rule needs the scene masks.** `parse_yaml_segments` matched `- name: bankRecX` with its item-line branch and dropped the name, so every record was `"?"` and `record_of(target) == record_of(caller)` was vacuously true — the session-45 invariant had been unchecked for as long as the configs have used the one-line form. Fixed, and refined: a same-unit cross-record call is only a hazard when **some scene's descriptor mask loads the caller's record without the target's** (1728 such calls, 23 genuine), and the genuine pre-existing unit-C backlog is an explicit allowlist (`tools/cross_bank_known_hazards.txt`) that still hard-fails on anything new | `tools/cross_bank.py`; `tools/cross_bank_known_hazards.txt`; `docs/HANDOFF-2026-09-17-session67.md` §6 |
 | 2026-09-17 (66) | **OB64's save is 32 KiB of battery-backed SRAM (not a Controller Pak, not EEPROM/FlashRAM), and the *device* of a game-issued PI DMA is chosen by the `OSPiHandle` the `OSIoMesg` carries, never by the address.** `func_8008A040` builds the save handle with `baseAddress 0xA8000000` (physical `0x08000000`); the boot accessors `func_80074CF0..` read the whole image in 256-byte DMAs at offsets `0..0x7F00` and `func_80074BF0` → `func_80074C58` writes it back the same way (direction 1 = `OSIoMesg` type `0x10`; `0xF` = read). `entry.save_type = recomp::SaveType::Sram`, and `librecomp/src/pi.cpp`'s inline handler (`pi_perform_dma`) routes the window; mupen64plus's database agrees (`SaveType=SRAM`, with `Mempak=Yes` for the unrelated copy/backup device). Emulator files wrap the same logical bytes differently, so `tools/sramsave.py` imports them by magic at any offset/byte order (a parallel-n64 dump has the SRAM at `0x20800`, 32-bit byteswapped) | `app/src/main.cpp`; `librecomp/src/pi.cpp`; `tools/sramsave.py`; `docs/guides/app-build.md` → "Saves"; `docs/HANDOFF-2026-09-17-session66.md` |
 | 2026-09-17 (64) | **A display list, or a decoded asset, that the port produced is evidence about the *port*, never about the game's intent — establish the port's faithfulness first, and treat a difference that survives as a *state* question.** The five checks (which GBI; was an RSP task swallowed; is the code the code we compiled; are the bytes what hardware would have; is the recompiler faithful at this `jal`) partition "the port differs" into recompiler / ucode dispatch / renderer / RDRAM contents / game state. Two session-61/62 mechanisms are **withdrawn**: N64Recomp does **not** execute a `jal` delay slot twice (the duplicate after `goto after_N` is dead code — the delay slot runs once, *before* the callee), and the sprite builder `func_ovlM_8019F83C` emits **no `G_SETTILESIZE` at all** (the word at `0x8019F990` is the TEXRECT's **s,t**), so there was never a "second window writer". The map's artist data is likewise **not** the defect: the LZ decoder is exact (13/13 assets end on their declared payload boundary), the port's `state[+0x04]` is byte-identical to an offline decode of asset `0x01DD210A`, and scene `0x05`'s ucode `0x8009F540` hashes to RT64's `F3DEX2.fifo 2.08` entry. **Do not patch generated C to make a picture look right** (rule 7) | `docs/guides/emulator-first.md`; `docs/HANDOFF-2026-09-17-session64.md` §1-§2 |
 | 2026-09-16 (60) | **Every `jal` from the main ELF into RAM a scene module occupies must be dispatched (`LOOKUP_FUNC`), not left bound to overlay C's body — and a `jal` into a size-overridden body interior is emitted as "call the containing body + early `return`", which abandons the caller's frame.** That emission is not cosmetic: the early return dereferences the *caller's* epilogue, so each call leaks its frame and the caller reads its callee-saved registers from the wrong stack slots. The map scene was black because of two such sites in the scene update/hook; the frame-pump thread's `$s1` (the message-type comparator) was corrupted and the pump stopped, which presents as a frozen frame counter (`D_800AEFA4`) with the VI retrace (`D_800C4BCC`) still counting. `cross_bank.py dispatch` repairs the shape to call-and-continue; targets `0x8019AF0C` and `0x801A103C` are now in `make recomp`'s `--only` list | `docs/HANDOFF-2026-09-16-session60.md` §1-§3; `Makefile`; `tools/cross_bank.py` |
@@ -49,6 +51,83 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-17 (session 67) — the mission scene renders: three record sets, one mis-binding, and a guard that was not checking
+
+The developer's suspend save (`assets/save-mission-1.srm`, the third SRAM slot at
+`0x30B0`) resumes at **scene `0x03`**, the mission (descriptor `0x8018F350`,
+mask `0x38C` = records 2, 3, 7, 8, 9). Four separate things had to land, and the
+third is the most transferable.
+
+**Decision (1): compile the records the mission streams as their own bank unit.**
+`config-bankN.yaml` holds records 7/8/9 (`0x101D00`/`0x145230`/`0x14EC00` → RAM
+`0x801AD5C0`/`0x801F4050`/`0x801FDA90`); they are RAM-disjoint from each other and
+overloaded by other units' records, and their bss ranges went into
+`tools/gen_bank_funcs.py`'s `RAM_END` so the runtime zeroes them on load. Same
+treatment as sessions 45/55/59. Without it the first call into record 8
+(`0x801F8530`) hit the streamed stub and the run died in `do_send` on a wild
+queue pointer.
+
+**Decision (2): a unit may not hold two records a scene can load separately,
+even when their RAM is disjoint.** Unit A held records 2, 3 and 6. Scene `0x03`
+loads record 3 *without* record 6, and record 3 calls `0x801AD6BC`, which is
+inside record 6's RAM. Because both records were in unit A, N64Recomp bound that
+call directly to unit A's own record-6 body (`BankAFuncs/funcs_0.c:20637`,
+`jal` at `0x8019F4AC`) instead of emitting `LOOKUP_FUNC`; with record 7 (unit N)
+resident in that RAM the wrong bank ran, and the process died on wild pointers
+that **moved between runs** (the crash-handler chain named it:
+`func_8008AFE0 -> func_80072398 -> func_800765D8 -> func_ovlA_8019EE70 ->
+func_ovlA_801AD6BC -> func_ovlA_801AEC60 -> func_8007A110`). Record 6 moved to
+**unit O**; the call now dispatches and the runtime's DMA-driven bank map picks
+the resident module (record 6/unit O in scene `0x0B`, record 7/unit N in the
+mission). The session-45 rule is about RAM *ownership*, not only overlap.
+
+**Decision (3): a `LOOKUP_FUNC` whose target is not a function entry is a silent
+no-op, so cross-record entries must be declared.** `get_function`
+(`librecomp/src/overlays.cpp:698`) returns `streamed_stub_generic` for any
+unregistered address in the streamed range — it has **no fallback to the
+containing function**. Spimdisasm analyses each record as its own segment, so a
+`jal` that only exists in *another* record (or in another unit's caller) is never
+seen while the target record is disassembled, and the address is emitted as a
+label inside the preceding body. The fix is a `symbol_addrs_path` file per unit
+(`symbol_addrs-bank{N,O,P,Q}.txt`, `name = 0xADDR; // type:func`). Forcing a
+**subsegment split** at the same address does *not* work: the assembler pads each
+`.text` subsegment to 16 bytes and these addresses are not 16-aligned, so the ELF
+stops being byte-identical to the ROM (session 65's check: `bankO.elf: 24265
+differing bytes`).
+
+**Decision (4): an arena's banks are found from the port's own stub log, not from
+the segment table.** Record 9's arena (`0x801AD5C0`-style reuse) has two more
+banks the segment table does not describe — units **P** (ROM `0x171EC0`,
+`0x6200`) and **Q** (ROM `0x165FE0`, `0xBEE0`), both → RAM `0x80214FA0`. The
+`[overlays] streamed function stub called @ …` log named the addresses first
+(they are past record 9's declared size, in its bss, with real MIPS at them), and
+`OGRE_DMA_TRACE=1 OGRE_DMA_TRACE_FULL=1` named module P. The trace **misses
+module Q** because its own overhead changes which path the run takes — a light
+probe inside `recomp::do_rom_read` (destination in the arena, or source in
+`0x160000..0x179000`) printed `rom=0x165FE0 ram=0x80214FA0` directly. When a
+trace and a run disagree about what was loaded, suspect the trace's effect on the
+run.
+
+**Decision (5): fix `check-banks` and give it the scene masks.** The guard's YAML
+parser matched `- name: bankRecX` with its item-line branch and dropped the name,
+so every record was `"?"` and the same-record test was vacuously true — this
+session's own wall (`unit A rec3 -> rec6`) was exactly what it exists to catch.
+It now parses names, flags a same-unit cross-record call only when **some scene's
+mask loads the caller without the target** (the masks are `SCENE_DESCRIPTOR_MASKS`
+from `tools/scenemap.py scenes`; 1728 calls reduce to 23), and carries an explicit
+allowlist of the pre-existing unit-C backlog
+(`tools/cross_bank_known_hazards.txt`) so a *new* violation still stops
+`make bank-recomp`.
+
+Result: the mission enters, runs and draws —
+`docs/proofs/native-mission-scene.png` (3D terrain, rivers, cliffs, the 2D party
+sprite, the `Stronghold` tooltip) and
+`docs/proofs/native-mission-unit-panel.png` (`No. / FRIENDLY / STATUS`,
+`1. Magnus`, `STRONGHOLD / Zemio`, `START ^ FATIGUE`). No crash, no stub calls,
+and `OGRE_SCENE=story`/`title` regression runs are clean.
 
 ---
 

@@ -1,0 +1,106 @@
+# Secondary splat config: streamed-overlay bank unit O (Phase 4).
+#
+# Unit O holds **bankRec6 alone**, moved out of unit A in session 67.
+#
+# Why it had to move: unit A's record 3 (`func_ovlA_8019EE70`, ROM 0xEBBD0) calls
+# 0x801AD6BC, which is inside record 6's RAM (0x801AD5C0). While record 6 lived in
+# unit A, N64Recomp bound that call directly to unit A's own body
+# (`func_ovlA_801AD6BC(rdram, ctx)` at `BankAFuncs/funcs_0.c:20637`, `jal` at
+# ROM/RAM 0x8019F4AC) instead of emitting `LOOKUP_FUNC`.
+#
+# Scene `0x03` (the mission; descriptor 0x8018F350, mask 0x38C) loads records
+# **2, 3, 7, 8, 9** — record 3 but **not** record 6 — and record 7 (unit N) is the
+# bank that actually occupies 0x801AD5C0 then. So unit A's record-6 body ran while
+# the mission module was resident: the frame-pump thread's call chain was
+# `func_8008AFE0 -> func_80072398 -> func_800765D8 -> func_ovlA_8019EE70 ->
+# func_ovlA_801AD6BC -> func_ovlA_801AEC60 -> func_8007A110` and the process died
+# on a wild pointer (session 67; the same run also died in `do_send` on a
+# corrupted VI-callback queue). With record 6 in its own unit the call compiles as
+# `LOOKUP_FUNC(0x801AD6BC)` and the runtime's DMA-driven bank map picks whichever
+# module the game actually loaded there (record 6 here, record 7/unit N in the
+# mission).
+#
+# The move is the session-45 remedy: a unit must not define a swappable range
+# *and* call into it from another of its records. `tools/cross_bank.py
+# check-banks` could not see this class before session 67 — its YAML parser
+# dropped the `name:` on `- name: bankRecX` lines, so every record was named "?"
+# and the same-record test was vacuously true (fixed in the same session).
+#
+# Record 6 is RAM- and ROM-disjoint from everything else unit O holds (nothing),
+# and its RAM 0x801AD5C0 is also owned by unit C's bankRec10 and unit N's
+# bankRec7 — both other banks of the same arena, which is exactly why it may not
+# be compiled into the unit whose code calls it.
+#
+#   bankRec6  ROM 0x0FA600 (0x7700) -> RAM 0x801AD5C0 .. 0x801B4CC0, bss ..0x801B4D60
+#
+# See config-bankA.yaml for the record's code/data split and config-bankC.yaml for
+# the unit model.
+
+name: Ogre Battle 64 - streamed overlay bank unit O
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankO
+  target_path: assets/ogre64.z64
+  elf_path: build/bankO.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankO/asm
+  build_path: build/bankO
+  asset_path: build/bankO/assets
+  ld_script_path: build/bankO.ld
+  undefined_syms_auto_path: build/bankO/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankO/undefined_funcs_auto.txt
+  # Function entries record 6's own disassembly would otherwise merge into the
+  # preceding body (see the bankRec6 comment below).
+  symbol_addrs_path:
+    - symbol_addrs-bankO.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlO_$VRAM"
+  symbol_name_format_no_rom: "ovlO_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Bank record 6: ROM 0xFA600..0x101D00 -> RAM 0x801AD5C0.
+  # code 0x5DF0 (-> 0x801B33B0), data 0x1910 (-> 0x801B4CC0), bss 0xA0.
+  #
+  # `symbol_addrs-bankO.txt` marks four addresses inside the code as function
+  # entries, and it is **load-bearing**: record 3 (`func_ovlA_8019EE70`) calls
+  # `0x801AD6BC`, `0x801AE880`, `0x801B0654` and `0x801B0714`. Record 7's layout
+  # (unit N) has all four as entries; record 6's own disassembly runs into them as
+  # fall-through tails of the function above (three are in `make midfunc`'s tail
+  # list), so spimdisasm would emit them as interior labels. A `LOOKUP_FUNC` at
+  # such an address finds no registered function and silently becomes the no-op
+  # streamed stub (`get_function` has no interior fallback), which would break the
+  # scenes where record 6 is the resident bank of this RAM (scene 0x0B's mask
+  # 0x4C loads records 2, 3 and 6). A subsegment boundary would force the split
+  # too, but it inserts the assembler's 16-byte `.text` padding and breaks the
+  # ELF-vs-ROM byte identity (session 65's guard) — a symbol does not.
+  - name: bankRec6
+    type: code
+    start: 0xFA600
+    vram: 0x801AD5C0
+    subsegments:
+      - [0xFA600, asm]
+      - [0x1003F0, data]
+
+  # The declared ROM ends here (splat only needs the ranges it is told about).
+  - [0x101D00]

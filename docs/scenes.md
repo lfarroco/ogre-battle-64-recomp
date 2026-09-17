@@ -156,6 +156,42 @@ two saves. **Session 66 corrects the device: it is the cartridge battery
 `0x12` → the map `0x05`, dev-confirmed). See
 `docs/HANDOFF-2026-09-17-session66.md` §3.
 
+### The mission (scene `0x03`) — what it must show (developer, session 67)
+
+The mission the player is sent to from the map. It is **not** the map scene: the
+developer's reference (a retail screenshot, session 67) and words describe *"a
+scene with lots of 3d elements, and some 2d characters over it"* — 3D terrain
+with cliffs, woods and rivers; the party sprite as a **2D** character with
+selection brackets; a **`NOTE` tooltip** carrying the mission's losing condition
+(*"Invasion of your headquarters. Death of Magnus."*); the **location label**
+(`Zemio` in the reference) with its illustration; and the `MISSION` banners along
+the bottom.
+
+The descriptor is **`0x8018F350`** (streamedB; selected by `*(0x80193700)`, which
+also picks scene `0x06`'s two descriptors): enter `func_80173724`, update
+`func_801737CC` (a no-op), hook `func_801737D4`, mask **`0x38C`** = records
+**2, 3, 7, 8, 9**. The enter sets `D_801977E8 = 2` (scene `0x05`'s map sets `1`,
+scene `0x07`'s form sets `3`) and allocates the `0xC000`-byte 320x240 buffer at
+`0x8019EE70`.
+
+| what | source | status |
+|---|---|---|
+| the mission map: 3D terrain, cliffs, woods, rivers, the road; the 2D party sprite with its selection brackets | dev (session 67 reference) | **renders** (session 67): `docs/proofs/native-mission-scene.png` |
+| the UI: the `Stronghold` tooltip + the `R` button hint; the unit panel (`No. / FRIENDLY / STATUS`, `1. Magnus`, `STRONGHOLD / Zemio`, `START ^ FATIGUE`) | dev + proof | **renders** (session 67): `docs/proofs/native-mission-unit-panel.png` |
+| the `NOTE` losing-condition tooltip, the mission `MISSION` banners, the `R` menu inside a mission | dev (session 67 reference) | unknown — not seen in the captures yet |
+
+**How it is reached (session 67):** the developer's suspend save
+(`assets/save-mission-1.srm`) resumes straight into it from the title's
+`Load Game`, so the mission can be tested without driving the map's cursor or the
+briefing. Without a suspend save the route is map (`0x05`) → swords → briefing
+(`0x06`, still uncompiled) → dialogue → mission.
+
+**The wall it was (session 67):** the three segment-table records it streams
+(7/8/9) were uncompiled and its arena streams two more modules (units P and Q),
+and the new records exposed a cross-bank mis-binding in unit A
+(`rec3 -> rec6`). All four are in tree now; the evidence is
+`docs/HANDOFF-2026-09-17-session67.md`.
+
 The step table's commands suggest (unverified) that steps 2 and 9 (`-3`) are the
 dialogue parts, the `-10` steps (3–8, 14–16) the forms, and the single `-4`
 step 10 the closing movie. Confirm against the captures when those steps run.

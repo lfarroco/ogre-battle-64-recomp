@@ -91,6 +91,9 @@ RAM_END: dict[int, int] = {
     0x281830: 0x80243DD0,  # 14 (unit C)
     0x286BA0: 0x8023E630,  # 14's chapter-animation bank (unit K, explicit DMA)
     0x1BA020: 0x80230600,  # 18 (unit B)
+    0x101D00: 0x801F4050,  #  7 (unit N, the mission scene 0x03)
+    0x145230: 0x801FDA90,  #  8 (unit N)
+    0x14EC00: 0x80220F60,  #  9 (unit N)
 }
 
 

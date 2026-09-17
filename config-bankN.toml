@@ -1,0 +1,21 @@
+# N64Recomp config for streamed-overlay bank unit N (Phase 4).
+# See config-bankM.toml for the model. This unit holds the three segment-table
+# records the mission scene (0x03) streams:
+#
+#   bankRec7 ROM 0x101D00 (0x43530) -> RAM 0x801AD5C0
+#   bankRec8 ROM 0x145230 (0x099D0) -> RAM 0x801F4050
+#   bankRec9 ROM 0x14EC00 (0x173E0) -> RAM 0x801FDA90
+
+[input]
+output_func_path = "BankNFuncs"
+elf_path = "build/bankN.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+# Splat is given each record's own code/data boundary (see config-bankN.yaml).
+# Extend any piece it still caps in the middle of a call-and-continue emission
+# here (the failure is "use of undeclared label" at the `goto after_N`).
+function_sizes = []

@@ -1,0 +1,118 @@
+# Secondary splat config: streamed-overlay bank unit N (Phase 4).
+#
+# Unit N holds the three segment-table records the **mission scene (0x03)**
+# streams. The suspend save the developer took *inside* a mission resumes at
+# scene 0x03 (descriptor 0x8018F350, record mask 0x38C = records 2, 3, 7, 8, 9);
+# records 2 and 3 are already compiled, 7/8/9 were not, and the game's first
+# call into the mission module (`0x801F8530`, inside record 8) hit the runtime's
+# streamed stub and the run died in `do_send` — the same wall as sessions
+# 45/55/59, one record set later.
+#
+# The segment table (ROM 0x387C0) describes them, and their ROM and RAM ranges
+# tile contiguously:
+#
+#   rec7 ROM 0x101D00 (0x43530) -> RAM 0x801AD5C0 .. 0x801F4050
+#   rec8 ROM 0x145230 (0x099D0) -> RAM 0x801F4050 .. 0x801FDA90
+#   rec9 ROM 0x14EC00 (0x173E0) -> RAM 0x801FDA90 .. 0x80220F60
+#
+# They are RAM-disjoint from each other, so one unit can hold all three. They
+# do overlap other units' records — rec7 shares its base 0x801AD5C0 with unit
+# A's record 6, unit C's bankRec10 and scene 0x05/0x06's modules, rec8/rec9
+# overlap unit B's record 18 (0x80220F60 is record 18's base, so rec9 ends
+# exactly where it starts) — which is why they live in their own unit: two banks
+# of one RAM range must never be compiled into the same ELF, and a unit may not
+# define a range its own code calls into (the session-45 rule).
+#
+# Code/data boundaries are the module's own last `jr ra` (each record's code
+# region ends on a 16-byte boundary, so the assembler's `.text` padding cannot
+# shift the data labels — the session-65 unit-M bug):
+#
+#   rec7 code 0x3A7C0 -> RAM 0x801E7D80, data to 0x801F0AF0, bss to 0x801F4050
+#   rec8 code 0x08C80 -> RAM 0x801FCCD0, data to 0x801FDA20, bss to 0x801FDA90
+#   rec9 code 0x11010 -> RAM 0x8020EAA0, data to 0x80214E70, bss to 0x80220F60
+#
+# The bss ranges are the segment table's `ram_end` word minus `ram start +
+# rom size`; `make bank-recomp`'s gen_bank_funcs.py carries them in RAM_END so
+# the runtime zeroes them on load exactly as the game's loader does.
+#
+# See config-bankA.yaml for the model.
+
+name: Ogre Battle 64 - streamed overlay bank unit N
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankN
+  target_path: assets/ogre64.z64
+  elf_path: build/bankN.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankN/asm
+  build_path: build/bankN
+  asset_path: build/bankN/assets
+  ld_script_path: build/bankN.ld
+  undefined_syms_auto_path: build/bankN/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankN/undefined_funcs_auto.txt
+  # Record 7's calls into records 8/9 (function entries the per-record analyser
+  # cannot see). See symbol_addrs-bankN.txt.
+  symbol_addrs_path:
+    - symbol_addrs-bankN.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlN_$VRAM"
+  symbol_name_format_no_rom: "ovlN_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Mission record 7: code to its last `jr ra` (ROM 0x13C4B4, delay slot
+  # 0x13C4B8, function ends 0x13C4BC), then the data half. The subsegment
+  # boundary is the next 16-byte boundary (0x13C4C0) so the asm size (0x3A7C0)
+  # is a multiple of 16.
+  - name: bankRec7
+    type: code
+    start: 0x101D00
+    vram: 0x801AD5C0
+    subsegments:
+      - [0x101D00, asm]
+      - [0x13C4C0, data]
+
+  # Mission record 8: code to ROM 0x14DEA8 (last `jr ra` 0x14DEA0, delay slot
+  # 0x14DEA4), data from the next 16-byte boundary 0x14DEB0 (asm size 0x8C80).
+  - name: bankRec8
+    type: code
+    start: 0x145230
+    vram: 0x801F4050
+    subsegments:
+      - [0x145230, asm]
+      - [0x14DEB0, data]
+
+  # Mission record 9: code to ROM 0x15FC0C (last `jr ra` 0x15FC08, delay slot
+  # 0x15FC0C), data from 0x15FC10.
+  - name: bankRec9
+    type: code
+    start: 0x14EC00
+    vram: 0x801FDA90
+    subsegments:
+      - [0x14EC00, asm]
+      - [0x15FC10, data]
+
+  # Records 7/8/9 end at ROM 0x165FE0. The next module the port knows is record
+  # 18 (ROM 0x1BA020); bound the last data subsegment here so it cannot run to
+  # the end of the ROM.
+  - [0x165FE0]
