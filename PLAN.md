@@ -841,7 +841,19 @@ hardware. RT64 remains the primary native renderer throughout. See
     is genuinely transparent. So it reads as a **sprite descriptor the map never
     finished filling**, and the next step is to find what fills it (and whether
     retail animates the party/panel in, since the port's frame is static).
-    `docs/HANDOFF-2026-09-16-session60.md` §7.
+    `docs/HANDOFF-2026-09-16-session60.md` §7. **Session 61 corrected the cause**
+    (§1): the `7x10` window **is** in the game's own list, the sprite table is
+    static and byte-identical to ROM, and the builder
+    `func_ovlM_8019F83C` is faithful — a rect always equals the entry's `(W,H)`
+    it reads. The party draw asks for slot **11** (`0x801A7038` = `144x23`) when
+    the knight's frames are slots **12-15** (`16x24`); the developer measured
+    retail's marker at *10% of height / 5% of width* = **~16x24 px**, matching
+    those slots exactly. The call site is `func_ovlM_801A2A7C`'s first builder
+    call, ROM `0x81B50` (`addiu $a2, $zero, 0xB`). A **global** `base+8` A/B made
+    the party exactly `16x24` but shifted *every* sprite, so it is not the fix; a
+    **targeted** `0xB→0xC` shrank the bar to a compact sprite but is not proven.
+    Open: the emitted window stays `7x10` even for a `(16,24)` entry, so the
+    writer of that window is still unidentified. `docs/HANDOFF-2026-09-16-session61.md`.
   - ✅ **`OGRE_CONSOLE_ON_SCENE` / `_STEP` / `_CMD` (session 58)** — run one
     console command the moment a chosen scene (and step) is live, e.g.
     `OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974

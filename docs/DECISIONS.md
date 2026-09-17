@@ -3566,3 +3566,26 @@ bounded-run exit path (`_exit`, so no `atexit`). It answers "which module is
 resident in this RAM, and which one overwrote it" without trusting
 `config.yaml` — the same class of question `tools/rdram.py banks` answers for a
 dump. Reuse it before writing another throwaway PI-DMA logger.
+
+### Decision: a sprite *size* bug is proved by an entry-vs-rect A/B, not by the window (session 61)
+
+When a 2D sprite renders at the wrong scale on this port, the fastest
+discriminator is **to compare the emitted `G_TEXRECT` with the sprite-table entry
+the builder actually read**, not to reason about the `G_SETTILESIZE` window.
+
+Measured (session 61): `func_ovlM_8019F83C` (`bankRec05`) always emits a rect
+equal to the entry's `(W,H)` from `0x801A6FE0 + a2*8`, so the rect's size names
+the slot the caller asked for. The map's party marker therefore reads slot 11
+(`144x23`, a HUD-width entry) while the knight frames are slots 12-15
+(`16x24`) — and the developer's retail measurement (~10% of 240 px tall, ~5% of
+320 px wide = `16x24`) matches those slots. So: **measure the rect, read the
+entry, and compare against the developer's stated on-screen size**; the
+tile-size window may be a separate writer and is not evidence about which slot
+was requested.
+
+Corollary recorded because it cost time: the `7x10`-texel window that session 60
+read as "a descriptor the map never finished filling" **is** the game's own
+emitted value (byte-confirmed in the display list), so it is not an app/renderer
+bug — but it is also **not** produced by the builder's own UV arithmetic, so its
+writer is still unidentified (session 61 §4). Do not assume the builder is the
+only writer of a sprite's tile-size command.
