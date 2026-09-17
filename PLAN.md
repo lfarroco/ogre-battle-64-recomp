@@ -823,33 +823,33 @@ hardware. RT64 remains the primary native renderer throughout. See
     card unchanged. The no-`--only` full dispatch also fixes it (89 sites /
     7 extra targets) and is the way to clear the remaining backlog.
     `docs/HANDOFF-2026-09-16-session60.md`; `docs/scenes.md` row 10.
-  - 🚧 **The map's sprites: the tile window is now fixed (session 62); the
-    shadow and the date panel are still open.** Session 61's "the window writer
-    is unidentified" is answered: the `G_SETTILESIZE` window that reaches the
-    RDP is the **caller's `jal` delay-slot store** (`func_ovlM_801A2A7C`, ROM
-    `0x81B44` `sw $t5, 0x44($v0)` with `$t5 = 0x0001C028` = a **28x40-texel**
-    window), not the builder's own window, which the builder writes to a
-    different slot (`$t1+0x14`). N64Recomp emits a display-list store in a `jal`
-    delay slot *before* the call as well as after it (the `goto after_N` shape),
-    so the caller's window survives and the callee's is discarded — the
-    generated-C signature of this bug class. With a 28x40 window a 144x23-px
-    rect wraps the atlas and the party renders as the row of ellipses. Fix
-    (`tools/map_sprite_fix.py apply`, run from `make recomp`): recompute the two
-    window stores from the sprite entry the builder is handed
-    (`0x801A6FE0 + (a2 & 0xFFFF)*8`, `lhu 0` = W, `lhu 2` = H) and raise the
-    party body's entry `0xB` -> `0xC` (entry 11 = `16x11`, entry 12 = `16x24`,
-    the knight). **Session 62 diagnosed the window and then reverted its fix**
-    (it regressed a better mid-session probe frame and did not reproduce the
-    reference): the map's `G_SETTILESIZE` is the **caller's `jal` delay-slot
-    store** (ROM `0x81B44`, `$t5 = 0x1C028` = a 28x40-texel window), and
-    N64Recomp emits that store *before* the call as well as after it, so the
-    builder's own window is discarded and a 144x23-px rect wraps the atlas —
-    that is the row of ellipses. Nothing is landed; the best leads are a
-    `(W, H+16)` window (turns the shadow into the reference's soft oval) and the
-    developer's oracle that the party is **two sprites**: the `16x24` knight and
-    a **static soft oval shadow below it**. `docs/HANDOFF-2026-09-16-session62.md`
-    §0 has the honest status. Still open: the **shadow** and the **date
-    panel's** `MONTH`/`DATE` box and day digit.
+  - 🚧 **The map's party: the two draws are identified (session 63); the wall is
+    a zeroed texture buffer. Nothing landed.** The developer corrected sessions
+    61/62: the party (Magnus, the knight) is the **second** builder call
+    (`func_ovlM_801A2A7C`, ROM `0x81BFC`, `a2=0xA`, rect `(a0-16, a1-24)`) — the
+    rect **above** the other — and it needs **`16x24`** (his hair is visible in
+    some sprites); the **first** call (ROM `0x81B50`, `a2=0xB`, rect `(a0-8,a1)`)
+    is the **shadow** and needs `16x11`. Live table values: slot 12 = `(16,24)`,
+    slot 10 = `(16,11)`, slot 11 = `(144,23)` — so the two calls currently name
+    each other's entries, which is why the shadow drew as the row of ~18
+    ellipses (`144x23` over a `7x10`-texel window) and the knight as a small dark
+    blob. **The window mechanism is settled:** the caller's `jal` delay-slot store
+    (`$t5 = 0x1C028`) lands on the **same display-list word** the builder writes
+    (`dl+0x3C`) and wins on **hardware** as well as in N64Recomp's output — not a
+    port artifact, and there is no unidentified second writer (corrects session
+    61 §4(a) / session 62 §1). **The wall:** with the rects and per-entry windows
+    made consistent, both party sprites are clean, correctly-shaped **dark
+    blocks**, and a live probe shows why — the knight's texture pointer
+    (`0x8021AC88`, from `state 0x80197B18 -> 0x801F1570` field `+0x04` biased by
+    `+0x1068`; the shadow's is `0x80264D00`, `+0x10E0`) points at a buffer whose
+    words are **all zero** in the live image, and a zero RGBA32 texture with the
+    map's alpha combiner renders as that block. The pointer address is faithful
+    to the emitted list; the **content** is what is missing, so the next step is
+    to watch that buffer from scene entry and find who fills it (or which field
+    names a populated one). The **cursor** (`a2=6`) and the **date panel**
+    (`a2=12`) are the same rect-vs-window class.
+    `docs/HANDOFF-2026-09-16-session63.md`.
+
   - 🚧 **The map's sprites are missing/garbled (session 60, developer spec)** —
     the developer supplied the retail screenshot
     (`docs/proofs/map-reference/retail-map-screen.png`) and the screen's spec:

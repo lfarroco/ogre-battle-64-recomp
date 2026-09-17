@@ -3592,7 +3592,71 @@ only writer of a sprite's tile-size command.
 
 ---
 
+## Session 63 — the map party's two draws are identified, and the knight samples a zeroed texture buffer
+
+**The correction (developer).** Sessions 61/62 identified the party's two builder
+calls backwards. In `func_ovlM_801A2A7C` the **second** call (ROM `0x81BFC`,
+`a2=0xA`, rect `(a0-16, a1-24)`) is the **knight** — the rect *above* the other —
+and it must be `16x24`; the **first** call (ROM `0x81B50`, `a2=0xB`, rect
+`(a0-8, a1)`) is the **shadow** and must be `16x11`. The geometry says the same:
+`a0`/`a1` are the party's map position, call 2's rect sits 24 px above call 1's
+and 8 px left, i.e. the body above its shadow. So the two calls today name each
+other's entries, which is exactly why call 1's `144x23` over a `7x10`-texel
+window produced the row of ~18 repeated ellipses while the knight stayed a small
+dark blob. Live entries: slot 12 = `(16,24)`, slot 10 = `(16,11)`, slot 11 =
+`(144,23)`; session 61's table printout inverts those pairs.
+
+**The window mechanism, settled.** The caller's hardcoded `0x0001C028`
+(`lrs=28 lrt=40`) is written by the `jal` **delay slot** to the *same*
+display-list word the builder writes its own window to (`dl+0x3C`), and it wins
+on **hardware** as well as in N64Recomp's output (the delay slot runs after the
+callee returns). It is the game's authored value either way: **not a port
+artifact and no unidentified second writer** (corrects session 61 §4(a) and
+session 62 §1's framing). Any fix must derive the window from the sprite-table
+entry the builder is about to read, and must sit at the **call sites**, not
+inside `func_ovlM_8019F83C` (19 callers; several entries carry a non-zero `u`/`v`
+and legitimately want a sub-rect window — changing the builder regressed them and
+produced a zero window, because its store runs before `$a2` is set).
+
+**The wall (new, and the reason nothing is landed).** With the rects and
+per-entry windows made consistent and slot 12 on the knight call, both party
+sprites are clean and correctly shaped — and both are flat **dark blocks**. A
+live probe at the draw reads the texture's own words:
+
+```
+[probe70] call1 tex=8021AC88  w0=00000000 w1=00000000 w4=00000000
+```
+
+The pointer address is faithful (the emitted list says `F1 … @0x8021AC88`), but
+the buffer is **zero in RDRAM**, and a zero RGBA32 texture under the map's
+alpha-blend combiner *is* the dark block. The shadow's buffer (`0x80264D00`,
+`+0x10E0`) is zero too. So the party's art is missing at the point of use — the
+next question is which pass fills `0x8021AC88` (the scene entry decodes ~20
+assets through `func_8009DD38`) or which field of the state table `0x801F1570`
+names a populated buffer, not which entry index or window is wrong.
+
+**Generalisable rules.** (1) When a caller's constant and a callee's table entry
+both write the same display-list word, the *caller's delay slot* is the one the
+RDP sees — on hardware too. (2) A sprite's rect is the authoritative statement
+of its size; derive its window from the same entry. (3) Before theorising about
+a sprite's geometry, check the texture's **bytes** at the draw: a rect and window
+can be perfectly consistent and still render flat if the buffer they name is
+empty.
+
+**Nothing is landed.** `tools/map_sprite_fix.py` and its `Makefile` hook were
+removed after the experiments; every probe was regenerated away.
+
 ## Session 62 — the map's `G_SETTILESIZE` window is the caller's `jal` delay slot, and N64Recomp runs delay-slot display-list stores before the call
+
+> **Superseded in part by session 63.** The mechanism below is right (the
+> caller's delay-slot store is the window the RDP uses), but two of its
+> conclusions are corrected there: the caller's window wins on **hardware** too
+> (not because of a recompiler quirk), and this entry's sprite-table printout is
+> endianness-inverted relative to the live image — the party's slot 11 is
+> `(144,23)` and the knight is slot 12 `(16,24)`, confirmed live at the consumer.
+> The window-from-the-entry fix belongs at the party's **call sites** rather than
+> inside the shared builder, but it is **not** landed (session 63 found the
+> texture buffer empty, so the form is right and the art is not).
 
 Session 61's open question ("the window has a second writer that is still
 unidentified") is answered at instruction level. The map's party draw

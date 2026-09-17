@@ -64,18 +64,27 @@ The developer's retail screenshot is `docs/proofs/map-reference/retail-map-scree
   current date in the italic serif face, e.g. `Sombra 1` (`Sombra` is the month
   name, `1` the day).
 
-**Status (session 62): partial — the tile-window cause is diagnosed; no fix is
-landed.** The terrain, the location labels, the road of dots and some unit
-markers draw. The row of ~18 repeated ellipses the party marker shows is the
-sprite **tile window**: the map's
-`jal` delay slot stores a hardcoded `28x40`-texel `G_SETTILESIZE` that N64Recomp
-lets win over the builder's own window, so a `144x23`-pixel rect wrapped the
-atlas. `tools/map_sprite_fix.py` (run by `make recomp`) now derives the window
-from the sprite-table entry, and raises the party body's entry from `0xB`
-(`16x11`) to `0xC` (`16x24`). Still wrong: the **shadow** draws as a solid dark
-block instead of the reference's soft oval, and the **date-panel** `MONTH`/`DATE`
-box and day digit are missing — the month name (`Flama` in the port's capture)
-draws without its box. See `docs/HANDOFF-2026-09-16-session62.md`.
+**Status (session 63): the two party draws are identified; the knight samples a
+zeroed texture buffer. Nothing landed.** The terrain, the location labels, the
+road of dots and some unit markers draw. The developer corrected sessions 61/62
+about the party: the knight (**Magnus**) is the draw whose rect sits **above** the
+other — the **second** builder call (`func_ovlM_801A2A7C`, ROM `0x81BFC`,
+`a2=0xA`, rect `(a0-16, a1-24)`) — and it must be **`16x24`** (his hair is visible
+in some sprites); the **first** call (ROM `0x81B50`, `a2=0xB`, rect `(a0-8, a1)`)
+is the **shadow** and must be `16x11`. Live sprite-table entries are slot 12 =
+`(16,24)`, slot 10 = `(16,11)`, slot 11 = `(144,23)`, so the two calls currently
+name each other's entries — which is why the shadow drew as the row of ~18
+repeated ellipses (`144x23` over a `7x10`-texel window) and the knight as a small
+dark blob. The window mechanism is settled (the caller's `jal` delay-slot store
+lands on the same display-list word as the builder's own window and wins on
+hardware too). **The wall:** with rects and per-entry windows made consistent,
+both sprites are clean but flat **dark blocks**, because the buffer the knight's
+texture pointer names (`0x8021AC88`) is **all zero** in RDRAM — and a zero RGBA32
+texture under the map's alpha combiner renders flat. The pointer address matches
+the emitted display list, so it is the buffer's *content* that is missing. The
+cursor (`a2=6`) and the date panel (`a2=12`, `MONTH`/`DATE` box and day digit
+still absent) are the same rect-vs-window class. See
+`docs/HANDOFF-2026-09-16-session63.md`.
 
 ### The map's `R` menu (developer, session 60)
 
