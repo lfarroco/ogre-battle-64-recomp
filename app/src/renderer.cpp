@@ -994,23 +994,27 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // and misparses the DLs.
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFF, 0, true);
 
-        // OGRE: the game reads one of its njpeg framebuffers with the CPU right
-        // after it waits for this RSP task (func_ovlE_8019976C's stage-3 copy).
-        // The port completes the emulated task as soon as the display list has
-        // been handed to RT64, so without this the readback copies RDRAM before
-        // the YUV macroblock draw has rendered. Wait here -- on the RSP worker,
-        // not the game thread -- until the renderer has built those framebuffers,
-        // so the game's own task wait also covers the render. Bounded: a renderer
-        // that is gone must not hang the game. OGRE_NJ_WAIT_MS=0 disables it.
-        {
-            static const uint32_t njWaitMs = [] {
-                const char* v = getenv("OGRE_NJ_WAIT_MS");
-                return (v != nullptr) ? (uint32_t)strtoul(v, nullptr, 0) : 500u;
-            }();
-            if (njWaitMs != 0) {
-                app_->waitForGameFramebuffers(njWaitMs);
-            }
-        }
+        // OGRE (session 77): the per-display-list wait for the njpeg framebuffers
+        // (`Application::waitForGameFramebuffers`, the old OGRE_NJ_WAIT_MS) used
+        // to run here. It was added in session 50 to stop the stage-3 CPU copy
+        // (`func_ovlE_8019976C`) reading RDRAM before the YUV macroblock draw had
+        // rendered, but it is not what orders that copy: the game's own
+        // DP-completion wait plus `ogre_sync_framebuffers()` (inserted by
+        // tools/njpeg_readback.py, which waits for the workload and writes the
+        // rendered buffers back) do it. Session 57 showed the wait never once
+        // blocked in the njpeg path.
+        //
+        // Worse, it polls for three *fixed* addresses (0x400/0x25C00/0x4B400).
+        // Every scene that does not render into them -- most visibly the boot's
+        // publisher stills (scene 0x0A, the Nintendo/ATLUS/QUEST logos), which
+        // use a 640x480 image buffer instead -- can never satisfy the condition,
+        // so the poll burned its whole 500 ms timeout on every submitted list:
+        // 2 display lists/s instead of 30. Removing it restores the retail frame
+        // rate (there is no such wait on hardware) and also drops the one-off
+        // 500 ms stall on the run's first list. The RT64-side helper is left in
+        // place (unused) so the submodule patch does not have to be regenerated;
+        // it can go with the next rt64-ob64.patch refresh.
+
         // OGRE_DL_ANALYZE=1: walk the submitted display list with the app's own
         // F3DEX2 analyzer and report its geometry. "The cube is missing" is
         // either "the DL has no triangles" (game-side) or the triangles are

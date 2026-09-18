@@ -127,10 +127,13 @@ buffers, not from this render.
 * **RT64's scratch word `0x807FFC08` is not a valid readback source.** It is only
   re-set by a YUV-texture-then-colour-image pair and is never cleared.
 * **The readback is ordered by the game's DP-completion wait**
-  (`events.cpp:432`), not by `sp_complete()` and not by
-  `waitForGameFramebuffers`/`OGRE_NJ_WAIT_MS` (a no-op once the game's buffers
-  exist). `ogre_sync_framebuffers()` forces the RDP's pixels back to RDRAM before
-  the copy.
+  (`events.cpp:432`), not by `sp_complete()`, and `ogre_sync_framebuffers()`
+  forces the RDP's pixels back to RDRAM before the copy. The session-50
+  `waitForGameFramebuffers`/`OGRE_NJ_WAIT_MS` RSP-worker poll was deleted in
+  session 77: it never blocked in this path, and every scene that does not render
+  into its three fixed addresses paid its full 500 ms timeout per display list
+  (the boot's publisher stills ran at 2 lists/s instead of 30 —
+  `docs/HANDOFF-2026-09-18-session77.md`).
 
 ## Checking another background
 

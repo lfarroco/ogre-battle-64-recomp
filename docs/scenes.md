@@ -52,6 +52,7 @@ visit, with the step index in `D_8018F1C0`.
 |---|---|---|---|
 | boot intro: soldiers, falling cube, Nintendo 64 logo | `0x09` | code + `docs/proofs/native-intro-*.png` | renders |
 | publisher stills: Licensed by Nintendo / ATLUS / QUEST (640x480) | `0x0A` | proof (`native-licensed-screen.png`, `native-atlus-screen.png`, `native-quest-screen.png`) | renders |
+| ↳ the QUEST still itself (dev, session 77): **three overlapping 3D "q" shapes** (blue/green → yellow → red) over the `QUEST` wordmark | `0x0A` | dev + `docs/proofs/native-quest-screen.png` | renders |
 | title: prologue text, then the logo + a menu over scrolling clouds | `0x04` | dev (session 43), proof (`native-title-menu.png`) | renders |
 | attract story (world map) | `0x0B` | code | renders |
 | attract unit-info book | `0x0C` | code | renders |

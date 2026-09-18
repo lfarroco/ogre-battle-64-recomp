@@ -445,10 +445,16 @@ from here.
   reaches RT64 — but the game then waits for the **DP** completion, which the
   runtime posts only *after* `send_dl` (`events.cpp:432`), so the CPU copy does
   **not** race the render, and it calls `ogre_sync_framebuffers()` first, which
-  forces the RDP's pixels back to RDRAM. `Application::waitForGameFramebuffers`
-  (RSP worker, `OGRE_NJ_WAIT_MS`) was added for that race and is a no-op once the
-  game's framebuffers exist (session 57 measured `spins=1 found=1 ms=0`; it costs
-  one ~500 ms stall on the run's first display list). **The njpeg readback's source
+  forces the RDP's pixels back to RDRAM. Session 50 added
+  `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) for that
+  race, but it never did anything useful: session 57 measured it as a no-op in the
+  njpeg path (`spins=1 found=1 ms=0`), and session 77 found its real cost — it
+  polls for three **fixed** addresses (`0x400`/`0x25C00`/`0x4B400`), so every scene
+  that renders elsewhere burned the whole 500 ms timeout on *every* display list.
+  The boot's publisher stills (scene `0x0A`, the Nintendo/ATLUS/QUEST logos) ran at
+  **2 display lists/s instead of 30**; the call was deleted (a per-frame wait for a
+  condition that cannot become true is not a slow frame, it is a 16× slow scene).
+  **The njpeg readback's source
   is the game's own `state[0x64]`, not RT64's scratch word** — `0x807FFC08` is
   never cleared, so it is stale at the first pass of every assembly and being
   preferred unconditionally is what produced the intermittent stale-backdrop

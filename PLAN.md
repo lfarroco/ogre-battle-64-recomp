@@ -40,6 +40,17 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The boot's publisher stills no longer lag (session 77).** Scene `0x0A`
+  ("Licensed by Nintendo" → ATLUS → QUEST, the 3-colour 3D "q" logo) was drawing
+  at **2 display lists/s instead of 30** because the RSP worker polled 500 ms per
+  frame for framebuffers that screen never renders (`OGRE_SYNC_TRACE=1`:
+  `[njwait] spins≈1940 found=0 ms=500` on every list). The poll was session 50's
+  njpeg guard, which session 57 had already measured as unnecessary (the copy is
+  ordered by the game's DP-completion wait plus `ogre_sync_framebuffers()`);
+  deleted. Scene duration is unchanged (16.4 s), the frame rate is now 30/s, and
+  the njpeg regression still reads its four documented frames. See
+  `docs/HANDOFF-2026-09-18-session77.md`.
+
 - ✅ ROM identified: `Ogre Battle 64 - Person of Lordly Caliber (USA) (Rev A)`,
   40 MB dump, 16-bit byte-swapped (`.n64`). Converted to big-endian `.z64`.
 - ✅ Cart header decoded (official N64 layout): entry point `0x80070C00`,
