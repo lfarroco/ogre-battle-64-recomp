@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (72) | **An unknown streamed record is worse than a stub: because `on_streamed_dma` only calls `load_function_bank` for a record it knows, it never *evicts* the previous bank from that RAM, so the caller's `jal` (correctly compiled as `LOOKUP_FUNC`) runs the old bank's body — no `streamed function stub` line, no crash, just wrong behaviour.** Two faces observed: the **settings menu hung** (`jal 0x80217E50` ran unit Q) and the **shop drew nothing** (its entry `0x80219594` existed in no registered bank, so `get_function` returned the stub — **3553 calls, once per frame**). The fix is always "compile the bank as its own unit and register the record". Enumerating **every `jal 8009da50` arena load** (not just the ones one route hits) showed **record 9's arena at RAM `0x80214FA0` has thirteen banks**: Q `0x165FE0`, P `0x171EC0`, Y `0x177EF0`, W `0x17F9E0` (combat), Z `0x188B80`, AA `0x18F120`, R `0x195430`, AB `0x1977B0` (**shop**), AC `0x19C730`, AD `0x1A2BF0`, V `0x1A4BE0` (**settings**), AE `0x1A9260`, AF `0x1B2640` — each its own unit (they all share that RAM); record 10's battle bank is X `0x22A250` → `0x801E6FD0`. Two corrections: **unit P's size is its DMA's `0x6030`, not the chunk-rounded `0x6200`** (the old end marker swallowed the first `0x1D0` bytes of bank Y; session 59's rule), and **P/Q's BSS was never zeroed** (`RAM_END` had no entry). `elfcheck`'s ELF-vs-ROM byte identity **cannot** catch an over-large module — the extra bytes are ROM bytes at their ROM offsets — so re-derive the loader. New live diagnostic: the console **`dmatrace`** prints the accumulated streamed-DMA map on demand | `config-bank{V,W,X,Y,Z,AA,AB,AC,AD,AE,AF}.*`, `symbol_addrs-bank*.txt`, `Makefile`, `app/src/bank_overlays.cpp`, `app/src/sdl_platform.cpp`, `tools/gen_bank_funcs.py`, `config-bankP.yaml`; `docs/HANDOFF-2026-09-17-session72.md` |
 | 2026-09-17 (71) | **The tutorial's practice stage is scene `0x03` with `D_80193700 != 0`, and its own module is a *second bank of record 18's arena* — bank unit T (ROM `0x1C32D0`, `0x5D50` → RAM `0x8022A860`), with the arena's mode-2 bank as unit U (ROM `0x1C9020`, `0x5020` → the same RAM).** `func_801862F0` (scene `0x17`'s accessor) branches on `D_80196B0C` bit 3 between two descriptors (masks `0x60000` records 17+18 and `0x20000` record 17), and `func_80173700` (scene `0x03`'s accessor) branches on `D_80193700` between `0x8018F350` (mask `0x38C`) and `0x8018F364` (mask `0x4038C`, **+ record 18**). Record 18's loader `func_ovlB_80221D50` (RAM `0x80221D50`) indexes a `0x28`-byte segment table at RAM `0x80229DDC` and a `0x1C`-byte mode table at `0x80229E88` by `D_80193700`: mode 1 → `func_8009DA50(0x1C32D0, 0x8022A860, 0x5D50)` then the mode record's `+0x08` (`0x8022AA94`); code `0x8022A860..0x8022CBF0`, data `0x8022CBF0..0x802305B0`, BSS `0x802305B0..0x802305F0`. The module is the **tutorial instruction module** (its data half is the lesson text), so without it the practice map was inert and the developer's "no instructions, no enemies". Four cross-record `jal` targets (`0x8022A860` unit-A record 3, `0x8022A88C` unit-N record 7, `0x8022AA94` the mode callback, `0x8022B36C` unit-A record 3) were stubbing; the three non-segment-start ones are forced in `symbol_addrs-bankT.txt`. Both banks are separate units because they share RAM with unit T/unit L/unit C's record 14/record 18's BSS — a unit may not define a range its own caller's unit also owns (session 45) | `config-bankT/U.yaml`/`.toml`, `symbol_addrs-bankT/U.txt`, `Makefile`, `app/src/bank_overlays.cpp`, `tools/gen_bank_funcs.py`; `docs/proofs/native-tutorial-practice-field.png`, `-command.png`; `docs/HANDOFF-2026-09-17-session71.md` |
 | 2026-09-17 (70) | **An input recording replayed in the port must be anchored on game state, not on frame or poll index — the port's VI retrace clock is wall-clock (`ultramodern/src/events.cpp:237`), so any absolute index carries a variable boot offset, while the guest-visible *state* trajectory is reproducible to the byte.** Measured: input polls are **~1:1 with VI retraces** (`min=1 max=2 mean=1.01` calls/retrace), which corrects the "the game polls input far faster than 60 Hz" claim of session 68; two runs at `OGRE_SPEED=4` differ only in the clock (a 16–19 retrace boot offset every later event keeps) and are byte-identical once normalised (map-entry and post-input `state` hexdump, `dir`, `statehash80`); a run at `OGRE_SPEED=2` is byte-identical too, except the free-running animation tick `state[+0x108]` (373 vs 374), which must not be asserted on. An emulator **savestate** is therefore a *data oracle to read* (guest addresses are identical — the port runs the ROM's instructions — and `OSThread::context` host pointers are what cannot cross a process, session 65), not an execution checkpoint to load; an emulator **input recording** converts mechanically into state-anchored, poll-counted segments. For the map/menu moments the durable, build-independent fixture is the game's own `.srm` (`tools/sramsave.py`; title → `0x12` → `0x05`) | session-70 `probe70` (temporary, `app/src/sdl_platform.cpp`, reverted; rebuild verified) with runs A/B at `OGRE_SPEED=4` and C at `OGRE_SPEED=2` (`/tmp/p70-{a,b,c}.log`); `docs/HANDOFF-2026-09-17-session70.md` |
 | 2026-09-17 (69) | **Scene `0x06` — the Organize Screen — is bank unit S, and the swappable-RAM rule applies a fourth time.** Its enter `func_8017B6D0` DMAs **ROM `0x87220` (`0x56D60`) → RAM `0x8019A7C0 … 0x801F1520`** (`bss_start == bss_end`, so no BSS) and `jal`s the module's entry `0x801C19B0`; the **generic** scene update `func_8017B858` and hook `func_8017B9C8`, which scenes `0x05`/`0x06`/`0x07` share, dispatch on `*(0x801977E8)` — scene `0x06`'s enter sets **2**, so `jal 0x801C214C` (update) and `jal 0x801B7FC0` (hook). All three callers are in `.streamedB` (the main unit) while the callees live in a **different bank of RAM the main unit also occupies** (overlay C has its own real function at `0x801B7FC0`), so all three had to be **dispatched** (`cross_bank.py dispatch --only`) rather than left bound. Uncompiled, the three stubs made the scene return to `0x03` **68 ms** after entering — the developer's "the screen just reloads". Two operational facts: the mission's `R` menu is a **hold** menu (only a capture *during* the hold sees it), and the **keyboard's `R` shoulder button is `E`** — the letter `R` is not mapped at all. And a diagnostic trap: `on_streamed_dma`'s "DMA onto a known module base from an unknown ROM" heuristic fires on **any** `0x200`-byte chunk, so a large module produces a phantom second `UNKNOWN module` (here `0x9A020`→`0x801AD5C0`, chunk 151) — count modules, do not count lines | `config-bankS.yaml`/`.toml`, `symbol_addrs-bankS.txt`, `Makefile`, `app/src/bank_overlays.cpp`; `docs/proofs/native-organize-screen.png`; `docs/HANDOFF-2026-09-17-session69.md` |
@@ -55,6 +56,81 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-17 (session 72) — combat and items: eleven arena banks
+
+**The question.** The developer: *"combat and items are very important parts of
+the game, we can move into that."* Agreed method: the client writes its logs to a
+file, the developer drives it into the situation, this session reads the log.
+A new live console command makes that precise — **`dmatrace`** prints the
+accumulated streamed-DMA map (`dump_dma_trace()`) on demand; with
+`OGRE_DMA_TRACE=1 OGRE_DMA_TRACE_FULL=1` the log then names every module the game
+streamed up to that instant.
+
+**The shape that produces no diagnostic.** `on_streamed_dma` calls
+`load_function_bank` only for records in `kBankRecords`. For an unknown module it
+logs `[bank] UNKNOWN module` and returns — so the bank map keeps the **previous**
+bank's functions at those addresses. The caller's `jal` was compiled as
+`LOOKUP_FUNC` (correct), and it runs the wrong bank. Two consequences seen:
+
+* **settings menu** — `jal 0x80217E50` ran unit Q's body: no stub, no crash, the
+  screen stopped accepting input;
+* **shop** — the entry address happened to be a function in no registered bank,
+  so `get_function` returned the logging stub: **3553 calls** (once per frame)
+  and an empty screen. A count like that on a single address means "the game is
+  waiting for this module every frame", which is the clue that it is a *module*
+  and not a one-shot call.
+
+**What was compiled.** The loaders were read off the disassembly, not inferred:
+
+* **V** settings, ROM `0x1A4BE0` (`0x4680`) → RAM `0x80214FA0`; loader unit N
+  `func_ovlN_801B7530`. Entries `0x802170EC`, `0x80217BE4`, `0x80217E50`,
+  `0x8021905C`. *(This session's own first attempt used `0x14680` from two bad hex
+  subtractions and silently merged the next bank into V; `elfcheck` cannot detect
+  that, and re-deriving the loader is what caught it.)*
+* **W** combat, ROM `0x17F9E0` (`0x91A0`) → RAM `0x80214FA0`; loader unit N
+  `0x801BAD0C`; entries `0x8021552C`, `0x80217660`, `0x80217690`.
+* **X** battle, ROM `0x22A250` (`0x10120`) → RAM `0x801E6FD0`; loader the main
+  unit's `func_80177754` @0x8017791C (scene `0x0E`'s enter, called as the battle
+  setup); entries `0x801EBCA0`, `0x801EFACC`, `0x801F0104`.
+* **AB** the shop, ROM `0x1977B0` (`0x4F80`) → RAM `0x80214FA0`; entries
+  `0x80219594`, `0x80219600`. Its data half is the shop dialogue — the strings
+  that identified it (`What do you have on sale?`, `Hello, how much is this?`).
+* **Y** `0x177EF0`, **Z** `0x188B80`, **AA** `0x18F120`, **AC** `0x19C730`,
+  **AD** `0x1A2BF0`, **AE** `0x1A9260`, **AF** `0x1B2640` — the rest of record 9's
+  arena. Two-character unit names are a first for this project; the Makefile,
+  `gen_bank_funcs.py` and `symbol_name_format` needed no change.
+
+Each is its own unit because they all share RAM `0x80214FA0`; the boundary is the
+game's own (`func_800900C0`/`func_80090010` around the DMA), and the forced
+entries are "a `LOOKUP_FUNC` target inside the bank's range that is a real
+function start in that bank's layout" (preceded by `jr $ra`).
+
+**Corrections to existing units.**
+
+* **P**'s declared size was the chunk-rounded `0x6200` (49 × `0x200`) rather than
+  the loader's `0x6030` (`0x177EF0 - 0x171EC0`), so its end marker `0x1780C0`
+  swallowed the first `0x1D0` bytes of the next bank (Y). This is session 59's
+  rule, applied to the arena that rule was written for.
+* **P/Q BSS** was never zeroed — `RAM_END` had no entry — so the loader's
+  `func_80093380` range was not reproduced. Added `0x171EC0 → 0x8021B010` and
+  `0x165FE0 → 0x80220F50`.
+
+**Verification.** `make bank-recomp` → **32 units, 42 records, 3452 functions**,
+`check-banks OK`; every new ELF byte-identical to the ROM with all address-named
+symbols at their address. A full developer-driven run (`OGRE_SPEED=4`,
+`OGRE_DMA_TRACE=1 OGRE_DMA_TRACE_FULL=1 OGRE_SCENE_LOG=1`) reached the mission,
+combat, a town shop, the Organize Screen and the dialogue engine with **0
+`streamed function stub` and 0 `UNKNOWN module`**; the developer: *"everything
+runs beautifully"*.
+
+**The reported slowdowns are render-bound, not missing code.** The log has
+`processDisplayLists` timing for 2940 display lists: median **4.4 ms**, p90
+8.0 ms, one ~995 ms stall early in the mission (likely a first-use Vulkan
+pipeline compile). At `OGRE_SPEED=4` the frame budget is ~4.15 ms, so the median
+is already at the limit; re-measure at 1× before treating this as a defect.
 
 ---
 

@@ -1,0 +1,24 @@
+// Function entries for streamed-overlay bank unit V (bankRec9e, the settings
+// menu), forced with `symbol_addrs_path` in config-bankV.yaml.
+//
+// Same reason as symbol_addrs-bankN/O/P/Q/R/S/T.txt: these addresses are only
+// `jal` targets from *another* module (unit N's record 7), so a per-record
+// disassembly of this module emits them as labels inside the preceding body and
+// the caller's `LOOKUP_FUNC` lands on whatever bank is registered there.
+//
+// The four the game calls, all real entries in this module's own layout (each is
+// preceded by a `jr $ra`, verified against the raw ROM):
+//
+//   0x802170EC  unit N `jal` (func_ovlN_801B6xxx family)
+//   0x80217BE4  unit N `jal`
+//   0x80217E50  the module's entry — unit N's `func_ovlN_801B7530` @0x801B75D4
+//               calls it right after the DMA (this is the call that ran unit Q's
+//               body and hung the settings screen)
+//   0x8021905C  unit N `jal`
+//
+// The module's own internal `jal`s give spimdisasm the rest of its 26 functions.
+
+func_ovlV_802170EC = 0x802170EC; // type:func
+func_ovlV_80217BE4 = 0x80217BE4; // type:func
+func_ovlV_80217E50 = 0x80217E50; // type:func
+func_ovlV_8021905C = 0x8021905C; // type:func

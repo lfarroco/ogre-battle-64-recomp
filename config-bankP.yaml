@@ -5,7 +5,14 @@
 # not a segment-table record — the same shape as bankRec10a/10b and
 # bankRec14a/b/d, sessions 45/58/59):
 #
-#   ROM 0x171EC0 (0x6200) -> RAM 0x80214FA0 .. 0x8021B1A0
+#   ROM 0x171EC0 (0x6030) -> RAM 0x80214FA0 .. 0x8021AFD0
+#
+# **Session 72 corrected the size** (session 59's rule: a bank's size is its
+# DMA's, not the chunk-rounded figure). The loader's own `subu` gives
+# `0x177EF0 - 0x171EC0 = 0x6030`; the 49-chunk DMA trace below over-reads by up
+# to one 0x200 chunk, and the old `0x6200` end marker (`0x1780C0`) therefore
+# swallowed the first 0x1D0 bytes of the next bank of this arena (ROM 0x177EF0,
+# bank unit Y). The BSS end is RAM 0x8021B010 (`RAM_END`).
 #
 # It is loaded right after record 9 (`rom 0x14EC00 -> ram 0x801FDA90`, ends at
 # RAM 0x80214E70) fills the rest of the arena, and its RAM is also owned by unit
@@ -75,4 +82,4 @@ segments:
     subsegments:
       - [0x171EC0, asm]
 
-  - [0x1780C0]
+  - [0x177EF0]

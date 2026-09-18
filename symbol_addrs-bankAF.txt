@@ -1,0 +1,10 @@
+// Function entries for streamed-overlay bank unit AF (bankRec9af),
+// forced with `symbol_addrs_path` in config-bankAF.yaml.
+//
+// Same reason as the other bank units: only another module `jal`s these, so this
+// module's own disassembly emits them as labels inside the preceding body.
+// Computed as "a LOOKUP_FUNC target inside this bank's RAM range that is a real
+// function start in this bank's own layout" (session 72).
+
+func_ovlAF_802156F4 = 0x802156f4; // type:func
+func_ovlAF_80216808 = 0x80216808; // type:func

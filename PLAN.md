@@ -1123,6 +1123,39 @@ hardware. RT64 remains the primary native renderer throughout. See
     (`docs/proofs/native-tutorial-practice-field.png`, `-command.png`); the
     `down down` lesson selects mode 0 (the normal mission) and is also stub-free.
     See `docs/HANDOFF-2026-09-17-session71.md`.
+  - ✅ **Combat and items run (session 72) — eleven more arena banks, and the
+    silent wrong-bank hang.** The developer's *"combat and items are very
+    important parts of the game"* was driven as an interactive session: the client
+    logs to a file, the developer plays, this session reads the log. The new live
+    console **`dmatrace`** command prints the accumulated streamed-DMA map on
+    demand (`OGRE_DMA_TRACE`/`_FULL`). Three findings, all the swappable-arena
+    class:
+    1. **Settings menu** (ROM `0x1A4BE0`, `0x4680` → RAM `0x80214FA0`) — `UNKNOWN
+       module` and **no stub**: because the port had no record, `on_streamed_dma`
+       never evicted unit Q, so `jal 0x80217E50` ran Q's body and the screen froze.
+       Now **unit V** (entries `0x802170EC`/`0x80217BE4`/`0x80217E50`/`0x8021905C`).
+       *(This session also corrected its own first V config: a bad hex subtraction
+       made it `0x14680` instead of `0x4680`, silently swallowing the next bank.
+       `elfcheck` cannot see that — the extra bytes are ROM bytes at their ROM
+       offsets; re-deriving the loader caught it.)*
+    2. **Combat** — record 9's `0x17F9E0` (`0x91A0`, **unit W**; stubs
+       `0x80217690`/`0x80217660`) and record 10's `0x22A250` (`0x10120`, **unit X**;
+       stub `0x801EFACC`). Developer: *"combat played beautifully."*
+    3. **Shop** — `0x1977B0` (`0x4F80`, **unit AB**): its data half is the shop
+       dialogue (*"What do you have on sale?"*) and its entry `0x80219594` was
+       stubbed **3553×** (once per frame), so nothing drew. Enumerating every
+       `jal 8009da50` arena load in unit N showed that **record 9's arena has
+       thirteen banks** and only five were compiled; the eight missing ones are
+       now **Y, Z, AA, AB, AC, AD, AE, AF** (two-character unit names — the first
+       in the project). Also corrected: **unit P**'s size `0x6200 → 0x6030`
+       (chunk-rounded, session 59's rule) and **P/Q BSS** zeroing.
+    Final run: **0 stubs, 0 UNKNOWN**, scenes `0x04 → 0x12 → 0x03` (mission) →
+    `0x06` (Organize) → `0x02`/`0x0D` (dialogue/combat); developer: *"everything
+    runs beautifully."* `make bank-recomp`: **32 units, 42 records, 3452
+    functions**, `check-banks OK`. The reported slowdowns are render-bound
+    (`processDisplayLists` median 4.4 ms at `OGRE_SPEED=4`, whose frame budget is
+    ~4.15 ms; one ~1 s stall, likely a Vulkan pipeline compile), not missing
+    modules. See `docs/HANDOFF-2026-09-17-session72.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —

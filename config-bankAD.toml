@@ -1,0 +1,14 @@
+# N64Recomp config for streamed-overlay bank unit AD (Phase 4).
+# See config-bankR.toml for the model. Record 9 arena bank:
+#   ROM 0x1a2bf0 (0x1ff0) -> RAM 0x80214FA0 (see config-bankAD.yaml).
+
+[input]
+output_func_path = "BankADFuncs"
+elf_path = "build/bankAD.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+function_sizes = []

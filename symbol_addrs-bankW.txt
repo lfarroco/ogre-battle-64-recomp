@@ -1,0 +1,21 @@
+// Function entries for streamed-overlay bank unit W (bankRec9f, the combat
+// bank of record 9's arena), forced with `symbol_addrs_path` in
+// config-bankW.yaml.
+//
+// Same reason as the other bank units: these addresses are only `jal` targets
+// from another module (unit N's record 7), so this module's own disassembly has
+// no `jal` to them and emits them as labels inside the preceding body.
+//
+// The three unit N calls that are real entries in this module's layout (each is
+// preceded by a `jr $ra`, verified against the raw ROM):
+//
+//   0x8021552C
+//   0x80217660  the run's stub
+//   0x80217690  the run's stub
+//
+// 0x80214FA0 is the segment start and spimdisasm emits it; the module's own
+// internal `jal`s give it the rest of its 17 functions.
+
+func_ovlW_8021552C = 0x8021552C; // type:func
+func_ovlW_80217660 = 0x80217660; // type:func
+func_ovlW_80217690 = 0x80217690; // type:func

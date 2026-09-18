@@ -1,0 +1,12 @@
+// Function entries for streamed-overlay bank unit Z (bankRec9z),
+// forced with `symbol_addrs_path` in config-bankZ.yaml.
+//
+// Same reason as the other bank units: only another module `jal`s these, so this
+// module's own disassembly emits them as labels inside the preceding body.
+// Computed as "a LOOKUP_FUNC target inside this bank's RAM range that is a real
+// function start in this bank's own layout" (session 72).
+
+func_ovlZ_8021511C = 0x8021511c; // type:func
+func_ovlZ_80217EF4 = 0x80217ef4; // type:func
+func_ovlZ_8021A0C4 = 0x8021a0c4; // type:func
+func_ovlZ_8021AFF8 = 0x8021aff8; // type:func

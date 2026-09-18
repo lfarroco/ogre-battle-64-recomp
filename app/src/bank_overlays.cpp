@@ -137,6 +137,17 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x087220u, (int32_t)0x8019A7C0u, 0x056D60u, true  },  // 19 (bank unit S, scene 0x06 "Organize Screen")
     { 0x1C32D0u, (int32_t)0x8022A860u, 0x005D50u, true  },  // 20 (bank unit T, rec18's tutorial-practice bank)
     { 0x1C9020u, (int32_t)0x8022A860u, 0x005020u, true  },  // 21 (bank unit U, rec18's mode-2 bank)
+    { 0x1A4BE0u, (int32_t)0x80214FA0u, 0x004680u, true  },  // 22 (bank unit V, the settings/options menu)
+    { 0x17F9E0u, (int32_t)0x80214FA0u, 0x0091A0u, true  },  // 23 (bank unit W, rec9's combat bank)
+    { 0x22A250u, (int32_t)0x801E6FD0u, 0x010120u, true  },  // 24 (bank unit X, rec10's battle bank)
+    { 0x177EF0u, (int32_t)0x80214FA0u, 0x007AF0u, true  },  // 25 (bank unit Y,  rec9 arena bank)
+    { 0x188B80u, (int32_t)0x80214FA0u, 0x0065A0u, true  },  // 26 (bank unit Z,  rec9 arena bank)
+    { 0x18F120u, (int32_t)0x80214FA0u, 0x006310u, true  },  // 27 (bank unit AA, rec9 arena bank)
+    { 0x1977B0u, (int32_t)0x80214FA0u, 0x004F80u, true  },  // 28 (bank unit AB, the shop/item screen)
+    { 0x19C730u, (int32_t)0x80214FA0u, 0x0064C0u, true  },  // 29 (bank unit AC, rec9 arena bank)
+    { 0x1A2BF0u, (int32_t)0x80214FA0u, 0x001FF0u, true  },  // 30 (bank unit AD, rec9 arena bank)
+    { 0x1A9260u, (int32_t)0x80214FA0u, 0x0093E0u, true  },  // 31 (bank unit AE, rec9 arena bank)
+    { 0x1B2640u, (int32_t)0x80214FA0u, 0x0079E0u, true  },  // 32 (bank unit AF, rec9 arena bank)
 };
 
 // Boot straight into a screen.

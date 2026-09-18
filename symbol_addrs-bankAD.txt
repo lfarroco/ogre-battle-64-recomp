@@ -1,0 +1,11 @@
+// Function entries for streamed-overlay bank unit AD (bankRec9ad),
+// forced with `symbol_addrs_path` in config-bankAD.yaml.
+//
+// Same reason as the other bank units: only another module `jal`s these, so this
+// module's own disassembly emits them as labels inside the preceding body.
+// Computed as "a LOOKUP_FUNC target inside this bank's RAM range that is a real
+// function start in this bank's own layout" (session 72).
+
+func_ovlAD_80215AE8 = 0x80215ae8; // type:func
+func_ovlAD_802163A0 = 0x802163a0; // type:func
+func_ovlAD_802163D8 = 0x802163d8; // type:func

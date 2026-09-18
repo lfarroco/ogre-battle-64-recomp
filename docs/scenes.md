@@ -181,6 +181,9 @@ scene `0x07`'s form sets `3`) and allocates the `0xC000`-byte 320x240 buffer at
 | the **intro sequence**: the camera pans from the party's fort to the enemy fort, the `NOTE` *winning condition* appears, the camera goes back, the `NOTE` *losing condition* appears, then `MISSION START`, then the mission is playable. The target fort is drawn as a **framed illustration + its place label** (`Theodricus Mine` in the session-68 capture) with a red pin. The camera pans on its own and **each phase waits for an `A` press** (developer, session 68) | dev (session 68) | **renders on the natural route** (session 68): `docs/proofs/native-mission-intro-natural.png`, `-natural-pan.png`. Before session 68 the fort drew garbled and `A` did nothing at all (see below) |
 | the mission `MISSION` banners along the bottom | dev + proof | renders |
 | the `NOTE` losing-condition tooltip, the `R` menu inside a mission | dev (session 67 reference) | unknown — not seen in the captures yet |
+| **combat** — a battle between units on the mission field | dev (session 72): *"combat played beautifully"* | **renders** (session 72) — bank units W (record 9's combat bank) and X (record 10's battle bank) |
+| the **settings / options** screen (`Message speed`, `Cursor speed`, `Help display`, `Icon name display`, `Game speed`, `Legion indicator`, `Destination display`, `Unit report type`, `Battle action name`, `Battle animation`, `Quick exit`, `Cancel all`, `Sound settings`, `Restore defaults`) | dev (session 72) + code (the module's string table) | **renders** (session 72) — bank unit V |
+| a town **shop** (`What do you have on sale?`, `Hello, how much is this?`, …) | dev (session 72) + code (the module's string table) | **renders** (session 72) — bank unit AB |
 
 **How it is reached, and the two routes are *not* the same code.** The suspend
 save (`assets/save-mission-1.srm`; the game **deletes** it when the suspend slot
@@ -207,6 +210,38 @@ See `docs/HANDOFF-2026-09-17-session68.md`.
 **On the map, `A` only works with the cursor *on* a location** (the location
 label, e.g. `Tenne Plains`, is shown), and a `START` press opens a **tooltip**
 that blocks everything until it is dismissed.
+
+### Record 9's arena: **thirteen** banks (session 72)
+
+Scene `0x03`'s mask names record 9, but the mission *streams* far more code than
+that record: RAM `0x80214FA0` is an arena that **thirteen** modules share, each
+loaded on demand (map, units, combat, settings, shop, menus). Enumerating every
+`jal 8009da50` arena load in unit N's record 7 (session 72) gave:
+
+| ROM | size | unit | what |
+|---|---|---|---|
+| `0x165FE0` | `0xBEE0` | Q | (suspend-route mission bank) |
+| `0x171EC0` | `0x6030` | P | mission bank |
+| `0x177EF0` | `0x7AF0` | Y | not yet identified |
+| `0x17F9E0` | `0x91A0` | W | **combat** |
+| `0x188B80` | `0x65A0` | Z | not yet identified |
+| `0x18F120` | `0x6310` | AA | not yet identified |
+| `0x195430` | `0x2380` | R | enemy/unit constructor (natural route) |
+| `0x1977B0` | `0x4F80` | AB | **shop** |
+| `0x19C730` | `0x64C0` | AC | not yet identified |
+| `0x1A2BF0` | `0x1FF0` | AD | not yet identified |
+| `0x1A4BE0` | `0x4680` | V | **settings** |
+| `0x1A9260` | `0x93E0` | AE | not yet identified |
+| `0x1B2640` | `0x79E0` | AF | not yet identified |
+
+Each is its own bank unit (they all share the RAM), so the runtime's DMA-driven
+bank map evicts the previous bank when the game streams the next. Record 10's
+arena (`0x801E6FD0`) has its own battle bank, unit **X** (ROM `0x22A250`).
+
+**When a screen freezes or draws nothing and the log shows no stub, check for an
+`UNKNOWN module` and remember the silent case:** an unknown record is never
+*evicted*, so the previous bank's body keeps running at those addresses. See
+`docs/HANDOFF-2026-09-17-session72.md`.
 
 ### The mission's `R` menu, and the **Organize Screen** (scene `0x06`)
 

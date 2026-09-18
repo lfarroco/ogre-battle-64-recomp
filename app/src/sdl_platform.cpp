@@ -1112,6 +1112,7 @@ void console_exec(const std::string& line_in) {
     if (cmd == "help") {
         printf("[console] r/rh/rb/rk <addr> [n] | d <addr> [len] | f <value> [max] | fb <hex> [max]\n"
                "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c\n"
+               "[console] dmatrace        (print the streamed-DMA bases seen so far; needs OGRE_DMA_TRACE=1)\n"
                "[console] press <buttons> [polls] [x] [y]  (hold a synthetic pad press and analog\n"
                "[console]                stick, e.g. `press a`, `press start+down`, `press none 60 -1 0`)\n"
                "[console] dump [path]   (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n"
@@ -1285,6 +1286,14 @@ void console_exec(const std::string& line_in) {
         const uint32_t spin = console_half(rdram, 0x800C4C26u);
         printf("[console] scene=0x%04X pending=0x%04X desc=0x%08X mask=0x%08X step=%u next=0x%04X spin=0x%04X\n",
                scene, pending, desc, mask, step, next, spin);
+    } else if (cmd == "dmatrace" || cmd == "dm") {
+        // Print the accumulated streamed-DMA bases *now* instead of only on the
+        // bounded-run exit path (`OGRE_DMA_TRACE=1` + `OGRE_DMA_TRACE_FULL=1`).
+        // This is how a module the game loads into RAM the port has no record
+        // for is found while the interesting screen is still on: run to the
+        // screen, drop `dmatrace` into the watched file, and compare the bases
+        // with `app/src/bank_funcs.inc`.
+        dump_dma_trace();
     } else if (cmd == "dump") {
         // A bare `dump` never overwrites an earlier one: the key can be pressed
         // as often as the developer likes and every snapshot is kept, numbered.

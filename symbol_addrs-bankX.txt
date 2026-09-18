@@ -1,0 +1,21 @@
+// Function entries for streamed-overlay bank unit X (bankRec10c, the battle
+// bank of record 10's arena), forced with `symbol_addrs_path` in
+// config-bankX.yaml.
+//
+// Same reason as the other bank units: these addresses are only `jal` targets
+// from another module (the battle engine in the main unit / record 10), so this
+// module's own disassembly emits them as labels inside the preceding body.
+//
+// The three battle calls that are real entries in this module's layout (each is
+// preceded by a `jr $ra`, verified against the raw ROM):
+//
+//   0x801EBCA0
+//   0x801EFACC  the run's stub
+//   0x801F0104
+//
+// 0x801E6FD0 is the segment start and spimdisasm emits it; the module's own
+// internal `jal`s give it the rest of its 78 functions.
+
+func_ovlX_801EBCA0 = 0x801EBCA0; // type:func
+func_ovlX_801EFACC = 0x801EFACC; // type:func
+func_ovlX_801F0104 = 0x801F0104; // type:func

@@ -1,0 +1,14 @@
+# N64Recomp config for streamed-overlay bank unit AE (Phase 4).
+# See config-bankR.toml for the model. Record 9 arena bank:
+#   ROM 0x1a9260 (0x93e0) -> RAM 0x80214FA0 (see config-bankAE.yaml).
+
+[input]
+output_func_path = "BankAEFuncs"
+elf_path = "build/bankAE.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+function_sizes = []

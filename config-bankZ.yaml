@@ -1,0 +1,74 @@
+# Secondary splat config: streamed-overlay bank unit Z (Phase 4).
+#
+# Unit Z holds one bank of record 9's arena at RAM 0x80214FA0 (the arena
+# units P/Q/R/V/W and their siblings share):
+#
+#   rec9z  ROM 0x188b80 (0x065a0) -> RAM 0x80214fa0
+#
+# Found (session 72) by enumerating every `func_8009DA50` arena load in unit N's
+# record 7 (`func_ovlN_801AExxx`); record 9's arena has **thirteen** banks and
+# the port had compiled only five:
+#
+#   0x165FE0 Q   0x171EC0 P   0x177EF0 Z   0x17F9E0 W   0x188B80 ..
+#   0x18F120 ..  0x195430 R   0x1977B0 ..        0x19C730 ..  0x1A2BF0 ..
+#   0x1A4BE0 V   0x1A9260 ..  0x1B2640 ..
+#
+# The loader (unit N's `func_800900C0`/`func_80090010`/`func_8009DA50`/
+# `func_80093380` arm) gives the game's own boundaries:
+#
+#   code  RAM 0x80214fa0..0x8021b490  ROM 0x188b80..0x18f070
+#   data  RAM ..0x8021b540            ROM ..0x18f120
+#   DMA   func_8009DA50(0x188b80, 0x80214fa0, 0x65a0)
+#   bss   RAM 0x8021b540..0x8021b610
+#
+# Code size 0x64f0 is a multiple of 16 (no assembler pad).
+#
+# See config-bankA.yaml for the model.
+
+name: Ogre Battle 64 - streamed overlay bank unit Z
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankZ
+  target_path: assets/ogre64.z64
+  elf_path: build/bankZ.elf
+  base_path: .
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankZ/asm
+  build_path: build/bankZ
+  asset_path: build/bankZ/assets
+  ld_script_path: build/bankZ.ld
+  undefined_syms_auto_path: build/bankZ/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankZ/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - symbol_addrs-bankZ.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlZ_$VRAM"
+  symbol_name_format_no_rom: "ovlZ_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  - name: bankRec9z
+    type: code
+    start: 0x188b80
+    vram: 0x80214fa0
+    subsegments:
+      - [0x188b80, asm]
+      - [0x18f070, data]
+
+  - [0x18f120]
