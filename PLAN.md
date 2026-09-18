@@ -1072,6 +1072,30 @@ hardware. RT64 remains the primary native renderer throughout. See
     **19 units / 29 records / 3094 functions**, developer-confirmed live
     (`docs/proofs/native-organize-screen.png`). See
     `docs/HANDOFF-2026-09-17-session69.md`.
+  - ✅ **Test-automation premise settled (session 70): the port's *timeline* is
+    wall-clock, but its *state* is reproducible to the byte — so an input
+    recording must be anchored on game state, not on frame/poll index.** Measured
+    with a temporary probe (scene-armed, poll-counted script: title → Load Game →
+    map → three cursor steps left, then a sample of the map's `state` struct):
+    **input polls are ~1:1 with VI retraces** (`min=1 max=2 mean=1.01` per
+    retrace), which **corrects the "the game polls input far faster than 60 Hz"
+    claim of session 68 and the console help** — a cursor step needs a long hold
+    because the cursor integrates a small delta *per retrace*, not because the poll
+    rate is high. Two runs at `OGRE_SPEED=4` differ **only** in the absolute clock
+    (a 16-19 retrace boot offset that every later event keeps); normalised for it
+    they are byte-identical at map entry and after the input (same hexdump, `dir`,
+    `statehash80`). A third run at `OGRE_SPEED=2` is byte-identical too, except the
+    free-running animation tick `state[+0x108]` (373 vs 374) — an assertion hazard,
+    not a state divergence. The VI retrace clock is wall-clock
+    (`events.cpp:237`), which is *why* absolute indices desynchronise. Consequence:
+    an emulator **savestate** is a data oracle (guest addresses are identical —
+    the port runs the ROM's instructions; `OSThread::context` host pointers are
+    what cannot cross a process, session 65) and not something to load; an emulator
+    **input recording** converts into state-anchored, poll-counted segments, and
+    the game's own `.srm` remains the build-independent fixture for the map/menu
+    moments (`tools/sramsave.py`; title → `0x12` → `0x05` re-verified). The probe
+    was reverted; no files changed net. A `DECISIONS.md` is named by AGENTS rule 10
+    but is absent from the tree. See `docs/HANDOFF-2026-09-17-session70.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —

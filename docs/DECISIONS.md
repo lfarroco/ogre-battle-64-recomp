@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (70) | **An input recording replayed in the port must be anchored on game state, not on frame or poll index — the port's VI retrace clock is wall-clock (`ultramodern/src/events.cpp:237`), so any absolute index carries a variable boot offset, while the guest-visible *state* trajectory is reproducible to the byte.** Measured: input polls are **~1:1 with VI retraces** (`min=1 max=2 mean=1.01` calls/retrace), which corrects the "the game polls input far faster than 60 Hz" claim of session 68; two runs at `OGRE_SPEED=4` differ only in the clock (a 16–19 retrace boot offset every later event keeps) and are byte-identical once normalised (map-entry and post-input `state` hexdump, `dir`, `statehash80`); a run at `OGRE_SPEED=2` is byte-identical too, except the free-running animation tick `state[+0x108]` (373 vs 374), which must not be asserted on. An emulator **savestate** is therefore a *data oracle to read* (guest addresses are identical — the port runs the ROM's instructions — and `OSThread::context` host pointers are what cannot cross a process, session 65), not an execution checkpoint to load; an emulator **input recording** converts mechanically into state-anchored, poll-counted segments. For the map/menu moments the durable, build-independent fixture is the game's own `.srm` (`tools/sramsave.py`; title → `0x12` → `0x05`) | session-70 `probe70` (temporary, `app/src/sdl_platform.cpp`, reverted; rebuild verified) with runs A/B at `OGRE_SPEED=4` and C at `OGRE_SPEED=2` (`/tmp/p70-{a,b,c}.log`); `docs/HANDOFF-2026-09-17-session70.md` |
 | 2026-09-17 (69) | **Scene `0x06` — the Organize Screen — is bank unit S, and the swappable-RAM rule applies a fourth time.** Its enter `func_8017B6D0` DMAs **ROM `0x87220` (`0x56D60`) → RAM `0x8019A7C0 … 0x801F1520`** (`bss_start == bss_end`, so no BSS) and `jal`s the module's entry `0x801C19B0`; the **generic** scene update `func_8017B858` and hook `func_8017B9C8`, which scenes `0x05`/`0x06`/`0x07` share, dispatch on `*(0x801977E8)` — scene `0x06`'s enter sets **2**, so `jal 0x801C214C` (update) and `jal 0x801B7FC0` (hook). All three callers are in `.streamedB` (the main unit) while the callees live in a **different bank of RAM the main unit also occupies** (overlay C has its own real function at `0x801B7FC0`), so all three had to be **dispatched** (`cross_bank.py dispatch --only`) rather than left bound. Uncompiled, the three stubs made the scene return to `0x03` **68 ms** after entering — the developer's "the screen just reloads". Two operational facts: the mission's `R` menu is a **hold** menu (only a capture *during* the hold sees it), and the **keyboard's `R` shoulder button is `E`** — the letter `R` is not mapped at all. And a diagnostic trap: `on_streamed_dma`'s "DMA onto a known module base from an unknown ROM" heuristic fires on **any** `0x200`-byte chunk, so a large module produces a phantom second `UNKNOWN module` (here `0x9A020`→`0x801AD5C0`, chunk 151) — count modules, do not count lines | `config-bankS.yaml`/`.toml`, `symbol_addrs-bankS.txt`, `Makefile`, `app/src/bank_overlays.cpp`; `docs/proofs/native-organize-screen.png`; `docs/HANDOFF-2026-09-17-session69.md` |
 | 2026-09-17 (68) | **A scene that works from a suspend save may still be missing code when it is played to: the two routes stream *different banks* of the same arena, and the run log's `[bank] UNKNOWN module` + `[overlays] streamed function stub called @ …` is the whole diagnosis.** The mission's natural route (map `0x05` → `0x02`/`0x0D` story → scene `0x16` movie → `0x02`/`0x0D` → `0x03`) makes unit N's own loader (`func_ovlN_801AE880+0x764`, ROM `0x1036E4`) DMA **ROM `0x195430` (`0x2380`) → RAM `0x80214FA0`** and `jal` its entry `0x80215C38` — a **third bank** of record 9's arena, alongside units P (`0x171EC0`) and Q (`0x165FE0`), which the suspend save's mission loads instead. Uncompiled, the stub returned into the intro's state machine: the target fort was built from stale bytes (the garbled draw), the winning-condition `NOTE` never advanced and the camera never panned. It is now **bank unit R** (`config-bankR.yaml`/`.toml`, one forced entry in `symbol_addrs-bankR.txt`, `BANK_UNITS += R`); the module is the mission's enemy/unit constructor (`No free space on TCharacterEnemyData.` / `EnemySolderData.`), and the natural route now runs the whole intro with **0 UNKNOWN modules and 0 stub calls**. Two driving knobs landed with it: `OGRE_TAP_SCENE_BUTTON` (a **scene-keyed** tap schedule — the wall-clock slot schedule lands on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s) and the live console's `press <buttons> [polls] [x] [y]` (synthetic pad + analog stick; **the game polls input far faster than 60 Hz, so a few hundred polls is one cursor step**) | `config-bankR.yaml`, `symbol_addrs-bankR.txt`, `Makefile`; `app/src/sdl_platform.cpp`; `docs/proofs/native-mission-intro-natural.png`; `docs/HANDOFF-2026-09-17-session68.md` |
 | 2026-09-17 (67) | **The mission scene (`0x03`) renders, and the reason it did not was the same swappable-RAM class as sessions 45/55/59 — in two new shapes.** (1) The three records it streams (segment table 7/8/9, `0x101D00`/`0x145230`/`0x14EC00` → RAM `0x801AD5C0`/`0x801F4050`/`0x801FDA90`) were uncompiled: **unit N**. (2) Unit A's record 3 called `0x801AD6BC` — record 6's RAM — and both records being in unit A, N64Recomp bound it directly to unit A's record-6 body; scene `0x03`'s mask `0x38C` loads record 3 **without** record 6 (record 7 is resident), so the wrong bank ran and the process died on wild pointers that moved between runs. Record 6 moved to **unit O**, and the call compiles as `LOOKUP_FUNC`. (3) Record 9's arena streams **two more banks** (units **P** `0x171EC0` and **Q** `0x165FE0`, both → RAM `0x80214FA0`). **A `LOOKUP_FUNC` onto a non-entry is a silent no-op** (`get_function` has no interior fallback), and a cross-*record* `jal` leaves no trace while the target record is disassembled, so the entries are forced with `symbol_addrs_path` files (`symbol_addrs-bank{N,O,P,Q}.txt`) — a subsegment split at the same address would insert the assembler's 16-byte `.text` padding and break the ELF-vs-ROM identity | `config-bankN/O/P/Q.yaml`, `symbol_addrs-bank*.txt`; `docs/proofs/native-mission-scene.png`; `docs/HANDOFF-2026-09-17-session67.md` |
@@ -53,6 +54,84 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-17 (session 70) — input-replay determinism: the timeline is wall-clock, the state is not
+
+**The question.** The developer wants reliable end-to-end testing without an
+agent reading screenshots: *"emulator saves + input recording… I can provide the
+game a `.srm` file and then run the game with an input recorder flag… then I tell
+an agent to create a test: run the game with the save and play the inputs, then
+assert something."* Before designing a fixture format, the question that decides
+the design is whether a fixed input sequence drives the port to the same state
+twice. It does — but not on the same *clock*, and that is the finding.
+
+**What was measured.** A temporary `probe70` in `app/src/sdl_platform.cpp` drove
+controller 0 from a scene-armed, poll-counted script (title `START` ×6, `0x12`
+`A` ×4, map `LEFT` ×3 — each press held and separated in input **polls**, not wall
+time), sampled the map's `state` struct (`*(0x80197B18)`) at a retrace-anchored
+point, and exited. Save fixture: `assets/__save-mission-1.srm` imported with
+`tools/sramsave.py import` (the developer's previous save was restored after).
+Runs: A and B identical at `OGRE_SPEED=4`; C at `OGRE_SPEED=2`.
+
+**Three results.**
+
+1. **Input polls are ~1:1 with VI retraces** — `min=1 max=2 mean=1.01` calls per
+   retrace of `D_800C4BCC`. This **corrects** the session-68 claim (repeated in
+   the console docs) that *"the game polls input far faster than 60 Hz"*: a cursor
+   step needs a long hold because the cursor integrates a small delta *per
+   retrace*, not because the poll rate is high. Useful consequence: an emulator
+   movie's per-frame controller state maps onto one poll per frame with no
+   resampling.
+2. **A and B differ only in the absolute clock.** Boot reached the title 19
+   retraces earlier in B (1843 vs 1825) and every later event kept that offset
+   (`0x12` 3078 vs 3059; map 3688 vs 3669). Normalised for
+   `retrace`/`frame`/`polls`/wall-time, the two runs are **byte-identical**: the
+   map-entry `state` hexdump, `dir=0`, `statehash80=0x24BD4B741FDB3AB8`, and the
+   post-input hexdump, `dir=7`, `statehash80=0x1074EC06FA2F0569`.
+3. **C (half the clock rate) is byte-identical to A** at both sample points —
+   same hexdumps, same hashes, same `dir` — **except `state[+0x108]`, the
+   free-running animation tick: 373 vs 374.**
+
+**Why the offset exists.** The VI thread schedules retraces off an absolute
+wall-clock base (`ultramodern/src/events.cpp:237`,
+`get_start() + total_vis * 1e6us / (60 * speed)`), and the game blocks on those
+retrace messages. So guest progress is throttled to wall time and the *number of
+retraces before the title* depends on how fast the boot got there — absolute
+frame, poll and retrace indices are therefore not reproducible, even though the
+state they carry is.
+
+**Consequences (all adopted).**
+
+* Replay must be **state-anchored**: a recording is a list of
+  `(state signature, input segment)` pairs; hold the segment until the port's
+  signature matches the recorded one, then advance, and report the first
+  divergence on mismatch. The signature is FNV-1a over named guest globals (scene
+  `D_800E810E`, step `D_8018F1C0`/`F1C2`, pending `D_800C4C26`, the map's
+  `state[+0x00..0x7F]`) — computable on both sides because guest addresses are
+  identical. This is also what fixes the project's original flakiness: wall-clock
+  tap schedules become state-anchored input.
+* **Do not assert on free-running counters** (`state[+0x108]`), nor on any
+  absolute index.
+* An emulator **savestate** is a data oracle to *read* (RDRAM at guest addresses,
+  `emulator-first.md` §5), not an execution checkpoint: `OSThread::context` is a
+  real host pointer stored in guest RDRAM (`ultra64.h:106`, `threads.cpp:371`) and
+  a foreign image crashes in `do_send` (session 65), and the port has no PC to
+  resume a mid-frame instant at. Guest addresses were never the problem.
+* For map/menu moments the durable, build-independent fixture is the game's own
+  `.srm` — the game rebuilds its own state, so unlike a checkpoint nothing needs
+  regenerating on a rebuild. (The checkpoint guard is still the whole-executable
+  `executable_fingerprint`, coarser than necessary; session 64's narrower
+  fingerprint lead stands, and for regression testing you *want* an old state
+  loadable by a new build.)
+
+**Probe discipline.** `probe70` and its three call sites were reverted with
+`git checkout -- app/src/sdl_platform.cpp`, the app rebuilt, and absence verified
+in both source (`grep -rn probe70 app/src/`) and binary
+(`strings build-app/ogrebattle64 | grep -c probe70` → 0). No files changed net.
+Open: whether the boot offset is boot-progress or VI phase, whether a minutes-long
+journey stays byte-stable, and what clock drives `state[+0x108]`.
 
 ---
 
