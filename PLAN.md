@@ -40,6 +40,30 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- 🛠 **The mission's post-battle lag has a landed fix (session 80): N64Recomp
+  no longer injects the blocking `yield_self()` into the mission's
+  nearest-target search.** Session 79 diagnosed the lag as one recompiler
+  artifact — `func_ovlN_801B2F4C`'s scan over the object list at `obj+0xA8`
+  yields **once per candidate** at its backward branch `0x801B3008` because a
+  body load (`lwc1 $f2, 8($s0)`) has a loop-invariant base, and `yield_self`
+  blocks until an external message arrives (≈ one VI retrace, 16.7 ms), so a
+  ~22-entity scan cost 0.4–0.7 s per frame (30 → 1.4 display lists/s). The fix
+  is **scoped, not a heuristic rewrite**: `config-bankN.toml` now carries
+  `yield_work_loop_branches = [0x801B3008]`, a new N64Recomp option (see
+  `n64recomp-ob64.patch`) that says "this backward branch is a work loop, not a
+  poll loop — emit no yield here". Regeneration changes **exactly one generated
+  file** (`BankNFuncs/funcs_3.c`, one line removed) and **52 → 51 yield sites**;
+  every other generated file is byte-identical, and the boot's scene timeline is
+  unchanged (intro → publishers → title → tutorial → new-game → scene `0x03`).
+  The three failed broad repairs of session 79 are why the fix is scoped to the
+  one site: the boot deadlocks if the wrong yield is removed, so a one-site
+  change in bank unit N (not resident at boot) cannot regress it. **Developer-
+  confirmed:** driven to a battle on the tutorial-practice route at
+  `OGRE_SPEED=8` (log `/tmp/ogre-lag-s80mission.log`, `--tag s80mission`), the
+  mission runs normally — 0 seconds at ≤12 display lists/s, `0x801B2F4C` never
+  hot, p50 6 ms / p99 31 ms display-list intervals over 129 s and eight mission
+  crossings. See `docs/HANDOFF-2026-09-18-session80.md`.
+
 - 🔎 **The mission's post-battle lag is diagnosed but NOT fixed (session 79).**
   The developer's *"after a battle, when the enemy unit's destruction effect
   ends, the game lags badly — it draws and responds, just very slowly"* is a

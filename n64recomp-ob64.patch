@@ -148,7 +148,7 @@ index 73f3e73..13ea02b 100644
  void do_break(uint32_t vram);
  
 diff --git a/include/recompiler/context.h b/include/recompiler/context.h
-index e7b4431..cf5b22b 100644
+index e7b4431..a35deb7 100644
 --- a/include/recompiler/context.h
 +++ b/include/recompiler/context.h
 @@ -31,6 +31,13 @@ namespace N64Recomp {
@@ -165,6 +165,23 @@ index e7b4431..cf5b22b 100644
          std::unordered_map<int32_t, std::string> function_hooks;
  
          Function(uint32_t vram, uint32_t rom, std::vector<uint32_t> words, std::string name, uint16_t section_index, bool ignored = false, bool reimplemented = false, bool stubbed = false)
+@@ -235,6 +242,16 @@ namespace N64Recomp {
+         bool skip_validating_reference_symbols = true;
+         // Whether all function calls (excluding reference symbols) should go through lookup.
+         bool use_lookup_for_all_function_calls = false;
++        // OB64 (project addition): backward-branch VRAMs whose loop the poll-loop
++        // heuristic in recompilation.cpp must NOT classify as a poll loop. The
++        // heuristic asks only whether some load in the loop body has a
++        // loop-invariant base, which is true of ordinary work loops that keep a
++        // base pointer in a callee-saved register (session 79: the mission's
++        // nearest-target search func_ovlN_801B2F4C, branch 0x801B3008). A yield
++        // there blocks the thread for an external message (about one VI retrace)
++        // per loop iteration. Listing a branch here suppresses the yield at that
++        // one site and leaves every other site byte-identical.
++        std::vector<uint32_t> yield_work_loop_branches;
+ 
+         //// Only used by the CLI, TODO move this to a struct in the internal headers.
+         // A mapping of function name to index in the functions vector
 diff --git a/include/recompiler/generator.h b/include/recompiler/generator.h
 index 145bcd0..3dbcb3e 100644
 --- a/include/recompiler/generator.h
@@ -336,6 +353,45 @@ index 94f85c5..bec0393 100644
  void N64Recomp::CGenerator::emit_trigger_event(uint32_t event_index) const {
      fmt::print(output_file, "recomp_trigger_event(rdram, ctx, base_event_index + {});\n", event_index);
  }
+diff --git a/src/config.cpp b/src/config.cpp
+index 1066aff..7b47802 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -360,6 +360,19 @@ N64Recomp::Config::Config(const char* path) {
+             bss_section_suffix = ".bss";
+         }
+ 
++        // OB64 (project addition): `yield_work_loop_branches` lists backward-branch
++        // VRAMs whose loop the poll-loop heuristic must not classify as a poll
++        // (see recompilation.cpp's is_yield_poll_loop). Optional, defaults empty.
++        toml::node_view yield_work_loops_data = input_data["yield_work_loop_branches"];
++        if (yield_work_loops_data.is_array()) {
++            for (const auto& el : *yield_work_loops_data.as_array()) {
++                std::optional<uint32_t> branch = el.value<uint32_t>();
++                if (branch.has_value()) {
++                    yield_work_loop_branches.push_back(branch.value());
++                }
++            }
++        }
++
+         std::optional<bool> single_file_output_opt = input_data["single_file_output"].value<bool>();
+         if (single_file_output_opt.has_value()) {
+             single_file_output = single_file_output_opt.value();
+diff --git a/src/config.h b/src/config.h
+index 7d6db23..9d05643 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -62,6 +62,10 @@ namespace N64Recomp {
+         std::vector<FunctionTextHook> function_hooks;
+         std::vector<FunctionSize> manual_func_sizes;
+         std::vector<ManualFunction> manual_functions;
++        // OB64 (project addition): backward-branch VRAMs whose loop must not be
++        // treated as a poll loop, so no yield_self() is emitted there. See the
++        // comment on Context::yield_work_loop_branches.
++        std::vector<uint32_t> yield_work_loop_branches;
+         std::string bss_section_suffix;
+         std::string recomp_include;
+         // Manual mappings of mdebug file records to elf sections.
 diff --git a/src/elf.cpp b/src/elf.cpp
 index 4fbd1ce..2177ca5 100644
 --- a/src/elf.cpp
@@ -355,7 +411,7 @@ index 4fbd1ce..2177ca5 100644
                      // TODO is this case needed anymore?
                      uint32_t vram = static_cast<uint32_t>(value);
 diff --git a/src/main.cpp b/src/main.cpp
-index 669c4a1..869b7df 100644
+index 669c4a1..40c5c10 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -158,6 +158,13 @@ std::vector<std::string> reloc_names {
@@ -372,7 +428,17 @@ index 669c4a1..869b7df 100644
  void dump_context(const N64Recomp::Context& context, const std::unordered_map<uint16_t, std::vector<N64Recomp::DataSymbol>>& data_syms, const std::filesystem::path& func_path, const std::filesystem::path& data_path) {
      std::ofstream func_context_file {func_path};
      std::ofstream data_context_file {data_path};
-@@ -853,6 +860,11 @@ int main(int argc, char** argv) {
+@@ -343,6 +350,9 @@ int main(int argc, char** argv) {
+     ignored_syms_set.insert(config.ignored_funcs.begin(), config.ignored_funcs.end());
+ 
+     N64Recomp::Context context{};
++    // OB64 (project addition): per-config list of loops the poll-loop heuristic
++    // must leave alone (see Context::yield_work_loop_branches).
++    context.yield_work_loop_branches = config.yield_work_loop_branches;
+     
+     if (!config.elf_path.empty() && !config.symbols_file_path.empty()) {
+         exit_failure("Config file cannot provide both an elf and a symbols file\n");
+@@ -853,6 +863,11 @@ int main(int argc, char** argv) {
                  false
              );
              const N64Recomp::Function& new_func = context.functions[new_func_index];
@@ -384,7 +450,7 @@ index 669c4a1..869b7df 100644
  
              fmt::print(func_header_file,
                         "void {}(uint8_t* rdram, recomp_context* ctx);\n", new_func.name);
-@@ -996,7 +1008,7 @@ int main(int argc, char** argv) {
+@@ -996,7 +1011,7 @@ int main(int argc, char** argv) {
                                  target_section_offset = reloc.target_section_offset;
                              }
                              fmt::print(overlay_file, "    {{ .offset = 0x{:08X}, .target_section_offset = 0x{:08X}, .target_section = {}, .type = {} }}, \n",
@@ -394,17 +460,18 @@ index 669c4a1..869b7df 100644
                      }
  
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..ad0c6b8 100644
+index c228433..b05f50f 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  #include <vector>
  #include <set>
 +#include <array>
++#include <algorithm>
  #include <unordered_set>
  #include <unordered_map>
  #include <cassert>
-@@ -18,9 +19,35 @@ enum class JalResolutionResult {
+@@ -18,9 +20,35 @@ enum class JalResolutionResult {
      Match,
      CreateStatic,
      Ambiguous,
@@ -441,7 +508,7 @@ index c228433..ad0c6b8 100644
  JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_section_index, uint32_t target_func_vram, size_t& matched_function_index) {
      // Skip resolution if all function calls should use lookup and just return Ambiguous.
      if (context.use_lookup_for_all_function_calls) {
-@@ -34,6 +61,16 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+@@ -34,6 +62,16 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
      uint32_t section_vram_end = cur_section.ram_addr + cur_section.size;
      bool in_current_section = target_func_vram >= section_vram_start && target_func_vram < section_vram_end;
      bool exact_match_found = false;
@@ -458,7 +525,7 @@ index c228433..ad0c6b8 100644
  
      // Use a thread local to prevent reallocation across runs and to allow multi-threading in the future.
      thread_local std::vector<size_t> matched_funcs{};
-@@ -47,6 +84,10 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+@@ -47,6 +85,10 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
              // Zero-sized symbol handling. unless there's only one matching target.
              if (target_func.words.empty()) {
                  if (!N64Recomp::is_manual_patch_symbol(target_func.vram)) {
@@ -469,7 +536,7 @@ index c228433..ad0c6b8 100644
                      continue;
                  }
              }
-@@ -84,6 +125,11 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
+@@ -84,6 +126,11 @@ JalResolutionResult resolve_jal(const N64Recomp::Context& context, size_t cur_se
          // If there were no matches then JAL resolution has failed.
          // A static can't be created as the target section is unknown.
          if (matched_funcs.size() == 0) {
@@ -481,7 +548,7 @@ index c228433..ad0c6b8 100644
              return JalResolutionResult::NoMatch;
          }
          // If there was an exact match, use it.
-@@ -259,7 +305,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -259,7 +306,7 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
          return true;
      };
  
@@ -490,7 +557,7 @@ index c228433..ad0c6b8 100644
          (uint32_t target_func_vram, bool tail_call = false, bool indent = false)
      {
          bool call_by_lookup = false;
-@@ -281,6 +327,11 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -281,6 +328,11 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
          else {
              std::string jal_target_name{};
              size_t matched_func_index = (size_t)-1;
@@ -502,7 +569,7 @@ index c228433..ad0c6b8 100644
              if (reloc_reference_symbol != (size_t)-1) {
                  if (reloc_type != N64Recomp::RelocType::R_MIPS_26) {
                      fmt::print(stderr, "Unsupported reloc type {} on jal instruction in {}\n", (int)reloc_type, func.name);
-@@ -310,6 +361,16 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -310,6 +362,16 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                      case JalResolutionResult::Match:
                          jal_target_name = context.functions[matched_func_index].name;
                          break;
@@ -519,7 +586,7 @@ index c228433..ad0c6b8 100644
                      case JalResolutionResult::CreateStatic:
                          // Create a static function add it to the static function list for this section.
                          jal_target_name = fmt::format("static_{}_{:08X}", func.section_index, target_func_vram);
-@@ -331,7 +392,11 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -331,7 +393,11 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                          return false;
                  }
              }
@@ -532,7 +599,7 @@ index c228433..ad0c6b8 100644
              if (indent) {
                  print_indent();
              }
-@@ -339,7 +404,14 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -339,7 +405,14 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  return false;
              }
              print_indent();
@@ -548,7 +615,7 @@ index c228433..ad0c6b8 100644
                  generator.emit_function_call_reference_symbol(context, reloc_section, reloc_reference_symbol, reloc_target_section_offset);
              }
              else if (call_by_lookup) {
-@@ -359,6 +431,20 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -359,6 +432,20 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
      auto print_branch = [&](uint32_t branch_target) {
          // If the branch target is outside the current function, check if it can be treated as a tail call.
          if (branch_target < func.vram || branch_target >= func_vram_end) {
@@ -569,7 +636,7 @@ index c228433..ad0c6b8 100644
              // If the branch target is the start of some known function, this can be handled as a tail call.
              // FIXME: how to deal with static functions?
              if (context.functions_by_vram.find(branch_target) != context.functions_by_vram.end()) {
-@@ -373,6 +459,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -373,6 +460,17 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  // generator.emit_branch_close();
                  return true;
              }
@@ -587,7 +654,7 @@ index c228433..ad0c6b8 100644
  
              fmt::print(stderr, "[Warn] Function {} is branching outside of the function (to 0x{:08X})\n", func.name, branch_target);
          }
-@@ -410,6 +507,149 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -410,6 +508,156 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
  
      bool handled = true;
  
@@ -598,6 +665,13 @@ index c228433..ad0c6b8 100644
 +    // messages (VI retraces etc.); without it a pure spin starves every other
 +    // game thread (see docs/HANDOFF-2026-08-25-session8.md).
 +    auto is_yield_poll_loop = [&](uint32_t branch_target) -> bool {
++        // OB64 (project addition): a loop whose backward branch is listed in the
++        // config's `yield_work_loop_branches` is a known work loop, not a poll.
++        // The rest of this heuristic is unchanged, so every other emission site
++        // stays byte-identical (see Context::yield_work_loop_branches).
++        if (std::find(context.yield_work_loop_branches.begin(), context.yield_work_loop_branches.end(), instr_vram) != context.yield_work_loop_branches.end()) {
++            return false;
++        }
 +        // Only backward branches within the current function.
 +        if (branch_target >= instr_vram || branch_target < func.vram) {
 +            return false;
@@ -737,7 +811,7 @@ index c228433..ad0c6b8 100644
      switch (instr_id) {
      case InstrId::cpu_nop:
          fmt::print(output_file, "\n");
-@@ -424,8 +664,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -424,8 +672,9 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_read(rt);
                  break;
              default:
@@ -749,7 +823,7 @@ index c228433..ad0c6b8 100644
              }
              break;
          }
-@@ -438,11 +679,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -438,11 +687,30 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  generator.emit_cop0_status_write(rt);
                  break;
              default:
@@ -782,7 +856,7 @@ index c228433..ad0c6b8 100644
      // Arithmetic
      case InstrId::cpu_add:
      case InstrId::cpu_addu:
-@@ -518,6 +778,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -518,6 +786,18 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
                  print_indent();
                  generator.emit_return(context, func_index);
              }
@@ -801,7 +875,7 @@ index c228433..ad0c6b8 100644
              else {
                  fmt::print(stderr, "Unhandled branch in {} at 0x{:08X} to 0x{:08X}\n", func.name, instr_vram, branch_target);
                  return false;
-@@ -720,6 +992,10 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -720,6 +1000,10 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
              }
          }
          else {
@@ -812,7 +886,7 @@ index c228433..ad0c6b8 100644
              if (!print_branch((uint32_t)instr.getBranchVramGeneric())) {
                  return false;
              }
-@@ -765,7 +1041,7 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+@@ -765,7 +1049,7 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
      //fmt::print("Recompiling {}\n", func.name);
      std::vector<rabbitizer::InstructionCpu> instructions;
  
@@ -821,7 +895,7 @@ index c228433..ad0c6b8 100644
  
      if (context.trace_mode) {
          fmt::print(output_file,
-@@ -864,6 +1140,85 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
+@@ -864,6 +1148,85 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
              // Advance the vram address by the size of one instruction
              vram += 4;
          }

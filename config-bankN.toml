@@ -15,6 +15,20 @@ uses_mips3_float_mode = true
 bss_section_suffix = ".bss"
 functions_per_output_file = 100
 
+# The mission's nearest-target search func_ovlN_801B2F4C walks the object list at
+# obj+0xA8 and keeps the nearest candidate. N64Recomp's poll-loop heuristic (see
+# tools/N64Recomp/src/recompilation.cpp, is_yield_poll_loop) injects a blocking
+# yield_self() before the loop's backward branch because the body reads
+# `lwc1 $f2, 8($s0)` from a callee-saved base register -- a benign invariant
+# address. 0x801B3008 is the backward branch of that loop, and it is NOT a poll
+# loop: it terminates on a list element loaded from an address the loop itself
+# advances. yield_self blocks until an external message arrives (~one VI
+# retrace, 16.7 ms), so a 22-entity scan paid ~22 retraces and the mission fell
+# from 30 to 1.4 display lists/s after combat (session 79). Listing the branch
+# here suppresses the yield at that one site and leaves the other 51 sites
+# byte-identical (session 80).
+yield_work_loop_branches = [0x801B3008]
+
 # Splat is given each record's own code/data boundary (see config-bankN.yaml).
 # Extend any piece it still caps in the middle of a call-and-continue emission
 # here (the failure is "use of undeclared label" at the `goto after_N`).
