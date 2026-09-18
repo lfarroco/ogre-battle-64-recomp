@@ -211,32 +211,94 @@ See `docs/HANDOFF-2026-09-17-session68.md`.
 label, e.g. `Tenne Plains`, is shown), and a `START` press opens a **tooltip**
 that blocks everything until it is dismissed.
 
-### Record 9's arena: **thirteen** banks (session 72)
+### Every streamed arena the game can load (session 73)
 
-Scene `0x03`'s mask names record 9, but the mission *streams* far more code than
-that record: RAM `0x80214FA0` is an arena that **thirteen** modules share, each
-loaded on demand (map, units, combat, settings, shop, menus). Enumerating every
-`jal 8009da50` arena load in unit N's record 7 (session 72) gave:
+**`tools/arenamap.py` prints this table from the ELFs.** Every streamed module in
+OB64 is DMA'd by one generated loader block whose own instructions carry the
+game's boundaries, so the map is mechanical and no address here was read by
+hand:
 
-| ROM | size | unit | what |
-|---|---|---|---|
-| `0x165FE0` | `0xBEE0` | Q | (suspend-route mission bank) |
-| `0x171EC0` | `0x6030` | P | mission bank |
-| `0x177EF0` | `0x7AF0` | Y | not yet identified |
-| `0x17F9E0` | `0x91A0` | W | **combat** |
-| `0x188B80` | `0x65A0` | Z | not yet identified |
-| `0x18F120` | `0x6310` | AA | not yet identified |
-| `0x195430` | `0x2380` | R | enemy/unit constructor (natural route) |
-| `0x1977B0` | `0x4F80` | AB | **shop** |
-| `0x19C730` | `0x64C0` | AC | not yet identified |
-| `0x1A2BF0` | `0x1FF0` | AD | not yet identified |
-| `0x1A4BE0` | `0x4680` | V | **settings** |
-| `0x1A9260` | `0x93E0` | AE | not yet identified |
-| `0x1B2640` | `0x79E0` | AF | not yet identified |
+```
+lui a0,%hi(rom_start); addiu a0,a0,%lo(rom_start)
+lui a1,%hi(ram_base);  addiu a1,a1,%lo(ram_base)
+lui a2,%hi(rom_end);   addiu a2,a2,%lo(rom_end)
+jal func_8009DA50
+subu a2,a2,a0                     ; size = rom_end - rom_start (the DMA's size)
+```
 
-Each is its own bank unit (they all share the RAM), so the runtime's DMA-driven
-bank map evicts the previous bank when the game streams the next. Record 10's
-arena (`0x801E6FD0`) has its own battle bank, unit **X** (ROM `0x22A250`).
+bracketed by `func_800900C0(ram_base, code_size)` (icache), `func_80090010(
+code_end, data_size)` (dcache) and `func_80093380(data_end, bss_size)` (bss).
+**A bank's size is its `subu`, never a chunk count** (session 59's rule, session
+72's unit V), and the code/data split is the cache bracket's — not a guess.
+
+| arena (RAM) | ROM start | size | code | data | BSS | unit | what |
+|---|---|---|---|---|---|---|---|
+| `0x800E9C20` | `0x0003F1B0` | `0x1CD0` | `0x1490` | `0x840` | shared | main (streamedA) | boot overlay (ROM-only) |
+| `0x8016AF80` | `0x00040E80` | `0x25FB0` | `0x1B3B0` | `0xAC00` | shared | main (streamedB) | boot overlay: scene registry, dialogue text (ROM-only) |
+| `0x8019A7C0` | `0x000712A0` | `0x84B0` | `0x7120` | `0x1390` | - | H | scene `0x07` name/birthday form |
+| | `0x00079750` | `0xDAD0` | `0xC0F0` | `0x19E0` | - | M | **scene `0x05`, the map** |
+| | `0x00087220` | `0x56D60` | `0x53920` | `0x3440` | - | S | **scene `0x06`, the Organize Screen** |
+| `0x801D0860` | `0x00213AE0` | `0x16770` | `0x15260` | `0x1510` | - | J | record 10's arena, non-`0x16` scenes |
+| | `0x0023A370` | `0xE80` | `0xE70` | `0x10` | - | **none** | scene-`0x14` setup fragment (see below) |
+| | `0x00244770` | `0x7500` | `0x6C70` | `0x890` | - | I | **scene `0x16`, the closing movie** |
+| `0x801E6FD0` | `0x0022A250` | `0x10120` | `0xF920` | `0x800` | - | X | **combat / battle** |
+| | `0x0023B1F0` | `0x9580` | `0x8D00` | `0x880` | - | C | record 10's main bank |
+| `0x80214FA0` | `0x00165FE0` | `0xBEE0` | `0x9BD0` | `0x2310` | - | Q | mission bank (suspend route) |
+| | `0x00171EC0` | `0x6030` | `0x4090` | `0x1FA0` | - | P | mission bank |
+| | `0x00177EF0` | `0x7AF0` | `0x3E00` | `0x3CF0` | - | Y | not yet identified |
+| | `0x0017F9E0` | `0x91A0` | `0x2930` | `0x6870` | - | W | **combat** |
+| | `0x00188B80` | `0x65A0` | `0x64F0` | `0xB0` | - | Z | not yet identified |
+| | `0x0018F120` | `0x6310` | `0x61F0` | `0x120` | - | AA | not yet identified |
+| | `0x00195430` | `0x2380` | `0x22F0` | `0x90` | `0x20` | R | enemy/unit constructor (natural route) |
+| | `0x001977B0` | `0x4F80` | `0x4810` | `0x770` | - | AB | **shop** |
+| | `0x0019C730` | `0x64C0` | `0x6410` | `0xB0` | - | AC | not yet identified |
+| | `0x001A2BF0` | `0x1FF0` | `0x1860` | `0x790` | `0x40` | AD | not yet identified |
+| | `0x001A4BE0` | `0x4680` | `0x4320` | `0x360` | - | V | **settings** |
+| | `0x001A9260` | `0x93E0` | `0x8FE0` | `0x400` | - | AE | not yet identified |
+| | `0x001B2640` | `0x79E0` | `0x72B0` | `0x730` | `0x20` | AF | not yet identified |
+| `0x8022ACB0` | `0x00286BA0` | `0x138F0` | `0x13180` | `0x770` | - | K | chapter animation (the "Prologue" card) |
+| | `0x0029A490` | `0xE860` | `0xDE00` | `0xA60` | - | L | the same arena's other bank |
+| `0x802395E0` | `0x002A8CF0` | `0x56A0` | `0x5620` | `0x80` | - | G | step ≥ 2's dialogue engine bank |
+| | `0x002AE390` | `0xA7E0` | `0xA600` | `0x1E0` | - | F | the same arena's other bank |
+
+"shared" = the boot loader zeroes the boot overlays' BSS with its own
+`func_80093380` calls, which span more than one record and start at the *end of
+the last one's data*, so no single record owns that range. The game's own
+per-record BSS (as `tools/gen_bank_funcs.py`'s `RAM_END` records it) is what the
+port reproduces; the BSS column above is the size the loader states for the
+record it belongs to.
+
+**There is no uncompiled bank on a reachable path any more.** `arenamap.py`
+finds 27 bank loads across 33 ELFs; 26 are compiled and the 27th is the fragment
+below. The tool also proves the negative: `--coverage` lists the ROM the scanned
+ELFs disassemble as code, and the two uncovered gaps (`0x0DDF80..0x0E4910`, a
+display-list/texture blob; `0x279FF0..0x281830`, the remainder of record 13's
+code) contain **0** `jal 0x8009DA50` — so no loader can be hiding in code the
+port never compiled.
+
+#### The one bank-shaped load with no unit: scene `0x14`'s setup fragment
+
+`func_80177754` (scene `0x14`'s enter, descriptor `0x8018FB2C`) has two arms. Its
+first arm loads record 10's arena, unit J/X; its **second** arm (`beqz v0,
+0x801777FC`) DMAs a `0xE80`-byte fragment `rom 0x0023A370 → RAM 0x801D0860`,
+exactly the first `0xE80` bytes of unit C's record 10b. It is **not compiled**:
+the RAM it lands in is record 10b's, which unit C owns, so a new record for it
+would collide in `cross_bank.py check-banks`. Nothing observed streams it — the
+developer's driven runs (sessions 67/71/72 and this session's) never log it and
+reach scene `0x14`'s first arm only — but if a scene-`0x14` screen ever draws
+from stale bytes, **this is the first thing to check.** Add it as its own unit
+(ROM `0x23A370`, size `0xE80`, code `0xE70`, data `0x10`, BSS none) and move
+record 10b out of unit C if it turns out to be live.
+
+#### The loader `arenamap.py` cannot see: a table-driven loop
+
+Record 18's bank (unit **T**, the tutorial's practice stage) is not loaded by a
+literal loader block. `func_ovlB_80221D50` indexes a `0x28`-byte descriptor
+table at RAM `0x80229DDC` by `D_80193700` and reads `ram`, `rom_start`, `rom_end`,
+`bss` and `entry` out of the entry, so the addresses are data, not immediates.
+The tool reports it as its one `jal 0x8009DA50` without a cache bracket — which
+is the correct answer, and the reason to read that list rather than trust a
+silent zero. The tutorial's other table at `0x80229E88` selects mode 2 (unit U).
 
 **When a screen freezes or draws nothing and the log shows no stub, check for an
 `UNKNOWN module` and remember the silent case:** an unknown record is never

@@ -134,7 +134,10 @@ wrong half of a function. Check these before blaming game logic:
   the right host address, with backtraces); `tools/scenemap.py` (the 25 scene
   types with their descriptor words, every writer of the pending-scene word, and
   the scripted step table — ROM-only, ~3 s, no run needed; see the scene fact
-  below). All are documented in
+  below); `tools/arenamap.py` (every streamed arena bank from the loader pattern
+  itself — ROM start, RAM base, size, code/data split, BSS, the loader
+  instruction, whether a bank unit links it — plus `--verify`, `--coverage` and
+  `--entries`; offline, ~10 s, no run needed). All are documented in
   `docs/guides/app-build.md` -> "Diagnostics toolkit".
 - **When the question is "what is in RAM at the moment X happens", use the live
   console instead of a bounded run's exit dump** (session 56: an exit dump is

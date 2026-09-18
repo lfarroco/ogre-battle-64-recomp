@@ -660,6 +660,47 @@ Pair it with `tools/guestmap.py <descriptor>` for the ROM offset and owning
 segment of a descriptor, and `tools/runlog.py` for which scenes a run actually
 entered.
 
+### `tools/arenamap.py` — every streamed arena, and whether we have it (session 73)
+
+```sh
+tools/arenamap.py                      # every arena, every bank (~10 s, offline)
+tools/arenamap.py --missing            # banks no unit links
+tools/arenamap.py --arena 0x80214FA0   # one RAM window
+tools/arenamap.py --verify             # every unit vs the loader that DMA's it
+tools/arenamap.py --coverage           # the ROM the scanned ELFs disassemble
+tools/arenamap.py --entries            # cross-record entry candidates
+tools/arenamap.py --md                 # markdown table (docs/scenes.md)
+```
+
+Answers *"what is this bank's size, and is it compiled?"* without a run, from the
+loader's own instructions. Every bank DMA is
+
+```
+lui/addiu x3  ->  jal func_8009DA50  ->  subu a2,a2,a0   (the size)
+func_800900C0(ram_base, code_size)   icache   (the brackets)
+func_80090010(code_end, data_size)   dcache
+func_80093380(data_end, bss_size)    bss
+```
+
+so the block yields ROM start, RAM base, size and the code/data boundary. **The
+size is the loader's `subu`, never the chunk count**; the tool reads the `subu`'s
+own operands because the assembler sometimes hoists it above the `jal`, and it
+evaluates each block in ascending address order because `addiu a1,a1,%lo` must run
+*after* the `lui` that gives it its base.
+
+`--verify` cross-checks every compiled record against the loader that DMA's it.
+A **split** difference is not automatically a bug: `mips-linux-gnu-as` pads
+`.text` to 16 bytes, so a record whose data starts on an 8-byte boundary links its
+data subsegment up to 8 bytes high (session 65's unit M), and several units'
+linker scripts declare their record as one subsegment; `make elf-rom-check` is
+what proves the bytes. `--coverage` is the negative check that matters: a loader
+can only be found in code some ELF disassembles, so it lists the uncovered ROM
+gaps and any `jal 0x8009DA50` inside them.
+
+Current answer: **27 bank loads across 5 arena RAM windows, 26 compiled**, the one
+gap being a `0xE80` scene-`0x14` setup fragment whose RAM another unit's record
+already owns (see `docs/scenes.md`).
+
 ### Adding a streamed bank unit (the session-67 recipe)
 
 When a scene reaches RAM the port has no code for, the run says so — take it in

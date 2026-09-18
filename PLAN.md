@@ -1156,6 +1156,29 @@ hardware. RT64 remains the primary native renderer throughout. See
     (`processDisplayLists` median 4.4 ms at `OGRE_SPEED=4`, whose frame budget is
     ~4.15 ms; one ~1 s stall, likely a Vulkan pipeline compile), not missing
     modules. See `docs/HANDOFF-2026-09-17-session72.md`.
+  - ✅ **The arena map is a tool, and every reachable streamed bank is compiled
+    (session 73).** `tools/arenamap.py` derives every streamed bank from the
+    loader pattern itself — `lui/addiu` ×3 → `jal func_8009DA50` → `subu` (the
+    size), bracketed by `func_800900C0(ram_base, code_size)` /
+    `func_80090010(code_end, data_size)` / `func_80093380(data_end, bss_size)` —
+    and prints per bank: **ROM start, RAM base, size, code/data split, BSS, the
+    loader instruction, whether a unit links it, and the cross-record entry
+    candidates with a real-function-start check.** It scans all 33 ELFs and finds
+    **27 bank loads across 5 arena RAM windows; 26 are compiled.** `--verify`
+    confirms the ROM range and size of every compiled record against the loader
+    that DMA's it; `--coverage` proves the negative — every `jal 0x8009DA50` in
+    the ROM (76) lies inside code the scanned ELFs disassemble, and the two
+    uncovered ROM gaps contain **0** of them, so no loader can be hiding. The one
+    uncompiled bank is a `0xE80` scene-`0x14` setup fragment
+    (`0x0023A370 → 0x801D0860`) whose RAM unit C's record 10b already owns and
+    which no observed run streams. No bank unit was needed, so
+    `make bank-recomp` is unchanged and green (32 units / 42 records / 3452
+    functions, `check-banks OK`), `elfcheck --syms` is 0 bytes on all 33 ELFs, and
+    two driven runs pass `runlog --check` with **0 stubs / 0 `UNKNOWN module`**
+    (tutorial: 37 bank loads, `0x17 → 0x02 → 0x0D → 0x03 ×2`; map: title →
+    `0x12` → `0x03`). The whole table is recorded in `docs/scenes.md` under
+    *"Every streamed arena the game can load (session 73)"*. See
+    `docs/HANDOFF-2026-09-17-session73.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —
