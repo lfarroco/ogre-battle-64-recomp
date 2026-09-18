@@ -23,6 +23,105 @@ index 61e1ff5..345f134 100644
  void N64Recomp::LiveGenerator::emit_trigger_event(uint32_t event_index) const {
      // Load rdram and ctx into R0 and R1.
      sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, Registers::rdram, 0, SLJIT_IMM, rdram_offset);
+diff --git a/RSPRecomp/src/rsp_recomp.cpp b/RSPRecomp/src/rsp_recomp.cpp
+index 518477d..60eb175 100644
+--- a/RSPRecomp/src/rsp_recomp.cpp
++++ b/RSPRecomp/src/rsp_recomp.cpp
+@@ -124,7 +124,12 @@ std::string_view ctx_gpr_prefix(int reg) {
+ uint32_t expected_c0_reg_value(int cop0_reg) {
+     switch (static_cast<Cop0Reg>(cop0_reg)) {
+     case Cop0Reg::RSP_COP0_SP_STATUS:
+-        return 0; // None of the flags in RSP status are set
++        // SP_STATUS_HALTED. The RSP is halted whenever a microcode reads its own
++        // status (the runtime's own osSpGetStatus_recomp returns 0x1 for the same
++        // reason), and OB64's audio boot block branches on that bit to tell a
++        // fresh task from a resumed one: with 0 it took the resume path and
++        // re-entered its own entry forever.
++        return 1;
+     case Cop0Reg::RSP_COP0_SP_DMA_FULL:
+         return 0; // Pretend DMAs complete instantly
+     case Cop0Reg::RSP_COP0_SP_DMA_BUSY:
+@@ -133,6 +138,14 @@ uint32_t expected_c0_reg_value(int cop0_reg) {
+         return 0; // Always acquire the semaphore
+     case Cop0Reg::RSP_COP0_DPC_STATUS:
+         return 0; // Good enough for the microcodes that would be recompiled (i.e. non-graphics ones)
++    // OB64's audio microcode (type 2, ucode 0x8009E050) polls the RDP
++    // command-end register after kicking a display-list DMA. The runtime never
++    // sends gfx tasks to recompiled microcode (RT64 parses them), so report the
++    // RDP as idle/instant-complete, the same assumption as DPC_STATUS above.
++    case Cop0Reg::RSP_COP0_DPC_START:
++    case Cop0Reg::RSP_COP0_DPC_END:
++    case Cop0Reg::RSP_COP0_DPC_CURRENT:
++        return 0; // Pretend display-list processing completes instantly
+     default:
+         fmt::print(stderr, "Unhandled mfc0: {}\n", cop0_reg);
+         throw std::runtime_error("Unhandled mfc0");
+@@ -154,6 +167,11 @@ std::string_view c0_reg_write_action(int cop0_reg) {
+         return "DO_DMA_READ";
+     case Cop0Reg::RSP_COP0_SP_WR_LEN:
+         return "DO_DMA_WRITE";
++    case Cop0Reg::RSP_COP0_DPC_START:
++    case Cop0Reg::RSP_COP0_DPC_END:
++    case Cop0Reg::RSP_COP0_DPC_CURRENT:
++    case Cop0Reg::RSP_COP0_DPC_STATUS:
++        return ""; // RDP command/status registers are inert here (no recompiled gfx ucode)
+     default:
+         fmt::print(stderr, "Unhandled mtc0: {}\n", cop0_reg);
+         throw std::runtime_error("Unhandled mtc0");
+@@ -528,6 +546,30 @@ bool process_instruction(size_t instr_index, const std::vector<rabbitizer::Instr
+             print_branch_condition("if (RSP_SIGNED({}{}) < 0)", ctx_gpr_prefix(rs), rs);
+             print_branch("goto L_{:04X}", branch_target);
+             break;
++        // bgezal/bltzal are the link forms of bgez/bltz: they set $ra to the
++        // instruction after the delay slot on the taken path (and in the
++        // delay-slot copy), exactly like jal. OB64's audio microcode uses them
++        // for its sample/mixer helpers.
++        case InstrId::rsp_bgezal:
++            print_indent();
++            print_line("{}{} = 0x{:04X}", ctx_gpr_prefix(31), 31, (instr_vram + 2 * instr_size) & rsp_mem_mask);
++            print_indent();
++            print_branch_condition("if (RSP_SIGNED({}{}) >= 0)", ctx_gpr_prefix(rs), rs);
++            print_branch("goto L_{:04X}", branch_target);
++            break;
++        case InstrId::rsp_bltzal:
++            print_indent();
++            print_line("{}{} = 0x{:04X}", ctx_gpr_prefix(31), 31, (instr_vram + 2 * instr_size) & rsp_mem_mask);
++            print_indent();
++            print_branch_condition("if (RSP_SIGNED({}{}) < 0)", ctx_gpr_prefix(rs), rs);
++            print_branch("goto L_{:04X}", branch_target);
++            break;
++        case InstrId::rsp_cfc2:
++            print_line("rsp.CFC2({}{}, {})", ctx_gpr_prefix(rt), rt, rd);
++            break;
++        case InstrId::rsp_ctc2:
++            print_line("rsp.CTC2({}{}, {})", ctx_gpr_prefix(rt), rt, rd);
++            break;
+         case InstrId::rsp_break:
+             print_line("return RspExitReason::Broke", instr_vram);
+             break;
+@@ -582,7 +624,7 @@ void write_indirect_jumps(std::ofstream& output_file, const BranchTargets& branc
+     }
+     fmt::print(output_file,
+         "    }}\n"
+-        "    printf(\"Unhandled jump target 0x%04X in microcode {}, coming from [%s:%d]\\n\", jump_target, debug_file, debug_line);\n"
++        "    fprintf(stderr, \"Unhandled jump target 0x%04X in microcode {}, coming from [%s:%d]\\n\", jump_target, debug_file, debug_line);\n"
+         "    printf(\"Register dump: r0  = %08X r1  = %08X r2  = %08X r3  = %08X r4  = %08X r5  = %08X r6  = %08X r7  = %08X\\n\"\n"
+         "           \"               r8  = %08X r9  = %08X r10 = %08X r11 = %08X r12 = %08X r13 = %08X r14 = %08X r15 = %08X\\n\"\n"
+         "           \"               r16 = %08X r17 = %08X r18 = %08X r19 = %08X r20 = %08X r21 = %08X r22 = %08X r23 = %08X\\n\"\n"
+@@ -1145,7 +1187,12 @@ int main(int argc, const char** argv) {
+     instrs.reserve(instr_words.size());
+     uint32_t vram = config.text_address & rsp_mem_mask;
+     for (uint32_t instr_word : instr_words) {
+-        const rabbitizer::InstructionRsp& instr = instrs.emplace_back(byteswap(instr_word), vram);
++        // Keep every instruction address inside the RSP's 4 KB IMEM window.
++        // Branch targets are masked with rsp_mem_mask both when collected and
++        // when emitted, so an unmasked label address above 0x1FFF can never be
++        // reached: OB64's audio text is longer than 0x2000 - 0x1120 and would
++        // otherwise emit `L_2000:`-style labels that no `goto L_0xxx` matches.
++        const rabbitizer::InstructionRsp& instr = instrs.emplace_back(byteswap(instr_word), vram & rsp_mem_mask);
+         vram += instr_size;
+     }
+ 
 diff --git a/include/recomp.h b/include/recomp.h
 index 73f3e73..13ea02b 100644
 --- a/include/recomp.h

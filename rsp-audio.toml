@@ -1,0 +1,46 @@
+# RSP microcode recompilation: the game's audio (M_AUDTASK, type 2) microcode.
+#
+# Every type-2 task the game submits uses the same ucode pointer, `0x8009E050`:
+#
+#   [rsp] task type=2 ucode=0x8009E050 ucode_size=0x0 ucode_data=0x800ABDA0
+#         ucode_data_size=0x800 data_ptr=0x80136110 data_size=0x3D8..0x9A0
+#
+# `0x8009E050` is the *RSP boot block*, not the text: the RSP starts there, walks
+# a table of (dest,len,src) segment descriptors, DMAs each segment into IMEM and
+# jumps to the text (`jal 0x84001120`). The recompiled entry point is therefore
+# the text, and the runtime never executes the boot block on the CPU.
+#
+#   boot block + table  RDRAM 0x8009E050 (ROM 0x2E450)  -- not recompiled
+#   text                RDRAM 0x8009E0F0 (ROM 0x2E4F0)  -- this config
+#   ucode_data          RDRAM 0x800ABDA0 (ROM 0x3C1A0)  -- DMEM seed, game-owned
+#   task data_ptr       RDRAM 0x80136110                -- command list, game-owned
+#
+# `text_address` is the IMEM address the microcode was assembled at, not the
+# RDRAM address of its bytes (the same rule as rsp-njpeg.toml); the boot block's
+# `jal` and the microcode's own `j` targets are all IMEM addresses. The text
+# starts at IMEM 0x1100, and `text_size = 0x2000` wraps the 4 KB window exactly
+# once, which is what the ROM image does too.
+#
+# Byte order: the ROM stores the text as the byte-reversed form of the RSP's
+# instruction words. RSPRecomp byteswaps every word it reads from the ROM
+# (`byteswap(instr_word)` in rsp_recomp.cpp), so `text_offset` points straight at
+# the ROM bytes and the emitted code matches what the RSP executes. Verified
+# against a live RDRAM dump: the guest words at 0x8009E0F0 (`<I` at dump offset
+# 0x9E0F0) equal the ROM's big-endian words at 0x2E4F0 across the whole region.
+#
+# `text_size = 0x2000` (not the bytes remaining before ucode_data) is deliberate:
+# the microcode's own branches target IMEM addresses through the wrap, so the
+# recompiler must see the whole 4 KB instruction window. RSPRecomp's label
+# emission is masked to 0x1FFF to match its branch targets (see the
+# `vram & rsp_mem_mask` patch in rsp_recomp.cpp); without that, labels land above
+# 0x1FFF unmasked and every wrapped goto is undeclared.
+#
+# Run `make rsp-recomp` after changing this file.
+text_offset = 0x2E450
+text_size = 0x2000
+text_address = 0x1000
+rom_file_path = "assets/ogre64.z64"
+output_file_path = "RspFuncs/audio_ucode.cpp"
+output_function_name = "audio_ucode"
+
+extra_indirect_branch_targets = [0x10EC]

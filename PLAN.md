@@ -1203,6 +1203,38 @@ hardware. RT64 remains the primary native renderer throughout. See
     **revives dead party soldiers** — the developer walked in from normal play and
     it works, so this was a real-route bank, not a test-only one. `--coverage` now leaves only **one**
     uncovered ROM gap. See `docs/HANDOFF-2026-09-17-session73.md` §8.
+  - ⬜ **Sound: the audio microcode is located, recompiled and running — it does
+    not yet make PCM (session 74).** The native port is **silent, not
+    screeching**: a probe on the app's `queue_audio_samples` (`OGRE_AI_DUMP`)
+    captured **3 800 704 bytes with 0 non-zero samples** from the game's three
+    rotating AI buffers, and the developer confirmed the screech they disabled
+    was the **web** build's unmuted AudioWorklet. The game's audio *driver* is
+    healthy — **1694 type-2 (`M_AUDTASK`) tasks in 30 s**, one ucode
+    (`0x8009E050`), one `ucode_data` (`0x800ABDA0`) and one `data_ptr`
+    (`0x80136110`) with 103 distinct `data_size` — so only the RSP is missing.
+    `0x8009E050` (ROM `0x2E450`) is the microcode's **own boot block**: it reads
+    the OSTask at DMEM `0xFC0` (standard libultra layout, verified live), walks
+    segments into IMEM and calls the text entry at IMEM `0x1120` (ROM
+    `0x2E4F0`). **The ROM stores the RSP words byte-reversed relative to the
+    RDRAM image** (verified: guest words at `0x8009E0F0` == the ROM's big-endian
+    words at `0x2E4F0` across the region) and RSPRecomp's byteswap handles it.
+    New `rsp-audio.toml` (`text_offset 0x2E450`, `text_size 0x2000`,
+    `text_address 0x1000`) → `RspFuncs/audio_ucode.cpp`, built by `make
+    rsp-recomp` and dispatched in `app/src/rsp.cpp`; **off by default**
+    (`OGRE_AUDIO_UCODE=1` opts in, and the stub path is verified healthy:
+    `runlog --check` PASS). Four RSPRecomp defects were fixed and the vendored
+    patch regenerated (`n64recomp-ob64.patch`): instruction addresses are now
+    masked like branch targets (long texts emitted undeclared labels), `mfc0`/
+    `mtc0` of `DPC_*` are handled, `cfc2`/`ctc2`/`bgezal`/`bltzal` are
+    implemented, the unhandled-jump diagnostic goes to `stderr` (it was lost to
+    the runtime's `_Exit`), and **`mfc0 SP_STATUS` reads `SP_STATUS_HALTED`**
+    like the runtime's own `osSpGetStatus` (the boot block re-entered itself with
+    0; njpeg never reads it). **Open wall:** the boot block's command-table walk
+    reads DMEM 0 because `$29` is 0 every iteration, so it never DMAs the game's
+    command list. Reference for the next attempt: `mupen64plus-rsp-hle`
+    (`memory.h` task at `0xFC0`; `alist_audio.c` `DMEM_BASE 0x5C0`), which also
+    shows emulators run this ucode **LLE** (no HLE shortcut). See
+    `docs/HANDOFF-2026-09-18-session74.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —

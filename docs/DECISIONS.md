@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-18 (74) | **The native port is *silent*, not screeching: the game hands the AI zero-filled buffers because the audio microcode is still stubbed, and the screech was the web build's unmuted AudioWorklet (developer-confirmed).** The type-2 (`M_AUDTASK`) microcode is a **custom** one at ucode `0x8009E050` (a 1694-task, 30 s census: one ucode, one `ucode_data` at `0x800ABDA0`, one `data_ptr` at `0x80136110`, 103 distinct `data_size` in `0x3D8..0x9A0`), and it is now **recompiled and running** (`rsp-audio.toml` → `RspFuncs/audio_ucode.cpp`, dispatched in `app/src/rsp.cpp`) — but it does **not** produce PCM yet, so the default stays the stub with `OGRE_AUDIO_UCODE=1` as the opt-in. Layout: `0x8009E050`/ROM `0x2E450` is the microcode's **own boot block** (reads the OSTask at DMEM `0xFC0` in the standard libultra layout, walks IMEM segments, calls the text entry at IMEM `0x1120` = ROM `0x2E4F0`); **the ROM stores RSP words byte-reversed relative to the RDRAM image** and RSPRecomp's byteswap handles it, so `text_offset` points straight at the ROM; `text_address` must be the whole 4 KB window (`0x1000`, size `0x2000`) because **RSPRecomp executes the array's first instruction as the entry**. Four tool defects fixed on the way (they apply to any ucode with a >4 KB image, `cfc2`/`ctc2`, `bgezal`, or a `DPC_*` read): instruction addresses are now masked like branch targets (unmasked labels made long texts uncompilable), `mfc0`/`mtc0` of `DPC_*` are handled, `cfc2`/`ctc2`/`bgezal`/`bltzal` emit the runtime calls and `$ra` link, the unhandled-jump diagnostic goes to `stderr` (it was a `stdout` `printf`, discarded by the runtime's `_Exit`), and **`mfc0 SP_STATUS` reads `1` (`SP_STATUS_HALTED`)** to match the runtime's own `osSpGetStatus` — the audio boot block branches on that bit and re-entered itself forever when it read 0 (njpeg does not read `SP_STATUS`, so it cannot regress). **The open wall is the boot block's command-table walk: `$29` is 0 for every iteration, so it reads DMEM 0, always computes target `0x00EC`, and never DMAs the game's list.** mupen64plus-rsp-hle is the reference (checkout under `/private/tmp/emu-research/mupen64plus-rsp-hle`): its `memory.h` confirms the `0xFC0` task layout, its `alist_audio.c` puts the audio list at **`DMEM_BASE 0x5C0`** (prime suspect), and its `try_audio_task_detection` (which requires `*ucode_data == 1`) proves **emulators do not HLE this ucode** — OB64 audio is LLE there, so a savestate's RSP DMEM/IMEM is the oracle, not a reference implementation | `rsp-audio.toml`, `app/src/rsp.cpp`, `Makefile`, `n64recomp-ob64.patch` (regenerated; previous hunks byte-identical); probes reverted; stock run `runlog --check` PASS; `docs/HANDOFF-2026-09-18-session74.md` |
 | 2026-09-17 (73b) | **The loader pattern is not the whole arena map: the game also loads banks from descriptor tables, and one of them (record 16) was missing from the port while 125 call sites depended on it.** Booting **scene `0x14`** (the developer's suggestion) logged `[bank] UNCOMPILED streamed record 16: rom=0x279FF0 ram=0x802258B0 size=0x7840` and three stubbed calls (`0x80226B7C`, `0x8022859C`, `0x80226CE0`) and drew nothing. Segment-table **entry 13** declares `rom 0x275820..0x279FF0 -> ram 0x802210E0`, which unit C links, and the game then loads a **second** module over the same arena from `0x279FF0`; there is no `subu` for it (the load is table-driven) and its size is the table's `ram_end` for entry 13 (`0x8022D0F0`) minus `0x802258B0` — exactly the number the port itself printed. This is session 55's class (a streamed module that is not a segment-table record still owns a swappable RAM range) and needed session 45's treatment: **bank unit AG** (`bankRec16b`, ROM `0x279FF0`, `0x7840` → RAM `0x802258B0`), with the three stubbed addresses declared in `symbol_addrs-bankAG.txt` (each is a real function start in *that* layout, preceded by `jr $ra`). It matters far beyond scene `0x14`: **125 distinct call targets across eight units** (banks B, C, F, G, K, L, N, T, main ELF) reach into the window, because three other arenas overlap it (record 18's tutorial module `0x8022A860` unit T, record 14d's chapter animation `0x8022ACB0` unit K, and unit L's) — so every call from unit C's code into the high half was bound at build time to record 13's layout. Result: scene `0x14` is **the Witch's Den** (*"Old Witch / Heh heh heh... Can I help you?"*, `WAR FUNDS 0001000 Goth`, proof `native-scene-14-shop.png`) — the developer's route: **every mission has one city with a witch den, and visiting it revives dead party soldiers**, confirmed working in normal play the same day — it renders with **0 stubs**, and `make bank-recomp` is 33 units / 43 records / 3509 functions with `check-banks OK`. **Lesson: `tools/arenamap.py`'s negative (`all 76 ROM-wide jal 0x8009DA50` are inside compiled code) is necessary but not sufficient — a table-driven load has no `jal` to find. The run log's `UNCOMPILED streamed record` line is the arbiter.** | `config-bankAG.yaml`/`.toml`, `symbol_addrs-bankAG.txt`, `Makefile` (`BANK_UNITS += AG`), `tools/arenamap.py` (`KNOWN_LOADERLESS`); runs `/tmp/ogre-s73-s14final.log` (PASS) and the scene-14 captures; `docs/scenes.md`, `docs/proofs/native-scene-14-shop.png`; `docs/HANDOFF-2026-09-17-session73.md` §8 |
 | 2026-09-17 (73) | **The arena map is mechanical, so it is a tool, not a hunt: `tools/arenamap.py` derives every streamed bank from the loader pattern itself and verifies each compiled unit against it.** Every bank DMA is `lui/addiu` ×3 → `jal func_8009DA50` → `subu a2,a2,a0` (the size), bracketed by `func_800900C0(ram_base, code_size)` (icache) and `func_80090010(code_end, data_size)` (dcache), optionally `func_80093380(data_end, bss_size)`. Two traps the tool had to get right: the size `subu` is sometimes in the `jal`'s delay slot and sometimes hoisted above it (so evaluate the `subu`'s own operands, not the register at the call), and the backward walk must *execute* the block in address order or `addiu a1,a1,%lo` runs before the `lui` that gives it its base. Result: **28 bank loads, 27 compiled, 1 uncompiled** — a `0xE80` scene-`0x14` setup fragment (`0x0023A370 → 0x801D0860`) whose RAM unit C's record 10b already owns, and which no observed run streams. **ROM-range and size match for every compiled record.** `--coverage` lists the ROM the scanned ELFs disassemble, and the uncovered gap (`0x0DDF80..0x0E4910`, display-list/texture data) contains **0** `jal 0x8009DA50`. A `--verify` split difference is *not* a bug by itself: `mips-linux-gnu-as` pads `.text` to 16 bytes, so a record whose data starts on an 8-byte boundary links its data subsegment up to 8 bytes high (session 65's unit M), and several units' linker scripts declare the record as one subsegment; `make elf-rom-check` is what proves the bytes | `tools/arenamap.py`; `docs/scenes.md`; runs `/tmp/ogre-s73-tutorial.log` (`runlog --check` PASS: 0 stub, 0 UNKNOWN, 37 bank loads, scenes `0x17 → 0x02 → 0x0D → 0x03 ×2`) and `/tmp/ogre-s73-map.log` (PASS: title → `0x12` → `0x03`, 0 stub, 0 UNKNOWN); `docs/HANDOFF-2026-09-17-session73.md` |
 | 2026-09-17 (72) | **An unknown streamed record is worse than a stub: because `on_streamed_dma` only calls `load_function_bank` for a record it knows, it never *evicts* the previous bank from that RAM, so the caller's `jal` (correctly compiled as `LOOKUP_FUNC`) runs the old bank's body — no `streamed function stub` line, no crash, just wrong behaviour.** Two faces observed: the **settings menu hung** (`jal 0x80217E50` ran unit Q) and the **shop drew nothing** (its entry `0x80219594` existed in no registered bank, so `get_function` returned the stub — **3553 calls, once per frame**). The fix is always "compile the bank as its own unit and register the record". Enumerating **every `jal 8009da50` arena load** (not just the ones one route hits) showed **record 9's arena at RAM `0x80214FA0` has thirteen banks**: Q `0x165FE0`, P `0x171EC0`, Y `0x177EF0`, W `0x17F9E0` (combat), Z `0x188B80`, AA `0x18F120`, R `0x195430`, AB `0x1977B0` (**shop**), AC `0x19C730`, AD `0x1A2BF0`, V `0x1A4BE0` (**settings**), AE `0x1A9260`, AF `0x1B2640` — each its own unit (they all share that RAM); record 10's battle bank is X `0x22A250` → `0x801E6FD0`. Two corrections: **unit P's size is its DMA's `0x6030`, not the chunk-rounded `0x6200`** (the old end marker swallowed the first `0x1D0` bytes of bank Y; session 59's rule), and **P/Q's BSS was never zeroed** (`RAM_END` had no entry). `elfcheck`'s ELF-vs-ROM byte identity **cannot** catch an over-large module — the extra bytes are ROM bytes at their ROM offsets — so re-derive the loader. New live diagnostic: the console **`dmatrace`** prints the accumulated streamed-DMA map on demand | `config-bank{V,W,X,Y,Z,AA,AB,AC,AD,AE,AF}.*`, `symbol_addrs-bank*.txt`, `Makefile`, `app/src/bank_overlays.cpp`, `app/src/sdl_platform.cpp`, `tools/gen_bank_funcs.py`, `config-bankP.yaml`; `docs/HANDOFF-2026-09-17-session72.md` |
@@ -58,6 +59,74 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-18 (session 74) — sound: the audio microcode is located, recompiled and running
+
+**The question.** The developer: *"rendering now seems to be mostly completed. the
+next goal: sound!"* — scoped to *"just the opening scene stops being
+silent/screeching"*, native only (the web build was explicitly deferred).
+
+**Silence, not screech.** A probe on the app's `queue_audio_samples` (temporary,
+reverted) dumped everything the game hands the AI: **3 800 704 bytes, 0 non-zero
+samples**, three rotating buffers 0x450 bytes apart (1104 samples ≈ 23 ms at
+48 kHz). The audio *driver* is alive — a 30 s run submits **1694 type-2 tasks**
+with one `ucode` (`0x8009E050`), one `ucode_data` (`0x800ABDA0`, 0x800 bytes),
+one `data_ptr` (`0x80136110`) and **103 distinct `data_size`** (`0x3D8..0x9A0`) —
+so the game builds real command lists; only the RSP is missing. The developer
+confirmed the screech they disabled was the **web** page playing those buffers
+through the AudioWorklet (session 22), which does not reproduce natively.
+
+**The microcode.** `0x8009E050` (ROM `0x2E450`) is the microcode's **own boot
+block**: it reads the OSTask at DMEM `0xFC0` (verified live: type 2, `+0x30` =
+`0x80136110` = `data_ptr`, `+0x34` = `0x520` = `data_size`, the standard libultra
+layout), walks `(dest,len,src)` segment descriptors into IMEM and calls the text
+entry at IMEM `0x1120` (text at ROM `0x2E4F0`). **The ROM stores the RSP words
+byte-reversed relative to the RDRAM image** — verified by comparing a live dump
+(guest words at `0x8009E0F0`) against the ROM's big-endian words at `0x2E4F0`
+across the region — and RSPRecomp byteswaps what it reads, so `text_offset`
+points straight at the ROM.
+
+**What landed.** `rsp-audio.toml` (text_offset `0x2E450`, size `0x2000`,
+text_address `0x1000`) compiles the whole 4 KB instruction window with the boot
+block first; `make rsp-recomp` builds `RspFuncs/audio_ucode.cpp`;
+`app/src/rsp.cpp` dispatches `0x8009E050`. **It stays off by default**
+(`OGRE_AUDIO_UCODE=1` opts in) because it does not yet make PCM, and the stub
+path is verified healthy (`runlog --check` PASS, 288 type-2 tasks, no crash).
+
+**Two RSPRecomp semantics that cost the most time**, both worth remembering:
+
+* **The entry is the array's first instruction.** Compiling only the text with
+  `text_address = 0x1120` (entry first by inspection) disassembles beautifully
+  and then dies with `UnhandledJumpTarget`; the boot block must be included so
+  the image is compiled in place, exactly as hardware loads it.
+* **`text_address` must be the 4 KB window, not the text's extent**, and
+  instruction addresses must be masked (`vram & 0x1FFF`) the way branch targets
+  already are — otherwise an image longer than `0x2000 − text_address` emits
+  `L_2FEC:`-style labels no `goto L_0FEC` matches (153 undeclared labels here).
+
+**The wall.** Enabled, the microcode is entered once and **spins**: its
+command-table walk at IMEM `0x1048` (`lw $26,0($29)` / `lw $25,4($29)` /
+`addi $28,$28,8` / `srl $1,$26,23` / `andi $1,$1,0xFE` / `lh $1,0($1)` /
+`jr $1`) has **`$29` = 0 for every iteration**, so it re-reads DMEM 0, always
+computes target `0x00EC`, and never issues a DMA with a non-zero address — the
+game's command list at `data_ptr` is never fetched (`$28`, the pointer loaded
+from `data_ptr`, advances 8 per iteration while `$29`, the table base, never
+moves). Next: the audio list must be DMAd to a DMEM base the runtime does not populate
+(the boot block's `jal 0x1120` subroutine starts `addi $1,$zero,0x2B0`, so it
+expects the list at DMEM `0x2B0`; mupen's alist uses `0x5C0`). **The boot-status
+value is disproven as the gate**: forcing `mfc0 DPC_STATUS` to 0x1/0x100/0x101/
+0x1FF changed nothing, so that arm is not it.
+
+**Reference (the developer's tip): `mupen64plus-rsp-hle`.** Its `memory.h` puts
+the OSTask at `0xFC0` exactly as this runtime does (so the boot block is reading
+the right place), and `alist_audio.c` uses **`DMEM_BASE 0x5C0`** for every audio
+list address — the strongest lead for the wall. It also proves there is **no HLE
+shortcut to port**: `try_audio_task_detection` requires `*ucode_data == 1`
+(ABI1/2/3) and OB64's block starts `0x10EC139C`, so emulators run this ucode
+**LLE** — a savestate's RSP DMEM/IMEM is the oracle, not a reference
+implementation. See `docs/HANDOFF-2026-09-18-session74.md`.
 
 ---
 

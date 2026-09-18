@@ -8,6 +8,12 @@
 // ROM by `make rsp-recomp` (RspFuncs/njpeg_ucode.cpp; it is a global symbol).
 extern RspExitReason njpeg_ucode(uint8_t* rdram, uint32_t ucode_addr);
 
+// The game's audio microcode (M_AUDTASK, type 2), recompiled from the ROM by
+// `make rsp-recomp` (RspFuncs/audio_ucode.cpp). Every type-2 task the game
+// submits uses ucode pointer 0x8009E050, which is the RSP boot block; the text
+// it loads lives at IMEM 0x1120 (rsp-audio.toml).
+extern RspExitReason audio_ucode(uint8_t* rdram, uint32_t ucode_addr);
+
 namespace ogre {
 
 // Stub RSP microcode: reports that the task "completed" (RspExitReason::Broke)
@@ -37,10 +43,37 @@ static RspExitReason stub_ucode(uint8_t* rdram, uint32_t ucode_addr) {
 // See docs/HANDOFF-2026-09-15-session47.md and docs/guides/rsp-microcode.md.
 constexpr uint32_t kNjpegUcodeAddr = 0x8009ED80u;
 
+// OB64's audio microcode (session 74). The game submits every type-2 task with
+// this ucode pointer. The block at that address is the microcode's own boot
+// block: it reads the OSTask at DMEM 0xFC0, DMAs segments into IMEM and calls
+// the text entry at IMEM 0x1120, so the recompiled function starts at the boot
+// block (rsp-audio.toml, text_address 0x1000) and the whole image is compiled
+// in place.
+//
+// **Off by default.** The recompiled audio microcode runs without crashing and
+// without unhandled jumps, but it does not yet produce PCM: its command walk
+// reads a table at DMEM 0 for every entry and never DMAs the game's audio list
+// (session 74 §4 has the trace and the two RSPRecomp bugs that were fixed on the
+// way). The stub leaves the game's audio path exactly as it has always been
+// (silent, buffers still queued and draining), so runs stay healthy until the
+// microcode's expected DMEM/boot state is reproduced. Set `OGRE_AUDIO_UCODE=1`
+// to run the recompiled microcode instead.
+constexpr uint32_t kAudioUcodeAddr = 0x8009E050u;
+
 static bool njpeg_enabled() {
     static const bool enabled = [] {
         const char* value = getenv("OGRE_NJPEG");
         return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+// `OGRE_AUDIO_UCODE=1` runs the recompiled audio microcode; anything else
+// (including unset) keeps the stub.
+static bool audio_ucode_enabled() {
+    static const bool enabled = [] {
+        const char* value = getenv("OGRE_AUDIO_UCODE");
+        return value != nullptr && value[0] == '1';
     }();
     return enabled;
 }
@@ -64,6 +97,15 @@ recomp::rsp::callbacks_t make_rsp_callbacks() {
                     return njpeg_ucode;
                 }
                 printf("[rsp] task type %u submitted (njpeg microcode disabled; stub)\n",
+                       static_cast<unsigned>(task->t.type));
+                return stub_ucode;
+            }
+            if ((uint32_t)task->t.ucode == kAudioUcodeAddr) {
+                if (audio_ucode_enabled()) {
+                    printf("[rsp] task type %u submitted (audio microcode)\n", static_cast<unsigned>(task->t.type));
+                    return audio_ucode;
+                }
+                printf("[rsp] task type %u submitted (audio microcode disabled; stub)\n",
                        static_cast<unsigned>(task->t.type));
                 return stub_ucode;
             }
