@@ -40,6 +40,24 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **Neutral encounters now spawn their monster (session 82).** The wild unit is
+  created by the battle/setup fragment scene `0x0E`'s enter streams
+  (**ROM `0x23A370`, `0xE80` → RAM `0x801D0860`**), which the port had no record
+  for — `jal 0x801D0AAC`/`0x801D1508` hit the runtime's streamed stub, so the
+  battle's participant table was never built and the battle began with an empty
+  enemy side (instant victory). It is now **bank unit AH** (three forced entries,
+  `bankRec10s`, code `0xE70` / data `0x10`). `tools/arenamap.py` had listed the
+  fragment since session 73 as "no observed run streams"; the neutral-encounter
+  path does. Reproduced with a temporary force-the-roll probe (since reverted by
+  `make bank-recomp`): `[bank] UNKNOWN module rom=0x23A370 ram=0x801D0860` +
+  `streamed function stub called @ 0x801D1508` → then **0 UNKNOWN / 0 stubs**,
+  the wild Young Dragon spawns and fights. Proofs
+  `docs/proofs/native-neutral-encounter-message.png`, `-battle.png`. The mechanic
+  (fully decoded): `func_ovlN_801E7940` rolls per frame in mission state 0,
+  picks a moving player unit, reads the tile's terrain and indexes two tables at
+  `0x801ED780`/`0x801ED79E` in record 7's data for the class, stores
+  `class + 0x100` at `0x801F0E24`, and enters the encounter state. See
+  `docs/HANDOFF-2026-09-18-session82.md`.
 - 🛠 **The cutscenes' flickering right/bottom line is fixed (session 81), with two
   RT64 changes.** (1) A game framebuffer is now sized from the **VI** rather than
   from the rectangle the frame happened to draw

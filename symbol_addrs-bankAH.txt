@@ -1,0 +1,16 @@
+// Function entries for streamed-overlay bank unit AH (bankRec10s), forced with
+// `symbol_addrs_path` in config-bankAH.yaml.
+//
+// Same reason as the other bank units: only another module `jal`s these, so
+// this module's own disassembly emits them as labels inside the preceding body.
+// The three real entries are the `jal` targets from the scene enters that stream
+// the fragment: scene 0x0E `func_80177754` at 0x8017795C (0x801D0860),
+// 0x801777EC (0x801D0AAC) and 0x80177874 (0x801D1508); scene 0x0D
+// `func_80178568` at 0x80178620 (0x801D0AAC) / 0x801786A8 (0x801D1508).
+//
+// (Scene 0x14's enter `func_80178130` also calls 0x801D0860, but it DMAs unit J
+// into the same RAM first, so that call resolves to J's body, not this module.)
+
+func_ovlAH_801D0860 = 0x801d0860; // type:func
+func_ovlAH_801D0AAC = 0x801d0aac; // type:func
+func_ovlAH_801D1508 = 0x801d1508; // type:func

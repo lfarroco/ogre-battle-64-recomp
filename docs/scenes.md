@@ -183,6 +183,7 @@ scene `0x07`'s form sets `3`) and allocates the `0xC000`-byte 320x240 buffer at
 | the mission `MISSION` banners along the bottom | dev + proof | renders |
 | the `NOTE` losing-condition tooltip, the `R` menu inside a mission | dev (session 67 reference) | unknown — not seen in the captures yet |
 | **combat** — a battle between units on the mission field | dev (session 72): *"combat played beautifully"* | **renders** (session 72) — bank units W (record 9's combat bank) and X (record 10's battle bank) |
+| a **neutral encounter** — a rare map event: a moving unit "encounters a wild \<monster\>" (the message quotes the unit leader and the class, e.g. `Magnus: "A wild Young Dragon? Here!?"`), a battle then starts against the wild monster, which can be weakened and **persuaded** to join (the GameFAQs guide the developer pasted; the class/terrain/level tables are `0x801ED780`/`0x801ED79E`, see `docs/HANDOFF-2026-09-18-session82.md`) | dev (session 82) + code | **renders — developer-confirmed** (session 82): the message and the monster battle are `docs/proofs/native-neutral-encounter-message.png`, `-battle.png`. Before session 82 the battle began with an **empty enemy side and won instantly**: the wild unit is created by the battle scene's setup fragment (ROM `0x23A370` → RAM `0x801D0860`), which the port had no record for, so its entry hit the runtime's streamed stub. It is now **bank unit AH** (`bankRec10s`) |
 | the **settings / options** screen (`Message speed`, `Cursor speed`, `Help display`, `Icon name display`, `Game speed`, `Legion indicator`, `Destination display`, `Unit report type`, `Battle action name`, `Battle animation`, `Quick exit`, `Cancel all`, `Sound settings`, `Restore defaults`) | dev (session 72) + code (the module's string table) | **renders** (session 72) — bank unit V |
 | a town **shop** (`What do you have on sale?`, `Hello, how much is this?`, …) | dev (session 72) + code (the module's string table) | **renders** (session 72) — bank unit AB |
 | **the Witch's Den** — the witch's shop interior: cauldron, shelves of bottles, a counter with `WAR FUNDS 0001000 Goth`, and the **Old Witch** portrait saying *"Heh heh heh... Can I help you?"*. **Visiting it lets the player revive dead party soldiers.** | **scene `0x14`** — dev (session 73): *"on every mission, there's one city that has a 'witch den'. visiting it allows resurrecting dead party soldiers."* Proof `native-scene-14-shop.png` | **renders — developer-confirmed** (session 73): reached in normal play, the developer *"just did that — it works!"*. Reached by **walking into the Witch's Den in one city of a mission** (see the map/mission sections). It is the scene that exposed the missing **record 16** bank unit (see the arena section). Its record mask is **`0x00013C14`** — records 2, 4, 10, 11, 12, 13, **16**, 17, 18, 19, 20. For scripted testing, `OGRE_SCENE=0x14` forces it, but the poke races the boot and lands about 1 run in 5 |
@@ -241,7 +242,7 @@ code_end, data_size)` (dcache) and `func_80093380(data_end, bss_size)` (bss).
 | | `0x00079750` | `0xDAD0` | `0xC0F0` | `0x19E0` | - | M | **scene `0x05`, the map** |
 | | `0x00087220` | `0x56D60` | `0x53920` | `0x3440` | - | S | **scene `0x06`, the Organize Screen** |
 | `0x801D0860` | `0x00213AE0` | `0x16770` | `0x15260` | `0x1510` | - | J | record 10's arena, non-`0x16` scenes |
-| | `0x0023A370` | `0xE80` | `0xE70` | `0x10` | - | **none** | scene-`0x14` setup fragment (see below) |
+| | `0x0023A370` | `0xE80` | `0xE70` | `0x10` | - | AH | **the battle/neutral-encounter setup fragment** (scene `0x0E`'s enter streams it; `none` until session 82) |
 | | `0x00244770` | `0x7500` | `0x6C70` | `0x890` | - | I | **scene `0x16`, the closing movie** |
 | `0x801E6FD0` | `0x0022A250` | `0x10120` | `0xF920` | `0x800` | - | X | **combat / battle** |
 | | `0x0023B1F0` | `0x9580` | `0x8D00` | `0x880` | - | C | record 10's main bank |
@@ -318,28 +319,33 @@ responsible: the three stubbed addresses (`0x80226B7C`, `0x8022859C`,
 `0x80226CE0`) are record 16 entries, each preceded by `jr $ra`, and they are
 declared in `symbol_addrs-bankAG.txt`.
 
-#### The scene-`0x14` `0xE80` fragment — the one bank-shaped load with no unit
+#### The `0xE80` setup fragment — the one bank-shaped load with no unit
 
-`func_80177754` (scene `0x14`'s enter, descriptor `0x8018FBE8`, mask
-`0x00013C14`) has several arms, selected by **bit 3 of `D_801976F8`** (the
-scene-script opcode word the VM writes; `D_80197B80` participates too):
+**Scene `0x0D`'s enter `func_80178568` and scene `0x0E`'s enter
+`func_80177754`** (descriptor `0x8018FB2C`, mask `0x00003C00` — the **battle**)
+both stream the same fragment **`rom 0x0023A370` (`0xE80`) → RAM `0x801D0860`**,
+with the game's own boundaries (code `0xE70` / data `0x10`, no BSS). Scene
+`0x0E`'s enter calls `0x801D0AAC` on one arm and `0x801D1508` on the other; the
+neutral-encounter battle takes the `0x801D1508` arm.
 
-* **the normal route's arm** — it DMAs **record 16** (unit AG, above) and calls
-  `0x801D0AAC` inside it. The developer's walk into the Witch's Den takes this
-  one, and it is the arm every observed entry takes.
-* bit 3 **set** → it DMAs a `0xE80`-byte fragment `rom 0x0023A370 →
-  RAM 0x801D0860` and calls `0x801D1508` in it. That is a *data* copy: the bytes
-  at ROM `0x23A370` are record 10b's code from its `0x16770` offset onward, so
-  the arm is a bootstrap, not a module.
-* a third arm (`D_80197B80 == 0`) loads record 10's arena instead.
+Session 73 read the fragment as "a *data* copy of record 10b's code" and left it
+uncompiled; **session 82 corrects that**: it is its own module (unit J's
+`bankRec10a` ends at `0x23A250`, unit X's battle bank at `0x23A370`, unit C's
+`bankRec10b` starts at `0x23B1F0`), and it is the code that **builds the battle's
+participant table** — `func_801D1508` scans the 30 unit slots at `0x801F0CD0` and
+tags a free one, `func_801D0AAC` reads the 16-byte table at `0x801D16D0`. It is
+now **bank unit AH** (see the arena table above). Without it the calls hit the
+runtime's streamed stub: normal battles still work (their units already exist on
+the field), but a **neutral encounter**'s wild unit is created here, so the
+battle started with an **empty enemy side and an instant victory** — the
+developer's report, fixed in session 82
+(`docs/proofs/native-neutral-encounter-message.png`, `-battle.png`,
+`docs/HANDOFF-2026-09-18-session82.md`).
 
-The `0xE80` fragment is **not compiled**: the RAM it lands in is record 10b's,
-which unit C owns. **Open question for the developer:** whether the witch is ever
-drawn from a *different* screen/state (a first visit, a scripted intro, a
-post-resurrection flourish) that takes the bit-3 arm — the code path exists, but
-every entry seen so far takes the record-16 arm, so it may be dead. If a
-scene-`0x14` state ever draws from stale bytes, this fragment is the first thing
-to check.
+Scene `0x14`'s enter (`func_80178130`, descriptor `0x8018FBE8`, mask
+`0x00013C14`) does **not** stream the fragment: it DMAs unit J into the same RAM
+and calls `0x801D0860` (J's own code), which is why the Witch's Den renders even
+before session 82.
 
 #### The loader `arenamap.py` cannot see: a table-driven loop
 
