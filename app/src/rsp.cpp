@@ -9,16 +9,44 @@
 extern RspExitReason njpeg_ucode(uint8_t* rdram, uint32_t ucode_addr);
 
 // The game's audio microcode (M_AUDTASK, type 2), recompiled from the ROM by
-// `make rsp-recomp` (RspFuncs/audio_ucode.cpp). Every type-2 task the game
-// submits uses ucode pointer 0x8009E050, which is the RSP boot block; the text
-// it loads lives at IMEM 0x1120 (rsp-audio.toml).
+// `make rsp-recomp` (RspFuncs/audio_ucode.cpp). See the block comment at
+// `kAudioUcodeAddr` below for the load path.
 extern RspExitReason audio_ucode(uint8_t* rdram, uint32_t ucode_addr);
 
 namespace ogre {
 
+// Wrapper around the recompiled audio microcode. The game's own ucode has one
+// property the port cannot execute faithfully: its SETLOOP command (opcode
+// 0x0F) stores a loop address as a word at DMEM 0x0E, which is *also* dispatch
+// table slots 7 and 8 (the table lives at DMEM 0; entries 7/8 are 0x0000 in the
+// game's `ucode_data`, i.e. this driver has no SEGMENT/SETBUFF and sacrifices
+// those slots to the loop variable). If the game ever dispatches opcode 7 or 8,
+// the "handler address" is the high/low half of that loop address — an
+// essentially arbitrary 16-bit value, and not necessarily an instruction
+// boundary. Session 75 saw exactly that once in ~45 runs: `Unhandled jump target
+// 0x1226` (= the low half of a loop address), which killed the process because
+// `run_task`'s failure exits.
+//
+// A recompiler cannot jump to a non-instruction target, so the port has no
+// faithful behaviour to offer there. Rather than take the process down, log it
+// loudly and report the task as completed: the game's audio driver retries next
+// frame, so the cost is one silent buffer. This is deliberately scoped to the
+// audio ucode — njpeg keeps the runtime's loud failure (docs/HANDOFF-2026-09-18-session75.md §6).
+static RspExitReason audio_ucode_guard(uint8_t* rdram, uint32_t ucode_addr) {
+    RspExitReason reason = audio_ucode(rdram, ucode_addr);
+    if (reason != RspExitReason::Broke) {
+        fprintf(stderr,
+                "[rsp] audio microcode bailed (reason %d, likely the SETLOOP/dispatch-table "
+                "alias); dropping this task so the game keeps running\n",
+                static_cast<int>(reason));
+        return RspExitReason::Broke;
+    }
+    return reason;
+}
+
 // Stub RSP microcode: reports that the task "completed" (RspExitReason::Broke)
 // without doing any work. It is the fallback for every microcode the port has
-// not recompiled yet (notably the audio ucode).
+// not recompiled yet, and for `OGRE_NJPEG=0` / `OGRE_AUDIO_UCODE=0`.
 static RspExitReason stub_ucode(uint8_t* rdram, uint32_t ucode_addr) {
     return RspExitReason::Broke;
 }
@@ -43,21 +71,28 @@ static RspExitReason stub_ucode(uint8_t* rdram, uint32_t ucode_addr) {
 // See docs/HANDOFF-2026-09-15-session47.md and docs/guides/rsp-microcode.md.
 constexpr uint32_t kNjpegUcodeAddr = 0x8009ED80u;
 
-// OB64's audio microcode (session 74). The game submits every type-2 task with
-// this ucode pointer. The block at that address is the microcode's own boot
-// block: it reads the OSTask at DMEM 0xFC0, DMAs segments into IMEM and calls
-// the text entry at IMEM 0x1120, so the recompiled function starts at the boot
-// block (rsp-audio.toml, text_address 0x1000) and the whole image is compiled
-// in place.
+// OB64's audio microcode (M_AUDTASK, type 2). The game submits every type-2 task
+// with `task->t.ucode = 0x8009E050`, `task->t.ucode_data = 0x800ABDA0`, and runs
+// it through the *standard libultra RSP boot code* at `task->t.ucode_boot =
+// 0x8009ECB0`: that loader DMAs `ucode_data` (0x800 bytes) to DMEM 0 and the text
+// (a fixed 0xF80 bytes) from `ucode` to IMEM 0x1080, then `jr 0x1080`. The
+// recompiled function therefore starts at IMEM 0x1080 (rsp-audio.toml,
+// `text_address = 0x1080`), and the runtime's own task load (DMEM 0xFC0 for the
+// task, DMEM 0 for `ucode_data`) reproduces the rest.
 //
-// **Off by default.** The recompiled audio microcode runs without crashing and
-// without unhandled jumps, but it does not yet produce PCM: its command walk
-// reads a table at DMEM 0 for every entry and never DMAs the game's audio list
-// (session 74 §4 has the trace and the two RSPRecomp bugs that were fixed on the
-// way). The stub leaves the game's audio path exactly as it has always been
-// (silent, buffers still queued and draining), so runs stay healthy until the
-// microcode's expected DMEM/boot state is reproduced. Set `OGRE_AUDIO_UCODE=1`
-// to run the recompiled microcode instead.
+// Session 74 misread 0x8009E050 as a second boot block and compiled it at IMEM
+// 0x1000, which put every internal branch target 0x80 bytes off: the driver ran
+// its command-list DMA helper at the wrong entry, read the dispatch table for
+// the wrong opcode, and never produced PCM. With 0x1080 the command loop
+// dispatches the real audio ABI and the buffers carry samples (session 75).
+//
+// The game keeps DMEM 0x000-0x07FF as `ucode_data` (the driver state and the
+// dispatch table live there, not in a game-visible structure), so the microcode
+// has no RDRAM output of its own: the game hands it command lists through
+// `data_ptr` and reads the mixed PCM back from buffers named by the list.
+//
+// `OGRE_AUDIO_UCODE=0` forces the old stub (an A/B escape hatch); anything else,
+// including unset, runs the recompiled microcode.
 constexpr uint32_t kAudioUcodeAddr = 0x8009E050u;
 
 static bool njpeg_enabled() {
@@ -68,12 +103,12 @@ static bool njpeg_enabled() {
     return enabled;
 }
 
-// `OGRE_AUDIO_UCODE=1` runs the recompiled audio microcode; anything else
-// (including unset) keeps the stub.
+// `OGRE_AUDIO_UCODE=0` forces the stub; anything else (including unset) runs the
+// recompiled audio microcode.
 static bool audio_ucode_enabled() {
     static const bool enabled = [] {
         const char* value = getenv("OGRE_AUDIO_UCODE");
-        return value != nullptr && value[0] == '1';
+        return value == nullptr || value[0] != '0';
     }();
     return enabled;
 }
@@ -103,7 +138,7 @@ recomp::rsp::callbacks_t make_rsp_callbacks() {
             if ((uint32_t)task->t.ucode == kAudioUcodeAddr) {
                 if (audio_ucode_enabled()) {
                     printf("[rsp] task type %u submitted (audio microcode)\n", static_cast<unsigned>(task->t.type));
-                    return audio_ucode;
+                    return audio_ucode_guard;
                 }
                 printf("[rsp] task type %u submitted (audio microcode disabled; stub)\n",
                        static_cast<unsigned>(task->t.type));

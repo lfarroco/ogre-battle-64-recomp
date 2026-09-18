@@ -4,7 +4,7 @@ Ogre Battle 64 submits RSP tasks for graphics. Display lists are **not** run
 through recompiled microcode in this port: the runtime routes gfx tasks
 (`M_GFXTASK`) to the renderer's `send_dl`, and **RT64 parses the display lists
 itself** with its built-in GBI interpreters (`tools/RT64/src/gbi/`). RSPRecomp
-is only needed for the **audio** ucode (task type `M_AUDTASK`, 5), which the
+is only needed for the **audio** ucode (task type `M_AUDTASK`, 2), which the
 runtime routes through `recomp::rsp::get_rsp_microcode`.
 
 ## The game's gfx ucode (identified, session 5)
@@ -133,17 +133,84 @@ readback-correctness improvement, not a fix. See
 which upstream fixed issue #102 with, before writing another decoder) and
 `-session48.md`/`-session47.md` §4-5 for the superseded readings.
 
-## Audio ucode (still TBD)
+## Audio ucode (resolved, session 75)
 
-No audio tasks (type 5) are submitted yet during boot, so the stub microcode in
-`app/src/rsp.cpp` is still fine. When the game reaches audio:
+The game's audio is a custom libultra-ABI driver, submitted as `M_AUDTASK`
+(**type 2**, not 5) with a **standard libultra RSP boot loader**:
 
-1. Capture the audio OSTask via `log_task` in `app/src/rsp.cpp` (non-gfx tasks
-   log their full OSTask) to get the ucode text/data RDRAM addresses + sizes.
-2. Map them to ROM offsets and write an `RSPRecomp` config
-   (`text_offset`, `text_size`, `text_address`, `rom_file_path`,
-   `output_file_path`, `output_function_name`).
-3. Build `RSPRecomp` (`cmake --build tools/N64Recomp/build --target RSPRecomp`),
-   compile the generated C into the app, and implement
-   `get_rsp_microcode` dispatch in `app/src/rsp.cpp`.
+```
+task->t.ucode_boot = 0x8009ECB0  (ROM 0x2F0B0, 0xD0 bytes)
+task->t.ucode      = 0x8009E050  (ROM 0x2E450, text)
+task->t.ucode_data = 0x800ABDA0  (ROM 0x3C1A0, 0x800 bytes)
+task->t.data_ptr   = 0x80136110  (the command list, game heap)
+```
+
+The boot loader (disassembled at IMEM 0x1000) sets `at = 0xFC0` (the OSTask in
+DMEM), DMAs `task->ucode_data` (its true size) to **DMEM 0**, DMAs a fixed
+`0xF80` bytes from `task->ucode` to **IMEM 0x1080**, then `jr 0x1080`. The
+recompiled task therefore needs `text_address = 0x1080`; the runtime already
+loads the OSTask at DMEM 0xFC0 and `ucode_data` at DMEM 0, and RSPRecomp emits
+the initial `r1 = 0xFC0` itself.
+
+`rsp-audio.toml` compiles `text_offset 0x2E450`, `text_size 0xC60`,
+`text_address 0x1080` into `RspFuncs/audio_ucode.cpp`. Two constraints, both
+load-bearing:
+
+* **`text_address = 0x1080` is the IMEM address the loader enters, not the text's
+  RDRAM low bits** (`0x0E50`) and not `0x1000`. Session 74 used `0x1000`; every
+  internal `j`/`beq` target (which is absolute in the instruction encoding) then
+  resolved 0x80 bytes early, the driver never DMA'd its command list, and the
+  output was silence. This is the same rule as `rsp-njpeg.toml`.
+* **`text_size = 0xC60`, not the loader's `0xF80`.** The fixed-length text DMA
+  runs past the end of the audio code into the boot loader's own ROM bytes and
+  the njpeg text at IMEM 0x1CE0, and those bytes' `j` targets point below the
+  text. The game never executes that tail; compiling it only emits references to
+  labels that do not exist. The audio code's own last instruction is at IMEM
+  0x1CD0. Same rule as `rsp-njpeg.toml`'s `text_size = 0x7B8`.
+
+`extra_indirect_branch_targets` must carry the command handlers, because the
+driver dispatches through a **halfword table in `ucode_data` at DMEM 0**:
+
+```
+10d4: srl  at,k0,0x17        ; opcode = top byte of the command word
+10d8: andi at,at,0xfe
+10dc: lh   at,0(at)          ; DMEM 0 (ucode_data[0]) + 2*opcode
+10e0: jr   at
+```
+
+The table is the standard 16-entry audio ABI (`0x00` SPNOOP … `0x0F` SETLOOP);
+the handler addresses it holds are data, so RSPRecomp cannot see them. The
+config lists every 4-byte-aligned target the table can produce
+(`(entry | 0x1000) & 0x1FFF`) plus `0x10B4`, which the command-list DMA helper
+returns to through `jr $5` rather than `$ra`. The tables for opcodes 7/8 hold
+0x0000 (this driver has no SEGMENT/SETBUFF; it passes counts and addresses
+inline), and the game does not emit them.
+
+**One caveat the port has to live with:** `SETLOOP` (opcode `0x0F`, handler
+`0x1384`) stores its 24-bit loop address as a word at **DMEM `0x0E`** — the exact
+bytes of table entries 7 and 8. So those two slots are *overwritten every time
+the game sets a loop point*, and a dispatch of opcode 7 or 8 would `jr` to half
+of an audio buffer address (not an instruction boundary). The store is faithful
+(the RSP is byte-addressable; aligning it down to `0x0C` would clobber entry 6
+= SAVEBUFF, which the game uses constantly), so `app/src/rsp.cpp` wraps the
+recompiled ucode in `audio_ucode_guard`: if it ever returns non-`Broke`, log it
+and report the task completed rather than letting the runtime exit the process.
+See `docs/HANDOFF-2026-09-18-session75.md` §6.
+
+**Verification recipe (no listening required):** the game's own AI descriptor is
+at `*(0x800A9B90)` — `+0x00` buffer, `+0x04` length in words; a live console
+`dump` while music plays then shows real PCM there:
+
+```
+printf 'c\ndump /tmp/live.bin\n' > /tmp/ogre-console75.tmp && mv … /tmp/ogre-console75.txt
+OGRE_NO_AUDIO=1 OGRE_CONSOLE_AT_MS=5000 OGRE_CONSOLE_FILE=/tmp/ogre-console75.txt \
+  OGRE_EXIT_AFTER_MS=7000 ./build-app/ogrebattle64 assets/ogre64.z64
+```
+
+Session 75 measured **1104/1104 non-zero stereo samples** in the AI buffer at
+t=5 s (scene 0x09, the intro), values spanning roughly −9600..+5800.
+
+`OGRE_AUDIO_UCODE=0` forces the old stub (silent, but the buffers still queue and
+drain) as an A/B escape hatch; unset runs the real microcode.
+
 

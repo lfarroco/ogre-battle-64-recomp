@@ -143,6 +143,22 @@ index 0fdb724..3c2f175 100644
  } RelocEntryType;
  
  typedef struct {
+diff --git a/librecomp/src/ai.cpp b/librecomp/src/ai.cpp
+index 0195f2b..365af85 100644
+--- a/librecomp/src/ai.cpp
++++ b/librecomp/src/ai.cpp
+@@ -25,5 +25,10 @@ extern "C" void osAiGetLength_recomp(uint8_t* rdram, recomp_context* ctx) {
+ }
+ 
+ extern "C" void osAiGetStatus_recomp(uint8_t* rdram, recomp_context* ctx) {
+-    ctx->r2 = 0x00000000; // Pretend the audio DMAs finish instantly
++    // AI_STATUS_BUSY (bit 31) while the queued audio has not finished playing.
++    // OB64's audio thread spins on this bit to pace its generation to the DAC;
++    // returning 0 unconditionally made it generate one buffer per *video* frame,
++    // overproducing ~3.5% and growing the output queue without bound (session
++    // 76). See `ultramodern::audio_dma_busy`.
++    ctx->r2 = ultramodern::audio_dma_busy() ? (int32_t)0x80000000 : 0;
+ }
 diff --git a/librecomp/src/cont.cpp b/librecomp/src/cont.cpp
 index 7ad6c21..c755129 100644
 --- a/librecomp/src/cont.cpp
@@ -1611,7 +1627,7 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..2e0e49a 100644
+index 46aea61..402363d 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
 @@ -23,7 +23,17 @@
@@ -1721,7 +1737,18 @@ index 46aea61..2e0e49a 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -170,11 +262,33 @@ void set_callbacks(
+@@ -121,6 +213,10 @@ void init_audio();
+ void set_audio_frequency(uint32_t freq);
+ void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
+ uint32_t get_remaining_audio_bytes();
++// True while queued audio has not finished playing. Drives the AI status
++// register's busy bit (`osAiGetStatus`), which games spin on to pace audio
++// generation to the DAC instead of to the video frame rate (session 76).
++bool audio_dma_busy();
+ 
+ struct audio_callbacks_t {
+     using queue_samples_t = void(int16_t*, size_t);
+@@ -170,11 +266,33 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -1759,7 +1786,7 @@ index 46aea61..2e0e49a 100644
 +#define debug_printf(...) do { if (ultramodern::sched_traces_enabled()) printf(__VA_ARGS__); } while (0)
  #endif
 diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
-index 3198be0..864705d 100644
+index 3198be0..fd92d59 100644
 --- a/ultramodern/src/audio.cpp
 +++ b/ultramodern/src/audio.cpp
 @@ -1,6 +1,8 @@
@@ -1794,6 +1821,43 @@ index 3198be0..864705d 100644
      // Calculate the number of samples from the number of bytes.
      uint32_t sample_count = byte_count / sizeof(int16_t);
  
+@@ -65,3 +83,36 @@ uint32_t ultramodern::get_remaining_audio_bytes() {
+     }
+     return buffered_byte_count;
+ }
++
++// The N64's AI has an internal FIFO and the AI_STATUS_BUSY bit stays set for as
++// long as the last `osAiSetNextBuffer` buffer is still being played. Games read
++// it (OB64's audio thread loops on `osAiGetStatus() & 0x80000000`) to pace
++// generation to the DAC. Without it the loop runs at the video frame rate, which
++// for OB64 is 60 buffers/s of 552 frames while the DAC plays 32000 frames/s —
++// a 3.5% overproduction that grows the output queue by ~2 s a minute.
++//
++// On hardware the game polls this bit in a tight loop (the CPU is fast relative
++// to one buffer), so "busy while anything is still playing" is enough. In the
++// recompiled port the same loop only iterates ~120 times/s — coarser than one
++// 17 ms buffer — so clearing the bit exactly when the queue empties makes the
++// game generate one buffer *late*: measured with a queue-depth probe it produced
++// 34 buffers/s instead of the DAC's 58, empty on every push (a 40% underrun, and
++// the music engine advances per buffer, so the music dragged and tore).
++//
++// The fix is to leave a cushion: report the AI idle once the queued audio drops
++// below ~52 ms, so the game tops up *before* the device runs dry. Measured sweep
++// at 32 kHz (session 76): 0 ms -> 34.0 pushes/s, 68/68 pushes onto an empty
++// queue; 36 ms -> 58.5/s, 15 empty; 52 ms -> 58.0/s, 0 empty, queue 13..56 ms;
++// 69 ms -> 58.0/s, 0 empty, queue 24..78 ms. 52 ms is ~3 of OB64's buffers and
++// the lowest setting that never starves the device.
++bool ultramodern::audio_dma_busy() {
++    if (audio_callbacks.get_frames_remaining == nullptr) {
++        return false;
++    }
++    constexpr uint32_t kCushionMs = 52;
++    // The callback reports int16 samples (both channels), so `ms * rate` frames
++    // is `* 2` in its units.
++    const size_t cushion = static_cast<size_t>(sample_rate) * kCushionMs / 1000 * 2;
++    return audio_callbacks.get_frames_remaining() > cushion;
++}
++
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
 index 2f1cfb5..1b6b971 100644
 --- a/ultramodern/src/events.cpp

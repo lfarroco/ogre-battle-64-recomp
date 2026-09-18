@@ -5,21 +5,43 @@
 #   [rsp] task type=2 ucode=0x8009E050 ucode_size=0x0 ucode_data=0x800ABDA0
 #         ucode_data_size=0x800 data_ptr=0x80136110 data_size=0x3D8..0x9A0
 #
-# `0x8009E050` is the *RSP boot block*, not the text: the RSP starts there, walks
-# a table of (dest,len,src) segment descriptors, DMAs each segment into IMEM and
-# jumps to the text (`jal 0x84001120`). The recompiled entry point is therefore
-# the text, and the runtime never executes the boot block on the CPU.
+# The game drives this ucode through the *standard libultra RSP boot code*, which
+# lives at RDRAM 0x8009ECB0 (`task->t.ucode_boot`; the same loader serves the
+# type-4 njpeg task). Disassembled (IMEM 0x1000-based):
 #
-#   boot block + table  RDRAM 0x8009E050 (ROM 0x2E450)  -- not recompiled
-#   text                RDRAM 0x8009E0F0 (ROM 0x2E4F0)  -- this config
-#   ucode_data          RDRAM 0x800ABDA0 (ROM 0x3C1A0)  -- DMEM seed, game-owned
-#   task data_ptr       RDRAM 0x80136110                -- command list, game-owned
+#   1000: j 0x1064
+#   1004: addi at,zero,0xFC0        ; at = OSTask in DMEM
+#   1008: lw v0,0x10(at)            ; v0 = task->ucode
+#   100c: addi v1,zero,0xF7F        ; fixed 0xF80-byte text length
+#   1010: addi a3,zero,0x1080       ; IMEM 0x1080
+#   1014: mtc0 a3,SP_MEM_ADDR
+#   1018: mtc0 v0,SP_DRAM_ADDR
+#   101c: mtc0 v1,SP_RD_LEN
+#   ...   (wait, then) jr a3        ; enter the microcode at IMEM 0x1080
 #
-# `text_address` is the IMEM address the microcode was assembled at, not the
-# RDRAM address of its bytes (the same rule as rsp-njpeg.toml); the boot block's
-# `jal` and the microcode's own `j` targets are all IMEM addresses. The text
-# starts at IMEM 0x1100, and `text_size = 0x2000` wraps the 4 KB window exactly
-# once, which is what the ROM image does too.
+# and, before that, the same loader DMAs `task->ucode_data` (size
+# `ucode_data_size`) to **DMEM 0**. So:
+#
+#   text        RDRAM 0x8009E050 (ROM 0x2E450) -> IMEM 0x1080, 0xF80 bytes
+#   ucode_data  RDRAM 0x800ABDA0 (ROM 0x3C1A0) -> DMEM 0x0000, 0x800 bytes
+#   task        RDRAM -- copied to DMEM 0xFC0 by the runtime
+#   data_ptr    RDRAM 0x80136110 -- the audio command list, game heap
+#
+# **`text_address` must be 0x1080**, not the text's RDRAM low bits (0x0E50) and
+# not 0x1000: RSPRecomp labels instruction *i* with `(text_address + 4i) & 0x1FFF`
+# while branch targets come from the instruction's own absolute IMEM field, so a
+# wrong base rotates every `j`/`beq` target by the difference. Session 74 used
+# 0x1000 and the whole driver ran 0x80 bytes early (it "worked" but never DMA'd
+# the command list). njpeg has the same rule (rsp-njpeg.toml).
+#
+# `text_size = 0xC60` is where the audio code itself ends: the last instruction
+# is the `j` at IMEM 0x1CCC / delay-slot `addi s8,s8,-8` at 0x1CD0, then the
+# region is zero padding, and IMEM 0x1CE0 (= RDRAM 0x8009ECB0) is the *boot
+# loader itself*, which the fixed-length DMA also copies into IMEM (its `j
+# 0x1064`/`0x1008` targets point below the audio text and have no labels there).
+# The game never executes that tail, so compiling it would only emit `goto
+# L_1064`-style references to labels that do not exist. Same rule as
+# rsp-njpeg.toml's `text_size = 0x7B8`.
 #
 # Byte order: the ROM stores the text as the byte-reversed form of the RSP's
 # instruction words. RSPRecomp byteswaps every word it reads from the ROM
@@ -28,19 +50,39 @@
 # against a live RDRAM dump: the guest words at 0x8009E0F0 (`<I` at dump offset
 # 0x9E0F0) equal the ROM's big-endian words at 0x2E4F0 across the whole region.
 #
-# `text_size = 0x2000` (not the bytes remaining before ucode_data) is deliberate:
-# the microcode's own branches target IMEM addresses through the wrap, so the
-# recompiler must see the whole 4 KB instruction window. RSPRecomp's label
-# emission is masked to 0x1FFF to match its branch targets (see the
-# `vram & rsp_mem_mask` patch in rsp_recomp.cpp); without that, labels land above
-# 0x1FFF unmasked and every wrapped goto is undeclared.
+# `extra_indirect_branch_targets`: the driver has two indirect jumps, and both
+# take their target from *data*, which the recompiler cannot see.
+#
+# 1. The command loop dispatches with
+#
+#      10d4: srl  at,k0,0x17          ; opcode = top byte of the command word
+#      10d8: andi at,at,0xfe
+#      10dc: lh   at,0(at)            ; halfword table at DMEM 0 (ucode_data[0])
+#      10e0: jr   at
+#
+#    The table is the standard 16-entry audio ABI (commands 0x00..0x0F). The
+#    list below is every 4-byte-aligned target that table can produce inside the
+#    text (`(entry | 0x1000) & 0x1FFF`); opcodes 7 and 8 hold 0x0000 in the game's
+#    data (they would jump to IMEM 0x1000, the boot loader's own code, which is
+#    not part of this text) and the game does not emit them. Entries whose
+#    low-12-bit PC already carries bit 12 (0x10EC etc.) and entries that do not
+#    (0x2B0 -> 0x12B0) are both handled by that OR.
+# 2. `jr $5` at the command-list DMA helper (IMEM 0x1144) returns through a
+#    saved register rather than `$ra`, so its target 0x10B4 is not collected as a
+#    link return and must be listed too.
 #
 # Run `make rsp-recomp` after changing this file.
 text_offset = 0x2E450
-text_size = 0x2000
-text_address = 0x1000
+text_size = 0xC60
+text_address = 0x1080
 rom_file_path = "assets/ogre64.z64"
 output_file_path = "RspFuncs/audio_ucode.cpp"
 output_function_name = "audio_ucode"
 
-extra_indirect_branch_targets = [0x10EC]
+extra_indirect_branch_targets = [
+    0x10B4, 0x10EC, 0x10F0, 0x1100, 0x119C, 0x11C8,
+    0x11F0, 0x1200, 0x1208, 0x1248, 0x127C, 0x12B0,
+    0x12D4, 0x1338, 0x1348, 0x1384, 0x139C, 0x148C,
+    0x1628, 0x16E4, 0x17EC, 0x1800, 0x1A44, 0x1A64,
+    0x1C84,
+]

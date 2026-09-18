@@ -1203,38 +1203,70 @@ hardware. RT64 remains the primary native renderer throughout. See
     **revives dead party soldiers** — the developer walked in from normal play and
     it works, so this was a real-route bank, not a test-only one. `--coverage` now leaves only **one**
     uncovered ROM gap. See `docs/HANDOFF-2026-09-17-session73.md` §8.
-  - ⬜ **Sound: the audio microcode is located, recompiled and running — it does
-    not yet make PCM (session 74).** The native port is **silent, not
-    screeching**: a probe on the app's `queue_audio_samples` (`OGRE_AI_DUMP`)
-    captured **3 800 704 bytes with 0 non-zero samples** from the game's three
-    rotating AI buffers, and the developer confirmed the screech they disabled
-    was the **web** build's unmuted AudioWorklet. The game's audio *driver* is
-    healthy — **1694 type-2 (`M_AUDTASK`) tasks in 30 s**, one ucode
-    (`0x8009E050`), one `ucode_data` (`0x800ABDA0`) and one `data_ptr`
-    (`0x80136110`) with 103 distinct `data_size` — so only the RSP is missing.
-    `0x8009E050` (ROM `0x2E450`) is the microcode's **own boot block**: it reads
-    the OSTask at DMEM `0xFC0` (standard libultra layout, verified live), walks
-    segments into IMEM and calls the text entry at IMEM `0x1120` (ROM
-    `0x2E4F0`). **The ROM stores the RSP words byte-reversed relative to the
-    RDRAM image** (verified: guest words at `0x8009E0F0` == the ROM's big-endian
-    words at `0x2E4F0` across the region) and RSPRecomp's byteswap handles it.
-    New `rsp-audio.toml` (`text_offset 0x2E450`, `text_size 0x2000`,
-    `text_address 0x1000`) → `RspFuncs/audio_ucode.cpp`, built by `make
-    rsp-recomp` and dispatched in `app/src/rsp.cpp`; **off by default**
-    (`OGRE_AUDIO_UCODE=1` opts in, and the stub path is verified healthy:
-    `runlog --check` PASS). Four RSPRecomp defects were fixed and the vendored
-    patch regenerated (`n64recomp-ob64.patch`): instruction addresses are now
-    masked like branch targets (long texts emitted undeclared labels), `mfc0`/
-    `mtc0` of `DPC_*` are handled, `cfc2`/`ctc2`/`bgezal`/`bltzal` are
-    implemented, the unhandled-jump diagnostic goes to `stderr` (it was lost to
-    the runtime's `_Exit`), and **`mfc0 SP_STATUS` reads `SP_STATUS_HALTED`**
-    like the runtime's own `osSpGetStatus` (the boot block re-entered itself with
-    0; njpeg never reads it). **Open wall:** the boot block's command-table walk
-    reads DMEM 0 because `$29` is 0 every iteration, so it never DMAs the game's
-    command list. Reference for the next attempt: `mupen64plus-rsp-hle`
-    (`memory.h` task at `0xFC0`; `alist_audio.c` `DMEM_BASE 0x5C0`), which also
-    shows emulators run this ucode **LLE** (no HLE shortcut). See
-    `docs/HANDOFF-2026-09-18-session74.md`.
+  - ✅ **Sound: the audio microcode runs and produces PCM (session 75).** Every
+    type-2 (`M_AUDTASK`) task now executes the ROM's own recompiled audio
+    microcode, and the game's AI buffer carries real stereo samples: a live RDRAM
+    dump at t=5 s (scene `0x09`, the intro) shows **1104/1104 non-zero samples**
+    in the buffer the game hands `osAiSetNextBuffer` (`*(0x800A9B90)` → buf
+    `0x8013EE70`, len `0x8A0`, run-specific), values spanning roughly −9600..+5800
+    with a
+    smooth waveform. `runlog.py --check` PASSes on a stock 15 s run (809 type-2
+    tasks, 0 stubbed non-gfx tasks) and `OGRE_AUDIO_UCODE=0` still gives the old
+    silent stub as an A/B escape hatch.
+    **The session-74 wall was one wrong constant: `text_address`.** `0x8009E050`
+    is not a second boot block — it is the audio text, loaded by the *standard
+    libultra RSP boot code* at `task->t.ucode_boot = 0x8009ECB0` (ROM `0x2F0B0`):
+    that loader sets `at = 0xFC0`, DMAs `ucode_data` (`0x800ABDA0`, 0x800 bytes)
+    to DMEM 0 and a fixed `0xF80` bytes from `ucode` to **IMEM 0x1080**, then
+    `jr 0x1080`. Compiling at `0x1000` (session 74) put every absolute
+    `j`/`beq` target 0x80 bytes off, so the driver's command-list DMA helper was
+    entered mid-instruction and `$29`/`$30` were never set. With `0x1080` the
+    driver dispatches its real command ABI. `rsp-audio.toml` is now
+    `text_offset 0x2E450`, `text_size 0xC60` (`0xF80` would compile the boot
+    loader's own bytes into the image and emit `goto L_1064`-style undeclared
+    labels), `text_address 0x1080`, plus
+    `extra_indirect_branch_targets` = the 16-entry ABI dispatch table held as
+    **data in `ucode_data` at DMEM 0** (`lh $at,0($at)` after
+    `srl $at,$k0,0x17`), including `0x10B4` for the `jr $5` return. The command
+    stream is the standard aspMain ABI (CLEARBUFF/LOADBUFF/SAVEBUFF/MIXER/
+    INTERLEAVE/LOADADPCM); opcodes 7/8 are 0 in the game's table (no
+    SEGMENT/SETBUFF). Session 74's four RSPRecomp fixes stay in
+    `n64recomp-ob64.patch`. `tools/runlog.py` now classifies `M_GFXTASK`=1 /
+    `M_AUDTASK`=2 (it had treated type 2 as gfx) and fails `--check` on any
+    non-gfx task served by the stub. **One rough edge, found by chasing a 1-in-25
+    crash:** the game's own `SETLOOP` (op 0x0F) stores its loop address as a word
+    at **DMEM 0x0E**, which is exactly dispatch-table entries 7/8 (both `0x0000`
+    in `ucode_data` — this driver has no SEGMENT/SETBUFF). A rare op7/op8
+    dispatch therefore `jr`s to half an audio-buffer address
+    (`Unhandled jump target 0x1226`), which the recompiler cannot execute; the
+    port now logs it and drops that one task (`audio_ucode_guard` in
+    `app/src/rsp.cpp`, audio-only) instead of exiting. **Latency (session 76):
+    fixed.** The game's audio thread is gated by `osAiGetStatus()`'s
+    `AI_STATUS_BUSY` bit (it spins on it before generating each buffer); the
+    runtime hardcoded that register to 0, so the game produced 552-frame buffers
+    at the video frame rate (60/s = 33 120 frames/s) while the DAC plays 32 000 —
+    a 3.5 % surplus that grew the SDL queue from 22 ms to **2 070 ms over 70 s**
+    (the developer's "1–2 s delay"). `ultramodern::audio_dma_busy()` now reports
+    busy while more than a **52 ms cushion** of audio is queued and
+    `osAiGetStatus_recomp` returns `0x80000000`. **The cushion is load-bearing:**
+    the literal "busy while anything is queued" cut the queue to 17.2 ms but made
+    the game generate only 34 buffers/s (a 40 % underrun, every push onto an
+    empty queue) — the "music drags and tears" the developer heard next, because
+    the music engine advances per generated buffer. The port's audio loop only
+    iterates ~120×/s, coarser than one 17 ms buffer, so the bit must clear before
+    the queue empties. A measured sweep (0/36/52/69 ms → 34.0/58.5/58.0/58.0
+    pushes/s, empty pushes 68/15/0/0) picked 52 ms. Final: **58.0 pushes/s = the
+    DAC rate, 0 underruns, queue 2–57 ms**. Carried in
+    `n64modernruntime-ob64.patch` (regenerate with the nested `N64Recomp`
+    submodule excluded). See
+    `docs/HANDOFF-2026-09-18-session76.md`. **Other open follow-ups:** the
+    runtime still wakes the game's audio thread with the session-16 dummy
+    response on queue `0x800C49E8`; the real AI-completion event
+    (`osSetEventMesg(OS_EVENT_AI, …)`) is registered but never fired — pacing no
+    longer depends on it, so it is now only a wake-up mechanism. Audio is
+    correct and paced (~58 buffers/s); see
+    `docs/HANDOFF-2026-09-18-session75.md` and
+    `docs/guides/rsp-microcode.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —
@@ -1529,13 +1561,19 @@ hardware. RT64 remains the primary native renderer throughout. See
     drawn render target (`OGRE_PRESENT_FBTARGET=1`). Both are turned on
     automatically by `OGRE_SYNTH_FRAME`. See
     `docs/HANDOFF-2026-09-12-session27.md`.
-  - ✅ **Game audio is muted by default (session 22)**: the audio microcode is
-    not emulated (the RSP audio task is only auto-completed), so what the game
-    hands the AI interface is garbage and playing it is a wall of screeching.
-    The AudioWorklet is still created and still drains the ring (the game's
-    `get_frames_remaining()` backpressure is load-bearing), only the output is
-    silenced. `?audio` on the URL, or `window.ogreAudio.setEnabled(true)`,
-    unmutes it for audio work. See `docs/HANDOFF-2026-09-11-session22.md`.
+  - ✅ **Web build: game audio is muted by default (session 22) — native now
+    plays it (session 75).** The **native** port runs the game's recompiled
+    audio microcode and feeds real PCM to SDL (see the sound entry above). The
+    **web** build is unchanged: its AudioWorklet is still created and still
+    drains the ring (the game's `get_frames_remaining()` backpressure is
+    load-bearing), and its output is still silenced by default — session 22
+    added that because the RSP audio task was only auto-completed *then*, so
+    what the game handed the AI interface was stale RDRAM and playing it was a
+    wall of screeching. `?audio` on the URL, or
+    `window.ogreAudio.setEnabled(true)`, unmutes it. Re-pointing the web build
+    at the now-working microcode (and removing that default-off) is deferred
+    web work. See `docs/HANDOFF-2026-09-11-session22.md` and
+    `docs/HANDOFF-2026-09-18-session75.md`.
   - ✅ **The intro's frame-31 "runaway walk" is fixed (session 21)**: OB64's
     display lists mix KSEG0 and **segmented** addresses, and the renderer
     resolved a segment as `(base_high_byte << 24) | offset` instead of RT64's

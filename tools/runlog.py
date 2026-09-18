@@ -53,7 +53,7 @@ RE_TASK = re.compile(
 # The reason is one of a known few, and log lines interleave mid-line with
 # other traces, so match the alternatives instead of "anything in parens".
 RE_TASK_SERVED = re.compile(
-    r"\[rsp\]\s+task type (\d+) submitted \((stub microcode|njpeg microcode[^)]*)\)")
+    r"\[rsp\]\s+task type (\d+) submitted \((stub microcode|njpeg microcode[^)]*|audio microcode[^)]*)\)")
 RE_BANK = re.compile(r"\[bank\]\s+loading overlay record rom=0x([0-9A-Fa-f]+) "
                      r"ram=0x([0-9A-Fa-f]+) size=0x([0-9A-Fa-f]+) \((\d+) functions\)")
 RE_DL = re.compile(r"\[renderer\]\s+display list (\d+) at t=(\d+)ms")
@@ -89,6 +89,12 @@ def summarize(path: str) -> dict:
               "data_size": int(m.group(7), 16)}
              for m in RE_TASK.finditer(text)]
     served = Counter(m.group(2) for m in RE_TASK_SERVED.finditer(text))
+    # Served-by-kind per task type. The N64 task types are M_GFXTASK=1 (RT64
+    # parses the display lists itself, so a stub is expected), M_AUDTASK=2 and
+    # M_NJPEGTASK=4 — the latter two are non-gfx and must run real microcode.
+    served_by_type: dict[int, Counter] = {}
+    for m in RE_TASK_SERVED.finditer(text):
+        served_by_type.setdefault(int(m.group(1)), Counter())[m.group(2)] += 1
     per_type: dict[int, Counter] = {}
     for task in tasks:
         per_type.setdefault(task["type"], Counter())["seen"] += 1
@@ -100,9 +106,16 @@ def summarize(path: str) -> dict:
     dls = [(int(m.group(1)), int(m.group(2))) for m in RE_DL.finditer(text)]
     problems = {name: len(rx.findall(text)) for name, rx, _ in PROBLEMS}
 
-    # Non-gfx tasks are the interesting ones: graphics goes to RT64 regardless.
-    non_gfx = [t for t in tasks if t["type"] != 2]
-    gfx_stubbed = served.get("stub microcode", 0)
+    # Non-gfx tasks are the interesting ones: graphics (type 1) goes to RT64
+    # regardless, so only types 2/4 (audio, njpeg) run through the RSP microcode.
+    # A "served by" kind that contains "stub" (bare `stub microcode`, or e.g.
+    # `audio microcode disabled; stub`) means the work never happened.
+    non_gfx = [t for t in tasks if t["type"] != 1]
+    gfx_stubbed = sum(count for kind, count in served_by_type.get(1, Counter()).items()
+                      if "stub" in kind)
+    non_gfx_stubbed = sum(count for ttype, kinds in served_by_type.items()
+                          if ttype != 1 for kind, count in kinds.items()
+                          if "stub" in kind)
     return {
         "path": path,
         "lines": len(lines),
@@ -110,9 +123,11 @@ def summarize(path: str) -> dict:
         "tasks": tasks,
         "tasks_per_type": {str(k): v["seen"] for k, v in sorted(per_type.items())},
         "tasks_served": dict(served),
+        "tasks_served_by_type": {str(k): dict(v) for k, v in sorted(served_by_type.items())},
         "non_gfx_tasks": non_gfx,
-        "gfx_tasks": per_type.get(2, Counter()).get("seen", 0),
-        "gfx_stubbed": served.get("stub microcode", 0),
+        "gfx_tasks": per_type.get(1, Counter()).get("seen", 0),
+        "gfx_stubbed": gfx_stubbed,
+        "non_gfx_stubbed": non_gfx_stubbed,
         "banks": banks,
         "dl_count": len(dls),
         "dl_first": dls[0] if dls else None,
@@ -145,6 +160,9 @@ def print_human(s: dict, max_tasks: int, show_banks: bool) -> None:
     if s["gfx_stubbed"]:
         print("  note: %d gfx task(s) are stubbed for the RSP — RT64 parses their "
               "display lists itself, so this is expected" % s["gfx_stubbed"])
+    if s["non_gfx_stubbed"]:
+        print("  WARNING: %d non-gfx task(s) served by the stub — that work never "
+              "happens (audio = type 2, njpeg = type 4)" % s["non_gfx_stubbed"])
     if s["non_gfx_tasks"]:
         print("  non-gfx tasks (%d) — these run through the RSP microcode, so a stub "
               "means the work never happens:" % len(s["non_gfx_tasks"]))
@@ -212,7 +230,12 @@ def main(argv: list[str] | None = None) -> int:
         if total:
             print("\nFAIL: %d problem line(s)" % total)
             return 1
-        print("\nPASS: no crash, no stub call, no unknown module, no bad RSP exit")
+        if s["non_gfx_stubbed"]:
+            print("\nFAIL: %d non-gfx task(s) served by the stub microcode "
+                  "(their work never happens)" % s["non_gfx_stubbed"])
+            return 1
+        print("\nPASS: no crash, no stub call, no unknown module, no bad RSP exit, "
+              "no stubbed non-gfx task")
     return 0
 
 
