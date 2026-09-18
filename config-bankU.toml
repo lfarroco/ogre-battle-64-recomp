@@ -1,0 +1,15 @@
+# N64Recomp config for streamed-overlay bank unit U (Phase 4).
+# See config-bankR.toml for the model. This unit holds the mode-2 bank of
+# record 18's arena (D_80193700 == 2):
+#   ROM 0x1C9020 (0x5020) -> RAM 0x8022A860 (see config-bankU.yaml).
+
+[input]
+output_func_path = "BankUFuncs"
+elf_path = "build/bankU.elf"
+rom_file_path = "assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+function_sizes = []

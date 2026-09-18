@@ -1,0 +1,26 @@
+// Function entries for streamed-overlay bank unit T (bankRec18b), forced with
+// `symbol_addrs_path` in config-bankT.yaml.
+//
+// Same reason as symbol_addrs-bankN.txt / -bankP.txt / -bankQ.txt / -bankR.txt /
+// -bankS.txt: an address that is only a `jal` target from *another* module is
+// emitted as a label inside the preceding body of this module, so N64Recomp has
+// no function entry there and the caller's `LOOKUP_FUNC` lands on the runtime's
+// logging stub.
+//
+// The four addresses the practice run stubbed on, and who calls them:
+//
+//   0x8022A860  the module entry (segment start — spimdisasm emits it itself)
+//               unit A's record 3 `jal 0x8022A860` @0x8019F7AC (BankAFuncs)
+//   0x8022A88C  unit N's record 7 `jal 0x8022A88C` @0x801B054C (BankNFuncs)
+//   0x8022AA94  the module's own loader entry, reached via the mode table
+//               (record 18's `func_ovlB_80221D50` `jalr`s the +0x08 word at
+//               0x80229EAC)
+//   0x8022B36C  unit A's record 3 `jal 0x8022B36C` @0x8019F5CC (BankAFuncs)
+//
+// All four are real entries in the module's disassembly (each is preceded by a
+// `jr $ra` or is the segment start); they are only invisible because no `jal`
+// to them exists *inside* this record.
+
+func_ovlT_8022A88C = 0x8022A88C; // type:func
+func_ovlT_8022AA94 = 0x8022AA94; // type:func
+func_ovlT_8022B36C = 0x8022B36C; // type:func

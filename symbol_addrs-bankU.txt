@@ -1,0 +1,13 @@
+// Function entries for streamed-overlay bank unit U (bankRec18c), forced with
+// `symbol_addrs_path` in config-bankU.yaml.
+//
+// 0x8022A87C is the entry record 18's loader calls for mode `D_80193700 == 2`
+// (`func_ovlB_80221D50` reads it from the mode table at RAM 0x80229EC0 + 0x08).
+// The module is disassembled on its own, so an address that is only a `jalr`
+// target from another module is emitted as a label inside the preceding body —
+// the same reason as symbol_addrs-bankT.txt and its siblings.
+//
+// The module's other functions are reachable from `jal`s inside the record, so
+// spimdisasm finds them itself.
+
+func_ovlU_8022A87C = 0x8022A87C; // type:func

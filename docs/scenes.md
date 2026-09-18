@@ -324,10 +324,31 @@ the name is confirmed.
 | what | scene | source | status |
 |---|---|---|---|
 | Deneb's dialogue box over the dark blue textured backdrop: `Welcome! / Is this your first time here?` | `0x17` | dev (session 43), proof (`native-tutorial-dialogue.png`) | renders |
+| the lesson menu after Deneb's dialogue; any entry then runs the scripted sequence `0x17 → 0x02 → 0x0D →` a mission | `0x17` | dev (session 71) | renders |
+| the practice stage: scene `0x03` with `D_80193700 == 1` (descriptor `0x8018F364`, records 2,3,7,8,9,**18**), the tutorial instruction box (`TUTORIAL / These are called the Field`, stronghold and `Use Item` lessons) over the field map | `0x03` | dev (sessions 69/71), proof (`native-tutorial-practice-field.png`, `-command.png`) | renders; bank unit T (session 71) |
+| the lesson that selects `D_80193700 == 0` is the **normal mission** (descriptor `0x8018F350`, records 2,3,7,8,9) | `0x03` | dev (session 71) | renders (sessions 67/68) |
 
 The same form-box look (dark blue backdrop, dialogue/form panel) is what the
 name-entry and birthday screens use, so the form module that draws the Tutorial
 is the one to look at when those steps are reached.
+
+**The tutorial is not a self-contained scene.** `func_801862F0` (scene `0x17`'s
+accessor) picks one of two descriptors on bit 3 of `D_80196B0C` — `0x8018FE50`
+(enter `0x8019B2C0`, mask `0x00060000` = records 17 **and** 18) or `0x8018FE64`
+(enter `0x8019B540`, mask `0x00020000` = record 17 only). Record 17/18 are bank
+unit B (session 43). The **lessons** are scripted steps of the sequence engine:
+the practice stage is scene `0x03` entered with the mode word `D_80193700 != 0`,
+which `func_80173700` uses to select descriptor `0x8018F364`; the mode word is
+set by `func_80173694(a0)` (callers in record 17: `0x8019B624` sets 1;
+`0x8019ABDC` passes a lesson variable). Record 18's own loader
+(`func_ovlB_80221D50`, RAM `0x80221D50`) streams the per-mode module into record
+18's arena at RAM `0x8022A860`:
+
+* mode 1 → ROM `0x1C32D0` (`0x5D50`), the **tutorial instruction module** — bank
+  unit T (session 71); its data half holds the lesson text.
+* mode 2 → ROM `0x1C9020` (`0x5020`) — bank unit U (session 71); no observed
+  route loads it yet.
+
 
 ## New Game → scene `0x07` = the name-entry form
 

@@ -135,6 +135,8 @@ static const StreamedRecord kAllStreamedRecords[] = {
     { 0x069920u, (int32_t)0x80197B90u, 0x004D60u, true  },  // 17 (bank unit B)
     { 0x1BA020u, (int32_t)0x80220F60u, 0x0092B0u, true  },  // 18 (bank unit B)
     { 0x087220u, (int32_t)0x8019A7C0u, 0x056D60u, true  },  // 19 (bank unit S, scene 0x06 "Organize Screen")
+    { 0x1C32D0u, (int32_t)0x8022A860u, 0x005D50u, true  },  // 20 (bank unit T, rec18's tutorial-practice bank)
+    { 0x1C9020u, (int32_t)0x8022A860u, 0x005020u, true  },  // 21 (bank unit U, rec18's mode-2 bank)
 };
 
 // Boot straight into a screen.

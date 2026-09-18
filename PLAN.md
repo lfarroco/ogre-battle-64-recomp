@@ -1096,6 +1096,33 @@ hardware. RT64 remains the primary native renderer throughout. See
     moments (`tools/sramsave.py`; title → `0x12` → `0x05` re-verified). The probe
     was reverted; no files changed net. A `DECISIONS.md` is named by AGENTS rule 10
     but is absent from the tree. See `docs/HANDOFF-2026-09-17-session70.md`.
+  - ✅ **The tutorial's practice stage runs its own module (session 71) — bank
+    units T and U.** The developer's *"open the tutorial … pick an option … we are
+    placed in a map and nothing happens, without enemies"* is scene `0x03` entered
+    with the mode word `D_80193700 != 0` (descriptor **`0x8018F364`**, mask
+    `0x0004038C` — records 2,3,7,8,9 **and 18**, vs the normal mission's
+    `0x8018F350`/`0x0000038C`). That path loads a **second bank of record 18's
+    arena** — ROM `0x1C32D0` (`0x5D50`) → RAM `0x8022A860` — which the port had no
+    code for: four call sites (`0x8022A860`, `0x8022A88C`, `0x8022AA94`,
+    `0x8022B36C`, from unit A's record 3 and unit N's record 7) hit the runtime's
+    logging stub, 4608 calls in a 40 s run. The loader is record 18's
+    `func_ovlB_80221D50` (RAM `0x80221D50`): it indexes a `0x28`-byte segment table
+    at RAM `0x80229DDC` and a `0x1C`-byte mode table at `0x80229E88` by
+    `D_80193700`, then `func_8009DA50(0x1C32D0, 0x8022A860, 0x5D50)` and `jalr`s
+    the mode record's `+0x08` word. The module's data half is the **tutorial
+    instruction text** (`Stationing unit will gather information.`, `This will end
+    the instruction on Stronghold Command. Proceed?`, `This concludes the tutorial
+    on Use Item command. Proceed?`), so the map was inert without it. Now **unit
+    T** (`config-bankT.*`, entries forced for the three cross-record targets,
+    BSS `0x802305B0..0x802305F0` in `RAM_END`) and **unit U** for the arena's
+    mode-2 bank (ROM `0x1C9020`, `0x5020`, entry `0x8022A87C`; no observed route
+    loads it, but it shares the RAM so the bank map must be able to evict unit T).
+    Verified with `OGRE_SCENE=tutorial` + scene-keyed A taps:
+    `0x17 → 0x02 → 0x0D → 0x03 (0x8018F364)`, **0 stub calls**, the tutorial
+    instruction box renders and the lessons advance
+    (`docs/proofs/native-tutorial-practice-field.png`, `-command.png`); the
+    `down down` lesson selects mode 0 (the normal mission) and is also stub-free.
+    See `docs/HANDOFF-2026-09-17-session71.md`.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —

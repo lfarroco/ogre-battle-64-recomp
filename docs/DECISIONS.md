@@ -13,6 +13,7 @@ handoff holds the evidence.
 
 | date (session) | decision | evidence |
 |---|---|---|
+| 2026-09-17 (71) | **The tutorial's practice stage is scene `0x03` with `D_80193700 != 0`, and its own module is a *second bank of record 18's arena* — bank unit T (ROM `0x1C32D0`, `0x5D50` → RAM `0x8022A860`), with the arena's mode-2 bank as unit U (ROM `0x1C9020`, `0x5020` → the same RAM).** `func_801862F0` (scene `0x17`'s accessor) branches on `D_80196B0C` bit 3 between two descriptors (masks `0x60000` records 17+18 and `0x20000` record 17), and `func_80173700` (scene `0x03`'s accessor) branches on `D_80193700` between `0x8018F350` (mask `0x38C`) and `0x8018F364` (mask `0x4038C`, **+ record 18**). Record 18's loader `func_ovlB_80221D50` (RAM `0x80221D50`) indexes a `0x28`-byte segment table at RAM `0x80229DDC` and a `0x1C`-byte mode table at `0x80229E88` by `D_80193700`: mode 1 → `func_8009DA50(0x1C32D0, 0x8022A860, 0x5D50)` then the mode record's `+0x08` (`0x8022AA94`); code `0x8022A860..0x8022CBF0`, data `0x8022CBF0..0x802305B0`, BSS `0x802305B0..0x802305F0`. The module is the **tutorial instruction module** (its data half is the lesson text), so without it the practice map was inert and the developer's "no instructions, no enemies". Four cross-record `jal` targets (`0x8022A860` unit-A record 3, `0x8022A88C` unit-N record 7, `0x8022AA94` the mode callback, `0x8022B36C` unit-A record 3) were stubbing; the three non-segment-start ones are forced in `symbol_addrs-bankT.txt`. Both banks are separate units because they share RAM with unit T/unit L/unit C's record 14/record 18's BSS — a unit may not define a range its own caller's unit also owns (session 45) | `config-bankT/U.yaml`/`.toml`, `symbol_addrs-bankT/U.txt`, `Makefile`, `app/src/bank_overlays.cpp`, `tools/gen_bank_funcs.py`; `docs/proofs/native-tutorial-practice-field.png`, `-command.png`; `docs/HANDOFF-2026-09-17-session71.md` |
 | 2026-09-17 (70) | **An input recording replayed in the port must be anchored on game state, not on frame or poll index — the port's VI retrace clock is wall-clock (`ultramodern/src/events.cpp:237`), so any absolute index carries a variable boot offset, while the guest-visible *state* trajectory is reproducible to the byte.** Measured: input polls are **~1:1 with VI retraces** (`min=1 max=2 mean=1.01` calls/retrace), which corrects the "the game polls input far faster than 60 Hz" claim of session 68; two runs at `OGRE_SPEED=4` differ only in the clock (a 16–19 retrace boot offset every later event keeps) and are byte-identical once normalised (map-entry and post-input `state` hexdump, `dir`, `statehash80`); a run at `OGRE_SPEED=2` is byte-identical too, except the free-running animation tick `state[+0x108]` (373 vs 374), which must not be asserted on. An emulator **savestate** is therefore a *data oracle to read* (guest addresses are identical — the port runs the ROM's instructions — and `OSThread::context` host pointers are what cannot cross a process, session 65), not an execution checkpoint to load; an emulator **input recording** converts mechanically into state-anchored, poll-counted segments. For the map/menu moments the durable, build-independent fixture is the game's own `.srm` (`tools/sramsave.py`; title → `0x12` → `0x05`) | session-70 `probe70` (temporary, `app/src/sdl_platform.cpp`, reverted; rebuild verified) with runs A/B at `OGRE_SPEED=4` and C at `OGRE_SPEED=2` (`/tmp/p70-{a,b,c}.log`); `docs/HANDOFF-2026-09-17-session70.md` |
 | 2026-09-17 (69) | **Scene `0x06` — the Organize Screen — is bank unit S, and the swappable-RAM rule applies a fourth time.** Its enter `func_8017B6D0` DMAs **ROM `0x87220` (`0x56D60`) → RAM `0x8019A7C0 … 0x801F1520`** (`bss_start == bss_end`, so no BSS) and `jal`s the module's entry `0x801C19B0`; the **generic** scene update `func_8017B858` and hook `func_8017B9C8`, which scenes `0x05`/`0x06`/`0x07` share, dispatch on `*(0x801977E8)` — scene `0x06`'s enter sets **2**, so `jal 0x801C214C` (update) and `jal 0x801B7FC0` (hook). All three callers are in `.streamedB` (the main unit) while the callees live in a **different bank of RAM the main unit also occupies** (overlay C has its own real function at `0x801B7FC0`), so all three had to be **dispatched** (`cross_bank.py dispatch --only`) rather than left bound. Uncompiled, the three stubs made the scene return to `0x03` **68 ms** after entering — the developer's "the screen just reloads". Two operational facts: the mission's `R` menu is a **hold** menu (only a capture *during* the hold sees it), and the **keyboard's `R` shoulder button is `E`** — the letter `R` is not mapped at all. And a diagnostic trap: `on_streamed_dma`'s "DMA onto a known module base from an unknown ROM" heuristic fires on **any** `0x200`-byte chunk, so a large module produces a phantom second `UNKNOWN module` (here `0x9A020`→`0x801AD5C0`, chunk 151) — count modules, do not count lines | `config-bankS.yaml`/`.toml`, `symbol_addrs-bankS.txt`, `Makefile`, `app/src/bank_overlays.cpp`; `docs/proofs/native-organize-screen.png`; `docs/HANDOFF-2026-09-17-session69.md` |
 | 2026-09-17 (68) | **A scene that works from a suspend save may still be missing code when it is played to: the two routes stream *different banks* of the same arena, and the run log's `[bank] UNKNOWN module` + `[overlays] streamed function stub called @ …` is the whole diagnosis.** The mission's natural route (map `0x05` → `0x02`/`0x0D` story → scene `0x16` movie → `0x02`/`0x0D` → `0x03`) makes unit N's own loader (`func_ovlN_801AE880+0x764`, ROM `0x1036E4`) DMA **ROM `0x195430` (`0x2380`) → RAM `0x80214FA0`** and `jal` its entry `0x80215C38` — a **third bank** of record 9's arena, alongside units P (`0x171EC0`) and Q (`0x165FE0`), which the suspend save's mission loads instead. Uncompiled, the stub returned into the intro's state machine: the target fort was built from stale bytes (the garbled draw), the winning-condition `NOTE` never advanced and the camera never panned. It is now **bank unit R** (`config-bankR.yaml`/`.toml`, one forced entry in `symbol_addrs-bankR.txt`, `BANK_UNITS += R`); the module is the mission's enemy/unit constructor (`No free space on TCharacterEnemyData.` / `EnemySolderData.`), and the natural route now runs the whole intro with **0 UNKNOWN modules and 0 stub calls**. Two driving knobs landed with it: `OGRE_TAP_SCENE_BUTTON` (a **scene-keyed** tap schedule — the wall-clock slot schedule lands on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s) and the live console's `press <buttons> [polls] [x] [y]` (synthetic pad + analog stick; **the game polls input far faster than 60 Hz, so a few hundred polls is one cursor step**) | `config-bankR.yaml`, `symbol_addrs-bankR.txt`, `Makefile`; `app/src/sdl_platform.cpp`; `docs/proofs/native-mission-intro-natural.png`; `docs/HANDOFF-2026-09-17-session68.md` |
@@ -54,6 +55,83 @@ handoff holds the evidence.
 Two house rules that this log learned the hard way: a **finding** belongs in the
 session handoff, not here; and when a later session disproves an entry, add a
 one-line `> Superseded by …` banner to it instead of deleting it.
+
+---
+
+## 2026-09-17 (session 71) — the tutorial's practice stage: banks T and U
+
+**The question.** The developer: *"let's fix the tutorials … if we open the
+tutorial scene … and if we open any of the options …, we are placed in a map and
+nothing happens, without enemies. in the regular game, there would be tutorial
+instructions and enemies in the map."*
+
+**What the code says.** Scene `0x17` (Tutorial) and scene `0x03` (the mission)
+each have **two descriptors** selected by a mode word:
+
+* `func_801862F0` (scene `0x17`) branches on `D_80196B0C` bit 3:
+  `0x8018FE50` (enter `0x8019B2C0`, mask `0x00060000` = records 17 **and** 18) or
+  `0x8018FE64` (enter `0x8019B540`, mask `0x00020000` = record 17).
+* `func_80173700` (scene `0x03`) branches on `D_80193700`: `0x8018F350`
+  (mask `0x0000038C` = records 2,3,7,8,9, the normal mission) or `0x8018F364`
+  (mask `0x0004038C` = those **plus record 18**, the tutorial practice).
+  `D_80193700` is set by `func_80173694(a0)`; the tutorial calls it with `1` at
+  `0x8019B624` and with a lesson variable at `0x8019ABDC`.
+
+The practice therefore loads **record 18** alongside the mission records, and
+record 18's own loader `func_ovlB_80221D50` streams a further module into record
+18's arena at RAM `0x8022A860`:
+
+```
+80221de0  lbu  v1, D_80193700
+80221de8  v0 = v1*0x28 ; s0 = v0 + 0x80229DDC        ; 0x28-byte segment table
+80221e1c  func_800900C0(code) ; func_80090010(data)  ; cache ops
+80221e3c  func_8009DA50(rom=*(s0+8), ram=*(s0+0), size=*(s0+0xC)-*(s0+8))
+80221e50  func_80093380(bss)                         ; zero bss
+80221e70  s0 = 0x80229E88 + v1*0x1C ; jalr *(s0+8)   ; 0x1C-byte mode table
+```
+
+For mode 1 the segment entry is `0x80229E04`: `ram 0x8022A860..0x802305F0`,
+`rom 0x001C32D0..0x001C9020` (`0x5D50`), code `0x8022A860..0x8022CBF0`, data
+`0x8022CBF0..0x802305B0`, BSS `0x802305B0..0x802305F0`; the mode record at
+`0x80229EA4` calls `0x8022AA94`. The port's `OGRE_DMA_TRACE_FULL` dump matches
+(chunks `rom=0x1C32D0 ram=0x8022A860` … `rom=0x1C8ED0 ram=0x80230460`).
+
+**Why it was broken.** The port had no code for that module, so four call sites
+(`0x8022A860` unit-A record 3 @0x8019F7AC, `0x8022A88C` unit-N record 7
+@0x801B054C, `0x8022AA94` the mode callback, `0x8022B36C` unit-A record 3
+@0x8019F5CC) hit `streamed_stub_generic` — 4608 calls in a 40 s run. The
+module's data half is the tutorial lesson text (`Stationing unit will gather
+information.`, `This will end the instruction on Stronghold Command. Proceed?`,
+`This concludes the tutorial on Use Item command. Proceed?`), so the field was
+inert. The four addresses are **real function entries** in the module (each is
+preceded by a `jr $ra` or is the segment start); they are only invisible to a
+per-record disassembly because no `jal` to them exists inside the record
+(session 67's silent-no-op `LOOKUP_FUNC`).
+
+**The fix.** Two bank units, because both banks occupy RAM that other units also
+own (`0x8022A860` overlaps unit C's record 14, unit L's `bankRec14a`, record 18's
+BSS):
+
+* **unit T** — `bankRec18b`, ROM `0x1C32D0` (`0x5D50`) → RAM `0x8022A860`;
+  code/data split at the loader table's `code_end` (`0x8022CBF0` = ROM
+  `0x1C5660`); forced entries `0x8022A88C`, `0x8022AA94`, `0x8022B36C`; BSS end
+  in `RAM_END`.
+* **unit U** — `bankRec18c`, ROM `0x1C9020` (`0x5020`) → the same RAM
+  (`0x8022A860..0x8022F880`), mode `D_80193700 == 2`, entry `0x8022A87C`. No
+  observed route loads it, but compiling it is what lets the runtime's bank map
+  evict unit T if the game does stream it.
+
+**Verification.** `OGRE_SCENE=tutorial` + scene-keyed A taps reaches
+`0x17 → 0x02 → 0x0D → 0x03 (0x8018F364)` with **0 stub calls**; the tutorial
+instruction box renders (`docs/proofs/native-tutorial-practice-field.png`,
+`-command.png`) and the lessons advance into the stronghold/town scenes. The
+`down down` lesson selects mode 0 (`0x8018F350`, the normal mission) and is also
+stub-free. `make bank-recomp`: `21 unit(s), 31 record(s), 3155 function(s)`,
+`check-banks OK`; both new ELFs are byte-identical to the ROM. Developer-confirmed
+live: the practice field now shows the tutorial instructions **and the enemy
+units**. (The enemies are built by the separate enemy constructor **unit R**,
+session 68, which loads on this route; the tutorial-module stub was what stopped
+the practice's setup from completing.)
 
 ---
 
