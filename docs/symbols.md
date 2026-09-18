@@ -80,6 +80,43 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x8019F83C` | `sprite_rect_emit` | `(a0 = x, a1 = y, a2 = sprite-table index)`; emits `G_RDPPIPESYNC`, the `G_TEXRECT` (**w0 = lower-right `(x+W, y+H)`, w1 = upper-left `(x, y)`**, both in quarter-px), `G_RDPHALF_1` carrying **s,t** (`u<<21 \| v<<5`), `G_RDPHALF_2` with `dsdx = dtdy = 1.0`, `G_RDPPIPESYNC`. It emits **no `G_SETTILESIZE`** — the caller supplies that | high |
 | `0x801A2A7C` | `map_party_draw` | `(a0 = x, a1 = y)`; two `sprite_rect_emit` calls — **call 1 = the shadow** (ROM `0x81B50`, `a2=0xB`, origin `(x-8, y)`, texture `state[+0x04]+0x1068`, static) and **call 2 = the knight** (ROM `0x81BFC`, `a2=0xA`, origin `(x-16, y-24)`, texture `state[+0x34] + ((3*state[0x1DC] + f) << 12)`, i.e. 24 frames of `0x1000` bytes). Each call writes its own `SETTIMG`/`SETTILE`/`LOADBLOCK`/`SETTILESIZE` block into `g_dl_cursor` first | high |
 
+## Save (battery SRAM) — the whole access path
+
+OB64 saves to 32 KiB of battery SRAM; the Controller Pak is only the game's
+copy/backup device. Read at instruction level in `build/ogrebattle64.elf`
+(session 78):
+
+| address | proposed name | evidence | conf |
+|---|---|---|---|
+| `0x80074CF0` | `save_image_read(dst, dev_off, size)` | if `*(0x800B83B8)` is null: `malloc(0x8000)` then read the whole image in 256-byte `save_dma(dev, off, 256, dir=0)` calls (`0x80074D24`-`0x80074D60`); then `memcpy(dst, image + dev_off, size)` (`0x80074D68`) | high |
+| `0x80074C58` | `save_image_write(image)` | allocates a 16-byte handle holding `save_dma`, then writes `0x8000` bytes in 256-byte chunks with direction `1` (`0x80074CA8`-`0x80074CC4`); skipped while `*(0x800C4800)` is set | high |
+| `0x80074BF0` | `save_commit(magic)` | if `*(0x800B83BC)` (dirty) **and** `magic == 0x37081383`: `save_image_write(*(0x800B83B8))`; then clears the flag and frees the cached image | high |
+| `0x80074AD4` | `save_slot_summary_load(slot)` | `malloc(6224)`; `save_slot_validate(slot, buf)`; `save_image_read(buf, 0x10 + slot*0x1850, 6224)`; returns a 26-byte `memcpy` of `buf + (*(0x800B8258) + 12)` when `*(buf+0x0C) != 0`, else NULL. `slot == 15` takes the other arm: `malloc(19176)`, `save_record15_validate`, `save_image_read(buf, 0x30B0, 19176)` | high |
+| `0x8007541C` | `save_slot_validate(slot, buf)` | reads 6224 bytes from `*(0x800B83B8) + 0x10 + slot*0x1850`; `memcmp(D_800B8240, buf+4, 8)` — the 8-byte `QuestOG3` signature; `u16[0x00] == checksum_sum_seeded(buf+0x0C, 6212, 0x10+slot*0x1850)`; `u16[0x02] == checksum_bits_seeded(same)` | high |
+| `0x80075578` | `save_record15_validate(buf)` | the same magic check for the 19176-byte record at device `0x30B0`; **a zero first word is accepted as it stands** (`beqz` at `0x80075620`), otherwise the two checksums over `buf+0x0C`, length `0x4ADC` = 19164, seed `0x30B0` | high |
+| `0x80075A84` | `checksum_sum_seeded(data, len, seed)` | loop of `lbu`/`addu`; returns `(sum + seed) & 0xFFFF` | high |
+| `0x80075B00` | `checksum_bits_seeded(data, len, seed)` | per byte, 8 `srl`/`andi` steps counting set bits; returns `(count + seed) & 0xFFFF` | high |
+| `0x80075AC4` / `0x80075B60` | `checksum_sum` / `checksum_bits` | the same two loops **without** the seed; the un-seeded pair is what the copy-to-pak path uses, so every note slot inside a Controller Pak validates with seed 0 | high |
+| `0x80093060` / `0x80092F50` | `memcpy` / `memcmp` | the two `jal` helpers this cluster is built from | high |
+
+Globals:
+
+| address | proposed name | evidence | conf |
+|---|---|---|---|
+| `0x800B83B8` | `g_save_image` (ptr) | the cached 32 KiB image, allocated by `save_image_read` and freed by `save_commit` | high |
+| `0x800B83BC` | `g_save_dirty` (byte) | set by the writers, tested by `save_commit` | high |
+| `0x800B8240` | `g_save_signature` (8 bytes) | the `memcmp` target in `save_slot_validate`; BSS, filled at boot, and every valid slot carries `QuestOG3` at `+0x04` | high |
+| `0x800B8250` | `g_save_field_table[13]` (stride `0x1C`) | `func_800749C0` walks 13 entries reading `[+0x00]` (a function) and `[+0x08]` (an offset into the slot); entry 0's offset is also `*(0x800B8258)`, added to `+0x0C` to locate a slot's 26-byte summary | medium |
+
+**Slot geometry**: slot `n` is the 6224-byte (`0x1850`) record at device
+`0x10 + n*0x1850`. Slot index **15 is special** — the 19176-byte (`0x4AE8`)
+record at device `0x30B0`; the game writes it at the map, which is why even a
+"blank" battery image has a `QuestOG3` at `0x30B4` (with a zero first word, which
+`save_record15_validate` accepts without checking its checksums). A slot's first
+4 bytes are two `u16` checksums over `slot+0x0C .. slot+0x1850`, each **seeded
+with the slot's device offset**, so the same 6224 bytes validate only in the slot
+they were checksummed for (`reseed_slot` in `tools/sramsave.py`).
+
 ## Shared tails (`jal` targets with no prologue)
 
 `make midfunc` lists all 67; the ones that have bitten this project:

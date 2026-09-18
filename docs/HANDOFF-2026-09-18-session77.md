@@ -17,6 +17,18 @@ already shown it is not what orders the njpeg copy. The call is deleted; the
 scene now runs at the same 30 lists/s as every other screen, with its **duration
 unchanged** (16.4 s) — the wait was costing frame rate, not game time.
 
+**Developer follow-up (same day): the fix also removed perceptible slowdowns in
+other scenes, not just the publisher stills.** That is the expected shape of this
+bug, and it means scene `0x0A` was only its most visible face: the poll's
+condition can be satisfied *only* by a scene whose draws create one of the three
+njpeg framebuffer addresses, so every scene that does not — most of the game
+outside the New Game njpeg backgrounds — paid 500 ms per display list. The
+publisher stills were reported first because they are long (~16 s) and the motion
+in them is obvious; anything else with a stall had the same cause. A future
+session wanting the exact affected set can re-run with the old poll reinstated
+(or just `OGRE_NJ_WAIT_MS=500`) and histogram the `OGRE_DL_TRACE` intervals per
+scene — the signature is a uniform ~516 ms spacing.
+
 ## 1. The measurement: one `grep` names the bad scene
 
 A natural boot with per-submission timestamps (`OGRE_SCENE_LOG=1

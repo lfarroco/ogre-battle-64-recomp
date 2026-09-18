@@ -99,6 +99,9 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_TAP_SCENE_BUTTON=<scene>:<button>[:<count>],…` | the **scene-keyed** sibling of `OGRE_TAP_BUTTON` (session 68). `OGRE_TAP_BUTTON`'s slot index advances with **wall time**, so a route across several scenes has to be hand-tuned to how long each takes — the same "title → Load Game → map" schedule landed on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s (the forced-scene poke races the publisher stills). This one keys the button on the dispatcher's active scene (`D_800E810E`; names from `kScenes` or hex) and presses it every `OGRE_TAP_MS` while that scene runs, at most `<count>` times (default unlimited). Entries in one scene are consumed in order, so `OGRE_TAP_MS=1500 OGRE_TAP_SCENE_BUTTON="title:start:5,0x12:a:3,0x05:right:3,0x05:a:1"` is "Start up to five times on the title (early presses are sometimes swallowed; the scene change stops it), A three times on the Load Game screen, then walk the map cursor right three times and press A". Requires `OGRE_TAP_MS`; it replaces the slot schedule entirely |
 | `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
 | `OGRE_PREF_DIR=<dir>` | use `<dir>` instead of `SDL_GetPrefPath` as the runtime config dir, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write `~/Library/Application Support`). Default is unchanged; the boot log prints the resolved path |
+| `OGRE_SAVE=<name\|path>` | start the run from that save as the cartridge battery (session 78). A bare name is looked up as the path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`, so `OGRE_SAVE=prologue` finds `assets/saves/prologue.n64`. Accepts the port's 32 KiB image, an emulator wrapper of it (in either byte order, at any offset), a **DexDrive `.N64` Controller Pak dump** — converted through its notes' battery slots, checksums reseeded — or a bare pak. The result is written to `<config>/saves/<game id>.bin`, never back into the source |
+| `OGRE_SAVE_RESET=1` | re-import even when the battery in the config dir is newer than the source. Without it a run **keeps** that battery, so progress the game wrote back survives a re-run, and swapping a save file in re-imports it (its mtime is newer) |
+| `OGRE_SAVE_ALL=1` | with `OGRE_SAVE`, also take the stale records a deleted Controller Pak note leaves behind (still capped at the battery's two save slots) |
 | `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces, including `[pi] inline DMA` for every streamed-overlay load (very chatty) |
 | `OGRE_DEBUG_VI=1` | with `OGRE_DEBUG_TRACES`, log every `osViSetMode` (mode pointer + decoded geometry) and every VI geometry change (`[vi-debug]`) |
 | `OGRE_DL_ANALYZE=1` | per-submission F3DEX2 workload counts (commands, triangles, texrects, textures) |
@@ -497,6 +500,22 @@ writes it back the same way when its dirty flag is set (`func_80074BF0` →
 `func_80074C58`). Save slots are `0x1850` (6224) bytes at `0x10 + n*0x1850`; the
 device signature and slot-0 magic are the ASCII `QuestOG3`.
 
+**A slot's first 4 bytes are two `u16` checksums, and their seed is the slot's own
+device offset** (session 78). `func_8007541C` rejects a slot unless
+`memcmp(D_800B8240, slot+4, 8)` matches `QuestOG3` **and**
+
+```
+u16[+0x00] == (sum of the bytes of slot+0x0C .. slot+0x1850) + (0x10 + n*0x1850)   // func_80075A84
+u16[+0x02] == (count of their set bits)                     + (0x10 + n*0x1850)   // func_80075B00
+```
+
+So a slot is valid **only in the slot index it was checksummed for**. The game's
+own copy-to-pak path uses the *un-seeded* twins (`func_80075AC4`/`func_80075B60`),
+so a slot lifted out of a Controller Pak is seeded 0 and must be reseeded for the
+battery slot it lands in. Any tool that moves save data between slots, or from a
+pak, has to rewrite those two halfwords; `tools/sramsave.py` does, and `check`
+reports each slot as `ok` or `MISMATCH (the game will reject this slot)`.
+
 Diagnostics: the runtime prints one `[save]` line when it loads/creates the file,
 one on the game's first read and first write of the window, and one when the
 saving thread writes the file (`[save] wrote …`); a failed write also prints
@@ -518,6 +537,73 @@ written for a **parallel-n64** dump: 296960 bytes, SRAM at **0x20800**, every
 32-bit word byte-reversed (so the magic reads `seuQ3GOt`). mupen64plus/RetroArch
 `.srm` dumps are the bare logical 32 KiB (offset 0, "logical") and import
 unchanged. It never invents data: a file without the magic is refused.
+
+**DexDrive `.N64` files are Controller Pak dumps, not battery images** (session
+78). A DexDrive dump is a 0x1040-byte header (`"123-456-STD"` at 0x00) followed
+by a 32 KiB Controller Pak, so it is 36928 bytes — which is exactly what
+`assets/saves/*.n64` are. They hold **no** battery image at any offset (scanning
+every offset for the device magic finds none), but they do hold the game's
+*copy/backup* notes: one 25-page (6400-byte) note per save in the pak's own PFS
+filesystem, game code `NOBE`, publisher `EB`, named `OgreBATTLE64 <n>`, and each
+note carries a verbatim copy of a battery slot at `note+0x20`. `import` follows
+the pak's FAT to the **live** notes (a deleted note leaves its 25 pages behind,
+still readable), extracts each slot and reseeds it into battery slot 0 (then 1);
+the battery has **only two save slots** — slot index 2's offset `0x30B0` is where
+the game's 19176-byte map record begins, and it covers the rest of the image, so
+extra notes are dropped with a warning rather than written into it;
+`--all` also takes the stale records, and `pak --all` lists them:
+
+```sh
+tools/sramsave.py pak --all assets/saves/prologue.n64
+```
+
+### Running with one of these saves — `OGRE_SAVE`, or `tools/run-save.sh`
+
+```sh
+# one knob: import (if needed) and boot
+OGRE_SAVE=prologue ./build-app/ogrebattle64 [rom.z64]
+OGRE_SAVE=~/Downloads/save.srm OGRE_SAVE_RESET=1 ./build-app/ogrebattle64
+
+# or the wrapper, which gives each save its own config dir
+tools/run-save.sh --list             # the saves in assets/saves
+tools/run-save.sh prologue           # import it, then boot with it as the battery
+tools/run-save.sh prologue --reset   # re-import, discarding progress saved since
+```
+
+`OGRE_SAVE` writes the converted image to `<config>/saves/<game id>.bin` — the
+active config dir, i.e. the default one or whatever `OGRE_PREF_DIR` says — and
+never back into the source, so a run left on a battery keeps its progress and
+`OGRE_SAVE_RESET=1` starts over. `run-save.sh` does the same thing with a
+per-save config dir, `.ogre-prefs-save-<name>/` (gitignored like the other
+`.ogre-prefs-*` sandboxes), and its `--import-only` prints the path without
+booting. Both accept the same file kinds and pass every `OGRE_*` knob through:
+
+```sh
+OGRE_SAVE=prologue OGRE_TAP_MS=1500 \
+  OGRE_TAP_SCENE_BUTTON="title:start:1,0x12:a:3,0x05:a:1" \
+  OGRE_EXIT_AFTER_MS=60000 ./build-app/ogrebattle64
+```
+
+Verified (session 78): with `assets/saves/prologue.n64` imported, the tap route
+takes the game **title → `0x12` (the Load Game book) → `0x05` (the map)**, and
+battery slot 0 stays **byte-identical** to the converted note. The *discriminator*
+is what the game's own data screen reads back, not the route — a **blank** battery
+also reaches `0x12`/`0x05` (pressing A on the data screen starts a new game), so
+the route alone proves nothing:
+
+| battery image in the config dir | the book's GAME DATA 1 |
+|---|---|
+| `assets/saves/prologue.n64` converted | `Magnus / Prologue / Alba / 0:20:42` |
+| `assets/save-mission-1.srm` converted (the older import) | `Magnus / Prologue / Alba / 0:07:02` |
+
+Same screen, same route, two config dirs, different playtime — the game is reading
+the file this script installed. `OGRE_SAVE=prologue` rebuilds that battery
+**byte-identically** to `tools/sramsave.py import` (device header and slot 0
+compared directly), so the two entry points are one conversion. Proofs:
+`docs/proofs/native-load-game-prologue.png`,
+`docs/proofs/native-load-game-battery-ab.png`. The same file imported *without*
+reseeding the header checksums makes the game repair the whole image to its blank
+format (sha256 `ed38cfd7…`), which is what the seed rule above predicts.
 
 Verified (session 66, all on this build): boot with no file → the game formats a
 blank battery and the port writes a real 32768-byte image with the `QuestOG3`

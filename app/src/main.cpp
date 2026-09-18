@@ -29,6 +29,7 @@
 #include "rsp.hpp"
 #include "overlays.hpp"
 #include "bank_overlays.hpp"
+#include "save_import.hpp"
 
 namespace ogre {
 Platform g_platform;
@@ -158,6 +159,13 @@ int main(int argc, char** argv) {
     } else {
         fprintf(stderr, "No ROM path provided and no stored ROM found; relying on stored ROM.\n");
     }
+
+    // --- OGRE_SAVE: start from a save file as the battery ----------------------
+    // The runtime loads `<config>/saves/<game id>.bin` on the game's first SRAM
+    // access, which happens after recomp::start, so install it here. Accepts the
+    // port's own 32 KiB image, an emulator wrapper of it, a DexDrive .N64
+    // Controller Pak dump or a bare pak; see save_import.cpp.
+    ogre::apply_ogre_save(pref_dir, game_id, rom_path);
 
     // --- runtime configuration --------------------------------------------------
     recomp::Configuration cfg;

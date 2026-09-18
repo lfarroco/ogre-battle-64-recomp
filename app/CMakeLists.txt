@@ -191,6 +191,7 @@ if (EMSCRIPTEN)
         src/overlays.cpp
         src/bank_overlays.cpp
         src/gbi.cpp
+        src/save_import.cpp
     )
 else()
     set(OGRE_APP_SOURCES
@@ -201,6 +202,7 @@ else()
         src/overlays.cpp
         src/bank_overlays.cpp
         src/gbi.cpp
+        src/save_import.cpp
     )
 endif()
 

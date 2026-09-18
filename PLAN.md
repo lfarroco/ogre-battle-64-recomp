@@ -40,6 +40,52 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- 🔎 **The mission's post-battle lag is diagnosed but NOT fixed (session 79).**
+  The developer's *"after a battle, when the enemy unit's destruction effect
+  ends, the game lags badly — it draws and responds, just very slowly"* is a
+  recompiler artifact, not game logic and not the renderer. **N64Recomp's
+  poll-loop heuristic injects a blocking `yield_self()` into the mission's
+  nearest-target search** (`func_ovlN_801B2F4C`, bank unit N) at the loop's
+  backward branch (`0x801B3008`, `BankNFuncs/funcs_3.c:55419`), so the search
+  yields **once per entity**; `yield_self` blocks until an external message
+  arrives (≈ one VI retrace, 16.7 ms). Measured: submitted display lists go from
+  33 ms apart to ~717 ms (**30 → 1.4 lists/s**) inside scene `0x03`, while
+  `processDisplayLists` stays at 4–6 ms and the log has **0 stub calls and 0
+  `UNKNOWN module`** — so the renderer and the bank map are both healthy and the
+  game thread is *waiting*. `OGRE_PROFILE=1` puts the frame-pump thread `t4` in
+  `0x801B2F4C` for 93–96 % of the slow seconds. The heuristic accepts the loop
+  because a load inside it (`lwc1 $f2, 8($s0)`) uses a base register set once at
+  function entry, which really is loop-invariant — the loop is simply not a poll
+  loop. **Three candidate repairs were built and all three stalled the boot** (the
+  intro scene stops producing frames, `t4` blocked on its message queue), which
+  establishes that `yield_self` is also the only external-message pump a running
+  thread has and that a non-blocking variant is not sufficient. Everything was
+  reverted; the tree and `tools/N64Recomp` are at their recorded baseline. Next
+  step: the scoped experiment (that one site only) and the scheduler-ring
+  comparison that explains the boot stall. See
+  `docs/HANDOFF-2026-09-18-session79.md`; the measurement recipe is
+  `tools/run-lag.sh` + `tools/proflog.py --names`.
+
+- ✅ **`assets/saves/*.n64` can be played: they are DexDrive Controller Pak dumps,
+  and the battery image is recoverable from them (session 78).** They are not
+  battery dumps and hold no battery image at any offset (36928 bytes = a
+  0x1040-byte DexDrive header + a 32 KiB pak), but each live 25-page note
+  (`OgreBATTLE64 <n>`, the game's own copy/backup feature) carries a verbatim copy
+  of a battery slot. The reason a straight copy was rejected — and the blank
+  battery written in its place — is the **checksum seed**: `func_8007541C`
+  validates a slot's two `u16` header checksums with the slot's **own device
+  offset** as the seed (`func_80075A84` = byte sum, `func_80075B00` = set-bit
+  count), while the pak-copy path seeds them with 0. `tools/sramsave.py` now
+  extracts a pak's live notes into battery slots 0/1 and reseeds them
+  (`import`, `pak`, `--all`), and both **`OGRE_SAVE=prologue`** (in-process, into
+  the active config dir) and **`tools/run-save.sh prologue`** (per-save config dir)
+  boot with one as the battery. Verified by the game's own
+  data screen, not by the scene route: GAME DATA 1 reads `Magnus / Prologue / Alba
+  / 0:20:42` for `prologue.n64` and `… / 0:07:02` for the older
+  `save-mission-1.srm` import in otherwise identical config dirs (a blank battery
+  reaches the same scenes, so the route alone proves nothing). See
+  `docs/HANDOFF-2026-09-18-session78.md`.
+
 - ✅ **The boot's publisher stills no longer lag (session 77).** Scene `0x0A`
   ("Licensed by Nintendo" → ATLUS → QUEST, the 3-colour 3D "q" logo) was drawing
   at **2 display lists/s instead of 30** because the RSP worker polled 500 ms per
@@ -48,7 +94,9 @@ hardware. RT64 remains the primary native renderer throughout. See
   njpeg guard, which session 57 had already measured as unnecessary (the copy is
   ordered by the game's DP-completion wait plus `ogre_sync_framebuffers()`);
   deleted. Scene duration is unchanged (16.4 s), the frame rate is now 30/s, and
-  the njpeg regression still reads its four documented frames. See
+  the njpeg regression still reads its four documented frames. **The same stall
+  hit every scene that does not render into those three addresses**, so the fix
+  also removed slowdowns elsewhere (developer-confirmed). See
   `docs/HANDOFF-2026-09-18-session77.md`.
 
 - ✅ ROM identified: `Ogre Battle 64 - Person of Lordly Caliber (USA) (Rev A)`,
