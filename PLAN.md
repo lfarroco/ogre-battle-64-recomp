@@ -40,6 +40,31 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- 🛠 **The cutscenes' flickering right/bottom line is fixed (session 81), with two
+  RT64 changes.** (1) A game framebuffer is now sized from the **VI** rather than
+  from the rectangle the frame happened to draw
+  (`framebufferHeightForDisplay`, `tools/RT64/src/hle/rt64_framebuffer.h`, used at
+  `rt64_workload_queue.cpp:435` and `rt64_state.cpp:551`/`:1294`) — the RDP snaps
+  a copy/fill rect's fractional bits (`lrx |= 3; lry |= 3`), so frames whose draws
+  stopped at row 238 produced a 239-row target while others produced 240/241;
+  measured: the target is now **320x240 in 1361/1361 and 2465/2465** consecutive
+  frames, and the stale-edge line on the black frames after a checkpoint `load` is
+  gone. (2) The presenter shows only the **319x239 area the game actually draws**
+  (`visibleFramebufferSize` in `tools/RT64/src/render/rt64_vi_renderer.cpp`,
+  `OGRE_OVERSCAN=<0..8>` override, default 1 px on the right/bottom) — measured
+  with `OGRE_DL_DECODE=all`: the game's own scissor and clear are
+  `(0,0)-(1276,956)` = 319x239, so its drawing never touches the framebuffer's
+  last column/row; those pixels keep leftovers from the boot's njpeg draws (only
+  in `0x400`, per a dump watch at t=4..12 s), and the VI's three-buffer rotation
+  toggled them against the other buffers' black — **120 of 120 consecutive
+  settled-cathedral frames are now clean (was 15 of 40)**, the picture is intact,
+  and `OGRE_OVERSCAN=0` restores the old image. A CRT's overscan hid the game's own
+  off-by-one; the port now crops it too. Boot/title/load-game/map timelines and
+  the intro/Magnus cutscenes are unchanged (all runs exit 0). Reference check
+  recorded in the handoff (mupen64plus-core forwards raw VI registers; GLideN64
+  and angrylion present a fixed window from `VI_ORIGIN`, where RT64 subtracts one
+  row — a separate fidelity item, not this fix; GLideN64's `enableTexCoordBounds`
+  has no RT64 equivalent).
 - 🛠 **The mission's post-battle lag has a landed fix (session 80): N64Recomp
   no longer injects the blocking `yield_self()` into the mission's
   nearest-target search.** Session 79 diagnosed the lag as one recompiler
