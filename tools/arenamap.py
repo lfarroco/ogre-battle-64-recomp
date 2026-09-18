@@ -37,14 +37,26 @@ a unit must not define a RAM range another bank can own *and* call into it, so
 every call target inside a bank's range that is a real function start in *that*
 bank's layout must be forced as an entry in `symbol_addrs-bank<U>.txt`.
 
+**The loader pattern is not the whole map.** The game also loads banks from
+descriptor tables, where the addresses are data and no `jal 0x8009DA50` with a
+cache bracket exists. `KNOWN_LOADERLESS` carries the one such record the port
+had to add by hand — **record 16**, the module scene `0x14` streams over record
+13's half of RAM `0x802258B0`; it was found by booting the scene and reading the
+port's own `UNCOMPILED streamed record 16 … size=0x7840` line (session 73), not
+by this scan. Treat `--unmapped`'s bracketed-looking sites as leads, and the run
+log as the arbiter.
+
 Usage:
     tools/arenamap.py                     # every arena, every unit
     tools/arenamap.py --arena 0x80214FA0  # one arena
     tools/arenamap.py --missing           # only banks with no/wrong unit
     tools/arenamap.py --unit Y            # what one unit covers
     tools/arenamap.py --elf build/bankN.elf
+    tools/arenamap.py --entries           # cross-record entry candidates
+    tools/arenamap.py --verify            # every unit vs the loader that DMA's it
+    tools/arenamap.py --coverage          # ROM the scanned ELFs disassemble
     tools/arenamap.py --md                # markdown table for docs/scenes.md
-    tools/arenamap.py --unmapped          # RAM windows only the main ELF loads
+    tools/arenamap.py --unmapped          # DMA sites with no cache bracket
 
 The scan walks the instruction stream backwards from every `jal 0x8009DA50`
 (with real register dataflow, so a loader that reuses a register between two
@@ -354,6 +366,7 @@ class CallSite:
     bss_size: int | None
     raw_args: tuple[int | None, int | None, int | None]
     supported: bool = False
+    derived: bool = False  # ROM/size from the segment table, not a loader subu
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -713,6 +726,14 @@ MAIN_SPLITS = {  # streamedA/B code/data boundaries from config.yaml
     0x040E80: (0x1B3B0, 0xAC00),
 }
 
+# The two segment-table records whose banks overlap that table's own entry, so
+# the table cannot say where one ends and the next begins. Both are loaded from
+# a descriptor table, not a loader block, so there is no `subu` to read either;
+# `unit names` is what makes `--unit`/`--verify` cover them. Record 16 was found
+# by booting scene 0x14 (session 73): the port's own `UNCOMPILED` line printed
+# `size=0x7840`, which is exactly `ram_end(entry 13) - 0x802258B0`.
+EXTRA_UNIT_NAMES = {0x275820: "C", 0x279FF0: "AG"}
+
 
 def main_unit_ranges() -> list[UnitRange]:
     """The main unit's own code segments, from `build/ogrebattle64.elf`.
@@ -864,6 +885,8 @@ class Bank:
 
     @property
     def status(self) -> str:
+        if self.cs.derived and self.unit is not None and self.unit_exact:
+            return f"unit {self.unit.unit} (from the segment table)"
         if self.unit is None:
             return "**MISSING**"
         if not self.unit_exact:
@@ -976,6 +999,50 @@ def collect(elfs: list[Elf]) -> tuple[dict[int, list[CallSite]], list[CallSite]]
     return arenas, unbracketed
 
 
+# The segment-table records whose load is not a loader block and which a unit
+# does not own. `(rom_start, size, ram_base)`.
+#
+# **Record 16** is the one that matters. Segment-table entry 13 declares
+# `rom 0x275820..0x279FF0 -> ram 0x802210E0` and unit C links exactly that, but
+# the game then loads a *second* module over the same arena from `0x279FF0`.
+# There is no `subu` for it — the load is descriptor-table-driven — and the size
+# `0x7840` is the table's `ram_end` for entry 13 (`0x8022D0F0`) minus
+# `0x802258B0`, which is also what the port's own `UNCOMPILED` line printed when
+# scene `0x14` was booted (session 73).
+KNOWN_LOADERLESS: tuple[tuple[int, int, int], ...] = (
+    (0x279FF0, 0x7840, 0x802258B0),
+)
+
+
+def derived_banks(ranges: list[UnitRange], loader_roms: set[int]) -> list[Bank]:
+    """Banks with no loader block of their own, stated in KNOWN_LOADERLESS."""
+    out: list[Bank] = []
+    for rom_start, size, ram_start in KNOWN_LOADERLESS:
+        if rom_start in loader_roms:
+            continue
+        if not any(r.rom_start == rom_start for r in ranges):
+            continue
+        cs = CallSite(
+            elf="(segment table)",
+            loader=0,
+            func=f"loader-less record rom 0x{rom_start:06X}",
+            rom_start=rom_start,
+            ram_base=ram_start,
+            dma_size=size,
+            rom_end=rom_start + size,
+            code_size=None,
+            data_size=None,
+            bss_base=None,
+            bss_size=None,
+            raw_args=(rom_start, ram_start, size),
+            supported=False,
+            derived=True,
+        )
+        unit, exact = unit_for(rom_start, ranges)
+        out.append(Bank(ram_base=ram_start, cs=cs, unit=unit, unit_exact=exact))
+    return out
+
+
 def build_banks(arenas: dict[int, list[CallSite]], ranges: list[UnitRange]) -> list[Bank]:
     """One Bank per distinct (RAM base, ROM range), with every loader site kept.
 
@@ -991,7 +1058,13 @@ def build_banks(arenas: dict[int, list[CallSite]], ranges: list[UnitRange]) -> l
                 continue
             merged.setdefault((ram, cs.rom_start, cs.dma_size), []).append(cs)
     out: list[Bank] = []
+    seen: set[tuple[int, int]] = set()
+    for b in derived_banks(ranges, {r for _ram, r, _s in merged}):
+        seen.add((b.ram_base, b.cs.rom_start or 0))
+        out.append(b)
     for (ram, _rom, _size), sites in merged.items():
+        if (ram, _rom) in seen:
+            continue
         sites.sort(key=lambda c: (c.elf, c.loader))
         cs = min(sites, key=lambda c: (c.loader))
         unit, exact = unit_for(cs.rom_start, ranges)
@@ -1018,6 +1091,14 @@ class CallerRecord:
         return f"{self.elf}:{self.record}"
 
 
+def elf_unit(elf: Elf) -> str | None:
+    """The unit an ELF belongs to, by the record ROM start it links."""
+    for s in elf.sections:
+        if s.code and s.name != "_0":
+            return EXTRA_UNIT_NAMES.get(s.lma)
+    return None
+
+
 def unit_names(ranges: list[UnitRange]) -> list[str]:
     seen: list[str] = []
     for r in ranges:
@@ -1036,7 +1117,7 @@ def build_caller_index(elfs: list[Elf], ranges: list[UnitRange]) -> list[CallerR
     out: list[CallerRecord] = []
     by_elf_unit: dict[str, str] = {f"bank{u}.elf": u for u in unit_names(ranges)}
     for elf in elfs:
-        unit = by_elf_unit.get(elf.name)
+        unit = by_elf_unit.get(elf.name) or elf_unit(elf)
         for s in elf.sections:
             if not s.code or s.name == "_0":
                 continue

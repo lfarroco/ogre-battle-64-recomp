@@ -1,0 +1,14 @@
+// Cross-record function entries for bank unit AG (bankRec16, RAM 0x802258B0).
+//
+// Each of these is a real function start in *this* bank's layout (preceded by
+// `jr $ra` in the ROM) that some caller outside the record reaches by absolute
+// address. N64Recomp emits `LOOKUP_FUNC` for such a call, and a lookup onto a
+// body interior is a silent no-op, so the address has to be declared here.
+//
+// The first three are the scene-0x14 stubs that exposed this unit:
+//   0x80226B7C  ROM 0x27B2BC   (called from ogrebattle64.elf@80178220)
+//   0x8022859C  ROM 0x27CCDC   (called from ogrebattle64.elf@80178278)
+//   0x80226CE0  ROM 0x27B420   (called from ogrebattle64.elf@801782C4)
+func_ovlAG_80226B7C = 0x80226B7C; // type:func
+func_ovlAG_8022859C = 0x8022859C; // type:func
+func_ovlAG_80226CE0 = 0x80226CE0; // type:func

@@ -184,6 +184,7 @@ scene `0x07`'s form sets `3`) and allocates the `0xC000`-byte 320x240 buffer at
 | **combat** — a battle between units on the mission field | dev (session 72): *"combat played beautifully"* | **renders** (session 72) — bank units W (record 9's combat bank) and X (record 10's battle bank) |
 | the **settings / options** screen (`Message speed`, `Cursor speed`, `Help display`, `Icon name display`, `Game speed`, `Legion indicator`, `Destination display`, `Unit report type`, `Battle action name`, `Battle animation`, `Quick exit`, `Cancel all`, `Sound settings`, `Restore defaults`) | dev (session 72) + code (the module's string table) | **renders** (session 72) — bank unit V |
 | a town **shop** (`What do you have on sale?`, `Hello, how much is this?`, …) | dev (session 72) + code (the module's string table) | **renders** (session 72) — bank unit AB |
+| **the Witch's Den** — the witch's shop interior: cauldron, shelves of bottles, a counter with `WAR FUNDS 0001000 Goth`, and the **Old Witch** portrait saying *"Heh heh heh... Can I help you?"*. **Visiting it lets the player revive dead party soldiers.** | **scene `0x14`** — dev (session 73): *"on every mission, there's one city that has a 'witch den'. visiting it allows resurrecting dead party soldiers."* Proof `native-scene-14-shop.png` | **renders — developer-confirmed** (session 73): reached in normal play, the developer *"just did that — it works!"*. Reached by **walking into the Witch's Den in one city of a mission** (see the map/mission sections). It is the scene that exposed the missing **record 16** bank unit (see the arena section). Its record mask is **`0x00013C14`** — records 2, 4, 10, 11, 12, 13, **16**, 17, 18, 19, 20. For scripted testing, `OGRE_SCENE=0x14` forces it, but the poke races the boot and lands about 1 run in 5 |
 
 **How it is reached, and the two routes are *not* the same code.** The suspend
 save (`assets/save-mission-1.srm`; the game **deletes** it when the suspend slot
@@ -256,10 +257,17 @@ code_end, data_size)` (dcache) and `func_80093380(data_end, bss_size)` (bss).
 | | `0x001A4BE0` | `0x4680` | `0x4320` | `0x360` | - | V | **settings** |
 | | `0x001A9260` | `0x93E0` | `0x8FE0` | `0x400` | - | AE | not yet identified |
 | | `0x001B2640` | `0x79E0` | `0x72B0` | `0x730` | `0x20` | AF | not yet identified |
+| `0x802210E0` | `0x00275820` | `0x47D0` | - | - | - | C (bankRec13) | scene `0x14`'s arena, low half |
+| | `0x00279FF0` | `0x7840` | - | - | - | **AG (bankRec16)** | **scene `0x14`'s own module — not in the segment table** (see below) |
 | `0x8022ACB0` | `0x00286BA0` | `0x138F0` | `0x13180` | `0x770` | - | K | chapter animation (the "Prologue" card) |
 | | `0x0029A490` | `0xE860` | `0xDE00` | `0xA60` | - | L | the same arena's other bank |
 | `0x802395E0` | `0x002A8CF0` | `0x56A0` | `0x5620` | `0x80` | - | G | step ≥ 2's dialogue engine bank |
 | | `0x002AE390` | `0xA7E0` | `0xA600` | `0x1E0` | - | F | the same arena's other bank |
+
+Record 13 and record 16 are listed without a split because **neither has a loader
+`subu`**: the game loads them from a descriptor table, so their sizes come from
+the segment table's `ram_end` (and, for record 16, the port's own
+`UNCOMPILED` log line, which printed exactly `0x7840`).
 
 "shared" = the boot loader zeroes the boot overlays' BSS with its own
 `func_80093380` calls, which span more than one record and start at the *end of
@@ -269,36 +277,79 @@ port reproduces; the BSS column above is the size the loader states for the
 record it belongs to.
 
 **There is no uncompiled bank on a reachable path any more.** `arenamap.py`
-finds 27 bank loads across 33 ELFs; 26 are compiled and the 27th is the fragment
-below. The tool also proves the negative: `--coverage` lists the ROM the scanned
-ELFs disassemble as code, and the two uncovered gaps (`0x0DDF80..0x0E4910`, a
-display-list/texture blob; `0x279FF0..0x281830`, the remainder of record 13's
-code) contain **0** `jal 0x8009DA50` — so no loader can be hiding in code the
-port never compiled.
+finds **28** bank loads across the ELFs; 27 are compiled and the 28th is a
+`0xE80` fragment with no loader of its own (below). The tool also proves the
+negative: `--coverage` lists the ROM the scanned ELFs disassemble as code, and
+its one remaining uncovered gap (`0x0DDF80..0x0E4910`, a display-list/texture
+blob) contains **0** `jal 0x8009DA50` — so no *loader-pattern* bank can be
+hiding. One did hide anyway: record 16's load is table-driven and its ROM
+(`0x279FF0..0x281830`) was the tool's *other* uncovered gap until unit AG closed
+it, and only booting the scene it belongs to revealed it (below).
 
-#### The one bank-shaped load with no unit: scene `0x14`'s setup fragment
+#### Record 16 — the bank that hid behind a loader-less load (unit AG, session 73)
 
-`func_80177754` (scene `0x14`'s enter, descriptor `0x8018FB2C`) has two arms. Its
-first arm loads record 10's arena, unit J/X; its **second** arm (`beqz v0,
-0x801777FC`) DMAs a `0xE80`-byte fragment `rom 0x0023A370 → RAM 0x801D0860`,
-exactly the first `0xE80` bytes of unit C's record 10b. It is **not compiled**:
-the RAM it lands in is record 10b's, which unit C owns, so a new record for it
-would collide in `cross_bank.py check-banks`. Nothing observed streams it — the
-developer's driven runs (sessions 67/71/72 and this session's) never log it and
-reach scene `0x14`'s first arm only — but if a scene-`0x14` screen ever draws
-from stale bytes, **this is the first thing to check.** Add it as its own unit
-(ROM `0x23A370`, size `0xE80`, code `0xE70`, data `0x10`, BSS none) and move
-record 10b out of unit C if it turns out to be live.
+Booting into scene `0x14` produced the answer `arenamap.py` had missed:
+
+```
+[bank] UNCOMPILED streamed record 16: rom=0x279FF0 ram=0x802258B0 size=0x7840
+[overlays] streamed function stub called @ 0x80226B7C (not yet loaded)   ... x3
+```
+
+**Record 16 is not a segment-table record.** Entry 13 declares
+`rom 0x275820..0x279FF0 → ram 0x802210E0`, which is what the port compiled (unit
+C); the game then loads a *second* module over the same arena from `0x279FF0`.
+The size `0x7840` is not a loader `subu` either — it is the segment table's
+`ram_end` for entry 13 (`0x8022D0F0`) minus `0x802258B0`, which is exactly the
+size the port's own log printed.
+
+It needed the session-45 treatment, and it matters far more than the three stubs
+suggested: **125 distinct call targets across eight units reach into its window**
+(banks B, C, F, G, K, L, N, T and the main ELF), because three *other* arenas
+overlap it — record 18's tutorial module (`0x8022A860`, unit T), record 14d's
+chapter animation (`0x8022ACB0`, unit K) and record 14a (unit L). Unit C's
+record 13 has compiled bodies at the low half of the same RAM, so every call
+from unit C's code into the high half was bound at build time to record 13's
+layout — the session-45/67/72 mis-binding class. It is now **bank unit AG**
+(`bankRec16b`, ROM `0x279FF0`, size `0x7840`, RAM `0x802258B0`).
+
+With unit AG in, scene `0x14` renders with **0 stubs**, and the fix is directly
+responsible: the three stubbed addresses (`0x80226B7C`, `0x8022859C`,
+`0x80226CE0`) are record 16 entries, each preceded by `jr $ra`, and they are
+declared in `symbol_addrs-bankAG.txt`.
+
+#### The scene-`0x14` `0xE80` fragment — the one bank-shaped load with no unit
+
+`func_80177754` (scene `0x14`'s enter, descriptor `0x8018FBE8`, mask
+`0x00013C14`) has several arms, selected by **bit 3 of `D_801976F8`** (the
+scene-script opcode word the VM writes; `D_80197B80` participates too):
+
+* **the normal route's arm** — it DMAs **record 16** (unit AG, above) and calls
+  `0x801D0AAC` inside it. The developer's walk into the Witch's Den takes this
+  one, and it is the arm every observed entry takes.
+* bit 3 **set** → it DMAs a `0xE80`-byte fragment `rom 0x0023A370 →
+  RAM 0x801D0860` and calls `0x801D1508` in it. That is a *data* copy: the bytes
+  at ROM `0x23A370` are record 10b's code from its `0x16770` offset onward, so
+  the arm is a bootstrap, not a module.
+* a third arm (`D_80197B80 == 0`) loads record 10's arena instead.
+
+The `0xE80` fragment is **not compiled**: the RAM it lands in is record 10b's,
+which unit C owns. **Open question for the developer:** whether the witch is ever
+drawn from a *different* screen/state (a first visit, a scripted intro, a
+post-resurrection flourish) that takes the bit-3 arm — the code path exists, but
+every entry seen so far takes the record-16 arm, so it may be dead. If a
+scene-`0x14` state ever draws from stale bytes, this fragment is the first thing
+to check.
 
 #### The loader `arenamap.py` cannot see: a table-driven loop
 
-Record 18's bank (unit **T**, the tutorial's practice stage) is not loaded by a
-literal loader block. `func_ovlB_80221D50` indexes a `0x28`-byte descriptor
-table at RAM `0x80229DDC` by `D_80193700` and reads `ram`, `rom_start`, `rom_end`,
-`bss` and `entry` out of the entry, so the addresses are data, not immediates.
-The tool reports it as its one `jal 0x8009DA50` without a cache bracket — which
-is the correct answer, and the reason to read that list rather than trust a
-silent zero. The tutorial's other table at `0x80229E88` selects mode 2 (unit U).
+Record 18's bank (unit **T**, the tutorial's practice stage) and record 16 are
+both loaded without a literal loader block. `func_ovlB_80221D50` indexes a
+`0x28`-byte descriptor table at RAM `0x80229DDC` by `D_80193700` and reads `ram`,
+`rom_start`, `rom_end`, `bss` and `entry` out of the entry, so the addresses are
+data, not immediates. The tool reports those as `jal 0x8009DA50` sites without a
+cache bracket — which is the correct answer, and the reason to read that list
+rather than trust a silent zero. The tutorial's other table at `0x80229E88`
+selects mode 2 (unit U).
 
 **When a screen freezes or draws nothing and the log shows no stub, check for an
 `UNKNOWN module` and remember the silent case:** an unknown record is never
@@ -476,6 +527,14 @@ six calls from resident code into it are dispatched through the runtime bank map
 * Scene `0x12` = Load Game (needs a save): what should it show with no save —
   hidden, greyed out, or an error? (Currently unreachable without a save.)
 * The `0x18` menu: which menu is it, and what should it list?
+* Scene `0x14`, the **Witch's Den** (answered in part, session 73): the route is
+  *mission → the one city with a witch den → walk in*, and its purpose is
+  **reviving dead party soldiers**. Still open: does anything take the enter's
+  **bit-3 arm** (`D_801976F8` bit 3; a `0xE80` copy of record 10b's code), or is
+  that arm dead? And what should the **revive flow** look like — a list of dead
+  soldiers, a price in `Goth` from `WAR FUNDS`, a confirmation? The scene's data
+  half has only the Old Witch's greeting in the captures so far, so the rest is
+  probably drawn from the tables record 16 builds at runtime.
 * Does the opening skip the movie when Start is pressed during it? Confirmed in
   session 45: with taps gated to `OGRE_TAP_NOT_SCENE=new-game,0x0D` (no input
   inside `0x0D`) visit 1 runs its full ~28.4 s; with taps that keep firing inside

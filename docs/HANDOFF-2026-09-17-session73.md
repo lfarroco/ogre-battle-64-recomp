@@ -185,3 +185,116 @@ probes were used.
 4. **The map drive only reached the mission head** before `OGRE_EXIT_AFTER_MS`.
    A longer driven run (or a checkpoint at the map) is what exercises units Q and
    W again; use the session-72 developer-driven recipe for combat/shop.
+
+## 8. Follow-up (same session): scene `0x14` is the shop, and it exposed a missing bank — **unit AG**
+
+The developer asked to boot the game straight into `0x14` and identify it from a
+screenshot. What came back was better than a screenshot.
+
+**Scene `0x14` is the Witch's Den** (developer, session 73): *"on every mission,
+there's one city that has a 'witch den'. visiting it allows resurrecting dead
+party soldiers."* It is reached in normal play by walking into that city's den —
+the developer confirmed after this session's fix: *"I know how to reach the witch
+scene, and I just did that — it works!"*. So this is **not** a test-only scene;
+the missing bank it exposed was on a real route.
+
+### What `OGRE_SCENE=0x14` did
+
+The scene can be forced, but the poke **races the boot** and lands about **1 run
+in 5** (the scene's own transition to the intro at ~1.6 s wins otherwise) — loop
+the command until `[scene] forced scene 0x14 is active` appears. The first
+successful run logged:
+
+```
+[bank] loading overlay record rom=0x275820 ram=0x802210E0 size=0x47D0 (49 functions)
+[bank] UNCOMPILED streamed record 16: rom=0x279FF0 ram=0x802258B0 size=0x7840
+[overlays] streamed function stub called @ 0x80226B7C (not yet loaded)
+[overlays] streamed function stub called @ 0x8022859C (not yet loaded)
+[overlays] streamed function stub called @ 0x80226CE0 (not yet loaded)
+```
+
+and the present was **black** (the render target had content, the presenter did
+not), with an occasional SIGBUS in RT64's `update_screen` at the present — the
+game handing the presenter a pointer into an unloaded module.
+
+### The missing bank: record 16, not a segment-table record
+
+Segment-table **entry 13** is `rom 0x275820..0x279FF0 -> ram 0x802210E0`, and
+unit C links exactly that. The game then DMAs a **second** module over the same
+arena from `0x279FF0`. It has **no loader `subu`**: the load is
+descriptor-table-driven, so `tools/arenamap.py`'s pattern scan cannot see it —
+its size is the table's `ram_end` for entry 13 (`0x8022D0F0`) minus `0x802258B0`
+= **`0x7840`**, which is exactly what the port's own `UNCOMPILED` line printed.
+
+The three stubbed addresses are in that module (`ROM 0x27B2BC`, `0x27CCDC`,
+`0x27B420`), each preceded by `jr $ra`. And the window is **heavily used**: a
+scan of every ELF finds **125 distinct call targets** in
+`0x802258B0..0x8022D0F0` from banks B, C, F, G, K, L, N, T and the main ELF,
+because three other arenas overlap it — record 18's tutorial module
+(`0x8022A860`, unit T), record 14d's chapter animation (`0x8022ACB0`, unit K)
+and record 14a (unit L). Unit C's record 13 has compiled bodies at the low half
+of the same RAM, so every call from unit C's code into the high half was bound
+at build time to record 13's layout.
+
+### The fix
+
+**Bank unit AG** — `bankRec16b`, ROM `0x279FF0`, size `0x7840`, RAM
+`0x802258B0` — with the three addresses declared in `symbol_addrs-bankAG.txt`
+(real function starts in *this* layout). New files `config-bankAG.yaml` and
+`config-bankAG.toml`; `BANK_UNITS += AG` in the `Makefile`;
+`app/src/bank_overlays.cpp` needs nothing (the record table is generated).
+Record 13 stays in unit C: the two are separate units, which is what makes the
+runtime's DMA-driven bank map evict one for the other.
+
+Verified: `bankAG.elf` is **0 differing bytes** from the ROM with 426
+address-named symbols at their addresses; `make bank-recomp` is
+**33 units / 43 records / 3509 functions**, `check-banks OK`; `elfcheck --syms`
+0 bytes on all 34 ELFs; `--coverage` leaves only **one** uncovered gap (record
+16's closed).
+
+### Result: scene `0x14` is the shop
+
+`runlog --check` **PASS** (0 stub, 0 UNKNOWN, 0 crash):
+
+```
+[scene] t=1.66s id=0x0014 mask=0x00013C14
+```
+
+and the frame (`docs/proofs/native-scene-14-shop.png`) is the Witch's Den —
+cauldron, bottle shelves, a counter reading **`WAR FUNDS 0001000 Goth`**, and
+the dialogue box **`Old Witch` / "Heh heh heh... Can I help you?"**. The
+developer reached it in normal play the same day and confirmed it works.
+
+Getting the picture needed one technique worth keeping: with the forced entry
+the **present** is black while the **render target is not**, so use
+`OGRE_CAPTURE_TARGET` (320x239, `RenderFormat` 11 = `R16G16B16A16_UNORM`, 8
+bytes per texel) and convert it, **bottom-up**:
+
+```python
+d = open("t.NNN.bin","rb").read()[:320*239*8]
+v = struct.unpack_from("<%dH" % (320*239*4), d)
+for i in range(320*239):
+    r,g,b = v[4*i], v[4*i+1], v[4*i+2]
+    row = 239-1-(i//320); col = i%320          # target is bottom-up
+```
+
+### Files changed by §8
+
+* `config-bankAG.yaml`, `config-bankAG.toml`, `symbol_addrs-bankAG.txt` (new)
+* `Makefile` — `BANK_UNITS += AG`
+* `tools/arenamap.py` — `KNOWN_LOADERLESS` (record 16), the derived-bank row, and
+  the docstring caveat that the loader pattern is not the whole map
+* `docs/scenes.md` — scene `0x14` row, the arena table's record 13/16 rows, §
+  *"Record 16 — the bank that hid behind a loader-less load"*
+* `docs/proofs/native-scene-14-shop.png` (new)
+* `PLAN.md`, `docs/DECISIONS.md`, this file
+
+No probes; `RecompiledFuncs/`/`Bank*Funcs/` regenerated, never hand-edited.
+
+### Lesson for the next session
+
+`tools/arenamap.py`'s negative — all 76 ROM-wide `jal 0x8009DA50` inside
+compiled code — is **necessary but not sufficient**: a descriptor-table load has
+no `jal` to find, and record 16 hid behind exactly that. The arbiter is the run
+log's `[bank] UNCOMPILED streamed record N: rom=… ram=… size=…`, which names
+both the module and its size. Boot the scene, read the line, add the unit.

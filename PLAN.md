@@ -1171,14 +1171,38 @@ hardware. RT64 remains the primary native renderer throughout. See
     uncovered ROM gaps contain **0** of them, so no loader can be hiding. The one
     uncompiled bank is a `0xE80` scene-`0x14` setup fragment
     (`0x0023A370 → 0x801D0860`) whose RAM unit C's record 10b already owns and
-    which no observed run streams. No bank unit was needed, so
-    `make bank-recomp` is unchanged and green (32 units / 42 records / 3452
-    functions, `check-banks OK`), `elfcheck --syms` is 0 bytes on all 33 ELFs, and
-    two driven runs pass `runlog --check` with **0 stubs / 0 `UNKNOWN module`**
-    (tutorial: 37 bank loads, `0x17 → 0x02 → 0x0D → 0x03 ×2`; map: title →
-    `0x12` → `0x03`). The whole table is recorded in `docs/scenes.md` under
+    which no observed run streams. `make bank-recomp` is green
+    (33 units / 43 records / 3509 functions, `check-banks OK`), `elfcheck --syms`
+    is 0 bytes on all 34 ELFs, and driven runs pass `runlog --check` with **0
+    stubs / 0 `UNKNOWN module`** (tutorial: 37 bank loads,
+    `0x17 → 0x02 → 0x0D → 0x03 ×2`; map: title → `0x12` → `0x03`; scene `0x14`
+    below). The whole table is recorded in `docs/scenes.md` under
     *"Every streamed arena the game can load (session 73)"*. See
     `docs/HANDOFF-2026-09-17-session73.md`.
+  - ✅ **Scene `0x14` is the shop, and finding it exposed a missing bank —
+    record 16, now unit AG (session 73).** The developer asked to boot scene
+    `0x14` directly and identify it from a screenshot. The poke lands ~1 run in 5
+    (it races the boot), and the scene's first forced run logged
+    `[bank] UNCOMPILED streamed record 16: rom=0x279FF0 ram=0x802258B0
+    size=0x7840` plus three stubbed calls (`0x80226B7C`, `0x8022859C`,
+    `0x80226CE0`) and drew nothing. **Record 16 is not in the segment table** —
+    entry 13 declares `rom 0x275820..0x279FF0`, which unit C links, and the game
+    then loads a second module over the same arena from `0x279FF0`; its size is
+    the table's `ram_end` (`0x8022D0F0`) minus `0x802258B0`, exactly the number
+    the port logged. **125 call targets across eight units** reach into that
+    window (three other arenas overlap it: unit T's `0x8022A860`, unit K's
+    `0x8022ACB0`, unit L's), so every call from unit C's code into the high half
+    was bound to record 13's layout — the session-45/67/72 mis-binding class. It
+    is now **bank unit AG** (`bankRec16b`, ROM `0x279FF0`, `0x7840` → RAM
+    `0x802258B0`; `config-bankAG.*`, `symbol_addrs-bankAG.txt`, `BANK_UNITS`),
+    and with it scene `0x14` **renders with 0 stubs** and
+    `runlog --check` PASSes: **the Witch's Den**, *"Old Witch / Heh heh heh…
+    Can I help you?"*, `WAR FUNDS 0001000 Goth`
+    (`docs/proofs/native-scene-14-shop.png`). **Developer-confirmed route:** every
+    mission has one city with a **witch den**, and visiting it is how the player
+    **revives dead party soldiers** — the developer walked in from normal play and
+    it works, so this was a real-route bank, not a test-only one. `--coverage` now leaves only **one**
+    uncovered ROM gap. See `docs/HANDOFF-2026-09-17-session73.md` §8.
   - ✅ **The mission renders (session 67).** The developer's **suspend save**
     (`assets/save-mission-1.srm`, third SRAM slot) resumes at **scene `0x03`**,
     the mission — descriptor `0x8018F350`, mask `0x38C` (records 2, 3, 7, 8, 9) —
