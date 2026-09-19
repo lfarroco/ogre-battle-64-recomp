@@ -56,6 +56,7 @@ visit, with the step index in `D_8018F1C0`.
 | title: prologue text, then the logo + a menu over scrolling clouds | `0x04` | dev (session 43), proof (`native-title-menu.png`) | renders |
 | attract story (world map) | `0x0B` | code | renders |
 | attract unit-info book | `0x0C` | code | renders |
+| **save-data / Controller Pak menu — hold Start through the boot window** | `0x18` | dev (session 88) + code + proof (`native-boot-start-controller-pak-menu.png`) | **renders** (session 88): `Controller Pak Menu` over `Save / Load / Erase / Exit`, the `Game Notes` / `Pages` list (`1:`..`4:`, `Left`, a scrollbar) and a note box (`Note 1` / `Not an Ogre Battle 64 note.` with a fresh pak). Entered at `t≈2.4 s` of a Start-held boot; before session 88 the scene sat on a black frame with no display lists (the enter's call into unit H was bound to the wrong bank — see the note below). |
 
 The title menu (no save) is **New Game / Tutorial / Stereo**, with
 `Load Game` inserted as the second entry when a save exists
@@ -71,6 +72,37 @@ watched the loaded game come up. So the title's `Load Game` and its default
 cursor read the **battery** save, and the Controller Pak is only the
 copy/backup device (session 65 §9-§10). See
 `docs/HANDOFF-2026-09-17-session66.md` §3.
+
+### The boot-Start save menu (scene `0x18`) — developer, session 88
+
+Holding **Start while the game boots** opens the save-data menu instead of the
+boot intro. The branch is a single test in the boot init, at `0x800721DC`:
+
+```c
+if (*(u16 *)0x800E79B0 & 0x1000)   /* the pad report's Start bit */
+    pending_scene = 0x18;          /* the menu */
+else
+    pending_scene = 0x09;          /* the boot intro */
+```
+
+`D_800E79B0` is the controller-0 report the boot's own poll fills
+(`func_8007297C`'s loop writes it); Start is `0x1000`, so a *held* Start is what
+matters — a tap at boot is a 50/50. Scene `0x18`'s descriptor is **`0x8018FDC0`**
+(mask `0x2`), enter `func_8017BA60`, update `func_8017BB28`, hook
+`func_8017BB54`. **Correction to session 65 §9:** the "extra callback words"
+`+0x14`/`+0x18`/`+0x1C` it found at `0x8018FDAC` are scene `0x07`'s descriptor
+plus `0x14`, i.e. **scene `0x18`'s own descriptor** at `0x8018FDC0` — there are
+no unread descriptor words, and `func_8017BB28` is not scene `0x07`'s callback.
+
+The enter chunk-DMAs **unit H** (ROM `0x712A0` → RAM `0x8019A7C0`, the same
+module as the name form) and calls `func_8019D67C` in it; the per-frame update
+and hook call `0x8019C69C` and `0x8019C4A8`. All three go through the runtime
+bank map (`make recomp`'s `cross_bank.py dispatch --only` list). The third one
+(`0x8019D67C`) was **not** in the list until session 88: `config.toml` extends
+`func_8019D568` to `0xCB0`, which swallows `0x8019D67C`, so N64Recomp bound the
+`jal` to `func_8019D568` and emitted the redirect-plus-early-`return` shape —
+the enter returned before the menu initialised and the scene stayed black. See
+`docs/HANDOFF-2026-09-19-session88.md`.
 
 ## New Game — the opening sequence (developer, session 44)
 
@@ -90,7 +122,7 @@ step table).
 | 7 | a **chapter animation**: characters are revealed with an animation over the text `Prologue` / `Casting their gaze on the ground, trudging along...` | dev (session 58) | **renders** (session 59): reached at step **1073** (asset `0x01A1625A`, **command `-8`** — not "command 6", see `docs/HANDOFF-2026-09-16-session59.md` §4c). The step's `-8` arm (`func_ovlC_8022683C` @0x802269DC) streams a **third bank** of the record-14 arena (ROM `0x286BA0`, 0x138F0 → RAM `0x8022ACB0`) that the port had no code for, and `bankRec14a` — the other bank of that RAM, which *was* compiled into unit C — was bound at build time to the interpreter's `jal 0x8022C270`/`0x8022C6E4` and the callback's `jal 0x8022E3F0`; with the chapter module resident the interpreter therefore ran rec14a's layout and crashed. The two banks are now **units K and L**, the calls compile as `LOOKUP_FUNC`, and the card draws: `docs/proofs/native-newgame-prologue-card.png`. Steps **1073..1077** are its five phases. |
 | 8 | another **movie**: the player being received for duty with other soldiers | dev (session 58, screenshots offered) | **renders** (session 59, unconfirmed by the developer): after the chapter animation, scene `0x0D` plays the hall scene with `General Godeslas` — *"It looks like some of you are gr…"* — over rows of soldiers (`docs/proofs/native-newgame-received-for-duty.png`), then the `Grey-Haired Old Man` / *"So you're Magnus… Hmm… I see."* dialogue with Magnus (`docs/proofs/native-newgame-magnus-old-man.png`). The sequence then reaches **scene `0x05`** (below). |
 | 10 | **the map scene** — the world map: terrain and rivers, location labels, the route of dots, unit markers and the `Flama` cursor, inside a stone frame. (Developer, session 60: *"the next scene after this prologue movie is an important one: it's the map scene. from there, it should be possible to save the game"*.) | dev (session 60) + code | **renders** (session 60): descriptor `0x8018FD70`, mask `0x2`; scene `0x05`. Proof `docs/proofs/native-newgame-map-scene.png`. The scene enters at t≈180 s on the natural route and, before this session, stayed on the prologue's black fade because **no frames were produced**: two calls in the scene update/hook (`func_8017B858` @0x8017B8A0 `jal 0x8019AF0C`, `func_8017B9C8` @0x8017BA10 `jal 0x801A103C`) were compiled as "call the containing body + early return" (a `jal` into a size-overridden body interior), so each abandoned the caller's frame; the frame-pump thread then read its `$s0`/`$s1` from the wrong stack slots, `$s1` (the message-type comparator) became 0 and the pump stopped after two frames. Both targets are in the RAM the scene module occupies and are now dispatched through the bank map (`make recomp`'s `--only` list) — `0x8019AF0C` resolves to unit **M**'s own state-1 handler, which is what the game's state machine asks for (scene `0x05`'s enter sets `0x801977E8 = 1`; scene `0x07`'s sets `3` and takes a different branch, which is why the form worked). See `docs/HANDOFF-2026-09-16-session60.md` |
-| 9 | the **Controller Pak menu** (reached from a later scene): `Save` / `Load` / `Erase` / `Exit` over `OgreBattle Game Notes`, with `Game Data 1` / `Game Data 2` notes, `Pages`, `No Data`, and the system messages (`Insert Controller Pak.`, `Saving data.`, `Data saved to Controller Pak.`, `1 note 25 pages to save.`, `Saving data has failed.` and its Loading/Deleting variants) | dev (session 58: *"the game has a save system, which we should arrive in one of the next scenes"*); text ROM `0x790EC..0x7967C` | **device implemented (session 65), menu not yet reached** — and note the framing: this menu is the **copy/backup** path between the cartridge save and a pak (`Data loaded to Game Pak.` / `Data saved to Controller Pak.`); **the game's own save is a battery-backed cartridge save (SRAM/FlashRAM/EEPROM)**, not this (developer, session 65). The pak device (flat 32 KiB, `.mpk`-compatible) is implemented over `osPfs*`: 105 calls into the PFS cluster from the main segment, and the menu's strings live in **bank unit H** (`D_ovlH_801A260C`, the same UI module as the name/birthday forms), so drawing should already work. The runtime's `librecomp/src/pak.cpp` is an upstream stub returning `PFS_ERR_NOPACK` for every entry point, and `recomp::SaveType` has no Controller Pak, so the game currently sees "no pak inserted". See `docs/HANDOFF-2026-09-16-session58.md` §3c |
+| 9 | the **Controller Pak menu** (reached by **holding Start through the boot window**): `Save` / `Load` / `Erase` / `Exit` over `OgreBattle Game Notes`, with `Game Data 1` / `Game Data 2` notes, `Pages`, `No Data`, and the system messages (`Insert Controller Pak.`, `Saving data.`, `Data saved to Controller Pak.`, `1 note 25 pages to save.`, `Saving data has failed.` and its Loading/Deleting variants) | dev (session 88: *"if you hold start while it is booting, it allows you to access a special menu for saves"*); text ROM `0x790EC..0x7967C` | **renders — this is the boot-Start menu (session 88)**: scene `0x18`, descriptor `0x8018FDC0`; proof `docs/proofs/native-boot-start-controller-pak-menu.png` (`Controller Pak Menu` / `Save Load Erase Exit` / `Game Notes` `Pages` / note box). **Device implemented session 65**, menu bound to the wrong bank until session 88. Note the framing: this menu is the **copy/backup** path between the cartridge save and a pak (`Data loaded to Game Pak.` / `Data saved to Controller Pak.`); **the game's own save is a battery-backed cartridge save (SRAM/FlashRAM/EEPROM)**, not this (developer, session 65). The pak device (flat 32 KiB, `.mpk`-compatible) is implemented over `osPfs*`: 105 calls into the PFS cluster from the main segment, and the menu's strings live in **bank unit H** (`D_ovlH_801A260C`, the same UI module as the name/birthday forms). See `docs/HANDOFF-2026-09-16-session58.md` §3c and `docs/HANDOFF-2026-09-19-session88.md` |
 
 ### The map screen (scene `0x05`) — what it must show (developer, session 60)
 
@@ -559,7 +591,8 @@ six calls from resident code into it are dispatched through the runtime bank map
 
 * Scene `0x12` = Load Game (needs a save): what should it show with no save —
   hidden, greyed out, or an error? (Currently unreachable without a save.)
-* The `0x18` menu: which menu is it, and what should it list?
+* The `0x18` menu: **answered, session 88** — it is the Controller Pak Menu
+  reached by holding Start through the boot window (see "Boot and attract").
 * Scene `0x14`, the **Witch's Den** (answered in part, session 73): the route is
   *mission → the one city with a witch den → walk in*, and its purpose is
   **reviving dead party soldiers**. Still open: does anything take the enter's

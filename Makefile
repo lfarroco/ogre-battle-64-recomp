@@ -79,7 +79,7 @@ recomp: recomp-prep $(ELF)
 	@# emits (session 58, after moving bankRec10a out of unit C). Clear first.
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0
 
 # The cross-bank dispatch inside `recomp` can only see bank records that
 # `make bank-recomp` has already written to app/src/bank_funcs.inc. Without it
@@ -139,7 +139,9 @@ regenerate:
 # unit's layout is a body interior in the bank's, and forcing splat to split
 # there makes the recompiler emit fragments with undefined `goto` labels.
 #
-# Three targets are dispatched in the default build (the line in `recomp` above):
+# The default build dispatches a growing list of targets (the line in `recomp`
+# above). Each entry is a call from resident code into RAM that N64Recomp bound
+# into the wrong layout; the notes below record why that target and not another:
 # 0x80198D28, scene 0x02's loader entry. The recompiler binds its single call
 # site (func_80178920) to the containing overlay-C body func_801989AC — which
 # dereferences $a0+3 with $a0 unset and dies — while bank unit E (record 0,
@@ -183,9 +185,23 @@ regenerate:
 # a different layout, which left the name-entry form black. Bank unit H is the
 # module; these six are every call the resident code makes into it. See
 # docs/HANDOFF-2026-09-16-session55.md.
+# 0x8019D67C, the same module's save-data menu entry, is the seventh (session
+# 88). It is scene 0x18's `enter` (func_8017BA60 @0x8017BB04) that calls it,
+# right after chunk-DMAing ROM 0x712A0 into RAM 0x8019A7C0 — and scene 0x18 is
+# exactly the menu the game reaches by holding Start through boot
+# (func_800721DC: `D_800E79B0 & 0x1000` -> scene 0x18, else 0x09). The call was
+# bound to func_8019D568 because config.toml extends that symbol over
+# 0x8019D67C (0xCB0, session 30's fall-through closure), so N64Recomp emitted
+# the redirect-plus-early-`return` shape: the enter returned before the menu
+# initialised, the scene sat on a black frame with no display lists, and unit
+# H's func_ovlH_8019D67C never ran. Dispatched, the lookup hands the call to
+# the resident module (unit H) and the tail repair restores call-and-continue.
+# The `func_8019D568` override is left in place: 0x8019D67C is a genuine
+# continuation of that body, and the one *call* to it is the site dispatched
+# here.
 # The remaining targets stay on the recompiler's bindings (session 33's
 # behaviour); dispatching the other resolvable ones is still an opt-in
-# experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41, 55).
+# experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41, 55, 88).
 # ---------------------------------------------------------------------------
 cross-bank-report:
 	python3 tools/cross_bank.py report

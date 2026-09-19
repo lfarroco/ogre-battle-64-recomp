@@ -40,6 +40,27 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The boot-Start save menu (scene `0x18`) renders (session 88).** Holding
+  Start while the game boots takes the boot branch at `0x800721DC`
+  (`*(u16*)0x800E79B0 & 0x1000` → pending scene `0x18`, else `0x09`), which
+  reaches the **Controller Pak Menu** — the `Save / Load / Erase / Exit` screen
+  the developer meant by *"a special menu for saves"*. In the port the scene
+  entered and stayed **black**: its enter `func_8017BA60` chunk-DMAs unit H
+  (ROM `0x712A0` → RAM `0x8019A7C0`) and then `jal 0x8019D67C`, but
+  `config.toml` extends `func_8019D568` to `0xCB0`, swallowing `0x8019D67C`, so
+  N64Recomp bound the call to `func_8019D568` and emitted the
+  redirect-plus-early-`return` shape — the enter returned before the menu
+  initialised (no display lists at all; every captured frame measured
+  `mean=0 max=0`). Fix: `0x8019D67C` added to `make recomp`'s `cross_bank.py
+  dispatch --only` list, so the call is a `LOOKUP_FUNC` into the resident unit H
+  and the tail repair restores call-and-continue. Verified on the RT64 build with
+  Start held (`OGRE_TAP_MS=150`): scene `0x18` at `t≈2.4 s`, `func_ovlH_8019D67C`
+  entered, 436 display lists, every captured frame non-black (mean 83) —
+  `docs/proofs/native-boot-start-controller-pak-menu.png`. This also answers the
+  session-65 "puzzle" about scene `0x07`'s extra descriptor words: they are
+  **scene `0x18`'s own descriptor** at `0x8018FDC0`. See
+  `docs/HANDOFF-2026-09-19-session88.md`.
+
 - ✅ **Regenerating the recompiled code is now a first-class, verified path for a
   fresh clone — and the old recipe was quietly broken (session 87, third
   part).** Tested the way a contributor experiences it: the tracked tree checked
