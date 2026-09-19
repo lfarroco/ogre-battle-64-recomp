@@ -1,0 +1,160 @@
+# Build a release for every platform and attach it to a GitHub Release.
+#
+# Triggered by pushing a version tag:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# It creates a DRAFT release (nothing is published until you press "Publish"
+# in the GitHub UI) with one archive per platform attached.
+#
+# ---------------------------------------------------------------------------
+# WHY `runs-on: self-hosted` AND NOT `ubuntu-latest` / `windows-latest`
+# ---------------------------------------------------------------------------
+# A GitHub-hosted runner starts from a bare clone of this repository, and this
+# repository deliberately does NOT contain the recompiled game code
+# (RecompiledFuncs/, Bank*Funcs/, RspFuncs/, app/src/bank_funcs.inc are
+# gitignored). Those ~62 MB of machine-generated C only exist on a machine
+# where `make && make recomp && make bank-recomp` has been run against a ROM,
+# and regenerating them requires the ROM, which cannot be committed or attached
+# here.
+#
+# So this workflow runs on a runner (or a plain machine registered as one) that
+# already has:
+#   1. this repository checked out at the tag being released,
+#   2. the generated code, i.e. `make recomp && make bank-recomp` already run,
+#   3. the platform toolchains below.
+#
+# `tools/release-build.sh` checks 2 and tells you exactly what is missing.
+#
+# If the generated code is ever committed to the repository, change the matrix
+# `runs-on` values to the hosted labels in the comments and this workflow works
+# unchanged. That is a licensing decision, not a technical one — see
+# docs/HANDOFF-2026-09-19-session87.md.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach to (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos
+            runs-on: [self-hosted, macOS, ARM64]   # hosted: macos-14
+            archive: ogre-battle-64-recomp-macos-arm64.tar.gz
+            dist_dir: dist-macos
+          - name: Linux (x86-64)
+            os: linux
+            runs-on: [self-hosted, Linux, X64]     # hosted: ubuntu-24.04
+            archive: ogre-battle-64-recomp-linux-x86_64.tar.gz
+            dist_dir: dist-linux
+          - name: Windows (x86-64)
+            os: windows
+            runs-on: [self-hosted, Windows, X64]   # hosted: windows-2022
+            archive: ogre-battle-64-recomp-windows-x86_64.zip
+            dist_dir: dist-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # The vendored RT64 patch and the SDL2 build both live under tools/,
+      # which is gitignored; re-create them exactly as a developer would.
+      - name: Prepare third-party trees
+        shell: bash
+        run: |
+          set -e
+          if [ ! -d tools/N64ModernRuntime ]; then
+            echo "::error::tools/N64ModernRuntime is missing. See docs/guides/app-build.md -> Configure & build."
+            exit 1
+          fi
+          if [ -f rt64-plume-sdl.patch ] && [ -d tools/RT64/src/contrib/plume ]; then
+            git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch 2>/dev/null || true
+          fi
+
+      - name: Build and package
+        shell: bash
+        env:
+          DIST_OS: ${{ matrix.os }}
+        run: tools/release-build.sh
+
+      - name: Collect the archive
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "${{ matrix.dist_dir }}"
+          if [ "${DIST_OS:-}" = "" ]; then export DIST_OS="${{ matrix.os }}"; fi
+          shopt -s nullglob
+          # release-build.sh writes dist/<name>-<os>.(tar.gz|zip); take whichever
+          # archive flavour this runner produced and give it the matrix name.
+          for f in dist/ogre-battle-64-recomp-"${{ matrix.os }}".tar.gz dist/ogre-battle-64-recomp-"${{ matrix.os }}".zip; do
+            if [ -f "$f" ]; then
+              cp "$f" "${{ matrix.dist_dir }}/${{ matrix.archive }}"
+              echo "collected $f"
+            fi
+          done
+          ls -lh "${{ matrix.dist_dir }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: ${{ matrix.dist_dir }}/*
+          if-no-files-found: error
+
+  release:
+    name: Attach to the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Show what will be attached
+        run: ls -lh artifacts
+
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Ogre Battle 64: Recomp $TAG" \
+              --notes "$(cat <<'NOTES'
+          Native builds of the port for the platforms below.
+
+          **These packages contain no game data.** You must supply your own
+          Ogre Battle 64 (USA, Rev A) ROM dump; the app asks for it on first
+          launch ("Click to load your ROM") and stores it beside itself after
+          validating it by hash. Saves are written to `saves/` next to the
+          executable.
+
+          See the README inside each archive, and the repository README for
+          build instructions and the full list of environment options.
+          NOTES
+          )"
+          fi

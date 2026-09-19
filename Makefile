@@ -71,7 +71,7 @@ build/assets/%.o: assets/%.bin
 	@mkdir -p $(dir $@)
 	$(OBJCOPY) -I binary -O elf32-tradbigmips -B mips:3000 $< $@
 
-recomp: $(ELF)
+recomp: recomp-prep $(ELF)
 	@# N64Recomp only writes the files the new layout needs; it never deletes the
 	@# previous run's. A symbol that moved (e.g. static_17_8021F470 -> a data
 	@# label after a config change) therefore left its old definition behind and
@@ -80,6 +80,53 @@ recomp: $(ELF)
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config.toml
 	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0
+
+# The cross-bank dispatch inside `recomp` can only see bank records that
+# `make bank-recomp` has already written to app/src/bank_funcs.inc. Without it
+# the dispatch is skipped, the build succeeds, and calls into swappable RAM are
+# bound to the wrong bank — the failure class of sessions 41/45/55. Refuse to
+# recompile in that state. (`app/src/bank_funcs.inc` is a prerequisite of the
+# app build, not of this target, so make will not silently regenerate it here.)
+.PHONY: recomp-prep
+recomp-prep:
+	@test -f app/src/bank_funcs.inc || { \
+	  echo "recomp: app/src/bank_funcs.inc is missing, so the cross-bank dispatch would be skipped"; \
+	  echo "        and calls into swappable RAM would be bound to the wrong bank."; \
+	  echo "        Run 'make bank-recomp' first, or use 'make regenerate' for the whole"; \
+	  echo "        order (resplit -> link -> bank-recomp -> recomp -> rsp-recomp)."; \
+	  exit 1; }
+
+# ---------------------------------------------------------------------------
+# make regenerate -- everything a fresh clone needs, in the one order that
+# works, from the ROM at assets/ogre64.z64:
+#
+#   splat split (asm/ + assets/ + the linker script)   -> make resplit
+#   assemble + link the MIPS ELF                       -> make
+#   the bank units' ELFs + Bank*Funcs/ + bank_funcs.inc-> make bank-recomp
+#   the main unit's C (dispatches cross-bank calls
+#     against the bank data the previous step wrote)   -> make recomp
+#   the RSP microcode (njpeg + audio)                  -> make rsp-recomp
+#
+# The order is load-bearing: `make recomp` runs the cross-bank dispatch, which
+# can only see bank records that `bank_funcs.inc` already lists. Running the
+# two the other way round leaves 15 dispatch sites undispatched — the build
+# succeeds and runs *wrong-bank code*, which is the failure class of sessions
+# 41/45/55. `make recomp` now refuses to run in that state; this target is the
+# supported way to regenerate a tree.
+# ---------------------------------------------------------------------------
+.PHONY: regenerate
+regenerate:
+	@echo "==> [1/5] splat split (asm/, assets/, linker script)"
+	$(MAKE) resplit
+	@echo "==> [2/5] assemble + link the main ELF"
+	$(MAKE) $(ELF)
+	@echo "==> [3/5] the streamed bank units"
+	$(MAKE) bank-recomp
+	@echo "==> [4/5] recompile the main unit (with the cross-bank dispatch)"
+	$(MAKE) recomp
+	@echo "==> [5/5] the RSP microcode"
+	$(MAKE) rsp-recomp
+	@echo "==> regenerated: RecompiledFuncs/ Bank*Funcs/ RspFuncs/ app/src/bank_funcs.inc"
 
 # ---------------------------------------------------------------------------
 # Cross-bank call routing (Phase 4).
@@ -290,4 +337,157 @@ rsp-recomp:
 	$(RSPRECOMP) rsp-njpeg.toml
 	$(RSPRECOMP) rsp-audio.toml
 
-.PHONY: all clean recomp cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check
+# ---------------------------------------------------------------------------
+# make dist -- a self-contained folder a player can run
+#
+# The game is "bring your own ROM", so the package is the app and nothing else.
+# On first launch the app shows its start screen ("Click to load your ROM"), and
+# once a ROM has been chosen it stores it in its own folder, so from then on the
+# same executable boots the game directly. The battery save lands in `saves/`
+# beside the executable (app/src/launcher.cpp resolve_pref_dir; OGRE_PREF_DIR
+# overrides it).
+#
+#   make dist            # -> dist/ogre-battle-64-recomp/
+#   make dist-zip        # -> dist/ogre-battle-64-recomp-<host>.zip
+#
+# The recompiled game code is *generated and gitignored* (RecompiledFuncs/,
+# Bank*Funcs/, RspFuncs/, app/src/bank_funcs.inc), so this needs no ROM only if
+# the tree has already been recompiled once on this machine. tools/release-build.sh
+# checks that and says exactly what to run; a fresh clone cannot build at all
+# until `make && make recomp && make bank-recomp` has run against a ROM.
+#
+# **SDL2 is linked statically, so the package is one file.** `make sdl2-static`
+# fetches and builds a pinned SDL2 into tools/SDL2-static/ (gitignored), and
+# `dist` builds the app against it. Homebrew's `sdl2` formula on macOS is
+# `sdl2-compat`, a shim over libSDL3 with no static library, so a static link
+# needs the real SDL2 sources -- hence the fetch. Set DIST_STATIC_SDL=0 to skip
+# it and bundle the shared SDL2 instead (much faster, but two files).
+# ---------------------------------------------------------------------------
+DIST_NAME := ogre-battle-64-recomp
+DIST_DIR  := dist/$(DIST_NAME)
+# The appended `.exe` is what CMake produces on Windows; the copy step uses this
+# name so the recipe is identical on every runner.
+EXE_NAME  := ogrebattle64$(if $(filter windows,$(DIST_OS)),.exe,)
+
+# The pinned real SDL2 (2.32.x is API/ABI-compatible with the 2.32.70
+# sdl2-compat that Homebrew installs, so both headers and libraries work).
+SDL2_VERSION := 2.32.10
+SDL2_SRC     := tools/SDL2-static/SDL2-$(SDL2_VERSION)
+SDL2_PREFIX  := tools/SDL2-static/prefix
+SDL2_DIR     := $(CURDIR)/$(SDL2_PREFIX)/lib/cmake/SDL2
+SDL2_TARBALL := https://github.com/libsdl-org/SDL/releases/download/release-$(SDL2_VERSION)/SDL2-$(SDL2_VERSION).tar.gz
+
+DIST_STATIC_SDL ?= 1
+
+# `DIST_OS` selects the packaging rules. It defaults to the host, and CI passes
+# it explicitly so one recipe serves every runner:
+#
+#   make dist DIST_OS=windows
+#
+DIST_OS ?= $(if $(filter Darwin,$(shell uname -s)),macos,$(if $(filter Linux,$(shell uname -s)),linux,windows))
+
+# Static SDL2, built once. Its license ships with the binary (see `dist`).
+.PHONY: sdl2-static
+sdl2-static:
+	@if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ]; then \
+	  echo "==> static SDL2 already built ($(SDL2_PREFIX))"; \
+	else \
+	  echo "==> fetching SDL2 $(SDL2_VERSION)"; \
+	  mkdir -p tools/SDL2-static; \
+	  curl -fsSL -o tools/SDL2-static/sdl2.tar.gz "$(SDL2_TARBALL)"; \
+	  tar xzf tools/SDL2-static/sdl2.tar.gz -C tools/SDL2-static; \
+	  echo "==> building static SDL2 (this takes a minute)"; \
+	  cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build \
+	    -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+	    -DSDL_TEST=OFF -DSDL_TESTS=OFF > tools/SDL2-static/build.log 2>&1; \
+	  cmake --build tools/SDL2-static/build -j >> tools/SDL2-static/build.log 2>&1; \
+	  cmake --install tools/SDL2-static/build --prefix "$(SDL2_PREFIX)" >> tools/SDL2-static/build.log 2>&1; \
+	  test -f "$(SDL2_PREFIX)/lib/libSDL2.a" || { echo "static SDL2 build failed; see tools/SDL2-static/build.log"; exit 1; }; \
+	  echo "==> static SDL2 ready"; \
+	fi
+
+# Build (or refresh) the app binary. CMake owns its own dependency tracking.
+# The app build directory is separate for the static-SDL2 link so switching
+# DIST_STATIC_SDL never leaves a stale library in the cache.
+ifeq ($(DIST_STATIC_SDL),1)
+APP_BUILD_DIR := build-dist
+APP_CMAKE_SDL := -DSDL2_DIR=$(SDL2_DIR)
+app: sdl2-static
+else
+APP_BUILD_DIR := build-app
+APP_CMAKE_SDL :=
+endif
+
+.PHONY: app
+app:
+	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
+	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 -j
+
+.PHONY: dist
+dist: app
+	rm -rf "$(DIST_DIR)"
+	mkdir -p "$(DIST_DIR)"
+	cp $(APP_BUILD_DIR)/$(EXE_NAME) "$(DIST_DIR)/"
+	@if [ "$(DIST_OS)" = "macos" ] && [ "$(DIST_STATIC_SDL)" = "1" ]; then \
+	  printf '%s\n' \
+	    'This executable includes SDL2 (https://libsdl.org), linked statically,' \
+	    'Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>, under the zlib' \
+	    'license reproduced below.' \
+	    '' > "$(DIST_DIR)/SDL2-LICENSE.txt"; \
+	  cat "$(SDL2_PREFIX)/share/licenses/SDL2/LICENSE.txt" 2>/dev/null \
+	    >> "$(DIST_DIR)/SDL2-LICENSE.txt" || cat "$(SDL2_SRC)/LICENSE.txt" >> "$(DIST_DIR)/SDL2-LICENSE.txt"; \
+	  echo "==> static SDL2: no shared library to bundle"; \
+	elif [ "$(DIST_OS)" = "macos" ]; then \
+	  echo "==> bundling shared SDL2"; \
+	  sdl=$$(otool -L "$(DIST_DIR)/$(EXE_NAME)" | awk '/libSDL2-2[^ ]*\.dylib/ {print $$1; exit}'); \
+	  if [ -n "$$sdl" ] && [ -f "$$sdl" ]; then \
+	    cp "$$sdl" "$(DIST_DIR)/"; \
+	    base=$$(basename "$$sdl"); \
+	    install_name_tool -change "$$sdl" "@executable_path/$$base" "$(DIST_DIR)/$(EXE_NAME)"; \
+	    install_name_tool -id "@executable_path/$$base" "$(DIST_DIR)/$$base" 2>/dev/null || true; \
+	    install_name_tool -add_rpath "@executable_path" "$(DIST_DIR)/$(EXE_NAME)" 2>/dev/null || true; \
+	    codesign --force --sign - "$(DIST_DIR)/$$base" 2>/dev/null || true; \
+	  else \
+	    echo "    no SDL2 dylib found to bundle (was it linked statically?)"; \
+	  fi; \
+	fi
+	@if [ "$(DIST_OS)" = "linux" ]; then \
+	  if ldd "$(DIST_DIR)/$(EXE_NAME)" | grep -q libSDL2; then \
+	    if command -v patchelf >/dev/null 2>&1; then \
+	      echo "==> bundling SDL2"; \
+	      sdl=$$(ldd "$(DIST_DIR)/$(EXE_NAME)" | awk '/libSDL2/ {print $$3; exit}'); \
+	      cp "$$sdl" "$(DIST_DIR)/"; \
+	      patchelf --set-rpath '$$ORIGIN' "$(DIST_DIR)/$(EXE_NAME)"; \
+	    else \
+	      echo "    (install patchelf to bundle SDL2, or build with DIST_STATIC_SDL=1)"; \
+	    fi; \
+	  else \
+	    echo "==> static SDL2: no shared library to bundle"; \
+	  fi; \
+	fi
+	@echo "==> dependencies carried in the package:"
+	@if [ "$(DIST_OS)" = "macos" ]; then \
+	  otool -L "$(DIST_DIR)/$(EXE_NAME)" | tail -n +2 | grep -vE "System/Library|/usr/lib" || echo "    (none: only system frameworks)"; \
+	elif [ "$(DIST_OS)" = "windows" ]; then \
+	  echo "    see the .dll files listed above (Windows bundles SDL2.dll unless built with a static SDL2)"; \
+	else \
+	  ldd "$(DIST_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
+	fi
+	cp "$(CURDIR)/packaging/README-dist.txt" "$(DIST_DIR)/README.txt"
+	@echo "==> $(DIST_DIR)"
+	@ls -lh "$(DIST_DIR)"
+
+# Both archive flavours: `zip` is what a Windows player expects, `tar.gz`
+# always exists on Linux/macOS runners. CI uploads whichever each runner makes.
+.PHONY: dist-zip
+dist-zip: dist
+	@cd dist && rm -f "$(DIST_NAME)-$(DIST_OS).zip" && \
+	  zip -q -r "$(DIST_NAME)-$(DIST_OS).zip" "$(DIST_NAME)" && \
+	  echo "==> dist/$(DIST_NAME)-$(DIST_OS).zip"
+
+.PHONY: dist-tar
+dist-tar: dist
+	@cd dist && tar czf "$(DIST_NAME)-$(DIST_OS).tar.gz" "$(DIST_NAME)" && \
+	  echo "==> dist/$(DIST_NAME)-$(DIST_OS).tar.gz"
+
+.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check app dist dist-zip dist-tar sdl2-static

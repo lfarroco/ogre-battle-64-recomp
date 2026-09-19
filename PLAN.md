@@ -40,6 +40,86 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **Regenerating the recompiled code is now a first-class, verified path for a
+  fresh clone — and the old recipe was quietly broken (session 87, third
+  part).** Tested the way a contributor experiences it: the tracked tree checked
+  out into a clean worktree (no generated code, because all 62 MB of it is
+  gitignored) with only the third-party trees linked. The pipeline works, but
+  the documented recipe led with `make recomp`, which needs the ELF from
+  `make resplit` + `make` and whose cross-bank dispatch needs the bank records
+  `make bank-recomp` writes — so on a fresh tree **15 call sites were left bound
+  to the wrong bank, silently, with a successful build** (the sessions-41/45/55
+  class; the fresh and working `RecompiledFuncs/` hashed differently). Fixed
+  with **`make regenerate`** (the whole pipeline in the one order that works:
+  `resplit → link → bank-recomp → recomp → rsp-recomp`, verified end to end and
+  producing a byte-identical `RecompiledFuncs/`) and a **`recomp-prep`** guard
+  that refuses to recompile when `bank_funcs.inc` is missing, naming the
+  consequence and the fix (tested failing on a pristine checkout and passing on
+  a regenerated one). The setup guide now leads with regeneration and records
+  the two traps a contributor will meet: `make resplit` always leaves
+  `asm/1CE040.s`/`asm/40E80.s` dirty (a `fix-labels` patch round-trip), and 26
+  `Bank{B..L}Funcs/` files differ from a fresh regeneration only in
+  `recomp_trace_return` depth constants (cosmetic; zero-line diff with those
+  lines filtered). See `docs/HANDOFF-2026-09-19-session87.md` §8 Addendum 2.
+
+- ✅ **Cross-platform release builds are wired up, and building for Linux found
+  four portability bugs macOS had hidden (session 87, second half).** The
+  developer's GitHub-Releases request turned up a blocker first: the recompiled
+  code `make dist` links (`RecompiledFuncs/`, 34 `Bank*Funcs/`, `RspFuncs/`,
+  `app/src/bank_funcs.inc` — 62 MB) is generated and gitignored, never tracked,
+  so a fresh clone cannot build at all and a **GitHub-hosted runner cannot
+  either** (it has no ROM to recompile from). Asked whether committing it adds
+  copyrighted code to the client, the answer is that the generated C is a
+  mechanical translation of the ROM — so it was **not** committed, and releases
+  build on a machine that has the ROM (`.github/workflows/release.yml` runs a
+  self-hosted matrix; the hosted `runs-on:` labels sit in comments for a
+  one-line switch if that policy ever changes). Landed: `tools/release-build.sh`
+  (single entry point, checks the generated code and names the commands),
+  `packaging/README-dist.txt` (the shipped player README), a platform-generic
+  `make dist` (`DIST_OS`, `EXE_NAME`, `dist-tar`), and the tag-driven workflow
+  that creates a **draft** release with one archive per platform. Building for
+  Linux in a container fixed four real bugs: **SSE4.1 was never enabled** for
+  `librecomp`'s RSP SIMD path (Apple clang's default `-march` masked it; GCC
+  fails on `_mm_shuffle_epi8`), a `const ssize_t n`/`size_t n` collision in the
+  executable-fingerprint loop, an out-of-order designated-initializer array in
+  `gbi.cpp` that GCC rejects, and Linux requesting `SDL_WINDOW_VULKAN`
+  unconditionally — which broke the **null-renderer** build on exactly the
+  machines it exists for. Verified under `ubuntu:24.04`: the null build runs
+  launcher → ROM → boot → save beside the executable. Open: **Windows is
+  written but unvalidated** (no MSVC/mingw here), and Linux+RT64 initializes
+  Vulkan then segfaults in the first frame under Xvfb + Mesa `lavapipe` —
+  undiagnosed, possibly a software-Vulkan artifact. See
+  `docs/HANDOFF-2026-09-19-session87.md` §8.
+
+- ✅ **The port is distributable: `make dist` builds a self-contained folder, and
+  a fresh launch shows a start screen that asks for the ROM (session 87).** The
+  developer's MVP ask: opening the program shows a black window reading
+  `OGRE BATTLE 64: RECOMP` / `CLICK TO LOAD YOUR ROM (OR DROP IT IN THIS
+  WINDOW)`, and running it creates the save file in the app's own directory.
+  New `app/src/launcher.cpp` + `app/src/font.cpp` draw that screen with SDL's 2D
+  renderer and a built-in 5x7 anti-aliased ASCII font (the app has no font
+  dependency and the screen exists before RT64). A ROM can be supplied by
+  clicking (nativefiledialog, already vendored by RT64), by dropping the file on
+  the window, or by leaving it next to the executable (`find_exe_rom`); a
+  rejected file is a message on the screen, not a process exit. **The config
+  directory is now the executable's own directory** (`SDL_GetBasePath`), so the
+  battery lands at `<app>/saves/ogrebattle64-us-rev1.bin` beside the executable;
+  `OGRE_PREF_DIR` still overrides and a read-only install falls back to the
+  per-user pref dir. A stored ROM makes later launches skip the screen
+  (`OGRE_LAUNCHER=1` forces it, `OGRE_ROM=` names one). `make dist` produces
+  `dist/ogre-battle-64-recomp/` — **one self-contained executable**: SDL2 is
+  linked statically (`make sdl2-static` fetches and builds a pinned real SDL2
+  into the gitignored `tools/SDL2-static/`, because Homebrew's macOS `sdl2` is
+  the SDL3-based `sdl2-compat` shim and ships no static library), so
+  `otool -L` shows only system frameworks, and SDL2's zlib license ships in the
+  package. Verified by launching the static binary from an empty folder: start
+  screen → ROM → game boots → `saves/` written beside the executable.
+  `make dist-zip` packages it; `DIST_STATIC_SDL=0` falls back to bundling the
+  shared library. Open: the native file picker itself has only been
+  code-verified (synthesizing a click needs macOS accessibility permission) —
+  the drag/drop, auto-scan, and stored-ROM paths are all exercised. See
+  `docs/HANDOFF-2026-09-19-session87.md`.
+
 - ✅ **The credits screen (scene `0x11`) plays — four size-override mis-bindings
   were leaking the frame-pump thread's stack (session 86).** The session-85 wall
   is closed: on the natural route the credits fade from black to "Ogre Battle

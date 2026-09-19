@@ -179,31 +179,40 @@ struct StatsVisitor {
         ++s.commands;
         ++s.cmd_counts[c.op];
 
-        // Anything outside the recognized command set counts as unknown.
-        static constexpr bool kKnown[256] = {
-            [OP_VTX] = true, [OP_MODIFYVTX] = true, [OP_CULLDL] = true,
-            [OP_BRANCH_Z] = true, [OP_TRI1] = true, [OP_TRI2] = true,
-            [OP_QUAD] = true, [OP_LINE3D] = true, [OP_SPECIAL_1] = true,
-            [OP_DMA_IO] = true, [OP_TEXTURE] = true, [OP_POPMTX] = true,
-            [OP_GEOMETRYMODE] = true, [OP_MTX] = true, [OP_MOVEWORD] = true,
-            [OP_MOVEMEM] = true, [OP_LOAD_UCODE] = true, [OP_DL] = true,
-            [OP_ENDDL] = true, [OP_SPNOOP] = true, [OP_RDPHALF_1] = true,
-            [OP_SETOTHERMODE_L] = true, [OP_SETOTHERMODE_H] = true,
-            [OP_TEXRECT] = true, [OP_TEXRECTFLIP] = true,
-            [OP_RDPLOADSYNC] = true, [OP_RDPPIPESYNC] = true,
-            [OP_RDPTILESYNC] = true, [OP_RDPFULLSYNC] = true,
-            [OP_SETKEYGB] = true, [OP_SETKEYR] = true, [OP_SETCONVERT] = true,
-            [OP_SETSCISSOR] = true, [OP_SETPRIMDEPTH] = true,
-            [OP_RDPSETOTHERMODE] = true, [OP_LOADTLUT] = true,
-            [OP_RDPHALF_2] = true, [OP_SETTILESIZE] = true,
-            [OP_LOADBLOCK] = true, [OP_LOADTILE] = true, [OP_SETTILE] = true,
-            [OP_FILLRECT] = true, [OP_SETFILLCOLOR] = true,
-            [OP_SETFOGCOLOR] = true, [OP_SETBLENDCOLOR] = true,
-            [OP_SETPRIMCOLOR] = true, [OP_SETENVCOLOR] = true,
-            [OP_SETCOMBINE] = true, [OP_SETTIMG] = true, [OP_SETZIMG] = true,
-            [OP_SETCIMG] = true, [0x00] = true,  // G_NOOP
+        // Anything outside the recognized command set counts as unknown. A
+        // switch rather than a designated-initializer table: GCC rejects
+        // `[OP_X] = true` array initializers unless the designators are in
+        // declaration order ("non-trivial designated initializers not
+        // supported"), and the OP_* constants below are not in opcode order.
+        const auto known_op = [](uint8_t op) {
+            switch (op) {
+                case OP_VTX: case OP_MODIFYVTX: case OP_CULLDL:
+                case OP_BRANCH_Z: case OP_TRI1: case OP_TRI2:
+                case OP_QUAD: case OP_LINE3D: case OP_SPECIAL_1:
+                case OP_DMA_IO: case OP_TEXTURE: case OP_POPMTX:
+                case OP_GEOMETRYMODE: case OP_MTX: case OP_MOVEWORD:
+                case OP_MOVEMEM: case OP_LOAD_UCODE: case OP_DL:
+                case OP_ENDDL: case OP_SPNOOP: case OP_RDPHALF_1:
+                case OP_SETOTHERMODE_L: case OP_SETOTHERMODE_H:
+                case OP_TEXRECT: case OP_TEXRECTFLIP:
+                case OP_RDPLOADSYNC: case OP_RDPPIPESYNC:
+                case OP_RDPTILESYNC: case OP_RDPFULLSYNC:
+                case OP_SETKEYGB: case OP_SETKEYR: case OP_SETCONVERT:
+                case OP_SETSCISSOR: case OP_SETPRIMDEPTH:
+                case OP_RDPSETOTHERMODE: case OP_LOADTLUT:
+                case OP_RDPHALF_2: case OP_SETTILESIZE:
+                case OP_LOADBLOCK: case OP_LOADTILE: case OP_SETTILE:
+                case OP_FILLRECT: case OP_SETFILLCOLOR:
+                case OP_SETFOGCOLOR: case OP_SETBLENDCOLOR:
+                case OP_SETPRIMCOLOR: case OP_SETENVCOLOR:
+                case OP_SETCOMBINE: case OP_SETTIMG: case OP_SETZIMG:
+                case OP_SETCIMG: case 0x00:  // G_NOOP
+                    return true;
+                default:
+                    return false;
+            }
         };
-        if (!kKnown[c.op]) {
+        if (!known_op(c.op)) {
             ++s.unknown_cmds;
         }
 

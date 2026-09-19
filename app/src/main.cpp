@@ -25,6 +25,7 @@
 #include "librecomp/game.hpp"
 
 #include "game.hpp"
+#include "launcher.hpp"
 #include "sdl_platform.hpp"
 #include "renderer.hpp"
 #include "rsp.hpp"
@@ -35,6 +36,39 @@
 namespace ogre {
 Platform g_platform;
 }
+
+namespace {
+
+// A one-line explanation of a ROM rejection, for both the launcher screen and
+// the console.
+std::string rom_error_text(recomp::RomValidationError error, const std::string& path) {
+    switch (error) {
+        case recomp::RomValidationError::IncorrectVersion:
+            return "This is a different version of Ogre Battle 64. The port needs the "
+                   "USA Rev A dump (" +
+                   std::string(ogre::INTERNAL_NAME) + ").";
+        case recomp::RomValidationError::IncorrectRom:
+            return "That file is not Ogre Battle 64 (" + path + ").";
+        case recomp::RomValidationError::NotARom:
+            return "That file is not an N64 ROM (" + path + ").";
+        case recomp::RomValidationError::NotYet:
+            return "That version of the game is not supported yet (" + path + ").";
+        case recomp::RomValidationError::FailedToOpen:
+            return "Could not open " + path + ".";
+        default:
+            return "Could not load " + path + ".";
+    }
+}
+
+// A launch that names its ROM explicitly (the argument, OGRE_ROM, a ROM sitting
+// next to the executable, or the copy the runtime stored on a previous run)
+// boots straight away; `OGRE_LAUNCHER=1` asks for the start screen anyway.
+bool launcher_forced() {
+    const char* value = getenv("OGRE_LAUNCHER");
+    return value != nullptr && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+}  // namespace
 
 static void update_gfx(void*) {
     // OGRE_SCENE=<name|hex>: boot straight into a screen (see bank_overlays.cpp).
@@ -98,28 +132,15 @@ int main(int argc, char** argv) {
         ultramodern::debug_cover_start();
     }
 
-    fprintf(stderr, "[boot] create_window...\n");
-    auto window_handle = ogre::create_window(ogre::g_platform, "Ogre Battle 64: Person of Lordly Caliber");
-    if (ogre::g_platform.window == nullptr) {
-        return EXIT_FAILURE;
-    }
     fprintf(stderr, "[boot] window ok\n");
 
     // --- runtime config path ------------------------------------------------
-    // OGRE_PREF_DIR overrides SDL_GetPrefPath so a run can keep its saves/mods
-    // in a chosen directory (e.g. inside the repo, or a sandbox that cannot
-    // write to the platform preference dir). Default is unchanged.
-    std::filesystem::path pref_dir;
-    if (const char* pref_override = getenv("OGRE_PREF_DIR"); pref_override != nullptr && pref_override[0] != '\0') {
-        pref_dir = std::filesystem::path(pref_override);
-        std::filesystem::create_directories(pref_dir);
-        fprintf(stderr, "[boot] OGRE_PREF_DIR=%s\n", pref_dir.string().c_str());
-    }
-    else {
-        char* pref_path = SDL_GetPrefPath("", "ogrebattle64");
-        pref_dir = std::filesystem::path(pref_path);
-        SDL_free(pref_path);
-    }
+    // The config dir is where the runtime keeps the ROM it stored, the battery
+    // save and mods. A distributable build keeps all of it in the executable's
+    // own folder, so `saves/<game id>.bin` lands right beside the app;
+    // OGRE_PREF_DIR still overrides (the test harnesses use it), and a
+    // read-only install location falls back to the platform preference dir.
+    const std::filesystem::path pref_dir = ogre::resolve_pref_dir();
     recomp::register_config_path(pref_dir);
     fprintf(stderr, "[boot] config path ok: %s\n", pref_dir.string().c_str());
 
@@ -166,35 +187,95 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[boot] overlays registered\n");
 
     // --- ROM selection --------------------------------------------------------
+    // Order: an explicit argument, OGRE_ROM, a ROM sitting next to the
+    // executable, the copy the runtime stored on a previous run, the repo's
+    // assets/ (development), then the start screen.
     std::filesystem::path rom_path;
     if (argc > 1) {
         rom_path = argv[1];
-    } else if (std::filesystem::exists("assets/ogre64.z64")) {
-        rom_path = "assets/ogre64.z64";
+    }
+    else if (const char* env_rom = getenv("OGRE_ROM"); env_rom != nullptr && env_rom[0] != '\0') {
+        rom_path = env_rom;
+    }
+    else if (!launcher_forced()) {
+        rom_path = ogre::find_exe_rom(ogre::executable_directory());
     }
 
     std::u8string game_id = entry.game_id;
+    bool explicit_rom = !rom_path.empty();
+
+    if (!explicit_rom) {
+        const std::filesystem::path stored = pref_dir / entry.stored_filename();
+        std::error_code exists_ec;
+        if (std::filesystem::is_regular_file(stored, exists_ec)) {
+            // The runtime stored (and hash-checked) this ROM on an earlier run,
+            // so booting it directly is what makes the second launch skip the
+            // start screen. If it no longer validates, select_rom deletes it.
+            rom_path = stored;
+        }
+        else if (std::filesystem::exists("assets/ogre64.z64")) {
+            rom_path = "assets/ogre64.z64";
+        }
+    }
+
+    // Validates and stores a candidate ROM; empty string means success. The
+    // start screen calls this for every click/drop, so a wrong file is a
+    // message on the screen rather than a process exit.
+    auto accept_rom = [&game_id](const std::filesystem::path& candidate) -> std::string {
+        auto chosen = recomp::select_rom(candidate, game_id);
+        if (chosen == recomp::RomValidationError::Good) {
+            std::fprintf(stderr, "[boot] rom ok: %s\n", candidate.string().c_str());
+            return {};
+        }
+        return rom_error_text(chosen, candidate.string());
+    };
+
+    std::string launcher_error;
     if (!rom_path.empty()) {
         fprintf(stderr, "[boot] selecting rom %s\n", rom_path.string().c_str());
-        auto result = recomp::select_rom(rom_path, game_id);
-        switch (result) {
-            case recomp::RomValidationError::Good:
-                break;
-            case recomp::RomValidationError::IncorrectVersion:
-                fprintf(stderr, "ROM is a different version of Ogre Battle 64 than expected (need %s).\n",
-                        ogre::INTERNAL_NAME.data());
+        const auto result = recomp::select_rom(rom_path, game_id);
+        if (result != recomp::RomValidationError::Good) {
+            const std::string message = rom_error_text(result, rom_path.string());
+            if (explicit_rom) {
+                fprintf(stderr, "%s\n", message.c_str());
                 return EXIT_FAILURE;
-            case recomp::RomValidationError::IncorrectRom:
-                fprintf(stderr, "ROM hash mismatch - this ROM is not supported.\n");
-                return EXIT_FAILURE;
-            default:
-                fprintf(stderr, "Failed to open ROM at %s\n", rom_path.string().c_str());
-                return EXIT_FAILURE;
+            }
+            // The remembered ROM is unusable now: show the start screen with
+            // the reason instead of guessing.
+            fprintf(stderr, "[boot] stored rom unusable (%s); showing the launcher\n",
+                    message.c_str());
+            launcher_error = message;
+            rom_path.clear();
         }
-        fprintf(stderr, "[boot] rom ok\n");
-    } else {
-        fprintf(stderr, "No ROM path provided and no stored ROM found; relying on stored ROM.\n");
+        else {
+            fprintf(stderr, "[boot] rom ok\n");
+        }
     }
+
+    if (rom_path.empty()) {
+        // The start screen is the whole interface: it returns the path of a ROM
+        // it has already validated, or empty if the user closed the window.
+        ogre::LauncherContext context;
+        context.pref_dir = pref_dir;
+        context.initial_error = launcher_error;
+        context.accept_rom = accept_rom;
+        rom_path = ogre::run_launcher(context);
+        if (rom_path.empty()) {
+            fprintf(stderr, "[boot] no ROM selected; exiting\n");
+            return EXIT_SUCCESS;
+        }
+    }
+
+    // --- window for the game ---------------------------------------------------
+    // The start screen owned a window of its own; the game gets a fresh one so
+    // the window flags (Metal/Vulkan) and the renderer attach to a clean
+    // surface.
+    fprintf(stderr, "[boot] create_window...\n");
+    auto window_handle = ogre::create_window(ogre::g_platform, "Ogre Battle 64: Recomp");
+    if (ogre::g_platform.window == nullptr) {
+        return EXIT_FAILURE;
+    }
+    fprintf(stderr, "[boot] window ok\n");
 
     // --- OGRE_SAVE: start from a save file as the battery ----------------------
     // The runtime loads `<config>/saves/<game id>.bin` on the game's first SRAM

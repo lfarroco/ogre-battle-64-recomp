@@ -11,7 +11,59 @@ and links the renderer (RT64), then boots the game on your ROM.
   (splat, mips binutils, N64Recomp, RT64, N64ModernRuntime submodules).
 - Your own big-endian `.z64` dump at `assets/ogre64.z64`.
 
+## Regenerating the recompiled code (start here on a fresh clone)
+
+**A fresh clone cannot build the app.** The recompiled C is *generated*, not
+committed: `RecompiledFuncs/`, 34 `Bank*Funcs/`, `RspFuncs/` and
+`app/src/bank_funcs.inc` are all gitignored, because they are the recompiler's
+output from a ROM that cannot be redistributed. You need your own ROM and one
+command:
+
+```sh
+make regenerate
+```
+
+That runs the whole pipeline in the one order that works:
+
+| step | what it produces |
+|---|---|
+| `make resplit` | `asm/`, `assets/*.bin`, `ogrebattle64.ld`, `undefined_*_auto.txt` (splat) |
+| `make` | `build/ogrebattle64.elf` (assemble + link the MIPS ELF) |
+| `make bank-recomp` | `Bank*Funcs/`, `app/src/bank_funcs.inc` (the 34 streamed-bank units) |
+| `make recomp` | `RecompiledFuncs/` (N64Recomp + the cross-bank dispatch) |
+| `make rsp-recomp` | `RspFuncs/` (the njpeg and audio microcode) |
+
+Verified end to end from a clean checkout of the tracked tree: the app builds
+and boots, and `RecompiledFuncs/` comes out **byte-identical** to the tree the
+project has been testing.
+
+**The order near the end is load-bearing.** `make recomp`'s cross-bank dispatch
+(`tools/cross_bank.py dispatch --only …`) rewrites 15 call sites that N64Recomp
+otherwise binds to the wrong bank, but it can only see bank records that
+`bank_funcs.inc` already lists. Recompile before regenerating the banks and the
+dispatch is skipped: the build succeeds and quietly runs wrong-bank code — the
+failure class of sessions 41/45/55. `make recomp` now refuses to run in that
+state rather than let it through.
+
+Two things worth knowing:
+
+- **`make resplit` leaves tracked files modified.** The committed `asm/*.s` are
+  the post-`fix-labels` form, and a re-split writes the raw splat form;
+  `tools/fix_cross_overlay_labels.sh` (a prerequisite of the object rules) then
+  re-applies the patch on every build, so `git status` shows `asm/1CE040.s` and
+  `asm/40E80.s` as dirty with identical content. Do not commit or revert those
+  files unless you are deliberately changing the label patch.
+- **Regenerated bank units differ from an older tree in one cosmetic way**: the
+  `recomp_trace_return(rdram, N)` depth constants in 26 files under
+  `Bank{B..L}Funcs/`. They feed the shadow call-chain diagnostic only — a
+  diff with those lines filtered out is empty — so a regenerated tree is
+  functionally identical. Expect the difference if you diff generated output
+  against a tree someone has not regenerated since the recompiler's trace
+  numbering changed.
+
 ## Configure & build
+
+Once the code above exists:
 
 ```sh
 # one-time: initialize all third-party submodules
@@ -27,32 +79,14 @@ git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
 git -C tools/RT64 apply ../../rt64-ob64.patch
 git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-ob64.patch
 
-# regenerate the recompiled code if it has changed (uses the ELF + config.toml)
-make recomp
-
-# streamed-overlay bank units (Phase 4): a second recompilation for the overlay
-# records the game loads into RAM another overlay/bank also occupies. Required
-# before configuring the app — it writes Bank{A..M}Funcs/ and
-# app/src/bank_funcs.inc, and the app links all of them. Units are listed in
-# `BANK_UNITS` in the Makefile; add a unit there when a new bank record is
-# compiled (a range can hold several records, but two records that share RAM
-# must be in different units — see config-bankF.yaml).
-# bank-recomp also re-applies the two generated-code patches that must survive
-# regeneration: `cross_bank.py check-banks` (an invariant) and
-# `tools/njpeg_readback.py` (the njpeg stage-3 copy must read the buffer its own
-# YUV draw landed in — see docs/HANDOFF-2026-09-15-session48.md).
-make bank-recomp
-
-# optional: the full cross-bank audit (bank units fail, main-unit backlog is
-# reported; `make bank-recomp` already runs the bank-unit half and fails on it)
-make cross-bank-check
-
 # build the app
 cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
 cmake --build build-app -j
 ```
 
-The executable is written to `build-app/ogrebattle64`.
+The executable is written to `build-app/ogrebattle64`. If it fails with
+"the recompiled game code is missing", you skipped the regeneration section
+above; `tools/release-build.sh` prints the same list.
 
 ### Build variants
 
@@ -76,13 +110,113 @@ pthreads).
 ./build-app/ogrebattle64 [path-to-rom.z64]
 ```
 
-On first run the app:
-1. creates the config directory (per-platform user config dir, subfolder
-   `ogrebattle64`),
-2. validates and stores your ROM by XXH3 hash,
-3. boots the recompiled game via `recomp_entrypoint`.
+The app starts on its own **start screen** — a black window reading
+`OGRE BATTLE 64: RECOMP` / `CLICK TO LOAD YOUR ROM (OR DROP IT IN THIS WINDOW)`
+— when it has no ROM to boot. Click it to open a native file picker, or drop a
+ROM file onto the window. A ROM placed in the app's folder (or `<app>/roms/`) is
+found automatically, so "put the ROM next to the executable and launch" works
+with no click at all.
 
-If no ROM path is given, the app looks for the stored ROM in the config dir.
+The ROM is validated by XXH3 hash and the runtime stores a copy in the config
+directory, so **later launches skip the start screen and boot straight into the
+game**. `OGRE_LAUNCHER=1` forces the start screen even when a ROM is available;
+`OGRE_ROM=<path>` names one without an argument.
+
+**The config directory is the executable's own directory** (`SDL_GetBasePath`),
+not the per-user preference dir, so a distributed build is self-contained: the
+battery save lands at `saves/<game id>.bin` right beside the executable, and so
+do `mods/`. `OGRE_PREF_DIR=<dir>` still overrides it (the scripted harnesses
+use that), and a read-only install location falls back to the platform
+preference dir automatically. The boot log prints the resolved path.
+
+### Distribution — `make dist`
+
+```sh
+make dist        # -> dist/ogre-battle-64-recomp/  (one executable + README + SDL2 license)
+make dist-zip    # -> dist/ogre-battle-64-recomp-<platform>.zip
+```
+
+**The package is a single file: SDL2 is linked statically.** Everything else is
+a system framework or already static, so the executable has no non-system
+dynamic dependency at all:
+
+```sh
+otool -L dist/ogre-battle-64-recomp/ogrebattle64 | grep -v "System/Library\|/usr/lib"   # prints nothing
+```
+
+Static SDL2 needs the *real* SDL2 sources: Homebrew's `sdl2` formula on macOS is
+**`sdl2-compat`**, a shim that `dlopen`s `libSDL3.0.dylib` and ships no static
+library, so `make dist` first runs `make sdl2-static`, which fetches a pinned
+SDL2 (`2.32.10`; API/ABI-compatible with the 2.32.70 shim, so either header set
+works) into the gitignored `tools/SDL2-static/` and builds it with
+`-DSDL_SHARED=OFF -DSDL_STATIC=ON`. That happens once and is reused. `dist`
+builds the app in its own `build-dist/` directory against that prefix, and
+copies SDL2's zlib license into the package as `SDL2-LICENSE.txt`.
+
+The static link pulls in the frameworks SDL2 uses (Cocoa, IOKit, CoreAudio,
+AudioToolbox, AVFoundation, Carbon, CoreVideo, Foundation, plus weakly
+GameController/Metal/QuartzCore/CoreHaptics), which is why the package still
+runs anywhere those system frameworks exist — macOS only.
+
+`DIST_STATIC_SDL=0 make dist` skips all of that and bundles the shared SDL2
+instead (two files, seconds instead of a minute) — useful for a quick local
+package.
+
+`make dist` needs **no ROM and no recompiler run** — but it does need the
+recompiled code to already be present on the machine. `RecompiledFuncs/`,
+`Bank*Funcs/`, `RspFuncs/` and `app/src/bank_funcs.inc` are **gitignored and
+generated**, so a fresh clone has none of them and `make dist` fails with the
+"recompiled game code is missing" message from `tools/release-build.sh` until
+`make && make recomp && make bank-recomp` has been run once against a ROM on
+that machine. That is also why release builds run on a machine with the ROM
+rather than on a GitHub-hosted runner — see "Releases" below.
+
+On Windows the executable is dynamically linked against `SDL2.dll` (and the
+platform's system DLLs), so a single-file Windows build needs a static `SDL2`
+built for the `x86_64-w64-mingw32` or MSVC target; the Linux and macOS recipes
+already do the equivalent.
+
+A first launch of the package in an empty folder is the user-facing acceptance
+test: the black start screen appears, clicking/dropping a ROM boots the game,
+and `saves/ogrebattle64-us-rev1.bin` is written next to the executable.
+
+### Releases (GitHub Actions)
+
+`.github/workflows/release.yml` builds macOS, Linux and Windows packages on a
+version tag and attaches them to a **draft** GitHub release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`tools/release-build.sh` is the single entry point — the workflow just exports
+`DIST_OS` and runs it, so a release artifact is byte-for-byte what `make dist`
+produces locally:
+
+```sh
+tools/release-build.sh                  # this machine's platform
+DIST_OS=linux tools/release-build.sh    # what CI does per runner
+```
+
+**Why the workflow uses self-hosted runners.** A GitHub-hosted runner clones
+the repository, and the recompiled code that `make dist` links is *not in the
+repository* (`RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/`,
+`app/src/bank_funcs.inc` are generated from the ROM and gitignored). Those
+runners have no ROM, so they cannot produce it, and `tools/release-build.sh`
+fails fast with the list of what is missing rather than a wall of compile
+errors. The workflow therefore runs where the ROM and the generated code
+already are. If the generated code is ever committed, switch the matrix
+`runs-on` values to the hosted labels noted beside them in the workflow; the
+rest of the workflow is unchanged. That is a licensing decision, not a
+technical one.
+
+Each runner needs, per platform:
+
+| platform | toolchain | SDL2 |
+|---|---|---|
+| macOS | Xcode command line tools (incl. the Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`) | built by `make sdl2-static` |
+| Linux | `cmake`, `ninja`, `g++`, `pkg-config`, `libgtk-3-dev`, `libvulkan-dev`, `libx11-dev` | `libsdl2-dev` (or `make sdl2-static`) |
+| Windows | Visual Studio 2022 (C++ + CMake) or MSYS2 `mingw-w64-x86_64-*`, `make` | `SDL2-devel` (its `SDL2.dll` is bundled unless a static SDL2 is used) |
 
 ## Scripted runs and diagnostics
 
@@ -98,7 +232,10 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_TAP_BUTTON=<list>` | which pad buttons the synthetic taps press, cycled one per tap (`start`, `a`, `b`, `down`, …; `none` skips a tap). **The list shape matters, and so does the form (developer, session 64): a tap that lands while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the sequence from advancing.** The name-entry form (scene `0x07`) is where this bites. The recorded working shape is **a few `start,a` pairs then a long run of plain `a`** — e.g. `"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` (see the checkpoint and `OGRE_NJREAD_LOG` recipes below). An *endless* `start,a` alternation stalls there forever: a scripted run that shows no crash, no stub call, and a final scene of `0x07` is almost always this. If a schedule keeps stalling, drive the run by hand and take a checkpoint instead |
 | `OGRE_TAP_SCENE_BUTTON=<scene>:<button>[:<count>],…` | the **scene-keyed** sibling of `OGRE_TAP_BUTTON` (session 68). `OGRE_TAP_BUTTON`'s slot index advances with **wall time**, so a route across several scenes has to be hand-tuned to how long each takes — the same "title → Load Game → map" schedule landed on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s (the forced-scene poke races the publisher stills). This one keys the button on the dispatcher's active scene (`D_800E810E`; names from `kScenes` or hex) and presses it every `OGRE_TAP_MS` while that scene runs, at most `<count>` times (default unlimited). Entries in one scene are consumed in order, so `OGRE_TAP_MS=1500 OGRE_TAP_SCENE_BUTTON="title:start:5,0x12:a:3,0x05:right:3,0x05:a:1"` is "Start up to five times on the title (early presses are sometimes swallowed; the scene change stops it), A three times on the Load Game screen, then walk the map cursor right three times and press A". Requires `OGRE_TAP_MS`; it replaces the slot schedule entirely |
 | `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
-| `OGRE_PREF_DIR=<dir>` | use `<dir>` instead of `SDL_GetPrefPath` as the runtime config dir, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write `~/Library/Application Support`). Default is unchanged; the boot log prints the resolved path |
+| `OGRE_PREF_DIR=<dir>` | use `<dir>` as the runtime config dir instead of the executable's own folder, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write next to the app). The boot log prints the resolved path |
+| `OGRE_ROM=<path>` | boot this ROM without passing it as an argument (validated and stored like an argument; the start screen is skipped) |
+| `OGRE_LAUNCHER=1` | force the start screen even when a ROM is available (testing the first-launch experience) |
+| `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
 | `OGRE_SAVE=<name\|path>` | start the run from that save as the cartridge battery (session 78). A bare name is looked up as the path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`, so `OGRE_SAVE=prologue` finds `assets/saves/prologue.n64`. Accepts the port's 32 KiB image, an emulator wrapper of it (in either byte order, at any offset), a **DexDrive `.N64` Controller Pak dump** — converted through its notes' battery slots, checksums reseeded — or a bare pak. The result is written to `<config>/saves/<game id>.bin`, never back into the source |
 | `OGRE_SAVE_RESET=1` | re-import even when the battery in the config dir is newer than the source. Without it a run **keeps** that battery, so progress the game wrote back survives a re-run, and swapping a save file in re-imports it (its mtime is newer) |
 | `OGRE_SAVE_ALL=1` | with `OGRE_SAVE`, also take the stale records a deleted Controller Pak note leaves behind (still capped at the battery's two save slots) |
@@ -487,8 +624,10 @@ The runtime keeps the image at
 
 ```
 <config>/saves/<game id>.bin          # ogrebattle64-us-rev1.bin, exactly 32768 bytes
-# macOS default: ~/Library/Application Support/ogrebattle64/saves/
-# or set OGRE_PREF_DIR=<dir> to relocate it
+# <config> is the executable's own directory (so the save sits beside the app,
+# and a distributed package carries its saves with it), unless OGRE_PREF_DIR
+# relocates it or the install location is read-only — in which case the
+# per-user preference dir is used (macOS: ~/Library/Application Support/ogrebattle64/)
 ```
 
 and the game's own DMA path reaches it: `func_8008BC40` queues an `OSIoMesg` to
@@ -1000,6 +1139,10 @@ is a `SIGFPE`/`SIGBUS` inside the runtime, break on that function instead:
 `lldb -b -o "breakpoint set -n do_recv" -o run -o "bt 14" -- ./build-null/ogrebattle64`.)
 
 ## Config directory
+
+The executable's own directory by default (`SDL_GetBasePath`), so saves and
+mods live beside the app. `OGRE_PREF_DIR` overrides it; a read-only install
+location falls back to the per-user preference dir:
 
 - macOS: `~/Library/Application Support/ogrebattle64/`
 - Linux: `~/.config/ogrebattle64/`

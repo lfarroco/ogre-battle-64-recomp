@@ -6,6 +6,8 @@ build/
 build-app/
 build-null/
 build-wasm/
+build-dist/
+dist/
 RecompiledFuncs/
 # Streamed-overlay bank units (Phase 4): N64Recomp output for
 # config-bank<U>.toml, plus the table tools/gen_bank_funcs.py derives from it.
@@ -23,6 +25,9 @@ tools/venv/
 tools/N64Recomp/
 tools/N64ModernRuntime/
 tools/RecompFrontend/
+# `make sdl2-static`: the pinned real SDL2 fetched and built for a static link
+# (Homebrew's sdl2 on macOS is sdl2-compat, which has no static library).
+tools/SDL2-static/
 # RT64 is a git submodule (git submodule update --init tools/RT64)
 
 

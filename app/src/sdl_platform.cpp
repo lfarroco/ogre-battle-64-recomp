@@ -381,9 +381,22 @@ void configure_automation(Platform& platform) {
 ultramodern::renderer::WindowHandle create_window(Platform& platform, const char* title) {
     uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #if defined(__APPLE__)
+    // RT64 creates a CAMetalLayer on the window; the null-renderer build needs
+    // no such flag (SDL ignores it there, but keeping the two in step avoids
+    // surprising anyone who ports the flag set to another platform).
+#if defined(OGRE_USE_RT64)
     flags |= SDL_WINDOW_METAL;
+#endif
 #elif defined(__linux__) || defined(__ANDROID__)
+    // Only the RT64 build renders through Vulkan. Asking for SDL_WINDOW_VULKAN
+    // unconditionally makes window creation *fail* on a Linux/Windows machine
+    // with no Vulkan-capable driver or no Vulkan loader, which is exactly the
+    // machine the null-renderer variant exists for (found by running the
+    // headless Linux build: "Failed to create window: Vulkan support is either
+    // not configured in SDL or not available in current SDL video driver").
+#if defined(OGRE_USE_RT64)
     flags |= SDL_WINDOW_VULKAN;
+#endif
 #endif
     SDL_Window* window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
     if (window == nullptr) {
@@ -964,8 +977,9 @@ bool executable_fingerprint(uint64_t& out, std::string& error) {
     }
     uint64_t hash = kFnv1aOffsetBasis;
     uint8_t buf[65536];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+    // Declared inside the loop so it cannot collide with the `n` the non-Apple
+    // branch above uses for readlink's return value (which is const there).
+    while (size_t n = fread(buf, 1, sizeof(buf), f)) {
         hash = fnv1a_bytes(hash, buf, n);
     }
     fclose(f);

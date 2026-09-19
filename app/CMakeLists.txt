@@ -64,6 +64,38 @@ foreach(OGRE_FP_TARGET librecomp ultramodern)
     endif()
 endforeach()
 
+# librecomp's RSP vector unit (librecomp/rsp_vu.hpp, which the recompiled RSP
+# microcode in RspFuncs/ includes) enables its SIMD path with
+# `#if defined(__x86_64__) || defined(_M_X64)` and then uses SSSE3/SSE4.1
+# intrinsics (`_mm_shuffle_epi8`, `_mm_blendv_epi8`) with no runtime guard, but
+# no target asks the compiler for those instructions. The x86-64 baseline is
+# SSE2 only, so a non-Apple build fails to compile outright:
+#
+#   error: inlining failed in call to 'always_inline' '_mm_shuffle_epi8':
+#          target specific option mismatch
+#
+# Apple clang defaults to a newer -march that happens to include them, which is
+# why this only bites on Linux and Windows. The header gates the path on
+# ARCHITECTURE_SUPPORTS_SSE4_1, so SSE4.1 (a superset of SSSE3) is the right
+# level; every x86-64 CPU this port targets has had it since ~2008.
+# aarch64 needs nothing: rsp_vu.hpp reaches the same code through sse2neon.
+# Both users of the header — the RSP recompilation and librecomp itself — get
+# the flag where those targets are defined below.
+set(OGRE_X86_SIMD_FLAGS "")
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(OGRE_X86_SIMD_FLAGS -msse4.1)
+    if (TARGET librecomp)
+        target_compile_options(librecomp PRIVATE ${OGRE_X86_SIMD_FLAGS})
+    endif()
+endif()
+set(OGRE_X86_SIMD_FLAGS "")
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(OGRE_X86_SIMD_FLAGS -msse4.1)
+    if (TARGET librecomp)
+        target_compile_options(librecomp PRIVATE ${OGRE_X86_SIMD_FLAGS})
+    endif()
+endif()
+
 # --- Renderer ----------------------------------------------------------------
 if (OGRE_USE_RT64)
     # Static build, expecting an SDL window outside of Windows (same options as
@@ -142,6 +174,7 @@ if(RSP_RECOMP_SOURCES)
         -Wno-unused-function
         -Wno-unused-but-set-variable
         -Wno-implicit-function-declaration
+        ${OGRE_X86_SIMD_FLAGS}
     )
 endif()
 
@@ -203,6 +236,8 @@ else()
         src/bank_overlays.cpp
         src/gbi.cpp
         src/save_import.cpp
+        src/font.cpp
+        src/launcher.cpp
     )
 endif()
 
@@ -252,6 +287,21 @@ endif()
 
 if (OGRE_USE_RT64)
     target_link_libraries(ogrebattle64 PRIVATE rt64)
+    # The start screen's "click to load your ROM" uses nativefiledialog-extended,
+    # which RT64 already vendors and compiles on every desktop platform (Cocoa
+    # on macOS, Win32 on Windows, GTK/portal on Linux). The null-renderer
+    # variant deliberately does not link it: it keeps the ROM drag-and-drop path
+    # and OGRE_ROM, and reports the missing browser on screen.
+    target_compile_definitions(ogrebattle64 PRIVATE OGRE_HAVE_NFD=1)
+    target_link_libraries(ogrebattle64 PRIVATE nfd)
+endif()
+
+# Tells the platform code whether a real renderer will attach to the window, so
+# it only asks SDL for the backend's window flag (Metal/Vulkan) when something
+# will use it. The null build must still work on a machine with no GPU driver —
+# see the window-creation comment in src/sdl_platform.cpp.
+if (OGRE_USE_RT64)
+    target_compile_definitions(ogrebattle64 PRIVATE OGRE_USE_RT64=1)
 endif()
 
 if (NOT EMSCRIPTEN)
