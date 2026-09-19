@@ -1627,7 +1627,7 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..402363d 100644
+index 46aea61..ef376af 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
 @@ -23,7 +23,17 @@
@@ -1648,7 +1648,7 @@ index 46aea61..402363d 100644
      moodycamel::LightweightSemaphore initialized;
  };
  
-@@ -77,6 +87,88 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
+@@ -77,6 +87,96 @@ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool re
  void wait_for_external_message(RDRAM_ARG1);
  void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
  
@@ -1684,6 +1684,14 @@ index 46aea61..402363d 100644
 +// real work instead of guessed from snapshots.
 +void debug_profile_start(void);
 +void debug_profile_dump(void);
++// Debug: OGRE_COVER=1 recompiled-function *coverage* census. Start() turns on
++// the per-function entry counters without the sampling thread; Dump() prints
++// every distinct function address the run entered, one per line, for
++// tools/recompcov.py to compare against the port's registered entries. The
++// question it answers is "how much of the recompiled game has this run
++// executed?", which no offline tool can know.
++void debug_cover_start(void);
++void debug_cover_dump(void);
 +// Debug: recompiled-function entry count for a thread (needs the trace hooks).
 +uint64_t debug_entry_count(int tid);
 +// Debug: recompiled-function entries across all threads.
@@ -1737,7 +1745,7 @@ index 46aea61..402363d 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -121,6 +213,10 @@ void init_audio();
+@@ -121,6 +221,10 @@ void init_audio();
  void set_audio_frequency(uint32_t freq);
  void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
  uint32_t get_remaining_audio_bytes();
@@ -1748,7 +1756,7 @@ index 46aea61..402363d 100644
  
  struct audio_callbacks_t {
      using queue_samples_t = void(int16_t*, size_t);
-@@ -170,11 +266,33 @@ void set_callbacks(
+@@ -170,11 +274,33 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -2108,10 +2116,10 @@ index 2f1cfb5..1b6b971 100644
  
 diff --git a/ultramodern/src/function_trace.cpp b/ultramodern/src/function_trace.cpp
 new file mode 100644
-index 0000000..eb2e711
+index 0000000..786872e
 --- /dev/null
 +++ b/ultramodern/src/function_trace.cpp
-@@ -0,0 +1,816 @@
+@@ -0,0 +1,925 @@
 +#include <array>
 +#include <atomic>
 +#include <chrono>
@@ -2193,8 +2201,46 @@ index 0000000..eb2e711
 +// shadow call chain plus the last-function slot each time. That is far too
 +// expensive to leave on for a normal run: it is a diagnostic, so it is enabled
 +// only when a diagnostic that consumes it is requested
-+// (OGRE_PROFILE / OGRE_SCHED_TRACE / OGRE_DEBUG_TRACES / OGRE_TRACE_HOOKS).
++// (OGRE_PROFILE / OGRE_COVER / OGRE_SCHED_TRACE / OGRE_DEBUG_TRACES /
++// OGRE_TRACE_HOOKS).
++// OGRE_COVER's value says where the census goes: unset / "" / "0" = off,
++// "1" = stdout (pipe or `tee` it), anything else = that file path. A coverage
++// session is played by hand and its output is thousands of lines at the end of a
++// very chatty run, so writing the census to its own file is the form that does
++// not depend on remembering to redirect; `OGRE_COVER=1` stays for scripted runs.
++static const char* cover_output(void) {
++    static const char* const value = [] () -> const char* {
++        const char* v = getenv("OGRE_COVER");
++        if (v == nullptr || v[0] == '\0' || (v[0] == '0' && v[1] == '\0')) {
++            return nullptr;
++        }
++        if (v[0] == '1' && v[1] == '\0') {
++            return "";
++        }
++        return v;
++    }();
++    return value;
++}
++
 +static bool trace_hooks_enabled() {
++    static const bool enabled = [] {
++        return getenv("OGRE_TRACE_HOOKS") != nullptr ||
++               getenv("OGRE_PROFILE") != nullptr ||
++               cover_output() != nullptr ||
++               getenv("OGRE_SCHED_TRACE") != nullptr ||
++               getenv("OGRE_DEBUG_TRACES") != nullptr;
++    }();
++    return enabled;
++}
++
++// The *expensive* half of the hooks: the per-thread last-function slot, the
++// per-thread entry counter and the shadow call chain, all of which write
++// several words and an atomic per entry/return. `OGRE_COVER` needs none of
++// them -- it only counts distinct functions -- so a coverage run skips this and
++// is the difference between a playthrough being measurable and not. Every other
++// consumer (the profiler, the scheduler trace, `debug_dump_call_chain`) needs
++// it, so this is the original set minus OGRE_COVER.
++static bool heavy_traces_enabled() {
 +    static const bool enabled = [] {
 +        return getenv("OGRE_TRACE_HOOKS") != nullptr ||
 +               getenv("OGRE_PROFILE") != nullptr ||
@@ -2320,6 +2366,15 @@ index 0000000..eb2e711
 +    if (!trace_hooks_enabled()) {
 +        return;
 +    }
++    // Coverage needs the counter and nothing else: feeding it here, before the
++    // thread lookup and the chain, keeps an OGRE_COVER playthrough near normal
++    // speed (the hash insert is the only cost per entry).
++    if (profile_on.load(std::memory_order_relaxed)) {
++        bump_func_count(func_vram);
++    }
++    if (!heavy_traces_enabled()) {
++        return;
++    }
 +    PTR(OSThread) self = ultramodern::this_thread();
 +    if (self == 0) {
 +        return;
@@ -2330,9 +2385,6 @@ index 0000000..eb2e711
 +    }
 +    last_func_vram[tid].store(func_vram, std::memory_order_relaxed);
 +    entry_counts[tid].n.fetch_add(1, std::memory_order_relaxed);
-+    if (profile_on.load(std::memory_order_relaxed)) {
-+        bump_func_count(func_vram);
-+    }
 +
 +    ThreadCallChain& chain = call_chains[tid];
 +    uint32_t depth = chain.depth;
@@ -2362,7 +2414,8 @@ index 0000000..eb2e711
 +// it is cheap to do so.
 +extern "C" void recomp_trace_return(uint8_t *rdram, size_t func_index) {
 +    (void)func_index;
-+    if (!trace_hooks_enabled()) {
++    // A coverage run has no call chain to close (see recomp_trace_entry).
++    if (!heavy_traces_enabled()) {
 +        return;
 +    }
 +    PTR(OSThread) self = ultramodern::this_thread();
@@ -2926,6 +2979,70 @@ index 0000000..eb2e711
 +        printf("[profile] %6.2f%%  t%-3u 0x%08X  %llu samples\n",
 +               100.0 * (double)e.count / (double)(total ? total : 1),
 +               e.tid, e.func, (unsigned long long)e.count);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// OGRE_COVER=1 recompiled-function coverage census.
++//
++// `func_count_key[]` is allocated on the first entry of each function and never
++// cleared, so at exit its occupied slots ARE the set of recompiled functions the
++// run executed -- a coverage census, as opposed to the profiler's per-second
++// top-8. `debug_profile_start()` also feeds this table, but it starts the
++// sampling thread too; `debug_cover_start()` only turns the counters on, so a
++// coverage run pays for the entry hooks and nothing else.
++//
++// The dump is a flat list (one address per line, plus the entry count) rather
++// than a summary because the comparison that matters is against the port's
++// registered entry set, which lives in the build artifacts
++// (app/src/bank_funcs.inc + RecompiledFuncs/recomp_overlays.inl);
++// tools/recompcov.py does that join and reports the per-unit breakdown.
++// ---------------------------------------------------------------------------
++
++void ultramodern::debug_cover_start(void) {
++    if (cover_output() == nullptr) {
++        return;
++    }
++    profile_on.store(true, std::memory_order_relaxed);
++}
++
++void ultramodern::debug_cover_dump(void) {
++    const char* path = cover_output();
++    if (path == nullptr) {
++        return;
++    }
++    // The first dump of the process truncates, later ones append, so a mid-run
++    // `cover` snapshot and the exit dump both survive in the same file.
++    static bool first = true;
++    FILE* out = stdout;
++    if (path[0] != '\0') {
++        out = fopen(path, first ? "w" : "a");
++        if (out == nullptr) {
++            fprintf(stderr, "[cover] cannot open %s\n", path);
++            return;
++        }
++    }
++    first = false;
++    size_t used = 0;
++    for (size_t i = 0; i < kFuncCountSlots; i++) {
++        if (func_count_key[i] != 0) {
++            used++;
++        }
++    }
++    fprintf(out, "[cover] %zu distinct recompiled function(s) entered (%zu/%zu table "
++            "slots)\n", used, used, kFuncCountSlots);
++    for (size_t i = 0; i < kFuncCountSlots; i++) {
++        if (func_count_key[i] != 0) {
++            fprintf(out, "[cover] 0x%08X %llu\n", func_count_key[i],
++                    (unsigned long long)func_count_val[i]);
++        }
++    }
++    if (out == stdout) {
++        fflush(stdout);
++    } else {
++        fclose(out);
++        printf("[cover] wrote %zu function address(es) to %s\n", used, path);
++        fflush(stdout);
 +    }
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp

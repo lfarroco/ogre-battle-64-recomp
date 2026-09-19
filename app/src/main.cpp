@@ -42,6 +42,13 @@ static void update_gfx(void*) {
     bool quit = false;
     ogre::pump_sdl_events(ogre::g_platform, &quit);
     if (quit) {
+        // Closing the window is how an *interactive* run ends, so the dumps a
+        // bounded run prints on its exit path have to print here too --
+        // otherwise a session played by hand (`OGRE_COVER=1` for a coverage
+        // census, `OGRE_PROFILE=1` for the hot list) produces nothing at all.
+        // Both are no-ops unless their env var is set.
+        ultramodern::debug_profile_dump();
+        ultramodern::debug_cover_dump();
         ultramodern::quit();
     }
 }
@@ -60,6 +67,14 @@ int main(int argc, char** argv) {
     // a "busy but not rendering" stall can be attributed to real work.
     if (getenv("OGRE_PROFILE") != nullptr) {
         ultramodern::debug_profile_start();
+    }
+
+    // OGRE_COVER=1: census which recompiled functions a run enters (the entry
+    // counters only, no sampling thread). tools/recompcov.py joins the dump with
+    // the port's registered entries, so "how much of the game did this run
+    // execute?" is a number.
+    if (getenv("OGRE_COVER") != nullptr) {
+        ultramodern::debug_cover_start();
     }
 
     fprintf(stderr, "[boot] create_window...\n");

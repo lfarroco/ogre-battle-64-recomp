@@ -40,6 +40,75 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- 🫒 **The attract story's olive background is diagnosed to a single bit (session
+  84).** Scene `0x0B`'s background fill is the game's own
+  `G_SETFILLCOLOR 0x4AC14AC1` (`FillRect rect=(0,0)-(1276,956)`) — RGBA16
+  `(74,90,0)`. It is an immediate (`addiu a0,zero,0x4AC1`) at ROM `0x0EEBE0` =
+  guest `0x801A1E80` in record 3, taken only when `*(0x80197C88)` has **neither**
+  bit `0x2000` nor `0x1000` set; with either set the same code draws
+  `0x4F00C308` = RGBA16 `(0,24,24)`, the near-black retail shows. The port reads
+  record 2's *code* bytes there (`0x10400009`, both bits clear) because that
+  address is inside record 2's code span, and the rect table it then reads at
+  `0x800E7A36` (`0x0600,0x0140,0x0000,0x000D`) is equally wrong — it clamps into
+  exactly those bands. A reverted probe **and** a hardware watchpoint proved
+  nothing in the port writes either address (only the loader does), and the
+  developer's retail screenshot of the same frame confirms the bands are the
+  game's own 4:3 letterbox and that retail paints them **black**: the port paints
+  exactly `(74,90,0)` (the `0x4AC1` arm), retail `(0,24,8)` (the `0x4F00C308`
+  arm) — measured vs derived, see the handoff's colour table. Remaining work:
+  read `*(0x80197C88)` from a *readable* reference state (`Mupen64Plus-Next`,
+  not `ParaLLEl N64`, whose RZIP RDRAM base did not resolve) to say which address
+  feeds the branch wrongly.
+  See `docs/HANDOFF-2026-09-18-session84.md`.
+
+- 🧰 **A stub-finder tool answers the whack-a-mole without a run (session 83).**
+  `tools/stubmap.py` reads the runtime's own registration tables
+  (`app/src/bank_funcs.inc` for the bank records,
+  `RecompiledFuncs/recomp_overlays.inl` for the base sections — the only place a
+  *reimplemented* function like `osSetIntMask_recomp` has an entry, since it has
+  no generated body) and every `jal` in the generated C, then ranks each
+  dispatched address by whether `get_function` can resolve it: **DEFINITE** (no
+  module registers it at all — no run state can resolve it, the session-82
+  shape; or the caller's own bank lacks it), **MISSING FUNCTION** (a bank that
+  can be resident has a real prologue there but no entry — a split the
+  disassembler could not find), **BANK SELECTION** (the missing bank's bytes are
+  a body interior; scene data picks the bank), **INERT** (the scene-descriptor
+  masks say the two records are never loaded together), plus `UNRESOLVABLE` and
+  the RSP-IMEM window. Current build: **985 static targets, 0 definite, 0
+  unresolvable, 129 missing-function, 152 bank-selection, 369 inert, 332
+  resolvable** — every static `jal` target is registered by *some* compiled
+  module. `stubmap.py log <run.log>` is the arbiter for a real hit: it matches
+  the live words the runtime prints at the stub address against each candidate's
+  ROM image to name the module that was *actually resident*, then says whether
+  the bug is a load that missed `on_streamed_dma` or a wrong-layout dispatch;
+  `pointers` lists data words (jalr / callback tables) that point at risky
+  targets. Replayed against the pre-session-82 tree it marks `0x801D1508` and
+  `0x801D0AAC` DEFINITE; on `ogre-s73-r5.log` it identifies the settings-menu
+  stub as record 16 (unit AG) and on `ogre-live4.log` the shop-screen stub as
+  record 9ab (unit AB). `make stubmap` / `make stub-check`. See
+  `docs/guides/app-build.md` → "Diagnostics toolkit".
+- 📐 **And "what is the recomp %?" is now four measured numbers (session 83).**
+  `tools/recompcov.py` / `make recompcov`: **99.05%** of the ROM's code span
+  (`0x2B11D0` of `0x001000..0x2B8B70`) is compiled, the one `0x6990`-byte gap
+  (`0x0DDF80..0x0E4910`) being data with no loader in it; **28/28** loader-pattern
+  arenas have a unit (44 bank records, 34 units, 10 base sections, 5037 function
+  entries / 4963 addresses); **985** static dispatch targets with **0
+  unresolvable** (288 `jalr` sites stay unmeasurable statically); and, per run,
+  **execution coverage** — of the registered functions, how many a route actually
+  entered. That last one needed a new knob: the runtime already counted every
+  function entry for `OGRE_PROFILE` but only printed the per-second top 8, so
+  `OGRE_COVER=1` now dumps the whole set at exit (and from the live console's
+  `cover`), with the shadow call chain skipped so the run stays near normal
+  speed. First measurements: a bare 20 s boot enters 408 functions; the scripted
+  mission route (Load Game → map → mission, 180 s at `OGRE_SPEED=8`) enters 1601,
+  i.e. **1593/4963 = 32.1%**; and **one mission played by hand enters 2213, i.e.
+  2205/4963 = 44.4%** with **exactly two modules never entered at all** (unit T's
+  `bankRec18b`, 54 functions, and unit U's `bankRec18c`, 7 — record 18's
+  tutorial-practice banks). A module at 0% is the definitive "untested" signal;
+  a module that *shares RAM with a sibling bank* has an upper-bounded count,
+  because siblings register the same addresses, so the tool marks those `[s]`.
+  See
+  `docs/guides/app-build.md` → "Diagnostics toolkit".
 - ✅ **Neutral encounters now spawn their monster (session 82).** The wild unit is
   created by the battle/setup fragment scene `0x0E`'s enter streams
   (**ROM `0x23A370`, `0xE80` → RAM `0x801D0860`**), which the port had no record

@@ -108,6 +108,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_DL_DECODE=<n>\|all` | dump the decoded command stream of display list `<n>` (or all): `SETTIMG`/`SETTILE`/`SETTILESIZE`/`LOAD*`/`TEXRECT` with its `RDPHALF` halves/`FILLRECT`/`SETSCISSOR`/combiner/othermode. The ground truth for "which RDP command draws this" |
 | `OGRE_DUMP_RDRAM=<path>` | with `OGRE_EXIT_AFTER_MS`, write the whole 8 MiB RDRAM image for offline analysis |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
+| `OGRE_COVER=1\|<path>` | recompiled-function **coverage census** (session 83): at exit, when the window is closed, or on the live console's `cover`, print every distinct recompiled function the run entered, one `[cover] 0xADDR count` line per function, for `tools/recompcov.py --log`. **Give it a path** (`OGRE_COVER=/tmp/cover.txt`) for a session played by hand — the census then lands in its own file instead of the end of a very chatty stdout, and the app prints one line saying so. `=1` keeps it on stdout for scripted runs. Unlike `OGRE_PROFILE=1` it starts no sampling thread and skips the shadow call chain, so the entry hooks cost one hash insert per call and a playthrough stays near normal speed |
 | `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |
 | `OGRE_SYNTH_AT_MS=<n>` / `OGRE_SYNTH_PERIOD=<n>` | when the probe first submits, and how many VIs between re-submits (default 30; 0 = every VI). Keep `AT_MS` above ~600 ms: before that the game's ucode is not in RDRAM yet and RT64 cannot identify the GBI |
 | `OGRE_NO_DUMMY_VI=1` | skip the pre-start dummy VI workload (it clears the screen black every VI and would hide a diagnostic draw) |
@@ -352,6 +353,7 @@ Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
 | `k <addr> [len]` | fnv1a checksum of a range — the cheap before/after for A/B runs |
 | `w <addr> <value>` | store a word (A/B experiments; it is a real write) |
 | `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
+| `cover` | the recompiled functions entered so far (needs `OGRE_COVER=1`), one per line — a mid-run coverage snapshot without ending the run; `tools/recompcov.py --log` reads the same lines |
 | `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
 | `save [path]` | write a **checkpoint** (whole RDRAM + the runtime's overlay state). A bare `save` writes `/tmp/ogre-checkpoint-NNNN.ckpt` and remembers it |
 | `load [path]` | **restore** a checkpoint this build wrote — the machine rewinds to the instant of the save and the game re-runs from there. A bare `load` uses the most recent bare `save` |
@@ -786,6 +788,137 @@ gaps and any `jal 0x8009DA50` inside them.
 Current answer: **27 bank loads across 5 arena RAM windows, 26 compiled**, the one
 gap being a `0xE80` scene-`0x14` setup fragment whose RAM another unit's record
 already owns (see `docs/scenes.md`).
+
+### `tools/stubmap.py` — which dispatches can find nothing, and who points at them
+
+```sh
+tools/stubmap.py report                 # every statically dispatched target, ranked
+tools/stubmap.py report --verbose       # also list inert gaps and resolved targets
+tools/stubmap.py report --json          # machine-readable, for triage scripts
+tools/stubmap.py report --strict        # exit 1 on a definite/unresolvable/likely gap
+tools/stubmap.py target 0x80219594      # one address: owners, bodies, callers, scenes
+tools/stubmap.py log /tmp/run.log       # attribute a run's stub hits
+tools/stubmap.py pointers               # data words pointing at risky targets (jalr)
+```
+
+`arenamap.py` answers *"is this bank compiled?"*; this answers the next question,
+*"does the function map have the address a call dispatches to?"* — the half of the
+whack-a-mole that a run only shows you one hit at a time as
+`[overlays] streamed function stub called @ 0xADDR (not yet loaded)`.
+
+It reads the runtime's own registration tables, not the generated C: the bank
+side from `app/src/bank_funcs.inc` (what `on_streamed_dma` registers), the base
+side from `RecompiledFuncs/recomp_overlays.inl`'s section table (what
+`load_overlays(0x1000, entrypoint, 0x3E1B0)` installs — the only place a
+*reimplemented* function such as `osSetIntMask_recomp` appears, because it has no
+generated body). Call sites come from the generated C's `jal` comments, so each
+finding names the caller, its unit and the file:line.
+
+The buckets are ordered by how much is actually known, and the tool refuses to
+claim more:
+
+* **DEFINITE** — either **no module registers the address at all**, or the bank
+  the caller executes from has no entry at the target while the target is inside
+  that bank's own DMA'd code. The first is the strongest form: `func_map` is
+  only ever filled from the registration tables, so if nothing in the model
+  lists the address, *no run state* can resolve the lookup — this is the
+  session-82 shape (a bank the port has no record for is resident, and the call
+  lands where a compiled module's layout has no function). Replayed against the
+  pre-session-82 tree, the tool marks both of that bug's call targets
+  (`0x801D1508`, `0x801D0AAC`) DEFINITE.
+* **MISSING FUNCTION** — a bank that can be resident lacks the entry, but its own
+  ROM bytes there open like a function prologue. That is either a function the
+  split missed (an indirect-only entry, which a disassembler cannot find) or a
+  bank the port has no record for. **The shortest list to act on.**
+* **UNRESOLVABLE** — no compiled module's *code* covers the address at all.
+* **BANK SELECTION** — the missing bank's bytes there are a body interior: the
+  caller disposed of another bank's address. Which bank of an arena the game
+  streams is scene data, so a run confirms these.
+* **INERT** — the missing bank's segment-table record is never loaded by a scene
+  that also loads the caller's record, so it cannot be resident when the call
+  runs (the scene-descriptor record-mask model from `cross_bank.py check`).
+* **RSP IMEM** — `0x84000000..`: recompiled microcode text the CPU never runs;
+  `get_function` accepts the window, so it would log as a stub.
+
+Current answer (session 83): **985 static dispatch targets, 0 definite, 0
+unresolvable, 129 missing-function candidates, 152 bank-selection candidates, 369
+inert, 332 resolvable** — i.e. every static `jal` target is registered by *some*
+compiled module, so the remaining whack-a-mole is `jalr` (288 indirect sites,
+which no static pass can name), a bank the port has no record for, or a load that
+missed `on_streamed_dma`. `log` mode covers all three.
+
+**`log` mode is the arbiter for a real hit.** The runtime already prints the live
+first words at a stub address (`[overlays] @0xADDR: …`); the tool matches them
+against every candidate module's ROM image, so it names the module that was
+*actually resident*, and then — using the run's own `loading overlay record`
+lines — says which of the two bugs it is:
+
+* the resident module **does** register the address → the bank was up but its load
+  never matched `kBankRecords` (`UNKNOWN module`), or it was registered and then
+  evicted by a later overlapping load (the tool says which, from the log);
+* it **does not** → the caller dispatched an address that does not exist in that
+  bank's layout, and the tool names the body it landed in.
+
+Worked example (the session-73 settings-menu stub, `ogre-s73-r5.log`):
+
+```
+0x80226B7C  1 hit(s)  status: partial
+    live words: 27BDFFE824020029AFBF0014AFB00010
+    RESIDENT: bankRec16b (unit AG, record 16) rom=0x279FF0 ram=0x802258B0 -- bytes
+      match its ROM image, it registers this address
+      the run has NO `loading overlay record` line for it: the DMA never matched
+      kBankRecords, so its load bypassed on_streamed_dma
+    dispatched from func_80178130(0x80178130)  RecompiledFuncs/funcs_11.c:8321
+```
+
+The log's own `UNCOMPILED streamed record 16` line says the port had no record
+for it that day; unit AG is that record, and the byte match proves it was the
+resident module. **A stub whose bytes match nothing compiled is a bank the port
+still has no record for** — the tool then searches the ROM for those bytes and
+names the record they belong to, which is the unit to add. The same day's
+`enc2.log` (session 82's pre-fix neutral encounter) reads the mirror image: 18
+records registered, none of them `bankRec10s`'s `0x23A370 → 0x801D0860`, and the
+stub at `0x801D1508` matches that record's own bytes.
+
+### `tools/recompcov.py` — how complete is the recompilation? (session 83)
+
+```sh
+tools/recompcov.py                       # the offline measurement (~20 s)
+tools/recompcov.py --no-scan             # fast: modules + dispatch only
+tools/recompcov.py --log /tmp/run.log    # + what a run executed (OGRE_COVER=1)
+tools/recompcov.py --json
+```
+
+There is no single "recomp %", because the question has four answers with
+different certainty. This tool reports all four and says which is which:
+
+| measure | value today | how |
+|---|---|---|
+| **code bytes** | **99.05%** — `0x2B11D0` of the code span `0x001000..0x2B8B70` | the ELFs' `CODE` `CONTENTS` sections vs the ROM; the one `0x6990`-byte gap (`0x0DDF80..0x0E4910`) classifies as data |
+| **modules** | **28/28** loader-pattern arenas have a unit; 44 bank records across 34 units + 10 base sections | `tools/arenamap.py`'s scan + `app/src/bank_funcs.inc` |
+| **dispatch** | **985 static targets, 0 unresolvable**; 288 `jalr` sites unmeasurable statically | `tools/stubmap.py`'s model |
+| **execution** | per run, from `OGRE_COVER=1` | the runtime prints every recompiled function it entered; the tool joins that with the registered set |
+
+`OGRE_COVER=1` is the one piece that needs the game. The runtime already kept a
+per-function entry counter for `OGRE_PROFILE`'s hot list, but only ever printed
+the per-second top 8; the counters' *keys* are never cleared, so their occupied
+slots are exactly the set of functions the run entered. `OGRE_COVER=<path>` dumps
+that set at exit — or when the window is closed, or on demand from the live
+console's `cover` — without starting the sampling thread.
+
+**The measurement is a session played by hand**, not a scripted run:
+
+```sh
+OGRE_COVER=/tmp/cover.txt ./build-app/ogrebattle64 assets/ogre64.z64
+# … play as long as you like, then close the window …
+tools/recompcov.py --log /tmp/cover.txt
+```
+
+Scripting it is a trap this session hit twice: taps drive the game to one screen
+and then stop, so the window sits idle, and `OGRE_EXIT_AFTER_MS` then kills a
+human's play mid-session. What it answers is *which parts of the port this route
+executed* — and the modules at 0% are the untested surface, which no offline
+measure can see.
 
 ### Adding a streamed bank unit (the session-67 recipe)
 

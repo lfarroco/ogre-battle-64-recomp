@@ -152,6 +152,23 @@ cross-bank-dispatch:
 cross-bank-check:
 	python3 tools/cross_bank.py check
 
+# `make stubmap`: which dispatched addresses the runtime's function map cannot
+# resolve, and what points at them (see tools/stubmap.py). Offline, reads the
+# generated C + the registration tables; `make stub-check` is the strict form
+# for CI ("no dispatch is provably unresolved").
+stubmap:
+	python3 tools/stubmap.py report
+
+stub-check:
+	python3 tools/stubmap.py report --strict
+.PHONY: stubmap stub-check
+
+# `make recompcov`: how complete is the recompilation — code bytes, modules and
+# dispatch offline; add `--log` for what a run executed (OGRE_COVER=1).
+recompcov:
+	python3 tools/recompcov.py
+.PHONY: recompcov
+
 # ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C
@@ -273,4 +290,4 @@ rsp-recomp:
 	$(RSPRECOMP) rsp-njpeg.toml
 	$(RSPRECOMP) rsp-audio.toml
 
-.PHONY: all clean recomp cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp
+.PHONY: all clean recomp cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check

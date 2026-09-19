@@ -535,6 +535,9 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         }
         // OGRE_PROFILE=1: the sampling profiler's (thread, function) histogram.
         ultramodern::debug_profile_dump();
+        // OGRE_COVER=1: every recompiled function this run entered, one per
+        // line, for `tools/recompcov.py --log` (see that tool).
+        ultramodern::debug_cover_dump();
         // OGRE_DUMP_RDRAM=<path>: write the whole RDRAM image so the state at
         // the stall can be analysed offline (and diffed against a run on the
         // other platform) instead of guessed from a handful of snapshot words.
@@ -1113,6 +1116,7 @@ void console_exec(const std::string& line_in) {
         printf("[console] r/rh/rb/rk <addr> [n] | d <addr> [len] | f <value> [max] | fb <hex> [max]\n"
                "[console] s <addr> [len] [max] | k <addr> [len] | w <addr> <value> | c\n"
                "[console] dmatrace        (print the streamed-DMA bases seen so far; needs OGRE_DMA_TRACE=1)\n"
+               "[console] cover           (print the recompiled functions entered so far; needs OGRE_COVER=1)\n"
                "[console] press <buttons> [polls] [x] [y]  (hold a synthetic pad press and analog\n"
                "[console]                stick, e.g. `press a`, `press start+down`, `press none 60 -1 0`)\n"
                "[console] dump [path]   (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n"
@@ -1294,6 +1298,12 @@ void console_exec(const std::string& line_in) {
         // screen, drop `dmatrace` into the watched file, and compare the bases
         // with `app/src/bank_funcs.inc`.
         dump_dma_trace();
+    } else if (cmd == "cover" || cmd == "cv") {
+        // OGRE_COVER=1: the recompiled functions entered so far, now rather than
+        // at exit — so a long interactive session can snapshot its coverage
+        // without ending the run (`tools/recompcov.py --log` reads the same
+        // lines from stdout).
+        ultramodern::debug_cover_dump();
     } else if (cmd == "dump") {
         // A bare `dump` never overwrites an earlier one: the key can be pressed
         // as often as the developer likes and every snapshot is kept, numbered.
