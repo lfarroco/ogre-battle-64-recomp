@@ -212,6 +212,11 @@ minutes here and the change only adds one `--only` target; the developer's usual
 * The fresh pak shows `Note 1` / `Not an Ogre Battle 64 note.` The note the
   game reads should probably be empty (`No Data`); whether the port's fresh
   `format_mempak` layout or the game's enumeration is at fault is unexamined.
+  **Deferred on purpose (developer, end of session):** the screen is the
+  *copy/backup* menu — *"that screen allows copying saves from the battery into
+  the controller pak, and the inverse. this is a pc port, so it's low priority.
+  will not be fixed now."* So this lead and the `Save`/`Load`/`Erase` flow are
+  feature requests, not defects.
 
 ## 6. Files changed
 

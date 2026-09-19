@@ -58,7 +58,10 @@ hardware. RT64 remains the primary native renderer throughout. See
   entered, 436 display lists, every captured frame non-black (mean 83) —
   `docs/proofs/native-boot-start-controller-pak-menu.png`. This also answers the
   session-65 "puzzle" about scene `0x07`'s extra descriptor words: they are
-  **scene `0x18`'s own descriptor** at `0x8018FDC0`. See
+  **scene `0x18`'s own descriptor** at `0x8018FDC0`. **The copy/backup function
+  the menu offers is deliberately out of scope** (developer, session 88: *"this
+  is a pc port, so it's low priority. will not be fixed now"*) — the render is
+  the deliverable. See
   `docs/HANDOFF-2026-09-19-session88.md`.
 
 - ✅ **Regenerating the recompiled code is now a first-class, verified path for a
