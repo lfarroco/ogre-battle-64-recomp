@@ -469,10 +469,38 @@ index 873883d..4ed7785 100644
          widthChanged = false;
          sizChanged = false;
 diff --git a/src/hle/rt64_framebuffer.h b/src/hle/rt64_framebuffer.h
-index 6e8c9b8..b067af1 100644
+index 6e8c9b8..b053b01 100644
 --- a/src/hle/rt64_framebuffer.h
 +++ b/src/hle/rt64_framebuffer.h
-@@ -74,6 +74,9 @@ namespace RT64 {
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <algorithm>
+ #include <array>
+ #include <stdint.h>
+ 
+@@ -13,6 +14,19 @@
+ #include "rt64_framebuffer_storage.h"
+ 
+ namespace RT64 {
++    // OGRE: how tall a game framebuffer has to be. The VI says what the display
++    // needs; a workload's `drawColorRect` only says what that workload happened
++    // to draw. Sizing the framebuffer from the latter made the render target
++    // change height between frames -- the RDP snaps the fractional bits of a
++    // copy/fill rectangle (`lrx |= 3` / `lry |= 3`, so a 320x240 clear reports a
++    // bottom of 240.75 -> 241) -- while the presenter samples the whole target,
++    // so the framebuffer's outermost row/column landed on screen and flickered.
++    // Take whichever is larger, so a workload that genuinely draws past the VI
++    // area is still covered. See docs/HANDOFF-2026-09-18-session81.md.
++    inline uint32_t framebufferHeightForDisplay(uint32_t drawnBottom, uint32_t viHeight) {
++        const uint32_t saneViHeight = (viHeight > 0) ? std::min<uint32_t>(viHeight, 1024) : 0;
++        return std::max(drawnBottom, saneViHeight);
++    }
+     struct RenderTarget;
+ 
+     struct TileCopyCache {
+@@ -74,6 +88,9 @@ namespace RT64 {
  
          void copyRenderTargetToNative(RenderWorker *worker, RenderTarget *target, uint32_t dstRowWidth, uint32_t dstRowStart, uint32_t dstRowEnd, uint8_t fmt, uint32_t ditherRandomSeed, const ShaderLibrary *shaderLibrary);
          void copyNativeToRAM(uint8_t *dst, uint32_t dstRowWidth, uint32_t dstRowStart, uint32_t dstRowEnd);
@@ -1243,7 +1271,7 @@ index 61bb3b1..3402883 100644
  
          struct {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..be550dc 100644
+index 2970e71..98972d5 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
 @@ -5,7 +5,9 @@
@@ -1256,6 +1284,15 @@ index 2970e71..be550dc 100644
  
  #include "im3d/im3d.h"
  #include "im3d/im3d_math.h"
+@@ -546,7 +548,7 @@ namespace RT64 {
+         if (!fbPair.drawColorRect.isEmpty()) {
+             auto &colorImg = fbPair.colorImage;
+             auto &depthImg = fbPair.depthImage;
+-            uint32_t colorHeight = fbPair.drawColorRect.bottom(true);
++            uint32_t colorHeight = framebufferHeightForDisplay(fbPair.drawColorRect.bottom(true), workload.viFbSize[1]);
+             uint32_t colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
+             uint32_t depthWriteWidth = 0;
+             RT64::Framebuffer *colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
 @@ -616,6 +618,118 @@ namespace RT64 {
          workload.fbPairSubmitted++;
      }
@@ -1375,6 +1412,15 @@ index 2970e71..be550dc 100644
      void State::checkRDRAM() {
          if (!rdramCheckPending) {
              return;
+@@ -1177,7 +1291,7 @@ namespace RT64 {
+                 if (!fbPair.drawColorRect.isEmpty()) {
+                     const auto &colorImg = fbPair.colorImage;
+                     const auto &depthImg = fbPair.depthImage;
+-                    colorHeight = fbPair.drawColorRect.bottom(true);
++                    colorHeight = framebufferHeightForDisplay(fbPair.drawColorRect.bottom(true), workload.viFbSize[1]);
+                     colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
+                     depthWriteWidth = 0;
+                     colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
 @@ -1200,6 +1314,37 @@ namespace RT64 {
                          depthRowEnd = fbPair.drawDepthRect.bottom(true);
                      }
@@ -1503,10 +1549,10 @@ index 7a8c13b..c61b685 100644
          void listProcessBegin();
          void listProcessEnd();
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..14a8715 100644
+index 5a331aa..8ba25d4 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -418,6 +418,15 @@ namespace RT64 {
+@@ -418,12 +418,21 @@ namespace RT64 {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
                  const auto &colorImg = fbPair.colorImage;
                  const auto &depthImg = fbPair.depthImage;
@@ -1522,6 +1568,13 @@ index 5a331aa..14a8715 100644
                  fixedResScale = workloadConfig.resolutionScale;
                  if (!fbPair.drawColorRect.isEmpty()) {
                      colorFb = nullptr;
+                     depthFb = nullptr;
+                     nativeColorWidth = colorImg.width;
+-                    nativeColorHeight = fbPair.drawColorRect.bottom(true);
++                    nativeColorHeight = framebufferHeightForDisplay(fbPair.drawColorRect.bottom(true), workload.viFbSize[1]);
+ 
+                     // When the target is much bigger than the reference height, we reduce the resolution scaling (but clamped to 1.0).
+                     const uint32_t heightThreshold = (workload.viFbSize[1] > 0) ? ((workload.viFbSize[1] * 3) / 2) : 360;
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
 index 9fae0d4..d510d49 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
@@ -1715,6 +1768,77 @@ index eb944a4..4e50ede 100644
  
          static uint32_t getNativeSize(uint32_t width, uint32_t height, uint8_t siz);
      };
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index b4ff4e9..44480eb 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -4,6 +4,9 @@
+ 
+ #include "rt64_vi_renderer.h"
+ 
++#include <algorithm>
++#include <stdlib.h>
++
+ #include "shared/rt64_hlsl.h"
+ #include "shared/rt64_video_interface.h"
+ 
+@@ -14,6 +17,33 @@ namespace RT64 {
+ 
+     VIRenderer::~VIRenderer() { }
+ 
++    // OGRE: Ogre Battle 64 draws into a 319x239 area of its 320x240 framebuffer --
++    // its own scissor and clear are `(0,0)-(1276,956)`, i.e. they stop one pixel
++    // short on the right and at the bottom (measured with OGRE_DL_DECODE=all at
++    // the New Game cathedral: 10306 commands use that scissor, and the only
++    // FILLRECT is the same rectangle). The game relied on CRT overscan for that
++    // last row/column; on a pixel-perfect display those pixels are never written
++    // by the scene, so they keep leftover content from earlier scenes -- and the
++    // boot's njpeg draws only wrote one of the three rotating framebuffers, so
++    // the leftovers differ per buffer and the edge flickers as the VI rotates.
++    // Present only the area the game actually draws, leaving the outer line at
++    // the presenter's clear colour. OGRE_OVERSCAN=<n> overrides (0 = present the
++    // full framebuffer, as before). See docs/HANDOFF-2026-09-18-session81.md.
++    static hlslpp::uint2 overscanCrop() {
++        static const uint32_t crop = [] {
++            const char* v = getenv("OGRE_OVERSCAN");
++            return uint32_t((v != nullptr) ? std::clamp(atoi(v), 0, 8) : 1);
++        }();
++        return hlslpp::uint2(crop, crop);
++    }
++
++    static hlslpp::uint2 visibleFramebufferSize(const VI &vi) {
++        const hlslpp::uint2 fbSize = vi.fbSize();
++        const hlslpp::uint2 crop = overscanCrop();
++        return hlslpp::uint2((fbSize.x > crop.x) ? (fbSize.x - crop.x) : fbSize.x,
++                             (fbSize.y > crop.y) ? (fbSize.y - crop.y) : fbSize.y);
++    }
++
+     inline hlslpp::float2 computeHDSize(hlslpp::float2 sdSize, hlslpp::float2 resolutionScale, uint32_t downsamplingScale) {
+         return (sdSize * resolutionScale) / float(downsamplingScale);
+     }
+@@ -74,7 +104,7 @@ namespace RT64 {
+         p.commandList->setScissors(scissor);
+ 
+         interop::VideoInterfaceCB pushConstants;
+-        pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
++        pushConstants.videoResolution = computeHDSize(hlslpp::float2(visibleFramebufferSize(*p.vi)), p.resolutionScale, p.downsamplingScale);
+         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
+         pushConstants.gamma = p.vi->gamma();
+ 
+@@ -105,7 +135,12 @@ namespace RT64 {
+         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
+ 
+         // Query the VI for the current rendering area.
+-        hlslpp::float4 viViewRect = vi.viewRectangle() * sdSize.xyxy;
++        // OGRE: on top of whatever the VI reports, only the framebuffer area the
++        // game actually draws is presented (see visibleFramebufferSize). The
++        // viewport is shrunk to it; the leftover strip is zeroed by the shader's
++        // outsideBorder test, since its uv lands past videoResolution.
++        const hlslpp::uint2 visibleSize = visibleFramebufferSize(vi);
++        hlslpp::float4 viViewRect = { 0.0f, 0.0f, float(visibleSize.x), float(visibleSize.y) };
+         hlslpp::float4 viCropRect = vi.cropRectangle() * sdSize.xyxy;
+ 
+         // Scale all the rectangles to the space of the Window.
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
 index e7895c3..b033e17 100644
 --- a/src/shaders/RasterPS.hlsl

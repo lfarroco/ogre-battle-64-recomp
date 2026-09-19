@@ -76,6 +76,47 @@ one-line `> Superseded by …` banner to it instead of deleting it.
 
 ---
 
+## 2026-09-19 (housekeeping) — `rt64-ob64.patch` is the *only* tracked home for RT64 changes, and it had drifted again
+
+**Decision.** Every change to `tools/RT64` must be followed by
+`git -C tools/RT64 diff --ignore-submodules=all > rt64-ob64.patch`, because the
+submodule is **not** committed (it points at upstream `4337374`) and
+`docs/guides/app-build.md` tells a fresh checkout to
+`git -C tools/RT64 apply ../../rt64-ob64.patch`. A stale patch is therefore not
+cosmetic: the change exists only in one machine's dirty worktree and a clone
+silently loses it.
+
+**What had drifted.** Session 81 landed two RT64 changes and its handoff §8 even
+measured the delta against "the baseline (23 files, 1314/28)" — but §10 never
+listed a patch refresh, and no commit has touched `rt64-ob64.patch` since
+`d00afce` (which is an *ancestor* of session 81's host commit `5954a70`). So the
+worktree carried **55 added lines the patch did not**: `framebufferHeightForDisplay`
+(`src/hle/rt64_framebuffer.h`, 3 call sites in `rt64_state.cpp`/`rt64_workload_queue.cpp`)
+and `overscanCrop`/`visibleFramebufferSize` — the whole of
+`src/render/rt64_vi_renderer.cpp`, which the patch did not contain at all. The
+tell is mechanical: diff the `+`-line sets of `git -C tools/RT64 diff` against the
+patch file; the worktree must be a subset, and it was not.
+
+**Classification of the diff (asked by the developer).** The uncommitted
+`tools/RT64` state is **not** debug code. It is the project's accumulated RT64
+patch — S2DEX/S2DEX2 object commands, YUV16 two-plane TMEM sampling and the
+`2*sext9(k)+1` conversion, njpeg readback, present-queue/native-target plumbing —
+plus **36 diagnostics, all gated behind `OGRE_*` `getenv` flags** (the project's
+documented convention, see the knob table in `guides/app-build.md`). There are no
+`probeNN` tags and no untracked source files. Two adjacent findings are *not*
+problems: `src/contrib/plume`'s 54-line `plume_metal.cpp` change is already
+declared in `rt64-plume-ob64.patch` (line-for-line identical), and
+`src/contrib/dxc`'s only dirt is an untracked build artifact (`lib/x64/libz.dylib`).
+
+**Done.** `rt64-ob64.patch` regenerated (**23 files, +1368/−33**) and verified to
+apply to a pristine `tools/RT64` HEAD (`git apply --cached --check` against a
+temp index built from `HEAD`, exit 0); the missing `OGRE_OVERSCAN=<0..8>` row added
+to `guides/app-build.md`; PLAN.md's session-81 status annotated. Left alone:
+`Application::waitForGameFramebuffers` is now dead RT64-side code (session 77
+deleted its only caller) — cruft to drop opportunistically, not a bug.
+
+---
+
 ## 2026-09-18 (session 82) — neutral encounters: the battle-setup fragment nobody had streamed
 
 **Symptom.** Developer: a **neutral encounter** (a rare wild-monster event on the

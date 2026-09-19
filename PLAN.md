@@ -323,7 +323,11 @@ hardware. RT64 remains the primary native renderer throughout. See
   recorded in the handoff (mupen64plus-core forwards raw VI registers; GLideN64
   and angrylion present a fixed window from `VI_ORIGIN`, where RT64 subtracts one
   row — a separate fidelity item, not this fix; GLideN64's `enableTexCoordBounds`
-  has no RT64 equivalent).
+  has no RT64 equivalent). Both halves are now declared in `rt64-ob64.patch` — it
+  was **stale** and did not carry them (`rt64_vi_renderer.cpp` was missing from the
+  patch entirely, so a fresh checkout applying it lost the fix); it was regenerated
+  and verified to apply to a pristine `tools/RT64` HEAD, and `OGRE_OVERSCAN` is now
+  in the `docs/guides/app-build.md` knob table.
 - 🛠 **The mission's post-battle lag has a landed fix (session 80): N64Recomp
   no longer injects the blocking `yield_self()` into the mission's
   nearest-target search.** Session 79 diagnosed the lag as one recompiler
