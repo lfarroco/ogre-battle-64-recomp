@@ -474,6 +474,32 @@ ignores input until a **Start** press summons the menu; the cursor starts on
 which **renders** (session 55) and hands off to `0x02`/`0x0D` at `t≈20.7 s` when
 the name is confirmed.
 
+## The ending and the credits
+
+**The credits are scene `0x11`** (descriptor `0x8018FBAC`, mask `0x00008000` →
+overlay C / `streamedC`, the section whose data holds the whole staff-roll text at
+ROM `0x1F0117..0x1F08F4`: `Presented`, `Producer`, `Music Composer`, `Director`,
+`Atlus U.S.A., Inc.`, `The END`, …). Reached at the end of a playthrough, after
+the last mission and the closing movie.
+
+| what | scene | source | status |
+|---|---|---|---|
+| **fade from black to `Ogre Battle 64` in the middle of the screen** | `0x11` | dev (session 86) + proof (`/tmp/cr5-3600.png`, a mid-fade frame) | **renders — developer-confirmed** (session 86) |
+| **scrolling credits** with multiple backgrounds from the game | `0x11` | dev (session 86) | **renders — developer-confirmed**; some credit backgrounds still have artifacts (open) |
+| the **total `Chaos Frame` points** the player finished the game with | `0x13` (descriptor `0x8018FBD4`, mask `0x8000`) | dev (session 86) | **reached and runs** (session 86): the credits exit into it at `t=328073 ms` on the natural route |
+| back to the attract loop | `0x09`/`0x0A`/`0x04` | code | runs |
+
+**The session-85 freeze is fixed (session 86).** The credits hung on their first
+beat with the frame-pump thread's counter frozen (`D_800AEFA4` frozen while
+`D_800C4BCC` counts). Four `config.toml` `function_sizes` overrides were leaking
+t4's stack — each one a `jal` compiled as *call the containing body + early
+`return`* (`func_801AB998`'s `jal 0x801AB770`, `func_801B1BBC`'s
+`jal 0x801B00D4`) or a dropped `jr ra` delay slot (`func_801AB568`'s epilogue
+continuation, `func_801AFC2C` itself). See
+`docs/HANDOFF-2026-09-19-session86.md`. **Do not test this scene with
+`OGRE_SCENE=0x11`** — a forced run plays the intro/opening (session 86 §1); use
+the natural ending (a suspend save in front of the final boss works).
+
 ## Tutorial (title menu → Tutorial)
 
 | what | scene | source | status |

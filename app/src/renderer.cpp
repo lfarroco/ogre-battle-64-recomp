@@ -1163,13 +1163,22 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                     }
                 }
                 const uint32_t base = u32(0x801B81D0);
+                // `base` is game state, not a constant: at a scene transition the
+                // word holds a stale/wild value before the new scene installs its
+                // object (session 85 -- the title -> story `0x0B` handoff). Every
+                // read below is base-relative, and `wptr` does no bounds check, so
+                // an unvalidated base walks off RDRAM and dies with SIGBUS inside
+                // this diagnostic. Only walk it when it is a KSEG0 pointer whose
+                // whole window (the 13 records at +0x6C0 plus the +0x830 fields)
+                // fits in the 8 MiB RDRAM.
+                const bool base_ok = base >= 0x80000000u && base <= 0x80800000u - 0x8A0u;
                 fprintf(stderr,
                         "[scene] t=%ums state=%u req=0x%04X base=0x%08X phase=%u p710=%u flags=%u/%u/%u bank=%u "
                         "mask=0x%08X\n",
                         now_ms, (unsigned)(u32(0x800E8214) & 0xFFFF), (unsigned)(u32(0x800C4C26) & 0xFFFF), base,
                         u32(0x801BA70C), u32(0x801BA710), u8(0x801BA700), u8(0x801BA701), u8(0x801BA72C),
                         u32(0x801977E8), u32(0x80190F30));
-                if (base != 0) {
+                if (base_ok) {
                     for (int i = 0; i < 13; i++) {
                         uint32_t rec = base + 0x6C0 + (uint32_t)i * 0x10;
                         fprintf(stderr, "[scene]   rec[%2d] @0x%08X ptr=0x%08X flag=%d x=%d y=%d\n", i, rec,
@@ -1185,9 +1194,12 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                     }
                 }
                 const uint32_t s10 = u32(0x801B84AC);
+                // Same hazard as `base`: only touch the object when the word is a
+                // plausible KSEG0 pointer (`s10 + 0x1118` must be inside RDRAM).
+                const bool s10_ok = s10 >= 0x80000000u && s10 <= 0x80800000u - 0x1120u;
                 fprintf(stderr, "[scene]   s10=0x%08X f14=%d f16=%d f18=%.3f\n", s10,
-                        s10 ? s16(s10 + 0x1114) : 0, s10 ? s16(s10 + 0x1116) : 0,
-                        s10 ? f32(s10 + 0x1118) : 0.0f);
+                        s10_ok ? s16(s10 + 0x1114) : 0, s10_ok ? s16(s10 + 0x1116) : 0,
+                        s10_ok ? f32(s10 + 0x1118) : 0.0f);
                 fflush(stderr);
             }
         }

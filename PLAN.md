@@ -40,6 +40,98 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The credits screen (scene `0x11`) plays — four size-override mis-bindings
+  were leaking the frame-pump thread's stack (session 86).** The session-85 wall
+  is closed: on the natural route the credits fade from black to "Ogre Battle
+  64", scroll the staff roll over the game's backgrounds, show the **Chaos
+  Frame** total (scene `0x13`) and return to the attract loop — developer
+  confirmed ("it worked!! there were some artifacts in the rendered
+  backgrounds, but you've done it!!"). The causes are all the session-41 class
+  and all in **`config.toml`**, each producing a `jal`-into-a-body-interior
+  early `return` or a dropped `jr ra` delay slot (so the caller's frame leaked
+  and t4's saved comparator died): `func_801AB76C` `0x22C`→`0x4` (swallowed the
+  real `func_801AB770`, the credits text drawer called by `func_801AB998`),
+  `func_801AB568` `0x1E0`→`0x208` (its epilogue continuation dropped the
+  `addiu sp,sp,56` delay slot, leaking `0x38` per call), `func_801B00D0`
+  `0x544`→`0x4` (swallowed the real `func_801B00D4`, called by `func_801B1BBC`
+  on the credits call tree) and `func_801AFC2C` `0x4A4`→`0x4A8` (its own delay
+  slot, leaking `0x80`). Two throwaway static checks find the shapes: a `jal`
+  emitted as call + `recomp_trace_return(); return;` with a duplicated delay
+  slot, and a `jr $ra` emitted with no delay slot at all (before: 2, after: 0).
+  **Correction to session 85: the forced `OGRE_SCENE=0x11` run does not execute
+  the credits** — it plays the intro/opening even when the trace says
+  `active=0x0011`; only the natural ending validates it. Verified from the
+  developer's suspend save in front of the final boss
+  (`assets/saves/suspend_final_boss.n64`, gitignored) at `OGRE_SPEED=8`: display
+  lists continuous (`30250 … 34400+`), `D_800AEFA4` tracking `D_800C4BCC`, the
+  fixed functions (`0x801B1BBC`/`0x801B00D4`) executing, 0 stubs/UNKNOWN,
+  `check-banks`/`cross-bank-check` OK, both builds rebuilt. Open: artifacts in
+  the rendered credit backgrounds; three latent leak-shaped `jal`s no reachable
+  route executed (notably `func_80079BD8`'s calls to unit A's `0x801AB740`,
+  which `cross_bank.py`'s `entry_looks_real` wrongly refuses because the leaf
+  starts with `lbu`). See `docs/HANDOFF-2026-09-19-session86.md`.
+
+- ✅ **The streamed-module hunt is exhausted: there is no un-recompiled module on
+  any reachable path (session 85).** The developer's ask — locate a module the
+  port has no record for and compile it — was run as a hunt, not a guess: two
+  hand-played sessions (~2 h emulated; tutorial incl. mode 2, mission incl.
+  battles, map, Organize, Load Game, attract routes) plus a forced sweep of every
+  scene (`0x02,0x03,0x05..0x0D,0x0E..0x18,0x1A..0x1D`) produced **0**
+  `UNKNOWN module`, **0** `UNCOMPILED streamed record`, **0** `streamed function
+  stub called` and **0** stub-microcode tasks, and an offline diff of every DMA
+  pair in the censuses (179 177 + 171 758 + 42 937) against both registration
+  tables found **0** unknown ROM at a known module base and **0** arena-shaped
+  load with a known-arena delta at an unknown base. Every registered module
+  executed at least one function in run 1 (session 83's two 0% modules — units T
+  and U — now both execute). **Nothing was compiled because nothing was
+  missing.** Two bugs were fixed in the hunt's own diagnostics:
+  `OGRE_SCENE_TRACE` dereferenced the wild scene-object word at the title→story
+  handoff (`RT64Renderer::update_screen`, SIGBUS) and is now bounds-checked, and
+  the window-close path now dumps both the DMA census and the whole
+  `OGRE_DUMP_RDRAM` image (previously only `OGRE_EXIT_AFTER_MS` did, so a
+  hand-played hunt lost them — the missing natural credits image is why). Open: a teardown
+  crash `func_8007F8E4 + 0x2F8` **after** the census dump on window close, in
+  both runs. The only "not compiled" backlog left is static and latent —
+  `stubmap`'s 129 missing-function candidates and 288 `jalr` sites, none of which
+  fired a stub in ~2 h of play + the full sweep. See
+  `docs/HANDOFF-2026-09-19-session85.md`.
+
+- 🧊 **The credits screen (scene `0x11`) freezes the frame pump, and it is not
+  missing code (session 85, from the developer's report).** *(Fixed in session
+  86 — see the entry above; the diagnosis below stands, and its forced
+  `OGRE_SCENE=0x11` repro was later shown to play the intro, not the credits.)* At the end of the
+  second hunt run the developer finished the last mission and the credits hung:
+  the last display list is `#125090 at t=1173789 ms`, the scene becomes `0x11`
+  at `t≈1174273`, and **no frame is submitted for 13 s** while the VI retraces on
+  (`D_800AEFA4` frozen at 91/96, `D_800C4BCC` at 16 704 — session 60's
+  signature). The credits window streamed **0 records** and hit **0 stubs /
+  0 UNKNOWN**, so this is the frame/event path, not a missing module. The frame
+  pump `func_8008AFE0` is parked in `osRecvMesg(0x800C4C28)`; with
+  `OGRE_DEBUG_TRACES=1 OGRE_DEBUG_VI=1` the VI event still arrives —
+  **1160 `retrace -> mq=0x800E8B84 msg=0x29A`** deliveries, t19
+  (`func_80088F08`) parked on that queue — so the break is between t19's retrace
+  handler and the pump's queue, and `osViSwapBuffer` is called only twice in the
+  whole run. A clean A/B at the same trace and 20 s isolates it to the scene:
+  **title `0x04` = 1159 retraces / 562 swaps / 64 display lists /
+  `D_800AEFA4`=1153, versus credits `0x11` = 1160 retraces / 2 swaps / 3 display
+  lists (boot) / `D_800AEFA4`=91 frozen** — the retrace arrives but the game
+  stops swapping buffers, so no frame completes. **It is not the forced entry
+  and not missing data:** a second forced scene under the identical trace
+  (`OGRE_SCENE=0x14`, the Witch's Den) renders normally (1158 retraces / 533
+  swaps / 61 display lists / `D_800AEFA4`=1152), and an `OGRE_DUMP_RDRAM` at the
+  forced credits freeze shows the credits state fully initialised
+  (`*(0x801B94D8)=0x801BA8A0`, state 4, count 3, entry array 0x801BA770 with a
+  real callback `0x801ABCF4` — note `lui 0x801c` + a negative immediate wraps to
+  `0x801B…`). So the freeze is **credits-specific**. Scene `0x11` is the credits
+  (descriptor `0x8018FBAC`, mask
+  `0x8000`, enter `func_80177F80` → overlay C `func_801AC944`, update
+  `func_80177F9C` → the 6-state `func_801ACC24` on `*(0x801C94D8)`).
+  `OGRE_SCENE=0x11` reproduces the same symptom in ~20 s without the
+  playthrough (forced entry lacks pre-state — a caveat, not a proven identity).
+  Next: walk the retrace from t19's handler through the event registry at
+  `0x800F9178`, and checkpoint before the credits. See
+  `docs/HANDOFF-2026-09-19-session85.md` §7.
+
 - 🫒 **The attract story's olive background is diagnosed to a single bit (session
   84).** Scene `0x0B`'s background fill is the game's own
   `G_SETFILLCOLOR 0x4AC14AC1` (`FillRect rect=(0,0)-(1276,956)`) — RGBA16

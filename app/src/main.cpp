@@ -12,6 +12,7 @@
 // update_gfx callback until ultramodern::quit() is requested.
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -46,9 +47,29 @@ static void update_gfx(void*) {
         // bounded run prints on its exit path have to print here too --
         // otherwise a session played by hand (`OGRE_COVER=1` for a coverage
         // census, `OGRE_PROFILE=1` for the hot list) produces nothing at all.
-        // Both are no-ops unless their env var is set.
+        // All are no-ops unless their env var is set. OGRE_DMA_TRACE=1 in
+        // particular is how a hand-played hunt names a streamed module the port
+        // has no record for (session 82/85), so it must survive a window close
+        // the same way the bounded-run exit path lets it.
         ultramodern::debug_profile_dump();
         ultramodern::debug_cover_dump();
+        ogre::dump_dma_trace();
+        // OGRE_DUMP_RDRAM=<path>: the whole 8 MiB image, the same dump the
+        // bounded-run exit path writes. Without this a hand-played session had
+        // no way to produce one at all -- only `OGRE_EXIT_AFTER_MS` (which kills
+        // the window mid-play) and the crash handler did (session 85: the credits
+        // freeze wanted exactly this image and there was none).
+        if (const char* dump_path = getenv("OGRE_DUMP_RDRAM")) {
+            if (uint8_t* rdram = ultramodern::get_rdram_base()) {
+                if (FILE* f = fopen(dump_path, "wb")) {
+                    const size_t written = fwrite(rdram, 1, 0x800000, f);
+                    fclose(f);
+                    fprintf(stderr, "[SDL] dumped %zu bytes of rdram to %s\n", written, dump_path);
+                } else {
+                    fprintf(stderr, "[SDL] could not open %s for rdram dump\n", dump_path);
+                }
+            }
+        }
         ultramodern::quit();
     }
 }
