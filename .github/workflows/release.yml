@@ -8,28 +8,29 @@
 # in the GitHub UI) with one archive per platform attached.
 #
 # ---------------------------------------------------------------------------
-# WHY `runs-on: self-hosted` AND NOT `ubuntu-latest` / `windows-latest`
+# WHERE THE RECOMPILED GAME CODE COMES FROM
 # ---------------------------------------------------------------------------
-# A GitHub-hosted runner starts from a bare clone of this repository, and this
-# repository deliberately does NOT contain the recompiled game code
+# This repository deliberately does NOT contain the recompiler's output
 # (RecompiledFuncs/, Bank*Funcs/, RspFuncs/, app/src/bank_funcs.inc are
-# gitignored). Those ~62 MB of machine-generated C only exist on a machine
-# where `make && make recomp && make bank-recomp` has been run against a ROM,
-# and regenerating them requires the ROM, which cannot be committed or attached
-# here.
+# gitignored). That is ~62 MB of C generated from a ROM, and generating it needs
+# the ROM. There are two ways to give a runner that code:
 #
-# So this workflow runs on a runner (or a plain machine registered as one) that
-# already has:
-#   1. this repository checked out at the tag being released,
-#   2. the generated code, i.e. `make recomp && make bank-recomp` already run,
-#   3. the platform toolchains below.
+#   1. Self-hosted runner (the default). The matrix `runs-on` uses the
+#      self-hosted labels, and the machine must already have run
+#      `make recomp && make bank-recomp` against a ROM.
 #
-# `tools/release-build.sh` checks 2 and tells you exactly what is missing.
+#   2. GitHub-hosted runner. Set this repository's Actions variable
+#      `OGRE_DATA_REPO` to the slug of the private data repository, and add the
+#      secret `OGRE_DATA_TOKEN` (a fine-grained token with `Contents: Read` on
+#      that repository). Every matrix job then switches to `matrix.hosted`,
+#      clones the data repository and unpacks `files.tar.gz` from it.
 #
-# If the generated code is ever committed to the repository, change the matrix
-# `runs-on` values to the hosted labels in the comments and this workflow works
-# unchanged. That is a licensing decision, not a technical one — see
-# docs/HANDOFF-2026-09-19-session87.md.
+# The archive for path 2 is produced on a machine with the ROM by
+# `tools/data-bundle.sh`; docs/guides/app-build.md -> "Releases (GitHub Actions)"
+# documents the contract, and docs/HANDOFF-2026-09-19-session89.md the reason.
+#
+# Either way `tools/release-build.sh` checks that the generated code is present
+# and tells you exactly what is missing.
 name: Release
 
 on:
@@ -49,24 +50,31 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.runs-on }}
+    # Empty OGRE_DATA_REPO -> the self-hosted labels, where the generated code
+    # already exists. Set -> the hosted label, plus the private data repository
+    # that supplies the generated code. `vars` is one of the contexts GitHub
+    # allows in `runs-on`.
+    runs-on: ${{ vars.OGRE_DATA_REPO != '' && matrix.hosted || fromJSON(matrix.fallback) }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: macOS (Apple Silicon)
             os: macos
-            runs-on: [self-hosted, macOS, ARM64]   # hosted: macos-14
+            hosted: macos-14
+            fallback: '["self-hosted","macOS","ARM64"]'
             archive: ogre-battle-64-recomp-macos-arm64.tar.gz
             dist_dir: dist-macos
           - name: Linux (x86-64)
             os: linux
-            runs-on: [self-hosted, Linux, X64]     # hosted: ubuntu-24.04
+            hosted: ubuntu-24.04
+            fallback: '["self-hosted","Linux","X64"]'
             archive: ogre-battle-64-recomp-linux-x86_64.tar.gz
             dist_dir: dist-linux
           - name: Windows (x86-64)
             os: windows
-            runs-on: [self-hosted, Windows, X64]   # hosted: windows-2022
+            hosted: windows-2022
+            fallback: '["self-hosted","Windows","X64"]'
             archive: ogre-battle-64-recomp-windows-x86_64.zip
             dist_dir: dist-windows
     steps:
@@ -75,19 +83,122 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # The vendored RT64 patch and the SDL2 build both live under tools/,
-      # which is gitignored; re-create them exactly as a developer would.
+      # Fail with the missing name rather than a checkout error, when the
+      # variable is set and the token is not.
+      - name: Check the data repository configuration
+        if: vars.OGRE_DATA_REPO != ''
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.OGRE_DATA_TOKEN }}
+        run: |
+          set -e
+          if [ -z "$TOKEN" ]; then
+            echo "::error::OGRE_DATA_REPO is set to '${{ vars.OGRE_DATA_REPO }}' but the OGRE_DATA_TOKEN secret is empty or missing. Add a fine-grained token with Contents: Read on that repository."
+            exit 1
+          fi
+
+      - name: Fetch the generated game code
+        if: vars.OGRE_DATA_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.OGRE_DATA_REPO }}
+          token: ${{ secrets.OGRE_DATA_TOKEN }}
+          path: ogre-data
+
+      - name: Unpack the generated game code
+        if: vars.OGRE_DATA_REPO != ''
+        shell: bash
+        run: |
+          set -e
+          tar xzf ogre-data/files.tar.gz -C .
+          for p in RecompiledFuncs app/src/bank_funcs.inc RspFuncs; do
+            test -e "$p" || { echo "::error::$p is missing from files.tar.gz"; exit 1; }
+          done
+          banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
+          [ "$banks" -gt 0 ] || { echo "::error::Bank*Funcs/ is missing from files.tar.gz"; exit 1; }
+          echo "RecompiledFuncs: $(find RecompiledFuncs -type f | wc -l | tr -d ' ') files"
+          echo "Bank units:      $banks"
+          echo "RspFuncs:        $(find RspFuncs -type f | wc -l | tr -d ' ') files"
+          if [ -f ogre-data.txt ]; then
+            cat ogre-data.txt
+            recorded=$(sed -n 's/^public commit: //p' ogre-data.txt)
+            if [ "$GITHUB_REF_TYPE" = "tag" ] && [ -n "$recorded" ] && [ "$recorded" != "$GITHUB_SHA" ]; then
+              echo "::warning::the generated code was bundled at $recorded, but this release builds $GITHUB_SHA"
+            fi
+          fi
+
+      # RT64 is a git submodule and is already here. tools/N64ModernRuntime is
+      # gitignored, so a GitHub-hosted runner has none: clone the pinned
+      # upstream commit and apply the same two root patches a developer applies.
+      # A self-hosted runner already has it and skips that.
       - name: Prepare third-party trees
         shell: bash
         run: |
           set -e
+          N64MODERNRUNTIME_COMMIT=589bbf018a3e6d3646ddf7de1e7919f1b7e99bb1
           if [ ! -d tools/N64ModernRuntime ]; then
-            echo "::error::tools/N64ModernRuntime is missing. See docs/guides/app-build.md -> Configure & build."
-            exit 1
+            echo "==> cloning N64ModernRuntime at $N64MODERNRUNTIME_COMMIT"
+            git clone https://github.com/N64Recomp/N64ModernRuntime.git tools/N64ModernRuntime
+            git -C tools/N64ModernRuntime checkout "$N64MODERNRUNTIME_COMMIT"
+            git -C tools/N64ModernRuntime submodule update --init --recursive
+            ( cd tools/N64ModernRuntime && git apply ../../n64modernruntime-ob64.patch )
+            ( cd tools/N64ModernRuntime/N64Recomp && git apply ../../../n64modernruntime-n64recomp.patch )
           fi
           if [ -f rt64-plume-sdl.patch ] && [ -d tools/RT64/src/contrib/plume ]; then
             git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch 2>/dev/null || true
           fi
+
+      # A hosted runner checks out the RT64 and plume submodules pristine, so it
+      # needs the project's patches applied the way a developer's tree has them.
+      # A self-hosted runner already has them, so this step is for the hosted
+      # path; `apply_patch` skips a patch that is already in the tree.
+      - name: Patch the RT64 submodules
+        if: vars.OGRE_DATA_REPO != ''
+        shell: bash
+        run: |
+          set -e
+          # apply_patch <directory> <patch path relative to that directory>
+          apply_patch() {
+            if ( cd "$1" && git apply --reverse --check "$2" ) >/dev/null 2>&1; then
+              echo "==> already applied: $2"
+            else
+              ( cd "$1" && git apply "$2" )
+              echo "==> applied $2"
+            fi
+          }
+          apply_patch tools/RT64 ../../rt64-ob64.patch
+          apply_patch tools/RT64/src/contrib/plume ../../../../../rt64-plume-ob64.patch
+          apply_patch tools/RT64/src/contrib/plume ../../../../../tools/rt64-plume-sdl.patch
+
+      # The runner images ship CMake and a C++ compiler, but not everything the
+      # builds below need. These steps run on the hosted path only; a self-hosted
+      # runner already has its toolchain (docs/guides/app-build.md -> Releases
+      # carries the per-platform list).
+      - name: Install Linux build dependencies
+        if: vars.OGRE_DATA_REPO != '' && matrix.os == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libvulkan-dev libx11-dev
+
+      # The Metal compiler is a separate download from Xcode 16 on. Probe first,
+      # so an image that already has it is untouched.
+      - name: Ensure the macOS Metal toolchain
+        if: vars.OGRE_DATA_REPO != '' && matrix.os == 'macos'
+        shell: bash
+        run: |
+          if xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "==> metal compiler already available"
+          else
+            echo "==> downloading the Metal toolchain"
+            sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      # release-build.sh drives `make dist`; the Windows image has no make.
+      - name: Install Windows build dependencies
+        if: vars.OGRE_DATA_REPO != '' && matrix.os == 'windows'
+        shell: bash
+        run: choco install make -y --no-progress
 
       - name: Build and package
         shell: bash

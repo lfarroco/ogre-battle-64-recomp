@@ -40,6 +40,25 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **Releases can build on GitHub-hosted runners; the generated code comes from
+  a private data repository (session 89).** The repository's name is deliberately
+  not recorded in this repository; it is the `OGRE_DATA_REPO` Actions variable.
+  Session 87b's blocker was that `RecompiledFuncs/`, the 34 `Bank*Funcs/`, `RspFuncs/`
+  and `app/src/bank_funcs.inc` are gitignored and a hosted runner has no ROM to
+  make them from. `tools/data-bundle.sh` now bundles them into `files.tar.gz` on
+  a machine with the ROM (188 entries, 7.5 MB, plus `ogre-data.txt` recording the
+  public commit), and `.github/workflows/release.yml` takes that archive from the
+  private repository when the Actions variable `OGRE_DATA_REPO` is set, using the
+  `OGRE_DATA_TOKEN` secret. With the variable unset the matrix keeps the
+  self-hosted labels, so the existing path is unchanged. The hosted path also
+  clones and patches the runtime and the RT64/plume submodules, which the
+  workflow never did before: both root patches apply cleanly to a fresh
+  `N64ModernRuntime` clone at `589bbf01` and the patched clone is byte-identical
+  to `tools/N64ModernRuntime`, and `rt64-ob64.patch` plus the two plume patches
+  apply to pristine submodule copies. A full hosted run, the Linux Vulkan patch
+  and the Windows job remain unverified. See `docs/guides/app-build.md` →
+  Releases.
+
 - ✅ **The boot-Start save menu (scene `0x18`) renders (session 88).** Holding
   Start while the game boots takes the boot branch at `0x800721DC`
   (`*(u16*)0x800E79B0 & 0x1000` → pending scene `0x18`, else `0x09`), which

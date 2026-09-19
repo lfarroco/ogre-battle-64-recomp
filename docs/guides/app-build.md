@@ -168,8 +168,9 @@ recompiled code to already be present on the machine. `RecompiledFuncs/`,
 generated**, so a fresh clone has none of them and `make dist` fails with the
 "recompiled game code is missing" message from `tools/release-build.sh` until
 `make && make recomp && make bank-recomp` has been run once against a ROM on
-that machine. That is also why release builds run on a machine with the ROM
-rather than on a GitHub-hosted runner — see "Releases" below.
+that machine. Release builds therefore run on a machine with the ROM, unless the
+generated code is supplied from the private data repository — see "Releases"
+below.
 
 On Windows the executable is dynamically linked against `SDL2.dll` (and the
 platform's system DLLs), so a single-file Windows build needs a static `SDL2`
@@ -198,19 +199,57 @@ tools/release-build.sh                  # this machine's platform
 DIST_OS=linux tools/release-build.sh    # what CI does per runner
 ```
 
-**Why the workflow uses self-hosted runners.** A GitHub-hosted runner clones
-the repository, and the recompiled code that `make dist` links is *not in the
-repository* (`RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/`,
+**Why the workflow uses self-hosted runners by default.** A GitHub-hosted runner
+clones the repository, and the recompiled code that `make dist` links is *not in
+the repository* (`RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/`,
 `app/src/bank_funcs.inc` are generated from the ROM and gitignored). Those
 runners have no ROM, so they cannot produce it, and `tools/release-build.sh`
 fails fast with the list of what is missing rather than a wall of compile
-errors. The workflow therefore runs where the ROM and the generated code
-already are. If the generated code is ever committed, switch the matrix
-`runs-on` values to the hosted labels noted beside them in the workflow; the
-rest of the workflow is unchanged. That is a licensing decision, not a
-technical one.
+errors. The default `runs-on:` values therefore select self-hosted runners,
+where the ROM and the generated code already are.
 
-Each runner needs, per platform:
+### Building releases on GitHub-hosted runners
+
+A private data repository supplies the generated code, which lets the release
+matrix run on hosted runners with no ROM present.
+
+1. On a machine with the ROM and a built tree, produce the archive:
+
+   ```sh
+   make && make recomp && make bank-recomp && make rsp-recomp
+   tools/data-bundle.sh                 # -> dist/ogre-data/files.tar.gz
+   ```
+
+   The archive holds `RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/` and
+   `app/src/bank_funcs.inc` at its root, plus `ogre-data.txt` recording the
+   public commit it was generated from. It refuses to run when any of them is
+   missing.
+
+2. Commit `files.tar.gz` to the private repository.
+
+3. In this repository's settings, set the **Actions variable** `OGRE_DATA_REPO`
+   to the private repository slug (for example `OWNER/PRIVATE-REPO`), and add the
+   **secret** `OGRE_DATA_TOKEN`: a fine-grained token with `Contents: Read` on
+   that private repository. Setting the variable switches every matrix job to its
+   hosted runner and unpacks the archive from there; leaving it unset keeps the
+   self-hosted labels. The repository's name is not recorded here; the variable
+   is its only reference.
+
+The archive is a snapshot of the recompiler's output, so regenerate it whenever
+a change alters the generated code. The workflow warns when the archive's
+recorded commit differs from the commit being released. Hosting the generated C
+in a private repository keeps it out of this repository and out of the release
+archives; it does not change what the published binary contains.
+
+On the hosted path the workflow reconstructs everything else a fresh checkout
+lacks: it clones `N64ModernRuntime` at the pinned commit and applies
+`n64modernruntime-ob64.patch` and `n64modernruntime-n64recomp.patch`, applies
+`rt64-ob64.patch` and `rt64-plume-ob64.patch`/`tools/rt64-plume-sdl.patch` to the
+RT64 submodules, and installs what the runner image is missing (`libgtk-3-dev`,
+`libvulkan-dev`, `libx11-dev` on Linux; the Metal toolchain on macOS; `make` on
+Windows). The self-hosted path keeps its own toolchain and dirtied submodules.
+
+A self-hosted runner needs, per platform:
 
 | platform | toolchain | SDL2 |
 |---|---|---|
