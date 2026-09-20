@@ -24,8 +24,10 @@ if (WIN32)
     # Opt out of constexpr mutex constructor on windows to prevent vcredist issues
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR")
     # SDL_syswm.h pulls in windows.h for the HWND, and windows.h defines min/max
-    # macros that break std::min/std::max.
-    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+    # macros that break std::min/std::max. WIN32_LEAN_AND_MEAN is not set here:
+    # the runtime's renderer_context.hpp defines it, and defining it again on the
+    # command line makes clang-cl warn about the redefinition.
+    add_compile_definitions(NOMINMAX)
 endif()
 
 # --- Flags for the app's own targets -----------------------------------------

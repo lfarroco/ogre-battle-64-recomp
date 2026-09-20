@@ -242,21 +242,23 @@ index 0f7de83..6bbe537 100644
  #   error "Unsupported architecture"
  #endif
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..9610b33 100644
+index 8c8e5d1..2ac837a 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
-@@ -1,6 +1,10 @@
+@@ -1,6 +1,12 @@
  #include <algorithm>
 +#include <atomic>
  #include <cassert>
  #include <cstdio>
-+#if !defined(__EMSCRIPTEN__)
++// OGRE: execinfo.h/backtrace are POSIX; the MSVC CRT has neither, so the host
++// stack dump below is Linux/macOS only.
++#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 +#include <execinfo.h>
 +#endif
  #include <cstring>
  #include <unordered_map>
  #include <vector>
-@@ -15,6 +19,14 @@
+@@ -15,6 +21,14 @@
  static recomp::overlays::overlay_section_table_data_t sections_info {};
  static recomp::overlays::overlays_by_index_t overlays_info {};
  
@@ -271,7 +273,7 @@ index 8c8e5d1..9610b33 100644
  static SectionTableEntry* patch_code_sections = nullptr;
  size_t num_patch_code_sections = 0;
  static std::vector<char> patch_data;
-@@ -37,6 +49,20 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
+@@ -37,6 +51,20 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
  static std::unordered_map<uint32_t, uint16_t> patch_code_sections_by_rom{};
  static std::vector<LoadedSection> loaded_sections{};
  static std::unordered_map<int32_t, recomp_func_t*> func_map{};
@@ -292,7 +294,7 @@ index 8c8e5d1..9610b33 100644
  static std::unordered_map<std::string, recomp_func_t*> base_exports{};
  static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
  static std::unordered_map<std::string, size_t> base_events;
-@@ -271,8 +297,305 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+@@ -271,8 +299,305 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
      }
  }
  
@@ -598,7 +600,7 @@ index 8c8e5d1..9610b33 100644
      section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
  
      // Sort the executable sections by rom address
-@@ -361,14 +684,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +686,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
@@ -648,7 +650,7 @@ index 8c8e5d1..9610b33 100644
 +
 +    fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
 +    dump_caller_chain("null-lookup");
-+#if !defined(__EMSCRIPTEN__)
++#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 +    // Temporary: dump the host call stack to identify the caller.
 +    void* bt[32];
 +    int n = backtrace(bt, 32);
