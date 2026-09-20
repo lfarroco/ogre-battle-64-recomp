@@ -424,7 +424,36 @@ void write_prelude(Report& report, const char* reason) {
 // per-thread chain, `fprintf(stderr, ...)` elsewhere). Run them with both
 // descriptors pointed at the report so their output lands in error.log, and
 // restore them afterwards.
+//
+// They are stdio calls, and a fault can arrive while the faulting thread holds a
+// stream lock (inside printf). `fflush(nullptr)` re-acquires every stream lock,
+// and the handler then never returns: the process never dies and the window
+// freezes (session 94). So the streams are never flushed here, and the dumps run
+// only when a non-blocking probe shows both locks free. The header and the
+// captured log are written with raw write() and do not depend on this.
 void write_guest_diagnostics(Report& report) {
+    bool stdio_free = true;
+#if !defined(_WIN32)
+    // Probe and release: holding the lock across the printf calls below would
+    // re-enter a non-recursive stream lock.
+    if (ftrylockfile(stdout) != 0) {
+        stdio_free = false;
+    } else {
+        funlockfile(stdout);
+    }
+    if (stdio_free) {
+        if (ftrylockfile(stderr) != 0) {
+            stdio_free = false;
+        } else {
+            funlockfile(stderr);
+        }
+    }
+#endif
+    if (!stdio_free) {
+        report.str("\n--- guest diagnostics skipped: a stdio stream lock is held ---\n");
+        return;
+    }
+
     const int saved_stdout = io_dup(1);
     const int saved_stderr = io_dup(2);
     if (saved_stdout < 0 && saved_stderr < 0) {
@@ -437,7 +466,6 @@ void write_guest_diagnostics(Report& report) {
         io_dup2(report.fd, 2);
     }
     report.str("\n--- guest diagnostics ---\n");
-    std::fflush(nullptr);
 
     const uint8_t* rdram = ultramodern::get_rdram_base();
     const int tid = (rdram != nullptr && ultramodern::this_thread() != 0)
@@ -452,7 +480,7 @@ void write_guest_diagnostics(Report& report) {
         }
     }
     ultramodern::debug_dump_chain_history();
-    std::fflush(nullptr);
+    std::fflush(stderr);
 
     if (saved_stdout >= 0) {
         io_dup2(saved_stdout, 1);

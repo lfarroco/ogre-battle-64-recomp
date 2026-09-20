@@ -59,6 +59,22 @@ hardware. RT64 remains the primary native renderer throughout. See
   `> out.log 2> err.log` still separates the streams. New knob
   `OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>`. See
   `docs/HANDOFF-2026-09-20-session94.md`.
+- ✅ **Closing the game window no longer freezes the process (session 94, part
+  2).** The pre-existing freeze had two layers. The teardown unmapped RDRAM at
+  the end of `recomp::start` while the game's N64 threads were still running
+  recompiled code, so the next guest access faulted inside the image (the
+  freeze's fault was at `rdram + 0xE7A18`); and the crash handler then deadlocked
+  instead of killing the process, because `fflush(nullptr)` re-acquired a stdio
+  stream lock the faulting thread already held. `recomp.cpp` now skips the RDRAM
+  free when the run exits through `ultramodern::quit()` (landed in
+  `n64modernruntime-ob64.patch`), `main.cpp` runs the SDL teardown and then
+  `_Exit(EXIT_SUCCESS)` instead of running the C++ static destructors with those
+  threads live, and the signal path no longer flushes and only runs the
+  `printf`-based runtime dumps behind a non-blocking `ftrylockfile` probe.
+  Verified: a synthetic `SDL_QUIT`, a real click on the window's close button and
+  the standard Quit event all exit 0 with no `error.log`, teardown ≈ 0.5 s; the
+  45 s route run is `runlog.py --check` PASS; crash reports still carry the guest
+  diagnostics. See `docs/HANDOFF-2026-09-20-session94.md` part 2.
 - ✅ **A SETTINGS tab carries GAME SPEED, and the speed changes while the game
   runs (session 93).** The shared `ui::Panel` gained a fifth tab whose only row is
   a radio group, `GAME SPEED  [ ] 1 [ ] 2 [x] 4`; `LEFT`/`RIGHT`/`SPACE` step it

@@ -433,7 +433,14 @@ int main(int argc, char** argv) {
     game_starter.join();
     ogre::overlay_shutdown();
     ogre::shutdown_sdl(ogre::g_platform);
-    return EXIT_SUCCESS;
+    // The runtime does not join the game's own threads, so they are still
+    // running recompiled code here. Running the C++ static destructors (what
+    // `return` does next) with them live is a race, and it is what made closing
+    // the window freeze the process (the runtime no longer unmaps RDRAM on
+    // quit; see recomp::start). Leave now instead. crash_log::flush() drains
+    // the captured log first, because _Exit skips the atexit handler.
+    ogre::crash_log::flush();
+    _Exit(EXIT_SUCCESS);
 }
 
 #if defined(_WIN32) && !defined(__MINGW32__)

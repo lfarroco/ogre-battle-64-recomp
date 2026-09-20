@@ -1373,7 +1373,7 @@ index 43509ba..bb9dc4e 100644
  
  void ultramodern::init_saving(RDRAM_ARG1) {
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
-index ea1c49b..74bd907 100644
+index ea1c49b..09f8dd8 100644
 --- a/librecomp/src/recomp.cpp
 +++ b/librecomp/src/recomp.cpp
 @@ -410,6 +410,13 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
@@ -1611,18 +1611,43 @@ index ea1c49b..74bd907 100644
      std::thread game_thread{[](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
          debug_printf("[Recomp] Starting\n");
  
-@@ -893,7 +1029,10 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -891,17 +1027,27 @@ void recomp::start(const recomp::Configuration& cfg) {
+     ultramodern::join_thread_cleaner_thread();
+     ultramodern::join_saving_thread();
      
-     // Free rdram.
-     bool free_failed;
+-    // Free rdram.
+-    bool free_failed;
 -#ifdef _WIN32
+-    // VirtualFree returns zero on failure.
+-    free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
++    // Free rdram, unless the user asked to quit. `ultramodern::quit()` stops
++    // the runtime's own threads, but the game's threads are not joined and are
++    // still running recompiled code; unmapping RDRAM under them makes the next
++    // guest access fault (session 94: closing the window froze the process with
++    // a SIGSEGV whose fault address was inside the image). The process is about
++    // to exit, so the OS reclaims the mapping.
++    if (!exited) {
++        bool free_failed;
 +#ifdef __EMSCRIPTEN__
-+    std::free(rdram);
-+    free_failed = false;
++        std::free(rdram);
++        free_failed = false;
 +#elif defined(_WIN32)
-     // VirtualFree returns zero on failure.
-     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
++        // VirtualFree returns zero on failure.
++        free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
  #else
+-    // munmap returns -1 on failure.
+-    free_failed = (munmap(rdram, allocation_size) == -1);
++        // munmap returns -1 on failure.
++        free_failed = (munmap(rdram, allocation_size) == -1);
+ #endif
+ 
+-    if (free_failed) {
+-        printf("Failed to free rdram\n");
++        if (free_failed) {
++            printf("Failed to free rdram\n");
++        }
+     }
+ }
 diff --git a/librecomp/src/sp.cpp b/librecomp/src/sp.cpp
 index ae0f44f..1f7bbd5 100644
 --- a/librecomp/src/sp.cpp

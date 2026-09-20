@@ -227,11 +227,16 @@ it to a GitHub issue.
 
 The handler's own output uses only `open`/`write`/`close` and an atomic ring
 length; the runtime's dump helpers are `printf`-based and run after the ring has
-been written. Only the first report of a fatal event is written, so a
-`std::terminate` that then aborts does not overwrite it. `OGRE_DUMP_RDRAM=<path>`
-still adds the whole 8 MiB image, on the crash path as on the exit path.
-`crash_log::flush()` restores the descriptors and joins the threads; `atexit`
-calls it, and the bounded-run `_Exit` path calls it explicitly.
+been written. The handler never calls `fflush`: a fault can arrive while the
+faulting thread holds a stdio stream lock, and flushing from the handler
+re-enters that lock and hangs the process instead of killing it (session 94).
+The `printf`-based dumps run only after a non-blocking `ftrylockfile` probe shows
+both stream locks free, and the report says when they were skipped. Only the
+first report of a fatal event is written, so a `std::terminate` that then aborts
+does not overwrite it. `OGRE_DUMP_RDRAM=<path>` still adds the whole 8 MiB image,
+on the crash path as on the exit path. `crash_log::flush()` restores the
+descriptors and joins the threads; `atexit` calls it, and the bounded-run and
+window-close `_Exit` paths call it explicitly.
 
 `OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>` raises that signal immediately after
 the logger is armed, so a packaged build's `error.log` can be checked without
@@ -240,6 +245,30 @@ provoking a real crash.
 `SDL_ShowSimpleMessageBox` errors from the runtime (its `message_box` channel)
 also write `error.log`, for the same reason: a player who sees the box has no
 console to copy.
+
+### Closing the window
+
+The window's close button makes SDL2 post `SDL_QUIT` (the last window's
+`SDL_WINDOWEVENT_CLOSE` posts it too; `src/events/SDL_windowevents.c`).
+`update_gfx` writes any requested dumps and calls `ultramodern::quit()`.
+
+`quit()` stops the runtime's own threads, but the game's threads are host threads
+running recompiled code and nothing joins them. Two things follow, and both are
+needed for the window to close instead of hanging:
+
+* `librecomp/src/recomp.cpp` no longer frees RDRAM when `exited` is set (the
+  change is in `n64modernruntime-ob64.patch`). It used to `munmap` the 8 MiB
+  image at the end of `recomp::start`, and a game thread that touched it
+  afterwards faulted — session 94's window-close freeze, whose fault address was
+  inside the image. The process is about to exit, so the OS reclaims the mapping.
+* `main.cpp` runs the SDL teardown and then `_Exit(EXIT_SUCCESS)` instead of
+  returning. `return` runs the C++ static destructors while those threads are
+  live, which is the same race from the other side. `crash_log::flush()` runs
+  first, because `_Exit` skips the atexit handler.
+
+Teardown takes about half a second after the close, exits 0, and writes no
+`error.log` (a normal close is not a crash). The battery save is safe: the
+runtime joins its saving thread inside `recomp::start`, before either change.
 
 ### Releases (GitHub Actions)
 

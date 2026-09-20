@@ -221,9 +221,10 @@ All on macOS (x86-64), with `build-app` and with the package built by `make dist
   in the knob table.
 * `PLAN.md`, `docs/DECISIONS.md`, this file.
 
-The generated game code, `config*.toml`/`config-bank*.yaml`, the runtime and
-RT64 were not touched, so `make recomp`/`make bank-recomp`/`rsp-recomp` were not
-needed and `n64modernruntime-ob64.patch` is unchanged.
+The generated game code, `config*.toml`/`config-bank*.yaml` and RT64 were not
+touched, so `make recomp`/`make bank-recomp`/`rsp-recomp` were not needed. The
+runtime is touched later in this session (part 2), and
+`n64modernruntime-ob64.patch` was regenerated then.
 
 ## 7. Open leads
 
@@ -244,3 +245,138 @@ needed and `n64modernruntime-ob64.patch` is unchanged.
    "uncompiled stub" path is the streamed range, which returns the no-op stub and
    logs; if the process then faults, the report contains those lines. Routing
    that terminal call through `message_box` would need a runtime patch.
+
+---
+
+# Part 2: the window-close freeze
+
+**Goal (developer):** *"one issue, that predates your changes is: when I load the
+rom, if I close the window by clicking on its 'x', the window freezes. I need to
+force quit it"*.
+
+**Result:** the close button now exits the process in about half a second. The
+teardown no longer unmaps RDRAM under the game's still-running threads
+(`n64modernruntime-ob64.patch`), the app leaves through `_Exit` after the SDL
+teardown instead of running the C++ static destructors with those threads live,
+and the crash handler can no longer deadlock on a stdio stream lock.
+
+## 8. Reproduction
+
+The close button makes SDL2 post `SDL_QUIT`: `-[Cocoa_WindowListener
+windowShouldClose:]` sends `SDL_WINDOWEVENT_CLOSE`, and
+`SDL_SendWindowEvent` (`src/events/SDL_windowevents.c`) posts `SDL_QUIT` when
+that window is the last one. The app already handles `SDL_QUIT`
+(`pump_sdl_events`), so a probe that pushes the same event reproduces the freeze
+without a mouse. `probe94` did that from `pump_sdl_events`
+(`OGRE_PROBE94_QUIT_MS=<n>`); the freeze reproduces every time, and it is the only
+probe this session used (reverted; `grep -r probe94 app/ RecompiledFuncs/
+Bank*Funcs/ RspFuncs/` is empty).
+
+`sample <pid>` on the frozen process, plus `lsof -p <pid>`, gave the whole
+picture:
+
+* the main thread was in `exit` → `__cxa_finalize_ranges` →
+  `ogre::crash_log::flush` → `std::thread::join` → `__ulock_wait`;
+* an N64 thread (`N64 Thread 1`) was in `run_thread_function` → `__sflush` →
+  `_sigtramp` → `fatal_signal_handler` → `write_report`, i.e. the signal handler
+  was itself stuck inside a stdio flush;
+* `lsof` showed the two capture pipes' **write ends still open** (fds 12 and 13)
+  while fd 1/2 had been restored, which is why `flush`'s join could never finish.
+
+And `error.log` (written by that handler before it hung) recorded
+`reason: SIGSEGV (11)`, `rdram base: 0x12025B000`, `fault offset from rdram:
+0xE7A18` — a fault **inside the 8 MiB image**.
+
+## 9. Root cause, in two layers
+
+**The teardown unmaps RDRAM while the game's threads run.**
+`recomp::start` ends with `join_event_threads`, `join_thread_cleaner_thread`,
+`join_saving_thread`, then `munmap(rdram)`. Those joins cover the *runtime's*
+threads; the game's N64 threads are host threads that nothing joins, and
+`ultramodern::quit()` only sets `exited` (which stops the runtime's service
+loops). So the guest threads were still executing recompiled code when the image
+was unmapped, and the next guest access faulted. The fault address being inside
+the image is the proof.
+
+**The crash handler deadlocked instead of dying.** The fault arrived on a thread
+that was inside `__sflush`, i.e. it held a stdio stream lock. The handler's
+`std::fflush(nullptr)` re-acquires every stream lock, so it hung on the lock the
+faulting thread already owned; the handler never returned, never re-raised, and
+the process never died — the window froze and needed a force quit. The handler
+had also duplicated the capture pipes' write ends (its `io_dup(1)`/`io_dup(2)`),
+so the main thread's `crash_log::flush()` join could not complete either. This
+deadlock is the reason the pre-existing bug showed as a freeze and not as a
+crash; the old `bank_overlays.cpp` handler had the same `fflush` pattern.
+
+## 10. The fix
+
+* **`librecomp/src/recomp.cpp`** — free RDRAM only when the run did not exit
+  through `ultramodern::quit()`. The process is about to end, so the OS reclaims
+  the mapping. Landed through `n64modernruntime-ob64.patch`, regenerated with
+  `git -C tools/N64ModernRuntime diff HEAD -- . ':(exclude)N64Recomp'`,
+  reverse-checked against the working tree and forward-checked against a pristine
+  `589bbf0` worktree.
+* **`app/src/main.cpp`** — after `recomp::start` returns, run
+  `overlay_shutdown()`/`shutdown_sdl()`, then `ogre::crash_log::flush()` and
+  `_Exit(EXIT_SUCCESS)`. `return` would run the C++ static destructors with the
+  game's threads still live, which is the same race from the other side; `_Exit`
+  also skips the atexit flush, hence the explicit call. The battery is not at
+  risk: `join_saving_thread()` is inside `recomp::start` and still runs.
+* **`app/src/crash_log.cpp`** — the signal path never calls `fflush` (that was
+  the deadlock), and the `printf`-based runtime dumps run only after a
+  non-blocking `ftrylockfile` probe shows both stream locks free; the report says
+  when they were skipped. The header and the captured ring tail are written with
+  raw `write()` and are unaffected.
+
+## 11. What was run for verification
+
+* **Synthetic close (`OGRE_PROBE94_QUIT_MS=5000`, `SDL_QUIT`):** before the fix,
+  still alive after 30 s and `sample` showed the stack above; after the fix,
+  `exit=0` in 5.49 s wall (probe at 5.00 s, so teardown ≈ 0.49 s) and **no
+  `error.log`**.
+* **Real close button:** `osascript -e 'tell application "System Events" to tell
+  process "ogrebattle64" to click button 1 of window 1'` on the packaged bundle,
+  after the game had loaded — the click was accepted and the process exited 0.
+  (`System Events` intermittently reports zero windows for this process, so the
+  later repeats of the click test could not run; the probe and the first click
+  cover the same `SDL_QUIT` path.)
+* **Real Quit event:** `open "dist/.../Ogre Battle 64.app"` then
+  `osascript -e 'tell application "Ogre Battle 64" to quit'` — exited cleanly.
+* **Crash reports still work:** `OGRE_CRASH_TEST=segv` before boot writes
+  `error.log` with the header and the captured log; a live `kill -SEGV` of a
+  booted process writes the `--- guest diagnostics ---` section with the
+  per-thread data (not the "skipped" line), so the lock probe does not disable
+  it in the normal case.
+* **Regression:** the maintained 45 s title-route run (`OGRE_SPEED=4
+  OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D OGRE_SCENE_LOG=1
+  OGRE_EXIT_AFTER_MS=45000`) exits 0 and `tools/runlog.py --check` prints PASS.
+  `build-app`, `build-dist` (the package) and `build-null` all link.
+* `n64modernruntime-ob64.patch` is the only change under `tools/`: reverse-apply
+  against the working runtime tree succeeds, `git apply --check` against a
+  pristine `589bbf0` worktree succeeds, and it carries no `N64Recomp` hunk.
+
+## 12. Files changed in part 2
+
+* `tools/N64ModernRuntime/librecomp/src/recomp.cpp` and
+  `n64modernruntime-ob64.patch` — the RDRAM free is skipped on a user quit.
+* `app/src/main.cpp` — `_Exit(EXIT_SUCCESS)` after the teardown.
+* `app/src/crash_log.cpp` — no `fflush` in the signal path, and the
+  `ftrylockfile` probe around the stdio-based dumps.
+* `app/src/sdl_platform.cpp` — `probe94` added and reverted, no net change.
+* `docs/guides/app-build.md` — "Closing the window" and the handler note.
+* `PLAN.md`, `docs/DECISIONS.md`, this file.
+
+## 13. Open leads
+
+1. **The game's threads are still never joined.** The fix stops the teardown from
+   tearing memory out from under them, but they remain alive until `_Exit`. A
+   clean solution would ask the runtime to terminate them (or wait for them), and
+   would make the `_Exit` unnecessary.
+2. **A fault inside stdio on Windows** has no `ftrylockfile` guard (the MSVC CRT
+   has no non-blocking stream-lock probe), so the handler there keeps the old
+   risk. The `SetUnhandledExceptionFilter` path is what would hit it.
+3. **`graphics_shutdown_ready` and `join_event_threads` are still run** before the
+   `_Exit`, so the renderer does shut down; only the process teardown is
+   immediate. If a future change makes that slow, the window would linger after
+   the click.
+
