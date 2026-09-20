@@ -1,6 +1,6 @@
 name: Diag
 
-# Temporary: isolate the windows-2022 fast-fail (0xC0000409) at startup.
+# Temporary: find the faulting module of the startup fast-fail (0xC0000409).
 on:
   workflow_dispatch:
 
@@ -8,43 +8,28 @@ jobs:
   win:
     runs-on: windows-2022
     steps:
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Trivial console / GUI / AttachConsole probes
+      - name: Run the v0.2.0 exe and read the Application Error event
         continue-on-error: true
         shell: bash
         run: |
           set +e
-          printf 'int main(void){return 7;}\n' > c.c
-          cat > g.c <<'EOF'
-          #include <windows.h>
-          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) { return 9; }
-          EOF
-          cat > ac.c <<'EOF'
-          #include <windows.h>
-          #include <stdio.h>
-          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) {
-              if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-                  FILE* console = NULL;
-                  freopen_s(&console, "CONOUT$", "w", stdout);
-                  freopen_s(&console, "CONOUT$", "w", stderr);
-              }
-              return 0;
-          }
-          EOF
-          clang-cl -nologo -MT -c c.c
-          clang-cl -nologo -MT -c g.c
-          clang-cl -nologo -MT -c ac.c
-          lld-link -nologo -subsystem:console -out:c.exe c.obj
-          echo "console-link=$?"
-          lld-link -nologo -subsystem:windows -out:g.exe g.obj
-          echo "gui-link=$?"
-          lld-link -nologo -subsystem:windows -out:ac.exe ac.obj
-          echo "ac-link=$?"
-          ls -l c.exe g.exe ac.exe
-          ./c.exe; echo "console exit=$?"
-          ./g.exe; echo "gui exit=$?"
-          ./ac.exe; echo "attachconsole exit=$?"
-          ./ac.exe >/tmp/ac.log 2>&1; echo "attachconsole-redirect exit=$?"
+          mkdir -p rel && cd rel
+          gh release download v0.2.0 --repo "$GITHUB_REPOSITORY" --pattern '*windows*' --dir .
+          unzip -q -o '*.zip'
+          app="$(cygpath -w "$PWD/ogre-battle-64-recomp/ogrebattle64.exe")"
+          echo "app=$app"
+          powershell -NoProfile -Command "
+            \$p = Start-Process -FilePath '$app' -PassThru
+            Start-Sleep -Seconds 8
+            if (\$p.HasExited) { 'exited code={0} hex=0x{0:X8}' -f \$p.ExitCode } else { 'RUNNING'; \$p.Kill() }
+          "
+          echo "---- Application Error events ----"
+          powershell -NoProfile -Command "
+            Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'} -MaxEvents 3 -ErrorAction SilentlyContinue |
+              ForEach-Object { '=== ' + \$_.TimeCreated; \$_.Message }
+          "
+          echo "---- WER events ----"
+          powershell -NoProfile -Command "
+            Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Windows Error Reporting'} -MaxEvents 3 -ErrorAction SilentlyContinue |
+              ForEach-Object { '=== ' + \$_.TimeCreated; \$_.Message }
+          "
