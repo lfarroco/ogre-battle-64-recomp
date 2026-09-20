@@ -45,24 +45,37 @@ hardware. RT64 remains the primary native renderer throughout. See
   already called by `recomp::start()`, but `GameEntry::mod_game_id` was never
   set, so `wait_for_game_started()` skipped loading and every `.nrm` in `mods/`
   was parsed and discarded. `app/src/main.cpp` now sets it and scans before the
-  start screen; the start screen (`app/src/launcher.cpp`) draws a **MODS** panel
-  that toggles mods and edits their options, and appears whenever a mod is
-  installed so a shipped mod can be turned off. `mods/skip-boot-logos/` is the
+  start screen; the start screen (`app/src/launcher.cpp`) has a **START GAME**
+  section (inert until a ROM is loaded), a **ROM** section (`[x] Loaded!` plus the
+  file name; selectable, so `UP`/`DOWN` + `SPACE` picks a ROM without a mouse, and
+  choosing one returns to the screen with START GAME ready) and a **MODS**
+  section that toggles mods and edits their options with the description in a
+  second column. It appears when no ROM is loaded and whenever a mod is
+  installed, so a shipped mod can always be turned off. `mods/skip-boot-logos/`
+  is the
   reference example: one entry hook on scene `0x09`'s update writes the title's
   id into the pending-scene word, so the boot goes straight to the title. Built
   by `make mod-syms` + `make example-mods` and shipped by `make dist` when
-  present. Verified: the true baseline boots to the title at 27.7 s; with the mod
-  the title is at 3.0 s and renders correctly (capture), with the battery still
-  loaded. **The skip must come from scene `0x09`, not `0x0A`**: cutting `0x0A` to
+  present. The example ships **off** (`enabled_by_default = false` in its
+  `mod.toml`; `RecompModTool` did not carry that field, so `n64recomp-ob64.patch`
+  adds it), so a fresh package plays the vanilla boot until the player turns it
+  on. Verified: the true baseline boots to the title at 27.7 s; with the mod
+  enabled the title is at 3.0 s and renders correctly (capture), with the battery
+  still loaded. **The skip must come from scene `0x09`, not `0x0A`**: cutting `0x0A` to
   one frame leaves the title producing no display lists at all and the last
   presented frame on screen, because `0x0A`'s enter/leave touch overlay-C globals
-  that only its completed state machine leaves consistent. Three runtime fixes
+  that only its completed state machine leaves consistent. Four runtime fixes
   were needed and are in `n64modernruntime-ob64.patch`: the recompiler-context
   section index must be translated to a code-section index before a regenerated
   call is resolved; HI16/LO16 relocations against sections that hold no code must
-  keep their absolute immediates; and macOS cannot make the executable's `__TEXT`
+  keep their absolute immediates; macOS cannot make the executable's `__TEXT`
   writable, so the page is replaced with a private copy before a hooked function
-  is patched. See `docs/HANDOFF-2026-09-20-session91.md` and
+  is patched; and the periodic `[snap]` queue snapshot dereferenced its guest
+  addresses without sign-extending, 4 GiB past RDRAM, which is why the developer's
+  run died with `SIGSEGV` in `debug_dump_queue_snapshot` (it had been printing
+  garbage since it was written).
+
+  See `docs/HANDOFF-2026-09-20-session91.md` and
   `docs/guides/app-build.md` → "Mods".
 
 - ✅ **The "Use Item" unit-command screen runs at full speed (session 90).** The

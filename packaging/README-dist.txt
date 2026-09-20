@@ -14,12 +14,14 @@ HOW TO PLAY
 
 1. Run the app: `ogrebattle64` (macOS/Linux) or `ogrebattle64.exe` (Windows).
 
-2. A black window appears:
+2. The start screen appears:
 
        OGRE BATTLE 64: RECOMP
-       CLICK TO LOAD YOUR ROM (OR DROP IT IN THIS WINDOW)
+       == START GAME ==
+       == ROM ==
+       == MODS ==
 
-   - Click the window and pick your ROM, or
+   - Select the **ROM** row and press SPACE to pick your ROM, or
    - drag the ROM file onto the window, or
    - just put the ROM in this folder and launch the app again (it finds
      `ogre64.z64`, or any `.z64`/`.n64`/`.v64` next to the executable).
@@ -31,10 +33,11 @@ HOW TO PLAY
    revision, or a decompressed/hacked one will be rejected by name, and the
    window says which case it is and keeps asking.
 
-3. The game stores the validated ROM in this folder, so later launches go
-   straight into the game — unless a mod is installed, in which case the start
-   screen appears first so the mods can be turned on or off (press ENTER to
-   play). Hold on to this folder: the game, its save and its mods live in it.
+3. The **START GAME** row starts the game (ENTER does the same). The game stores
+   the validated ROM in this folder, so later launches go straight into the game
+   — unless a mod is installed, in which case the start screen appears first so
+   the mods can be turned on or off. Hold on to this folder: the game, its save
+   and its mods live in it.
 
 
 SAVES
@@ -50,6 +53,31 @@ progress; delete it to start fresh. Setting the environment variable
 there instead.
 
 
+START SCREEN
+------------
+
+The start screen appears when no ROM is loaded, and whenever at least one mod is
+installed (so a shipped mod can always be turned off). It has three sections:
+
+    == START GAME ==   [x] Start Game starts the game. It reads [ ] and cannot
+                       be selected until a ROM is loaded.
+    == ROM ==          [x] Loaded! and the ROM's file name, or [ ] No ROM.
+                       Selecting it opens the file picker; the chosen ROM comes
+                       back here as loaded, with START GAME ready.
+    == MODS ==         one row per installed mod, with its short description
+
+    UP / DOWN        select a row
+    SPACE            activate the selected row: START GAME starts the game, the
+                     ROM row opens the file picker, a mod row turns the mod on
+                     or off, an option row steps its value
+    LEFT / RIGHT     change the selected option's value
+    ENTER            start the game, or open the ROM picker when there is no ROM
+    mouse            click a row to activate it, click elsewhere to start
+
+A mod's own options live in `mod_config/<mod id>.json`; the start screen is the
+normal way to change them.
+
+
 MODS
 ----
 
@@ -58,18 +86,13 @@ package carries one example mod:
 
     mods/skip-boot-logos.nrm    Skip Boot Logos (boots straight to the title)
 
-Every `.nrm` in `mods/` is opened at startup and listed in the start screen,
-which appears when at least one mod is installed. There:
+It ships **off**, so the game plays exactly as it did on the console until you
+turn it on: select its row in the **MODS** section and press SPACE. The setting
+is remembered.
 
-    UP / DOWN        select a mod or one of its options
-    SPACE            turn the selected mod on or off
-    LEFT / RIGHT     change the selected option's value
-    ENTER            play
-
-A mod's own options (this example mod has none) live in
-`mod_config/<mod id>.json`; the start screen is the normal way to change them.
-Dropping another `.nrm` into `mods/` installs it, and deleting one uninstalls
-it.
+Every `.nrm` in `mods/` is opened at startup and listed in the start screen's
+**MODS** section. Dropping another `.nrm` into `mods/` installs it, and deleting
+one uninstalls it.
 
 Mods are recompiled into the client at startup, so a mod built for a different
 build of the game may be refused; the start screen prints the reason.

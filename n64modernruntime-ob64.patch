@@ -3238,7 +3238,7 @@ index 0000000..786872e
 +    }
 +}
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 9944a02..57c156c 100644
+index 9944a02..7379c21 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -1,5 +1,10 @@
@@ -3252,7 +3252,7 @@ index 9944a02..57c156c 100644
  
  #include "blockingconcurrentqueue.h"
  
-@@ -37,10 +42,443 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+@@ -37,10 +42,456 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
  
  bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
  
@@ -3406,8 +3406,19 @@ index 9944a02..57c156c 100644
 +    // Host-side external-message backlog (VI retraces etc. waiting for a game
 +    // thread to drain them). Grows unboundedly iff nobody drains.
 +    printf("[snap] extbacklog=%llu\n", (unsigned long long)external_messages.size_approx());
++    // Guest KSEG0 address -> host pointer. The addresses here are 32-bit
++    // values, and the runtime's convention (`TO_PTR`) is
++    // `rdram + (addr - 0xFFFFFFFF80000000)`, which only works on a value that is
++    // already sign-extended. A bare `uint32_t` zero-extends instead, so the
++    // arithmetic lands 4 GiB past RDRAM: the snapshot has been reading whatever
++    // is mapped there, and when nothing is it takes a SIGSEGV (the developer's
++    // run died here, at this function's first queue read). Sign-extend first,
++    // as `function_trace.cpp` already does.
++    auto to_host = [rdram](uint32_t addr) -> uint8_t* {
++        return rdram + ((int64_t)(int32_t)addr - (int64_t)0xFFFFFFFF80000000ll);
++    };
 +    for (uint32_t mq_ : watched) {
-+        OSMesgQueue* mq = TO_PTR(OSMesgQueue, mq_);
++        OSMesgQueue* mq = (OSMesgQueue*)to_host(mq_);
 +        uint32_t recv_head = (uint32_t)mq->blocked_on_recv;
 +        uint32_t send_head = (uint32_t)mq->blocked_on_send;
 +        int32_t count = mq->validCount;
@@ -3425,10 +3436,10 @@ index 9944a02..57c156c 100644
 +            return a >= 0x80000000u && a < 0x80800000u;
 +        };
 +        if (snapshot_thread_ptr_ok(recv_head)) {
-+            recv_tid = TO_PTR(OSThread, recv_head)->id;
++            recv_tid = ((OSThread*)to_host(recv_head))->id;
 +        }
 +        if (snapshot_thread_ptr_ok(send_head)) {
-+            send_tid = TO_PTR(OSThread, send_head)->id;
++            send_tid = ((OSThread*)to_host(send_head))->id;
 +        }
 +        printf("[snap] mq=0x%08X count=%d/%d recv_wait=t%d send_wait=t%d\n",
 +               mq_, count, cap, recv_tid, send_tid);
@@ -3458,10 +3469,12 @@ index 9944a02..57c156c 100644
 +    // pointers can be garbage (game memory corruption); guard every deref.
 +    {
 +        auto snap_w = [&](uint64_t addr) -> int32_t {
-+            return *(int32_t*)(rdram + (addr - 0xFFFFFFFF80000000));
++            return *(int32_t*)to_host((uint32_t)addr);
 +        };
++        // The `^ 2` is the runtime's halfword swap within a word (see the
++        // recompiled `MEM_HU`), applied to the guest address before the map.
 +        auto snap_hu = [&](uint64_t addr) -> uint16_t {
-+            return *(uint16_t*)(rdram + ((addr ^ 2) - 0xFFFFFFFF80000000));
++            return *(uint16_t*)to_host((uint32_t)(addr ^ 2u));
 +        };
 +        // Same RDRAM-window bound as the thread guards above: a wild KSEG0
 +        // value must not be followed out of the committed mapping.
@@ -3511,13 +3524,13 @@ index 9944a02..57c156c 100644
 +    // Key Ogre Battle 64 boot state variables (rdram reads, byte-swapped like
 +    // the game's own MEM_* macros).
 +    auto snap_w = [&](uint64_t addr) -> uint32_t {
-+        return (uint32_t)(*(int32_t*)(rdram + (addr - 0xFFFFFFFF80000000)));
++        return (uint32_t)(*(int32_t*)to_host((uint32_t)addr));
 +    };
 +    auto snap_hu = [&](uint64_t addr) -> uint16_t {
-+        return *(uint16_t*)(rdram + ((addr ^ 2) - 0xFFFFFFFF80000000));
++        return *(uint16_t*)to_host((uint32_t)(addr ^ 2u));
 +    };
 +    auto snap_b = [&](uint64_t addr) -> uint8_t {
-+        return *(uint8_t*)(rdram + ((addr ^ 3) - 0xFFFFFFFF80000000));
++        return *(uint8_t*)to_host((uint32_t)(addr ^ 3u));
 +    };
 +    printf("[snap] game: phase(D_800C4800)=0x%02X bootstate(D_800AEF98)=0x%08X spin(D_800C4C26)=0x%04X "
 +           "mask1(D_800E8B10)=0x%04X mask2(D_800E8B12)=0x%04X frameprod(D_800E918D)=0x%02X rspdone(D_800E79A4)=0x%08X "
@@ -3697,7 +3710,7 @@ index 9944a02..57c156c 100644
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
              requeued_messages.push_back(to_send);
          }
-@@ -51,6 +489,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
+@@ -51,6 +502,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message(RDRAM_ARG1) {
@@ -3705,7 +3718,7 @@ index 9944a02..57c156c 100644
      QueuedMessage to_send;
      external_messages.wait_dequeue(to_send);
      if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -59,6 +498,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -59,6 +511,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
  }
  
  void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
@@ -3713,7 +3726,7 @@ index 9944a02..57c156c 100644
      QueuedMessage to_send;
      if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
          if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
-@@ -67,6 +507,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+@@ -67,6 +520,7 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
      }
  }
  
@@ -3721,7 +3734,7 @@ index 9944a02..57c156c 100644
  extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
      OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
      mq->blocked_on_recv = NULLPTR;
-@@ -89,21 +530,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+@@ -89,21 +543,63 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
      return MQ_GET_COUNT(mq) >= mq->msgCount;
  }
  
@@ -3786,7 +3799,7 @@ index 9944a02..57c156c 100644
      }
      
      if (jam) {
-@@ -118,13 +601,52 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+@@ -118,13 +614,52 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
          TO_PTR(OSMesg, mq->msg)[last] = msg;
          mq->validCount++;
      }
@@ -3844,7 +3857,7 @@ index 9944a02..57c156c 100644
      return true;
  }
  
-@@ -137,11 +659,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +672,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -3879,7 +3892,7 @@ index 9944a02..57c156c 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +696,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +709,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.

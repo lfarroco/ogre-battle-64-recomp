@@ -15,8 +15,9 @@ start screen a **MODS** panel that toggles mods and edits their options.
 `mods/skip-boot-logos/` is the reference example (one entry hook that sends the
 boot straight to the title) and `make example-mods` builds it. Verified: the true
 baseline reaches the title at 27.7 s; with the mod the title is at 3.0 s and a
-swap-chain capture shows it rendering correctly. Three runtime bugs blocked hooks
-on this port and are fixed in `n64modernruntime-ob64.patch`. A first version that
+swap-chain capture shows it rendering correctly. Four runtime bugs stood in the
+way and are fixed in `n64modernruntime-ob64.patch`: three blocked hooks on this
+port, and one killed the packaged client at the first periodic `[snap]` dump. A first version that
 skipped the stills scene instead of never entering it broke the title, and the
 developer's report of that is section 3.
 
@@ -63,26 +64,45 @@ present and the UI is the start screen.
 
 ## 2. The start screen
 
-`app/src/launcher.cpp` gains a `ModPanel`: a flat list with one row per mod and
-one row per visible option of that mod.
+`app/src/launcher.cpp` gains a `StartPanel` with three sections:
 
-* `UP` / `DOWN` move the selection.
-* `SPACE` toggles the selected mod, or steps the selected option.
+```
+== START GAME ==   [x] Start Game starts the game; [ ] and not selectable until
+                   a ROM is loaded
+== ROM ==          [x] Loaded! and the ROM's file name, or [ ] No ROM; selecting
+                   it opens the file picker
+== MODS ==         one row per mod, then one row per visible option of that mod;
+                   a mod's short description sits in a second column
+```
+
+* `UP` / `DOWN` move the selection (section headings and an inactive START GAME
+  are skipped).
+* `SPACE` activates the selected row: START GAME plays, the ROM row opens the
+  file picker, a mod row toggles, an option row steps forward.
 * `LEFT` / `RIGHT` step the selected option's value.
-* `ENTER` plays when a ROM is ready; a click on a row activates it, a click
-  elsewhere plays (or opens the ROM picker when no ROM is ready).
-* The selected mod's `short_description` is shown under the list, and the
-  controls are printed at the bottom.
+* `ENTER` plays when a ROM is ready; it opens the picker when no ROM is loaded or
+  when the ROM row is selected.
+* Mouse: a click on a row activates it, a click elsewhere plays (or opens the
+  picker when no ROM is ready).
+
+Two requests shaped this. The ROM row (so the screen works from the keyboard
+alone) is `[x] Loaded!` plus the ROM's file name, or `[ ] No ROM` plus
+`PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN THIS WINDOW`. Then the START GAME
+section was added on top, and the old prompt line ("CLICK TO LOAD YOUR ROM…")
+and the body hint were removed because the rows state both. **Choosing a ROM does
+not start the game**: the picker and a drop both stop at the screen with the ROM
+loaded and START GAME selected, which is what makes START GAME useful on the
+first run. `ogre_test_drop` still auto-plays so a scripted run needs no input.
 
 A toggle calls `recomp::mods::enable_mod`, which writes `mods.json`; an option
 value calls `recomp::mods::set_mod_config_value`, which the runtime's config
 thread writes to `mod_config/<mod id>.json`. Enum, bool and number options are
 editable; a string option is displayed only.
 
-The screen is shown whenever a ROM is ready **and** at least one mod is
-installed, so a shipped mod always has a switch. A vanilla install (empty
-`mods/`) still boots straight in, which keeps the scripted harnesses and the
-"put the ROM next to the app" flow unchanged.
+The screen is shown whenever no ROM is loaded, and whenever a ROM is ready **and**
+at least one mod is installed, so a shipped mod always has a switch. A vanilla
+install (empty `mods/`) still boots straight in, which keeps the scripted
+harnesses and "put the ROM next to the app" flow unchanged.
 
 `dist/ogre-battle-64-recomp/` already carried `mods/`, `mod_config/` and
 `mods.json` (created by `initialize_mods` on a local run); `make dist` now also
@@ -113,6 +133,19 @@ func_80177DCC  scene 0x09's update -> 0x8004   (the title)
 ```
 
 The boot then runs `0x09` for one frame and enters the title at t ≈ 3.0 s.
+
+**It ships off.** `mod.toml` sets `enabled_by_default = false`, so the packaged
+client plays the vanilla boot until the player turns the mod on in the MODS
+section, and the choice is remembered in `mods.json`. The runtime has always read
+`enabled_by_default` from `mod.json` and defaults it to `true`, but
+`RecompModTool` neither parsed nor wrote it, so a shipped mod could not be off.
+The tool now parses it from `mod.toml` and always emits it
+(`RecompModTool/main.cpp`, in `n64recomp-ob64.patch`). Verified: the `.nrm`'s
+`mod.json` reads `"enabled_by_default": false`; a fresh config directory with
+only the `.nrm` logs `[boot] 1 mod(s) installed` and **no** `Loading mod` line,
+and the boot timeline is the vanilla one (title at 28569 ms); the start screen
+shows `[ ] Skip Boot Logos`
+(`/tmp/launcher-mod-off.png`).
 
 ### Scene `0x0A` must not be entered
 
@@ -145,7 +178,7 @@ overlay-C state — its update `func_80177A58` reads `func_8019BD0C()` and takes
 branch that draws. Entering the title from `0x09` never runs `0x0A`, and it
 renders.
 
-## 4. Three runtime fixes a hook needed
+## 4. Four runtime fixes
 
 All three are in `n64modernruntime-ob64.patch`, regenerated with the documented
 command (`git -C tools/N64ModernRuntime diff HEAD -- . ':(exclude)N64Recomp'`),
@@ -217,6 +250,48 @@ macOS process may map `rwx` anonymous memory, but no Apple Silicon machine was
 available. If it fails there, `vm_remap` returns an error and the symptom is the
 same `SIGBUS`.
 
+**(d) The `[snap]` queue snapshot dereferenced 4 GiB past RDRAM.**
+This one is not about hooks, and it is what the developer hit on the first
+packaged run. The runtime dumps a message-queue snapshot every ~90 VI retraces
+(`ultramodern/src/events.cpp:280`), and the developer's log shows it firing at
+`T=1249` and taking the process with it:
+
+```
+[snap] T=1249 --- queue snapshot ---
+[crash] host pc _ZN11ultramodern25debug_dump_queue_snapshotEPh + 0xF7
+[crash] signal 11 on N64 thread -1 fault=0x221ae3b14 rdram=0x1219fb000 offset=0x1000E8B14
+```
+
+`debug_dump_queue_snapshot` stored its guest addresses as `uint32_t`
+(`watched[]`, and `mq->blocked_on_recv`) and converted them with `TO_PTR` /
+`addr - 0xFFFFFFFF80000000`. That conversion only works on a value that is
+already sign-extended to 64 bits — which is how recompiled code holds a guest
+pointer (`PTR(x)` is `int32_t`). A bare `uint32_t` zero-extends instead, so the
+computed host address was `rdram + addr + 0x80000000`, exactly the reported
+offset (`0x1000E8B14` = `0x80000000 + 0x800E8B14`, the first watched queue).
+The faulting instruction is the first queue read, `movl (%rcx,%rax), %ecx` at
+`+0xF7` in the build's disassembly.
+
+It was intermittent because `rdram + 0x1000E8B14` is 4 GiB past the mapping:
+whether that is unmapped (fault, as here) or happens to land in another mapping
+(garbage read) depends on the process address map. The evidence that it had
+never worked is in session 90's log, which prints
+`mq=0x800E8B14 count=-1996517056/2143475736` — an impossible queue count. The
+fix sign-extends the address before mapping it (`to_host`), as
+`function_trace.cpp` already did, and every `snap_w`/`snap_hu`/`snap_b` helper
+uses it. Before/after, first periodic snapshot:
+
+```
+mq=0x800E8B14 count=-1996517056/2143475736 recv_wait=t-1   (garbage)
+mq=0x800E8B14 count=0/8 recv_wait=t18                      (fixed)
+titledisp: idx=0x0009 statep=0x800C4BBC=0x800AEFE0 srcidx=9 ind=0x8018FB70 *ind=0x80177DA0
+```
+
+`*ind = 0x80177DA0` is scene `0x09`'s enter, and the asset-table tag is `0x25`
+as the code expects, so the snapshot now reports the game rather than noise.
+The fix is a diagnostic fix; a `[snap]` line with an impossible count is now a
+statement about the game.
+
 ## 5. What was run
 
 * `make mod-syms` and `make example-mods` (the latter builds MIPS in a
@@ -238,15 +313,23 @@ same `SIGBUS`.
   the title (99 and 93 display lists); forcing `0x0A` -> `0x04` produces 35
   display lists and no frame after the title enters; forcing `0x09` -> `0x04`
   renders (`/tmp/cap-d.480.ppm`, `/tmp/title-d.png`).
-* The start screen with the mod installed, captured with `screencapture`:
-  `/tmp/ogre-launcher-shot.png` (title, prompt, error from a deliberately bad
-  `OGRE_TEST_DROP`, the `MODS` panel with `[x] Skip Boot Logos`, its description
-  and the controls line, and the save path). The shot is from the earlier
-  two-option version, so it also shows the old `Skip: Publisher stills` row.
+* The start screen, captured from the window itself (`screencapture -l <window
+  id>`, which does not need the window to be frontmost; the id comes from a
+  throwaway `CGWindowListCopyWindowInfo` program at `/tmp/winid`):
+  * `/tmp/launcher-start-loaded.png` — `[x] Start Game` selected, `[x] Loaded!`
+    with `ogrebattle64-us-rev1.z64`, and the mod row with its description.
+  * `/tmp/launcher-start-norom.png` — `[ ] Start Game` inert, `[ ] No ROM` with
+    the two-line `PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN THIS WINDOW`, and
+    `(none installed)`.
+  * `/tmp/launcher-accepted.png` — the state after a drop is accepted, captured
+    with a one-line probe (the test-drop hook stopped short of `play()`) that was
+    reverted before the final build: `[x] Loaded!` and START GAME selected.
+  * `/tmp/ogre-launcher-shot.png` — the first version (two-option mod, one
+    section), kept for the record.
   **The panel's key and mouse handlers were not exercised end to end**: driving
   them needs synthetic SDL input, and `osascript`/System Events blocked on an
   accessibility permission this session could not grant. What is verified is
-  that the panel renders with the mod; that the calls it makes
+  that the panel renders in every state; that the calls it makes
   (`recomp::mods::enable_mod`, `set_mod_config_value`) are the runtime's own; and
   that the runtime's write path works — a fresh config directory with only the
   `.nrm` present auto-enables the mod and writes `mods.json` with it in both
@@ -254,16 +337,28 @@ same `SIGBUS`.
   hand-written `mod_config/ogre_skip_boot_logos.json` with `mode = Off` was read
   back and took the old two-hook version's hooks out of the picture, which is how
   the title bug was isolated to the skip rather than to the regeneration.
+* `OGRE_TEST_DROP` still starts the game on its own (the hook calls `play()`), so
+  a scripted run needs no input: title at 4820 ms in
+  `OGRE_PREF_DIR=/tmp/ogre-e OGRE_TEST_DROP=assets/ogre64.z64`.
 * `make dist` into `dist/ogre-battle-64-recomp/`, and the packaged `mods/` folder
   holds `skip-boot-logos.nrm`.
+* The **packaged** client, run from `dist/ogre-battle-64-recomp/` with the
+  shipped mod (`OGRE_PREF_DIR=/tmp/ogre-dist-test OGRE_TEST_DROP=assets/ogre64.z64
+  OGRE_EXIT_AFTER_MS=8000`), exits 0 with **4 periodic snapshots and no
+  `[crash]` line**, all snapshots reading `mq=0x800E8B14 count=0/8`, and reaches
+  the title at 2737 ms (`/tmp/dist-run.log`). Before fix (d) this is the run that
+  died.
 * `cmake --build build-app --target ogrebattle64 -j8` and the same for
   `build-null` (both succeed).
 * `git apply --check` of the regenerated `n64modernruntime-ob64.patch` against a
   tree archived from `589bbf0`.
 
-**No probes.** Nothing is tagged, no generated file was hand-edited, and no
-`.nrm` is committed. The three changes to the vendored submodule are deliberate
-and captured in `n64modernruntime-ob64.patch`.
+**One probe, reverted.** `app/src/launcher.cpp`'s test-drop hook carried
+`// probe91` for one build, to stop short of `play()` and capture the
+post-accept state; `grep -rn probe91 app/src/` is empty in the final tree. No
+generated file was hand-edited and no `.nrm` is committed. The three changes to
+the vendored submodule are deliberate and captured in
+`n64modernruntime-ob64.patch`.
 
 ## 6. Files changed
 
@@ -282,12 +377,17 @@ and captured in `n64modernruntime-ob64.patch`.
 * `packaging/README-dist.txt` — the MODS section, and the start screen in HOW TO
   PLAY.
 * `docs/guides/app-build.md` — a Mods section.
-* `n64modernruntime-ob64.patch` — regenerated (three fixes above).
+* `n64modernruntime-ob64.patch` — regenerated (four fixes above).
+* `n64recomp-ob64.patch` — regenerated: `RecompModTool` gains
+  `enabled_by_default` (parsed from `mod.toml`, always written to `mod.json`), so
+  a shipped example can start off.
+* `mods/skip-boot-logos/mod.toml` — `enabled_by_default = false`.
 * `PLAN.md`, `docs/DECISIONS.md`, this file.
 
 Vendored (gitignored) and re-applied from the patch: submodule
 `tools/N64ModernRuntime`, files `librecomp/src/mods.cpp`,
-`librecomp/src/overlays.cpp`, `librecomp/include/librecomp/overlays.hpp`.
+`librecomp/src/overlays.cpp`, `librecomp/include/librecomp/overlays.hpp`,
+`ultramodern/src/mesgqueue.cpp`.
 
 ## 7. Next leads
 

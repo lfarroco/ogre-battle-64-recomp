@@ -122,6 +122,43 @@ index 518477d..60eb175 100644
          vram += instr_size;
      }
  
+diff --git a/RecompModTool/main.cpp b/RecompModTool/main.cpp
+index 0768f16..8c48a67 100644
+--- a/RecompModTool/main.cpp
++++ b/RecompModTool/main.cpp
+@@ -33,6 +33,10 @@ struct ModManifest {
+     std::string minimum_recomp_version;
+     std::unordered_map<std::string, std::vector<std::string>> native_libraries;
+     bool custom_gamemode = false;
++    // Whether the client enables this mod on a fresh install. The runtime has
++    // always read this from the manifest; the tool did not write it, so every
++    // mod was enabled. OGRE: emitted so an example can ship off by default.
++    bool enabled_by_default = true;
+     std::vector<toml::table> config_options;
+     std::vector<std::string> dependencies;
+     std::vector<std::string> full_dependency_strings;
+@@ -371,6 +375,10 @@ ModManifest parse_mod_config_manifest(const std::filesystem::path& basedir, cons
+     // Custom gamemode (optional)
+     ret.custom_gamemode = read_toml_value<bool>(manifest_table, "custom_gamemode", false);
+ 
++    // Whether the client enables the mod on a fresh install (optional; the
++    // client's default is true).
++    ret.enabled_by_default = read_toml_value<bool>(manifest_table, "enabled_by_default", true);
++
+     return ret;
+ }
+ 
+@@ -554,6 +562,10 @@ void write_manifest(const std::filesystem::path& path, const ModManifest& manife
+         output_data.emplace("custom_gamemode", manifest.custom_gamemode);
+     }
+ 
++    // Always emitted, so the packaged manifest states the default explicitly
++    // rather than relying on the client's fallback.
++    output_data.emplace("enabled_by_default", manifest.enabled_by_default);
++
+     toml::json_formatter formatter{output_data, toml::format_flags::indentation | toml::format_flags::indentation};
+     std::ofstream output_file(path);
+ 
 diff --git a/include/recomp.h b/include/recomp.h
 index 73f3e73..13ea02b 100644
 --- a/include/recomp.h

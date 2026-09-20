@@ -36,6 +36,12 @@ dependencies = [ ]
 
 native_libraries = [ ]
 
+# Ships off. The client turns a mod on by default only when its manifest says
+# so, and the shipped package should behave like the vanilla game until the
+# player opts in from the start screen's MODS section. RecompModTool writes this
+# into the `.nrm`'s `mod.json`, where the runtime reads it.
+enabled_by_default = false
+
 [inputs]
 
 # Written by tools/build-example-mods.sh.

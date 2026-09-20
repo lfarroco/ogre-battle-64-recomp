@@ -1260,30 +1260,52 @@ list the mods and write a toggle before the game starts. The second scan inside
 
 ### The start screen
 
-`app/src/launcher.cpp` draws a **MODS** panel under the usual prompt. It is a
-flat list: one row per mod, then one row per visible option of that mod.
+`app/src/launcher.cpp` draws the start screen's list under the wordmark. It has
+three sections:
 
 ```
-UP / DOWN        select a row
-SPACE            toggle a mod, or step the selected option
+== START GAME ==   [x] Start Game starts the game; [ ] until a ROM is loaded,
+                   and then the row cannot be selected
+== ROM ==          [x] Loaded! and the ROM's file name, or [ ] No ROM; the row
+                   opens the file picker
+== MODS ==         one row per mod, then one row per visible option of that mod;
+                   a mod's short description sits in a second column
+```
+
+```
+UP / DOWN        select a row (section headings, and START GAME before a ROM is
+                 loaded, are skipped)
+SPACE            activate the selected row: START GAME plays, the ROM row opens
+                 the file picker, a mod row toggles, an option row steps
 LEFT / RIGHT     step the selected option's value
-ENTER            play (when a ROM is ready)
+ENTER            play, or open the ROM picker when no ROM is loaded or the ROM
+                 row is selected
 mouse            click a row to activate it; click elsewhere to play
 ```
+
+Choosing a ROM — by picker or by dropping one on the window — **does not start
+the game**. The ROM row shows `[x] Loaded!` with the file name, START GAME
+becomes selectable, and the selection moves to it; ENTER or SPACE then plays.
+That is what makes START GAME meaningful on the first run, and the ROM row is
+what makes the whole screen usable from the keyboard alone.
 
 A toggle goes to `recomp::mods::enable_mod`, which writes `mods.json`; an option
 value goes to `recomp::mods::set_mod_config_value`, which writes
 `mod_config/<mod id>.json` on the runtime's config thread. The start screen
-appears even when a stored ROM is ready whenever at least one mod is installed,
-so the player always has a way to turn a shipped mod off. Any mod can be
-removed by deleting its `.nrm`.
+appears when no ROM is loaded and whenever a stored ROM is ready with at least
+one mod installed, so the player always has a way to turn a shipped mod off. Any
+mod can be removed by deleting its `.nrm`.
 
 ### Building an example mod
 
 `mods/skip-boot-logos/` is the reference: one code mod, one entry hook on a
 scene update, and the section macros in `include/`. It writes the pending-scene
 word from scene `0x09`'s update so the boot goes straight to the title, skipping
-the boot intro and the publisher stills (~26 s in total).
+the boot intro and the publisher stills (~26 s in total). Its manifest sets
+`enabled_by_default = false`, so the shipped package plays the vanilla boot until
+the player turns it on in the MODS section. The runtime has always read that
+field from `mod.json`; `RecompModTool` did not write it, so every mod was enabled
+— the tool now parses and emits it (`n64recomp-ob64.patch`).
 
 **Skip to the title from scene `0x09`, not from scene `0x0A`.** Writing the word
 from scene `0x0A`'s update cuts the stills to one frame, and the title then
@@ -1317,10 +1339,10 @@ registered by `register_base_overlays()`, which are the ELF's own sections
 (`app/src/bank_overlays.cpp`) is not covered by that map and is unproven; start
 with functions in the base sections.
 
-### Three runtime fixes this needed
+### Four runtime fixes this needed
 
-All three are in `n64modernruntime-ob64.patch`; without them a hook either
-fails to load or corrupts memory.
+All four are in `n64modernruntime-ob64.patch`; without them a hook either fails
+to load, corrupts memory, or the periodic snapshot kills the process.
 
 1. **Section indices.** A generated `RelocEntry.target_section` is the
    *recompiler's* number for an ELF section (this port's code sections are
@@ -1343,6 +1365,19 @@ fails to load or corrupts memory.
    `apply_regenlist` -> `patch_func`. `unprotect` now replaces the page with a
    private anonymous copy whose maxprot is `rwx` (`vm_remap` with
    `VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE`) before making it writable.
+4. **The periodic `[snap]` snapshot dereferenced 4 GiB past RDRAM.** The runtime
+   dumps a message-queue snapshot every ~90 VI retraces
+   (`ultramodern::debug_dump_queue_snapshot`). Its guest addresses are 32-bit,
+   and it converted them with `TO_PTR`/`addr - 0xFFFFFFFF80000000`, which only
+   works on a value that is already sign-extended: a bare `uint32_t` zero-extends,
+   so the computed host address was `rdram + addr + 0x80000000`. Whether that
+   faults depends on the process address map, which is why it was intermittent —
+   the snapshot had been printing garbage (`count=-1996517056`) and the
+   developer's run died in `debug_dump_queue_snapshot + 0xF7` with the fault
+   4 GiB past RDRAM. It now sign-extends before the map, as `function_trace.cpp`
+   already did. The snapshot is a diagnostic, so this is a fix to the diagnostic;
+   a `[snap]` line with an impossible count is now a bug report about the game,
+   not about the snapshot.
 
 ## Config directory
 
