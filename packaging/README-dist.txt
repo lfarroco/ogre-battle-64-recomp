@@ -32,8 +32,9 @@ HOW TO PLAY
    window says which case it is and keeps asking.
 
 3. The game stores the validated ROM in this folder, so later launches go
-   straight into the game. Hold on to this folder: the game and its save live
-   in it.
+   straight into the game — unless a mod is installed, in which case the start
+   screen appears first so the mods can be turned on or off (press ENTER to
+   play). Hold on to this folder: the game, its save and its mods live in it.
 
 
 SAVES
@@ -47,6 +48,31 @@ in this folder, next to the executable. Back that file up to keep your
 progress; delete it to start fresh. Setting the environment variable
 `OGRE_PREF_DIR` to another directory moves both the save and the stored ROM
 there instead.
+
+
+MODS
+----
+
+The `mods/` folder holds the mods the client loads. A fresh copy of this
+package carries one example mod:
+
+    mods/skip-boot-logos.nrm    Skip Boot Logos (boots straight to the title)
+
+Every `.nrm` in `mods/` is opened at startup and listed in the start screen,
+which appears when at least one mod is installed. There:
+
+    UP / DOWN        select a mod or one of its options
+    SPACE            turn the selected mod on or off
+    LEFT / RIGHT     change the selected option's value
+    ENTER            play
+
+A mod's own options (this example mod has none) live in
+`mod_config/<mod id>.json`; the start screen is the normal way to change them.
+Dropping another `.nrm` into `mods/` installs it, and deleting one uninstalls
+it.
+
+Mods are recompiled into the client at startup, so a mod built for a different
+build of the game may be refused; the start screen prints the reason.
 
 
 REQUIREMENTS

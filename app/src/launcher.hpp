@@ -45,6 +45,16 @@ struct LauncherContext {
     // Message to show when the launcher opens (the previous failure, if any).
     std::string initial_error;
 
+    // A ROM that was already found and validated before the screen opened (the
+    // stored copy, or one sitting next to the executable). When set, the screen
+    // opens ready to play and returns this path on Enter or a click; when empty,
+    // the player must click, drop or pick a ROM first.
+    std::filesystem::path ready_rom;
+
+    // The id mods target. The mod panel lists the mods opened for this id, and
+    // writes each toggle to `mods.json` through the runtime's mod system.
+    std::string mod_game_id;
+
     // Validates `path` and stores it as the ROM to boot. Returns an empty
     // string on success, or a human-readable explanation to show on screen
     // (the launcher then keeps running).

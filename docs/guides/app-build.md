@@ -119,8 +119,10 @@ with no click at all.
 
 The ROM is validated by XXH3 hash and the runtime stores a copy in the config
 directory, so **later launches skip the start screen and boot straight into the
-game**. `OGRE_LAUNCHER=1` forces the start screen even when a ROM is available;
-`OGRE_ROM=<path>` names one without an argument.
+game** — unless a mod is installed, in which case the start screen appears first
+so the mods can be turned on or off (see "Mods" below). `OGRE_LAUNCHER=1` forces
+the start screen even when a ROM is available; `OGRE_ROM=<path>` names one
+without an argument.
 
 **The config directory is the executable's own directory** (`SDL_GetBasePath`),
 not the per-user preference dir, so a distributed build is self-contained: the
@@ -1229,6 +1231,118 @@ frame #1  osRecvMesg         frame #3  func_80088F08 + 717   <- the guest caller
 (`bt` at a *signal* stop can still print only the faulting frame — if the crash
 is a `SIGFPE`/`SIGBUS` inside the runtime, break on that function instead:
 `lldb -b -o "breakpoint set -n do_recv" -o run -o "bt 14" -- ./build-null/ogrebattle64`.)
+
+## Mods
+
+The runtime (`librecomp/src/mods.cpp`) has a complete mod system: it opens every
+mod it finds, recompiles a code mod's MIPS at load time, applies the function
+hooks and replacements the mod declares, and persists the player's toggles and
+per-mod option values. The port wires it up and gives it a UI.
+
+**Enabling it was two lines and a screen.** `recomp::start()` already called
+`initialize_mods()` and `scan_mods()`, and `wait_for_game_started()` already
+loaded the enabled mods — but only when `GameEntry::mod_game_id` is non-empty,
+and it was never set, so every mod in `mods/` was parsed and thrown away.
+`app/src/main.cpp` now sets it to `MOD_GAME_ID` (`app/src/game.hpp`) and calls
+`initialize_mods()` + `scan_mods()` before the start screen, so the screen can
+list the mods and write a toggle before the game starts. The second scan inside
+`recomp::start` re-reads `mods.json` and keeps the toggles.
+
+### Where the files live
+
+| path | what |
+|---|---|
+| `<config>/mods/*.nrm` | one file per mod; the packaged mod |
+| `<config>/mod_config/<mod id>.json` | that mod's option values |
+| `<config>/mods.json` | which mods are enabled, and their order |
+
+`<config>` is the executable's own directory unless `OGRE_PREF_DIR` overrides it.
+
+### The start screen
+
+`app/src/launcher.cpp` draws a **MODS** panel under the usual prompt. It is a
+flat list: one row per mod, then one row per visible option of that mod.
+
+```
+UP / DOWN        select a row
+SPACE            toggle a mod, or step the selected option
+LEFT / RIGHT     step the selected option's value
+ENTER            play (when a ROM is ready)
+mouse            click a row to activate it; click elsewhere to play
+```
+
+A toggle goes to `recomp::mods::enable_mod`, which writes `mods.json`; an option
+value goes to `recomp::mods::set_mod_config_value`, which writes
+`mod_config/<mod id>.json` on the runtime's config thread. The start screen
+appears even when a stored ROM is ready whenever at least one mod is installed,
+so the player always has a way to turn a shipped mod off. Any mod can be
+removed by deleting its `.nrm`.
+
+### Building an example mod
+
+`mods/skip-boot-logos/` is the reference: one code mod, one entry hook on a
+scene update, and the section macros in `include/`. It writes the pending-scene
+word from scene `0x09`'s update so the boot goes straight to the title, skipping
+the boot intro and the publisher stills (~26 s in total).
+
+**Skip to the title from scene `0x09`, not from scene `0x0A`.** Writing the word
+from scene `0x0A`'s update cuts the stills to one frame, and the title then
+produces no display lists at all and the last presented frame stays on screen.
+Scene `0x0A`'s enter and leave set up and tear down globals in overlay C that
+only its *completed* state machine leaves consistent. Entering the title from
+scene `0x09` never runs `0x0A` and renders correctly.
+
+```sh
+make mod-syms        # -> mods/reference/{dump,data_dump}.toml
+make example-mods    # -> build/mods/skip-boot-logos.nrm
+```
+
+`make mod-syms` runs N64Recomp with `--dump-context` on the linked
+`build/ogrebattle64.elf`; a mod names the functions it hooks and the mod tool
+resolves those names against that dump. Both files are generated and gitignored,
+for the same reason `RecompiledFuncs/` is: they need the ROM.
+
+`tools/build-example-mods.sh` compiles each mod's `src/*.c` to big-endian MIPS
+and runs `RecompModTool` on the result. Apple's clang has no MIPS target, so the
+script uses a `mips-linux-gnu-gcc` when one is on `PATH` and otherwise runs
+`gcc-mips-linux-gnu` in a `debian:bookworm-slim` container. `make dist` ships
+whatever is already in `build/mods/`; it does not build mods.
+
+### What a hook can reach
+
+A mod declares a hook as a *section ROM address + function vram* pair, and the
+runtime resolves it through `get_vrom_to_section_map()` — the sections
+registered by `register_base_overlays()`, which are the ELF's own sections
+(`.entry`, `.main`, `.streamedA/B/C`). A hook in a streamed bank unit
+(`app/src/bank_overlays.cpp`) is not covered by that map and is unproven; start
+with functions in the base sections.
+
+### Three runtime fixes this needed
+
+All three are in `n64modernruntime-ob64.patch`; without them a hook either
+fails to load or corrupts memory.
+
+1. **Section indices.** A generated `RelocEntry.target_section` is the
+   *recompiler's* number for an ELF section (this port's code sections are
+   3/6/9/12/16 of 23). `populate_reference_symbols` looks the function up by its
+   *position* in the code-section table, so it found nothing and the mod failed
+   with `Failed to load mod code (Code mod loading internal error)`.
+   `context_from_regenerated_list` now translates the index
+   (`get_code_section_index_from_section_index`).
+2. **Data relocations.** A HI16/LO16 relocation against a section that holds no
+   code is a data reference. This project recompiles with absolute symbols, so
+   the immediate already holds the final address and the runtime has no load
+   address for that section (`section_addresses[data_section]` is zero).
+   Regenerating it as a reference-symbol relocation emitted a load from address
+   0 and the following store ran off the end of RDRAM. Those relocations are now
+   left as the immediates they are.
+3. **macOS code pages.** macOS maps the executable's `__TEXT` with an `r-x`
+   maxprot, so `mprotect` fails with `EACCES` and `vm_protect` returns
+   `KERN_PROTECTION_FAILURE`; patching a recompiled function's entry to point at
+   its hooked version is a write there, and it died with `SIGBUS` inside
+   `apply_regenlist` -> `patch_func`. `unprotect` now replaces the page with a
+   private anonymous copy whose maxprot is `rwx` (`vm_remap` with
+   `VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE`) before making it writable.
 
 ## Config directory
 

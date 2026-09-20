@@ -49,7 +49,7 @@ index 37556bd..eefe64b 100644
  };
  
 diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
-index 35703bd..d817c03 100644
+index 35703bd..be20d5b 100644
 --- a/librecomp/include/librecomp/overlays.hpp
 +++ b/librecomp/include/librecomp/overlays.hpp
 @@ -6,6 +6,7 @@
@@ -60,7 +60,23 @@ index 35703bd..d817c03 100644
  #include "sections.h"
  
  namespace recomp {
-@@ -45,6 +46,59 @@ namespace recomp {
+@@ -38,6 +39,15 @@ namespace recomp {
+         recomp_func_t* get_func_by_section_rom_function_vram(uint32_t section_rom, uint32_t function_vram);
+         bool get_func_entry_by_section_index_function_offset(uint16_t code_section_index, uint32_t function_offset, FuncEntry& func_out);
+         recomp_func_t* get_func_by_section_index_function_offset(uint16_t code_section_index, uint32_t function_offset);
++
++        // The recompiler numbers every ELF section, including data sections, and
++        // that numbering is what a generated `RelocEntry.target_section` holds.
++        // The section table here holds only the code sections, indexed by their
++        // position in it. Anything that resolves a function by section index
++        // needs the position, so a reloc's section index has to be translated
++        // first. Returns false when `section_index` is one of the special values
++        // (import, event, absolute) or names a section with no code.
++        bool get_code_section_index_from_section_index(uint16_t section_index, uint16_t& code_section_index_out);
+         recomp_func_t* get_base_export(const std::string& export_name);
+         recomp_func_ext_t* get_ext_base_export(const std::string& export_name);
+         size_t get_base_event_index(const std::string& event_name);
+@@ -45,6 +55,59 @@ namespace recomp {
  
          void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
  
@@ -216,7 +232,7 @@ index f84ac71..7b8638b 100644
      printf("Initializing recomp heap at offset 0x%08X with size 0x%08X\n", heap_offset, static_cast<uint32_t>(heap_size));
  
 diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
-index 0f7de83..6bbe537 100644
+index 0f7de83..856225c 100644
 --- a/librecomp/src/mods.cpp
 +++ b/librecomp/src/mods.cpp
 @@ -74,6 +74,10 @@ bool get_to_vec(const nlohmann::json& val, std::vector<T2>& out) {
@@ -230,7 +246,79 @@ index 0f7de83..6bbe537 100644
  #else
  #   error "Unsupported architecture!"
  #endif
-@@ -585,6 +589,10 @@ void patch_func(recomp_func_t* target_func, recomp::mods::GenericFunction replac
+@@ -169,6 +173,11 @@ void protect(void* target_func, uint64_t old_flags) {
+ #  include <unistd.h>
+ #  include <dlfcn.h>
+ #  include <sys/mman.h>
++#  if defined(__APPLE__)
++#    include <mach/mach.h>
++#    include <mach/vm_map.h>
++#    include <mach/vm_prot.h>
++#  endif
+ 
+ class recomp::mods::DynamicLibrary {
+ public:
+@@ -229,22 +238,53 @@ private:
+ 
+ void unprotect(void* target_func, uint64_t* old_flags) {
+     // Align the address to a page boundary.
+-    uintptr_t page_start = (uintptr_t)target_func;
++    uintptr_t start = (uintptr_t)target_func;
+     int page_size = getpagesize();
+-    page_start = (page_start / page_size) * page_size;
++    uintptr_t page_start = (start / page_size) * page_size;
++    // `patch_func` writes at most 16 bytes at the function entry, which can
++    // cross into the next page when the function starts near a page end.
++    size_t length = (start - page_start) + 16;
++    size_t num_pages = (length + page_size - 1) / page_size;
++
++#if defined(__APPLE__)
++    // macOS maps the main executable's __TEXT with an r-x maxprot, so neither
++    // `mprotect` nor `vm_protect` can add write permission to a recompiled
++    // function's page: `mprotect` fails with EACCES and `vm_protect` returns
++    // KERN_PROTECTION_FAILURE, and the write that follows is a SIGBUS. Replace
++    // each page with a private anonymous copy of itself whose maxprot is rwx,
++    // taken before the remap so the bytes do not change. The copy is writable
++    // and executable, so `protect` can later restore r-x.
++    for (size_t page_index = 0; page_index < num_pages; page_index++) {
++        vm_address_t page = (vm_address_t)(page_start + page_index * page_size);
++        vm_address_t copy = 0;
++        if (vm_allocate(mach_task_self(), &copy, (vm_size_t)page_size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
++            continue;
++        }
++        memcpy(reinterpret_cast<void*>(copy), reinterpret_cast<void*>(page), (size_t)page_size);
++        vm_address_t destination = page;
++        vm_prot_t cur_protection = VM_PROT_READ | VM_PROT_WRITE;
++        vm_prot_t max_protection = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
++        vm_remap(mach_task_self(), &destination, (vm_size_t)page_size, 0,
++                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), copy, FALSE,
++                 &cur_protection, &max_protection, VM_INHERIT_NONE);
++        vm_deallocate(mach_task_self(), copy, (vm_size_t)page_size);
++    }
++#endif
+ 
+-    int result = mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE);
++    int result = mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_WRITE);
+     *old_flags = 0;
+     (void)result;
+ }
+ 
+ void protect(void* target_func, uint64_t old_flags) {
+     // Align the address to a page boundary.
+-    uintptr_t page_start = (uintptr_t)target_func;
++    uintptr_t start = (uintptr_t)target_func;
+     int page_size = getpagesize();
+-    page_start = (page_start / page_size) * page_size;
++    uintptr_t page_start = (start / page_size) * page_size;
++    size_t length = (start - page_start) + 16;
++    size_t num_pages = (length + page_size - 1) / page_size;
+ 
+-    int result = mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
++    int result = mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC);
+     (void)result;
+ }
+ #endif
+@@ -585,6 +625,10 @@ void patch_func(recomp_func_t* target_func, recomp::mods::GenericFunction replac
             write_bytes(&native_func, sizeof(&native_func));
          }
      }, replacement_func);
@@ -241,8 +329,50 @@ index 0f7de83..6bbe537 100644
  #else
  #   error "Unsupported architecture"
  #endif
+@@ -1414,9 +1458,40 @@ N64Recomp::Context context_from_regenerated_list(const RegeneratedList& regenlis
+             else {
+                 reloc_out.symbol_index = 0; // Unused for live recompilation.
+             }
+-            reloc_out.target_section = reloc_in.target_section;
++            // `RegeneratedReloc.target_section` comes from a generated
++            // `RelocEntry`, whose section index is the recompiler's numbering of
++            // every ELF section. The recompiled function lookup below uses the
++            // position in the code-section table instead, and the two differ as
++            // soon as a project has data sections between its code sections (this
++            // port's `.entry`/`.main`/`.streamed{A,B,C}` are sections 3/6/9/12/16
++            // of 23). `populate_reference_symbols` resolves the regenerated calls
++            // by that lookup, so translate here. Special sections (import, event,
++            // absolute) have no code section and are left as they are.
++            uint16_t translated_section = reloc_in.target_section;
++            uint16_t code_section_index = 0;
++            const bool has_code_section =
++                recomp::overlays::get_code_section_index_from_section_index(reloc_in.target_section, code_section_index);
++            if (has_code_section) {
++                translated_section = code_section_index;
++            }
++            reloc_out.target_section = translated_section;
+             reloc_out.type = static_cast<N64Recomp::RelocType>(reloc_in.type);
+             reloc_out.reference_symbol = true;
++
++            // A HI16/LO16 relocation against a section that holds no code is a
++            // data reference. This project recompiles with absolute symbols, so
++            // the instruction's immediate already holds the final address, and
++            // the runtime registers a load address only for the code sections —
++            // `section_addresses[data_section]` is zero. Relocating such a
++            // reference would therefore emit a load from address 0 and the store
++            // that follows would run off the end of RDRAM. Leave the immediate
++            // alone, which is what the offline recompiler does for the same
++            // relocation.
++            if (!has_code_section &&
++                (reloc_out.type == N64Recomp::RelocType::R_MIPS_HI16 ||
++                 reloc_out.type == N64Recomp::RelocType::R_MIPS_LO16)) {
++                reloc_out.type = N64Recomp::RelocType::R_MIPS_NONE;
++            }
+         }
+     }
+ 
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..2ac837a 100644
+index 8c8e5d1..6ad498c 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,12 @@
@@ -600,10 +730,20 @@ index 8c8e5d1..2ac837a 100644
      section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
  
      // Sort the executable sections by rom address
-@@ -361,14 +686,58 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +686,68 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
++bool recomp::overlays::get_code_section_index_from_section_index(uint16_t section_index, uint16_t& code_section_index_out) {
++    for (size_t i = 0; i < sections_info.num_code_sections; i++) {
++        if (sections_info.code_sections[i].index == section_index) {
++            code_section_index_out = static_cast<uint16_t>(i);
++            return true;
++        }
++    }
++    return false;
++}
++
 +// Temporary diagnostic: dump the calling N64 thread's recompiled call chain.
 +static void dump_caller_chain(const char* label) {
 +    uint8_t* rdram = ultramodern::get_rdram_base();

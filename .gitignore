@@ -20,6 +20,11 @@ RspFuncs/
 *.map
 *.o
 
+# Example mods: the base symbol dump (`make mod-syms`) is generated from the
+# linked ELF, and each mod's MIPS object/ELF is built by `make example-mods`.
+mods/reference/*.toml
+mods/*/build/
+
 # Third-party tooling (see README.md for setup)
 tools/venv/
 tools/N64Recomp/

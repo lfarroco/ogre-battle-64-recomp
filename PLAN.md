@@ -40,6 +40,31 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The mod system is on, with an example mod shipped (session 91).** The
+  runtime's mod support (`librecomp/src/mods.cpp`) was already present and
+  already called by `recomp::start()`, but `GameEntry::mod_game_id` was never
+  set, so `wait_for_game_started()` skipped loading and every `.nrm` in `mods/`
+  was parsed and discarded. `app/src/main.cpp` now sets it and scans before the
+  start screen; the start screen (`app/src/launcher.cpp`) draws a **MODS** panel
+  that toggles mods and edits their options, and appears whenever a mod is
+  installed so a shipped mod can be turned off. `mods/skip-boot-logos/` is the
+  reference example: one entry hook on scene `0x09`'s update writes the title's
+  id into the pending-scene word, so the boot goes straight to the title. Built
+  by `make mod-syms` + `make example-mods` and shipped by `make dist` when
+  present. Verified: the true baseline boots to the title at 27.7 s; with the mod
+  the title is at 3.0 s and renders correctly (capture), with the battery still
+  loaded. **The skip must come from scene `0x09`, not `0x0A`**: cutting `0x0A` to
+  one frame leaves the title producing no display lists at all and the last
+  presented frame on screen, because `0x0A`'s enter/leave touch overlay-C globals
+  that only its completed state machine leaves consistent. Three runtime fixes
+  were needed and are in `n64modernruntime-ob64.patch`: the recompiler-context
+  section index must be translated to a code-section index before a regenerated
+  call is resolved; HI16/LO16 relocations against sections that hold no code must
+  keep their absolute immediates; and macOS cannot make the executable's `__TEXT`
+  writable, so the page is replaced with a private copy before a hooked function
+  is patched. See `docs/HANDOFF-2026-09-20-session91.md` and
+  `docs/guides/app-build.md` → "Mods".
+
 - ✅ **The "Use Item" unit-command screen runs at full speed (session 90).** The
   screen's per-frame lookup `func_ovlN_801DA248` (bank unit N) carried an
   injected blocking `yield_self` at its outer loop's backward branch

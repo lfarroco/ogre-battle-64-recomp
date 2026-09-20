@@ -1,0 +1,53 @@
+# Build definition for the "Skip Boot Logos" example mod.
+#
+# RecompModTool takes this file and the ELF named in `[inputs]` and writes a
+# `.nrm` (the packaged mod the client loads) plus the symbol and binary files it
+# is built from. `tools/build-example-mods.sh` runs the whole thing.
+
+[manifest]
+
+# The id `mods.json` stores the player's toggle against. It must stay stable.
+id = "ogre_skip_boot_logos"
+
+version = "1.0.0"
+
+display_name = "Skip Boot Logos"
+
+description = """
+The game plays the boot intro (the falling cube and the Nintendo 64 logo) and
+then about sixteen seconds of publisher stills (Licensed by Nintendo, ATLUS,
+QUEST) before the title. This mod moves the boot straight to the title.
+
+The cartridge save is read before the boot's first scene, so the title is
+reached with the battery already loaded."""
+
+short_description = "Boot straight to the title."
+
+authors = [ "Ogre Battle 64 Recomp" ]
+
+# The id the port registers for mods. See `MOD_GAME_ID` in app/src/game.hpp.
+game_id = "ogrebattle64"
+
+# The port's `project_version` is 0.1.0 (app/src/main.cpp). A mod whose minimum
+# is higher is refused at load.
+minimum_recomp_version = "0.1.0"
+
+dependencies = [ ]
+
+native_libraries = [ ]
+
+[inputs]
+
+# Written by tools/build-example-mods.sh.
+elf_path = "build/mod.elf"
+
+# The output `<mod_filename>.nrm`.
+mod_filename = "skip-boot-logos"
+
+# The base game's symbols, written by `make mod-syms`. The mod names the
+# functions it hooks, and the mod tool resolves those names against this file.
+# Paths here are relative to this file.
+func_reference_syms_file = "../reference/dump.toml"
+data_reference_syms_files = [ "../reference/data_dump.toml" ]
+
+additional_files = [ ]

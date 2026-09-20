@@ -23,6 +23,7 @@
 #include "recomp.h"
 #include "funcs.h"
 #include "librecomp/game.hpp"
+#include "librecomp/mods.hpp"
 
 #include "game.hpp"
 #include "launcher.hpp"
@@ -150,6 +151,12 @@ int main(int argc, char** argv) {
     entry.internal_name = std::string(ogre::INTERNAL_NAME);
     entry.display_name = std::string(ogre::DISPLAY_NAME);
     entry.game_id = std::u8string(ogre::GAME_ID);
+    // The id mods target. `recomp::register_game` registers it with the runtime's
+    // mod system, and `wait_for_game_started` loads the enabled mods only when
+    // this is non-empty (librecomp/src/recomp.cpp). It stayed empty until the mod
+    // system was wired up, so every mod in `mods/` was opened, parsed and thrown
+    // away.
+    entry.mod_game_id = std::string(ogre::MOD_GAME_ID);
     entry.entrypoint_address = ogre::ENTRYPOINT_ADDRESS;
     entry.entrypoint = recomp_entrypoint;
     // Register streamed overlays A/B/C after init_overlays() clears the map,
@@ -181,6 +188,20 @@ int main(int argc, char** argv) {
 
     recomp::register_game(entry);
     fprintf(stderr, "[boot] game registered\n");
+
+    // --- mods -----------------------------------------------------------------
+    // Create `<config>/mods` and `<config>/mod_config`, then open every mod in
+    // `mods/` and apply `mods.json`. `recomp::start` repeats both calls before it
+    // boots (librecomp/src/recomp.cpp), which is safe: `scan_mod_folder` starts
+    // with `close_mods()`, and the second pass re-reads `mods.json`. Scanning
+    // here is what lets the start screen list the installed mods and write a
+    // toggle before the game starts.
+    recomp::mods::initialize_mods();
+    recomp::mods::scan_mods();
+    const std::vector<recomp::mods::ModDetails> installed_mods =
+        recomp::mods::get_all_mod_details(entry.mod_game_id);
+    fprintf(stderr, "[boot] %zu mod(s) installed in %s\n", installed_mods.size(),
+            recomp::mods::get_mods_directory().string().c_str());
 
     // --- base overlays (entry + main sections) --------------------------------
     ogre::register_base_overlays();
@@ -252,12 +273,21 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (rom_path.empty()) {
+    if (rom_path.empty() || !installed_mods.empty() || launcher_forced()) {
         // The start screen is the whole interface: it returns the path of a ROM
         // it has already validated, or empty if the user closed the window.
+        //
+        // It also owns the mod toggles, and for that reason it is shown even when
+        // a ROM is ready. A vanilla install (no mods in `mods/`) still boots
+        // straight away, so the "put the ROM next to the app and launch" flow is
+        // unchanged; an install with mods gets one screen where the player can
+        // turn them off. `OGRE_LAUNCHER=1` forces the screen, and a command-line
+        // ROM still boots directly when nothing is installed.
         ogre::LauncherContext context;
         context.pref_dir = pref_dir;
         context.initial_error = launcher_error;
+        context.ready_rom = rom_path;
+        context.mod_game_id = std::string(ogre::MOD_GAME_ID);
         context.accept_rom = accept_rom;
         rom_path = ogre::run_launcher(context);
         if (rom_path.empty()) {

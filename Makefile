@@ -233,6 +233,29 @@ recompcov:
 .PHONY: recompcov
 
 # ---------------------------------------------------------------------------
+# Example mods (mods/). A mod's code is compiled to big-endian MIPS and then
+# recompiled against the base game's symbols, so it needs two derived inputs:
+# the linked ELF (already a prerequisite of the recompilation) and the reference
+# symbol dump made from it. Both are generated and gitignored, for the same
+# reason RecompiledFuncs/ is: they need the ROM.
+#
+#   make mod-syms     -> mods/reference/dump.toml, data_dump.toml
+#   make example-mods -> build/mods/<name>.nrm
+#
+# `tools/build-example-mods.sh` needs a MIPS cross gcc (or Docker); see its
+# header. `make dist` ships whatever is already in build/mods/.
+# ---------------------------------------------------------------------------
+.PHONY: mod-syms
+mod-syms: $(ELF)
+	@mkdir -p mods/reference
+	@cd mods/reference && ../../$(N64RECOMP) ../../config.toml --dump-context >/dev/null
+	@echo "==> mods/reference/dump.toml, mods/reference/data_dump.toml"
+
+.PHONY: example-mods
+example-mods: mod-syms
+	tools/build-example-mods.sh
+
+# ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C
 # also uses (see config-bankA.yaml / config-bankC.yaml). Kept separate because
@@ -528,6 +551,16 @@ dist: app
 	  ldd "$(DIST_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
 	fi
 	cp "$(CURDIR)/packaging/README-dist.txt" "$(DIST_DIR)/README.txt"
+	# Example mods. `make example-mods` builds them (it needs a MIPS cross
+	# compiler); this target only ships what is already there, so a package
+	# built without that toolchain still succeeds and says what is missing.
+	@mkdir -p "$(DIST_DIR)/mods" "$(DIST_DIR)/mod_config"
+	@if ls build/mods/*.nrm >/dev/null 2>&1; then \
+	  cp build/mods/*.nrm "$(DIST_DIR)/mods/"; \
+	  echo "==> bundled example mods:"; ls -1 "$(DIST_DIR)/mods"; \
+	else \
+	  echo "    no example mods in build/mods (run 'make example-mods' first)"; \
+	fi
 	@echo "==> $(DIST_DIR)"
 	@ls -lh "$(DIST_DIR)"
 

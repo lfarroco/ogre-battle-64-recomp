@@ -12,6 +12,8 @@
 
 #include <SDL.h>
 
+#include <librecomp/mods.hpp>
+
 #if defined(OGRE_HAVE_NFD)
 #include <nfd.h>
 #endif
@@ -24,8 +26,11 @@ namespace {
 constexpr const char* kTitle = "OGRE BATTLE 64: RECOMP";
 constexpr const char* kSubtitle = "CLICK TO LOAD YOUR ROM (OR DROP IT IN THIS WINDOW)";
 constexpr const char* kReadyHint = "OR PLACE THE ROM IN THIS FOLDER AND LAUNCH AGAIN";
+constexpr const char* kPlayPrompt = "PRESS ENTER TO PLAY";
 constexpr const char* kErrorTitle = "THAT IS NOT A USABLE ROM";
 constexpr const char* kErrorHint = "CLICK OR DROP A ROM TO TRY AGAIN";
+constexpr const char* kModsTitle = "MODS";
+constexpr const char* kModsHint = "UP/DOWN SELECT   SPACE/CLICK TOGGLE   LEFT/RIGHT CHANGE VALUE";
 
 // A black window; the content sits slightly above centre.
 constexpr int kWindowWidth = 1280;
@@ -35,6 +40,7 @@ constexpr int kSubtitleScale = 2;
 constexpr int kBodyScale = 2;
 constexpr int kErrorScale = 2;
 constexpr int kFooterScale = 2;
+constexpr int kModScale = 2;
 
 const SDL_Color kTitleColor{238, 238, 232, 255};
 const SDL_Color kSubtitleColor{196, 200, 208, 255};
@@ -285,6 +291,232 @@ int chars_per_line(const Font& font, int scale, int max_width_px) {
     return std::max(12, max_width_px / advance);
 }
 
+// --- mod panel ---------------------------------------------------------------
+//
+// The start screen owns the mod toggles. The runtime's mod system has no UI of
+// its own (`app/src/renderer.cpp` was adapted from RecompFrontend "minus the
+// RecompFrontend UI"), so this panel is the player's way to turn a shipped mod
+// off.
+//
+// The list is flat: one row per mod, then one row per visible config option of
+// that mod. Up/Down reach every row, Space activates the selected row (a mod
+// row toggles the mod, an option row steps its value), and Left/Right step the
+// value of an option row. Mouse clicks activate the row under the pointer.
+
+// The displayed value of one config option. Enum values show the option name,
+// not the number, so the panel reads like the mod's own description.
+std::string config_value_text(const recomp::config::ConfigOption& option,
+                              const recomp::config::ConfigValueVariant& value) {
+    using recomp::config::ConfigOptionType;
+    switch (option.type) {
+        case ConfigOptionType::Enum: {
+            const auto& enumeration =
+                std::get<recomp::config::ConfigOptionEnum>(option.variant);
+            const uint32_t current = std::holds_alternative<uint32_t>(value)
+                                         ? std::get<uint32_t>(value)
+                                         : enumeration.default_value;
+            const auto found = enumeration.find_option_from_value(current);
+            return found != enumeration.options.end() ? found->name
+                                                      : std::to_string(current);
+        }
+        case ConfigOptionType::Bool: {
+            const bool current = std::holds_alternative<bool>(value)
+                                     ? std::get<bool>(value)
+                                     : std::get<recomp::config::ConfigOptionBool>(option.variant).default_value;
+            return current ? "on" : "off";
+        }
+        case ConfigOptionType::Number: {
+            const auto& number =
+                std::get<recomp::config::ConfigOptionNumber>(option.variant);
+            const double current = std::holds_alternative<double>(value)
+                                       ? std::get<double>(value)
+                                       : number.default_value;
+            char buffer[48];
+            std::snprintf(buffer, sizeof(buffer), "%.*f", number.precision, current);
+            return buffer;
+        }
+        case ConfigOptionType::String: {
+            return std::holds_alternative<std::string>(value) ? std::get<std::string>(value)
+                                                              : std::string{};
+        }
+        default:
+            return {};
+    }
+}
+
+struct ModRow {
+    bool is_mod = true;
+    size_t mod = 0;     // index into ModPanel::mods
+    size_t option = 0;  // index into that mod's config schema options
+};
+
+class ModPanel {
+public:
+    explicit ModPanel(std::string game_id) : game_id_(std::move(game_id)) { reload(); }
+
+    void reload() {
+        mods_ = recomp::mods::get_all_mod_details(game_id_);
+        rows_.clear();
+        for (size_t mod = 0; mod < mods_.size(); mod++) {
+            rows_.push_back(ModRow{true, mod, 0});
+            const recomp::config::ConfigSchema& schema =
+                recomp::mods::get_mod_config_schema(mods_[mod].mod_id);
+            for (size_t option = 0; option < schema.options.size(); option++) {
+                if (schema.options[option].hidden) {
+                    continue;
+                }
+                rows_.push_back(ModRow{false, mod, option});
+            }
+        }
+        if (rows_.empty()) {
+            selected_ = 0;
+        }
+        else if (selected_ >= rows_.size()) {
+            selected_ = rows_.size() - 1;
+        }
+        row_rects_.clear();
+    }
+
+    bool empty() const { return rows_.empty(); }
+    size_t row_count() const { return rows_.size(); }
+    size_t selected() const { return selected_; }
+    bool is_mod_row(size_t index) const { return rows_[index].is_mod; }
+
+    void move(int delta) {
+        if (rows_.empty()) {
+            return;
+        }
+        const int count = static_cast<int>(rows_.size());
+        int index = static_cast<int>(selected_) + delta;
+        index = ((index % count) + count) % count;
+        selected_ = static_cast<size_t>(index);
+    }
+
+    std::string row_text(size_t index) const {
+        const ModRow& row = rows_[index];
+        const recomp::mods::ModDetails& mod = mods_[row.mod];
+        if (row.is_mod) {
+            const bool enabled = recomp::mods::is_mod_enabled(mod.mod_id);
+            return std::string(enabled ? "[x] " : "[ ] ") + mod.display_name;
+        }
+        const recomp::config::ConfigSchema& schema =
+            recomp::mods::get_mod_config_schema(mod.mod_id);
+        const recomp::config::ConfigOption& option = schema.options[row.option];
+        return "      " + option.name + ": " +
+               config_value_text(option, recomp::mods::get_mod_config_value(mod.mod_id, option.id));
+    }
+
+    // The description of the selected mod, shown under its row. Empty when the
+    // row is a config option or the mod has no description.
+    std::string selected_description() const {
+        if (rows_.empty() || !rows_[selected_].is_mod) {
+            return {};
+        }
+        return mods_[rows_[selected_].mod].short_description;
+    }
+
+    // `direction` is +1 for a forward step and -1 for a backward one. A mod row
+    // ignores it and toggles.
+    void activate(size_t index, int direction) {
+        if (index >= rows_.size()) {
+            return;
+        }
+        const ModRow& row = rows_[index];
+        const recomp::mods::ModDetails& mod = mods_[row.mod];
+        if (row.is_mod) {
+            const bool enabled = recomp::mods::is_mod_enabled(mod.mod_id);
+            recomp::mods::enable_mod(mod.mod_id, !enabled);
+            // Enabling a mod can enable a required dependency, so rebuild the
+            // list instead of assuming only one row changed.
+            reload();
+            return;
+        }
+
+        const recomp::config::ConfigSchema& schema =
+            recomp::mods::get_mod_config_schema(mod.mod_id);
+        const recomp::config::ConfigOption& option = schema.options[row.option];
+        const recomp::config::ConfigValueVariant value =
+            recomp::mods::get_mod_config_value(mod.mod_id, option.id);
+        using recomp::config::ConfigOptionType;
+        switch (option.type) {
+            case ConfigOptionType::Enum: {
+                const auto& enumeration =
+                    std::get<recomp::config::ConfigOptionEnum>(option.variant);
+                if (enumeration.options.empty()) {
+                    return;
+                }
+                const uint32_t current = std::holds_alternative<uint32_t>(value)
+                                             ? std::get<uint32_t>(value)
+                                             : enumeration.default_value;
+                const auto found = enumeration.find_option_from_value(current);
+                size_t position = found != enumeration.options.end()
+                                      ? static_cast<size_t>(found - enumeration.options.begin())
+                                      : 0;
+                position = direction >= 0
+                               ? (position + 1) % enumeration.options.size()
+                               : (position + enumeration.options.size() - 1) % enumeration.options.size();
+                recomp::mods::set_mod_config_value(mod.mod_id, option.id,
+                                                   enumeration.options[position].value);
+                break;
+            }
+            case ConfigOptionType::Bool: {
+                const bool current = std::holds_alternative<bool>(value)
+                                         ? std::get<bool>(value)
+                                         : std::get<recomp::config::ConfigOptionBool>(option.variant).default_value;
+                recomp::mods::set_mod_config_value(mod.mod_id, option.id, !current);
+                break;
+            }
+            case ConfigOptionType::Number: {
+                const auto& number =
+                    std::get<recomp::config::ConfigOptionNumber>(option.variant);
+                double current = std::holds_alternative<double>(value)
+                                     ? std::get<double>(value)
+                                     : number.default_value;
+                const double step = number.step != 0.0 ? number.step : 1.0;
+                current += direction >= 0 ? step : -step;
+                if (number.max > number.min) {
+                    current = std::clamp(current, number.min, number.max);
+                }
+                recomp::mods::set_mod_config_value(mod.mod_id, option.id, current);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    // Row rectangles from the last frame, for mouse hit testing. Clicks are
+    // handled before that frame is drawn, so a click uses the previous frame's
+    // geometry (one frame of lag, which is not visible).
+    SDL_Rect* hit_test(int x, int y) {
+        for (SDL_Rect& rect : row_rects_) {
+            if (x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h) {
+                return &rect;
+            }
+        }
+        return nullptr;
+    }
+
+    void set_row_rects(std::vector<SDL_Rect> rects) { row_rects_ = std::move(rects); }
+    const std::vector<SDL_Rect>& row_rects() const { return row_rects_; }
+
+    // The row a rectangle belongs to, or row_count() when it is not a row.
+    size_t row_for_rect(const SDL_Rect* rect) const {
+        if (rect == nullptr) {
+            return row_count();
+        }
+        const size_t index = static_cast<size_t>(rect - row_rects_.data());
+        return index < row_rects_.size() ? index : row_count();
+    }
+
+private:
+    std::string game_id_;
+    std::vector<recomp::mods::ModDetails> mods_;
+    std::vector<ModRow> rows_;
+    std::vector<SDL_Rect> row_rects_;
+    size_t selected_ = 0;
+};
+
 }  // namespace
 
 std::filesystem::path executable_directory() {
@@ -397,6 +629,39 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     std::filesystem::path accepted;
     bool running = true;
 
+    // A ROM found before this screen opened is ready to play: Enter, a click on
+    // empty space, or a dropped ROM all leave with it.
+    const std::filesystem::path ready_rom = context.ready_rom;
+    ModPanel panel(context.mod_game_id);
+
+    auto play = [&]() {
+        if (!ready_rom.empty()) {
+            accepted = ready_rom;
+            running = false;
+        }
+    };
+
+    // Opens the platform picker and validates the choice. Shared by a click on
+    // empty space and the Enter key.
+    auto browse_and_accept = [&]() {
+        const std::filesystem::path chosen = browse_for_rom();
+        if (chosen.empty()) {
+#if !defined(OGRE_HAVE_NFD)
+            error = "This build has no file browser. Drop the ROM onto this "
+                    "window, or set OGRE_ROM to its path.";
+#endif
+            return;
+        }
+        std::string reason = context.accept_rom(chosen);
+        if (reason.empty()) {
+            accepted = chosen;
+            running = false;
+        }
+        else {
+            error = std::move(reason);
+        }
+    };
+
     // What both the SDL_DROPFILE event and the test hook below run.
     auto handle_dropped = [&](const std::filesystem::path& dropped) {
         std::string reason = context.accept_rom(dropped);
@@ -425,33 +690,70 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             handle_dropped(std::filesystem::path(test_drop));
             continue;
         }
+
+        int output_width = 0;
+        int output_height = 0;
+        SDL_GetRendererOutputSize(renderer, &output_width, &output_height);
+        int window_width = 0;
+        int window_height = 0;
+        SDL_GetWindowSize(window, &window_width, &window_height);
+        const float ui_scale =
+            std::max(1.0f, static_cast<float>(output_height) / kWindowHeight);
+        auto px = [ui_scale](int value) {
+            return static_cast<int>(static_cast<float>(value) * ui_scale);
+        };
+
         SDL_Event event;
         while (SDL_PollEvent(&event) == 1) {
             if (event.type == SDL_QUIT) {
                 running = false;
             }
-            else if (event.type == SDL_KEYDOWN &&
-                     (event.key.keysym.sym == SDLK_ESCAPE ||
-                      event.key.keysym.sym == SDLK_q)) {
-                running = false;
+            else if (event.type == SDL_KEYDOWN) {
+                const SDL_Keycode key = event.key.keysym.sym;
+                if (key == SDLK_ESCAPE || key == SDLK_q) {
+                    running = false;
+                }
+                else if (key == SDLK_UP) {
+                    panel.move(-1);
+                }
+                else if (key == SDLK_DOWN) {
+                    panel.move(1);
+                }
+                else if (key == SDLK_LEFT) {
+                    panel.activate(panel.selected(), -1);
+                }
+                else if (key == SDLK_RIGHT) {
+                    panel.activate(panel.selected(), 1);
+                }
+                else if (key == SDLK_SPACE) {
+                    panel.activate(panel.selected(), 1);
+                }
+                else if (key == SDLK_RETURN || key == SDLK_RETURN2 || key == SDLK_KP_ENTER) {
+                    play();
+                    if (running) {
+                        browse_and_accept();
+                    }
+                }
             }
             else if (event.type == SDL_MOUSEBUTTONDOWN &&
                      event.button.button == SDL_BUTTON_LEFT) {
-                const std::filesystem::path chosen = browse_for_rom();
-                if (chosen.empty()) {
-#if !defined(OGRE_HAVE_NFD)
-                    error = "This build has no file browser. Drop the ROM onto this "
-                            "window, or set OGRE_ROM to its path.";
-#endif
-                    continue;
-                }
-                std::string reason = context.accept_rom(chosen);
-                if (reason.empty()) {
-                    accepted = chosen;
-                    running = false;
+                // The renderer output is in pixels while SDL mouse coordinates
+                // are in window points; on a high-DPI display they differ.
+                const int mouse_x = window_width > 0
+                                        ? (event.button.x * output_width) / window_width
+                                        : event.button.x;
+                const int mouse_y = window_height > 0
+                                        ? (event.button.y * output_height) / window_height
+                                        : event.button.y;
+                SDL_Rect* row = panel.hit_test(mouse_x, mouse_y);
+                if (row != nullptr) {
+                    panel.activate(panel.row_for_rect(row), 1);
                 }
                 else {
-                    error = std::move(reason);
+                    play();
+                    if (running) {
+                        browse_and_accept();
+                    }
                 }
             }
             else if (event.type == SDL_DROPFILE) {
@@ -461,18 +763,10 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             }
         }
 
-        int output_width = 0;
-        int output_height = 0;
-        SDL_GetRendererOutputSize(renderer, &output_width, &output_height);
-        const float ui_scale =
-            std::max(1.0f, static_cast<float>(output_height) / kWindowHeight);
-        auto px = [ui_scale](int value) {
-            return static_cast<int>(static_cast<float>(value) * ui_scale);
-        };
-
         FrameText frame;
+        const char* subtitle = ready_rom.empty() ? kSubtitle : kPlayPrompt;
         frame.title.build(renderer, font, kTitle, px(kTitleScale), kTitleColor);
-        frame.subtitle.build(renderer, font, kSubtitle, px(kSubtitleScale), kSubtitleColor);
+        frame.subtitle.build(renderer, font, subtitle, px(kSubtitleScale), kSubtitleColor);
         frame.footer.build(renderer, font, "SAVED TO: " + context.pref_dir.string(),
                            px(kFooterScale), kFooterColor);
 
@@ -486,15 +780,40 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         const int title_height = px(kTitleScale) * Font::kCellHeight;
         const int subtitle_height = px(kSubtitleScale) * Font::kCellHeight;
         const int line_height = px(kErrorScale) * Font::kCellHeight;
+        const int mod_line_height = px(kModScale) * Font::kCellHeight;
+        const int mod_row_height = mod_line_height + px(8);
+        const int panel_width = std::min(output_width - px(64), px(880));
+        const int panel_left = output_width / 2 - panel_width / 2;
+        const std::string mod_description = panel.selected_description();
+        const std::vector<std::string> mod_description_lines =
+            mod_description.empty()
+                ? std::vector<std::string>{}
+                : wrap_text(mod_description,
+                            chars_per_line(font, px(kModScale), panel_width));
+
+        int panel_height = 0;
+        if (!panel.empty()) {
+            panel_height = px(16) + mod_line_height + px(14) +
+                           static_cast<int>(panel.row_count()) * mod_row_height +
+                           px(10) + mod_line_height;
+            if (!mod_description_lines.empty()) {
+                panel_height += px(8) + static_cast<int>(mod_description_lines.size()) *
+                                            mod_line_height;
+            }
+        }
+
         int block_height = title_height + px(40) + px(2) + px(38) + subtitle_height;
         block_height += px(56);
-        if (error_lines.empty()) {
-            block_height += px(kBodyScale) * Font::kCellHeight;
-        }
-        else {
+        if (!error_lines.empty()) {
             block_height += px(6) + line_height + px(8);
             block_height += static_cast<int>(error_lines.size()) * (line_height + px(6));
             block_height += px(8) + line_height;
+        }
+        else if (ready_rom.empty()) {
+            block_height += px(kBodyScale) * Font::kCellHeight;
+        }
+        if (panel_height > 0) {
+            block_height += px(30) + panel_height;
         }
 
         int cursor_y = std::max(px(24), (output_height - block_height) / 2);
@@ -518,11 +837,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         frame.subtitle.draw(renderer, center_x, 0, cursor_y, true);
         cursor_y += subtitle_height + px(56);
 
-        if (error_lines.empty()) {
-            frame.body.build(renderer, font, kReadyHint, px(kBodyScale), kHintColor);
-            frame.body.draw(renderer, center_x, 0, cursor_y, true);
-        }
-        else {
+        if (!error_lines.empty()) {
             frame.body.build(renderer, font, kErrorTitle, px(kErrorScale), kErrorColor);
             frame.body.draw(renderer, center_x, 0, cursor_y, true);
             cursor_y += line_height + px(8);
@@ -534,6 +849,55 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             cursor_y += px(8);
             frame.body.build(renderer, font, kErrorHint, px(kErrorScale), kHintColor);
             frame.body.draw(renderer, center_x, 0, cursor_y, true);
+        }
+        else if (ready_rom.empty()) {
+            frame.body.build(renderer, font, kReadyHint, px(kBodyScale), kHintColor);
+            frame.body.draw(renderer, center_x, 0, cursor_y, true);
+        }
+
+        if (!panel.empty()) {
+            cursor_y += px(30);
+
+            SDL_SetRenderDrawColor(renderer, 20, 22, 27, 240);
+            const SDL_Rect background{panel_left - px(18), cursor_y - px(14),
+                                      panel_width + px(36), panel_height};
+            SDL_RenderFillRect(renderer, &background);
+
+            frame.body.build(renderer, font, kModsTitle, px(kModScale), kHintColor);
+            frame.body.draw(renderer, 0, panel_left, cursor_y, false);
+            cursor_y += mod_line_height + px(14);
+
+            std::vector<SDL_Rect> row_rects;
+            row_rects.reserve(panel.row_count());
+            for (size_t i = 0; i < panel.row_count(); i++) {
+                const SDL_Rect row_rect{panel_left - px(12), cursor_y - px(4),
+                                        panel_width + px(24), mod_row_height};
+                if (i == panel.selected()) {
+                    SDL_SetRenderDrawColor(renderer, 52, 58, 70, 255);
+                    SDL_RenderFillRect(renderer, &row_rect);
+                }
+                const SDL_Color color =
+                    i == panel.selected() ? kWarmColor
+                                          : (panel.is_mod_row(i) ? kTitleColor : kSubtitleColor);
+                frame.body.build(renderer, font, panel.row_text(i), px(kModScale), color);
+                frame.body.draw(renderer, 0, panel_left, cursor_y, false);
+                row_rects.push_back(row_rect);
+                cursor_y += mod_row_height;
+            }
+            panel.set_row_rects(std::move(row_rects));
+
+            if (!mod_description_lines.empty()) {
+                cursor_y += px(8);
+                for (const std::string& line : mod_description_lines) {
+                    frame.body.build(renderer, font, line, px(kModScale), kHintColor);
+                    frame.body.draw(renderer, 0, panel_left, cursor_y, false);
+                    cursor_y += mod_line_height;
+                }
+            }
+
+            cursor_y += px(10);
+            frame.body.build(renderer, font, kModsHint, px(kModScale), kHintColor);
+            frame.body.draw(renderer, 0, panel_left, cursor_y, false);
         }
 
         frame.footer.draw(renderer, center_x, 0,
