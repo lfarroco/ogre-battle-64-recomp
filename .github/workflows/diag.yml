@@ -1,6 +1,6 @@
 name: Diag
 
-# Temporary: how far does the v0.2.0 Windows exe get before the ucrtbase fast-fail?
+# Temporary: stack at the ucrtbase fast-fail, via cdb.
 on:
   workflow_dispatch:
 
@@ -8,7 +8,7 @@ jobs:
   win:
     runs-on: windows-2022
     steps:
-      - name: OGRE_CRASH_TEST probe + error.log + cdb presence
+      - name: cdb stack of the v0.2.0 fast-fail
         continue-on-error: true
         shell: bash
         run: |
@@ -17,20 +17,8 @@ jobs:
           gh release download v0.2.0 --repo "$GITHUB_REPOSITORY" --pattern '*windows*' --dir .
           unzip -q -o '*.zip'
           cd ogre-battle-64-recomp
-          echo "== cdb =="
-          ls -l "/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe" 2>/dev/null || echo "no cdb"
-          echo "== plain run, look for error.log =="
-          rm -f error.log
-          ./ogrebattle64.exe >/tmp/plain.log 2>&1
-          echo "plain exit=$?"
-          if [ -f error.log ]; then echo "--- error.log ---"; head -12 error.log; else echo "no error.log"; fi
-          echo "== OGRE_CRASH_TEST=segv (fires right after crash_log::install) =="
-          rm -f error.log
-          OGRE_CRASH_TEST=segv ./ogrebattle64.exe >/tmp/forced.log 2>&1
-          echo "forced exit=$?"
-          if [ -f error.log ]; then echo "--- error.log ---"; head -14 error.log; else echo "no error.log"; fi
-          echo "== WER event offsets =="
-          powershell -NoProfile -Command "
-            Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'} -MaxEvents 3 -ErrorAction SilentlyContinue |
-              ForEach-Object { \$_.Message }
-          " | grep -iE "Faulting module|Exception code|offset|ogrebattle" | head -20
+          cdb="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
+          "$cdb" -o -g -G -c "g; .ecxr; kb; q" ogrebattle64.exe > cdb.log 2>&1
+          echo "cdb exit=$?"
+          echo "=========== cdb.log ==========="
+          cat cdb.log
