@@ -193,21 +193,27 @@ private:
 // placing one beside the executable, still works there.
 std::filesystem::path browse_for_rom() {
 #if defined(OGRE_HAVE_NFD)
-    // Plain (not u8) literals: nfdu8char_t is `char`, and in C++20 u8"" is
-    // char8_t, which does not convert. Standard execution encoding is UTF-8 on
-    // every platform this builds for.
-    const nfdnfilteritem_t filters[] = {
+    // The UTF-8 entry points, not the native-char ones: `nfdnchar_t` is
+    // `wchar_t` on Windows (nfd.h), so `NFD_OpenDialogN` cannot take the narrow
+    // literals below. Plain (not u8) literals: nfdu8char_t is `char`, and in
+    // C++20 u8"" is char8_t, which does not convert. Standard execution encoding
+    // is UTF-8 on every platform this builds for.
+    const nfdu8filteritem_t filters[] = {
         {"N64 ROM (*.z64; *.n64; *.v64)", "z64,n64,v64"},
         {"All files", "*"},
     };
-    nfdnchar_t* chosen = nullptr;
+    nfdu8char_t* chosen = nullptr;
     const nfdresult_t result =
-        NFD_OpenDialogN(&chosen, filters, SDL_arraysize(filters), nullptr);
+        NFD_OpenDialogU8(&chosen, filters, SDL_arraysize(filters), nullptr);
     if (result != NFD_OKAY) {
         return {};
     }
-    std::filesystem::path path{chosen};
-    NFD_FreePathN(chosen);
+    // Build the path from a char8_t string so the UTF-8 bytes are decoded to
+    // the native encoding. On Windows this avoids depending on the ANSI code
+    // page; `std::filesystem::u8path` would do the same but is deprecated in
+    // C++20.
+    std::filesystem::path path{std::u8string(reinterpret_cast<const char8_t*>(chosen))};
+    NFD_FreePathU8(chosen);
     return path;
 #else
     return {};
