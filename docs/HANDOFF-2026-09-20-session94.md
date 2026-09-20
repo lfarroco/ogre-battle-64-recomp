@@ -407,17 +407,62 @@ the process ran at all. The `.exe` in the release zip is sound:
   `Subsystem 3 (Windows CUI)` with the same CRT imports.
 * The zip's CRCs are intact and the PE headers are sane.
 
-So the process start path was correct, and the failure was at or after the first
-window, or in the loader.
+So the process start path was correct, and the failure was inside the app, before
+the first window (section 15).
 
-## 15. The defect: the package did not carry its runtime DLLs
+## 15. The cause: `setvbuf(stdout, nullptr, _IOLBF, 0)` is an invalid parameter on the MSVC CRT
 
+`crash_log::install()` (part 1) called `std::setvbuf(stdout, nullptr, _IOLBF, 0)`
+to keep `stdout` line-buffered after fd 1 became a pipe. glibc and macOS accept a
+null buffer with size 0; **the MSVC CRT does not** — it reports an invalid
+parameter, and the invalid-parameter handler calls `_invoke_watson`, which
+fast-fails the process. The call is the top of `main`, before the fatal handlers
+are installed, so every Windows launch died immediately with `0xC0000409` and no
+`error.log`. That is the whole "nothing happens in the windows version" report.
+
+The stack, from `cdb.exe` on the runner (the SDK debugger is installed there),
+against the **released v0.2.0 `.exe`**, which reproduces it exactly:
+
+```
+ucrtbase!invoke_watson+0x18
+ucrtbase!_invalid_parameter_internal+0x3829c
+ucrtbase!_setvbuf_internal+0xaf
+ucrtbase!setvbuf+0x2d
+ogrebattle64+0x10e40          <- crash_log::install's setvbuf call
+ogrebattle64+0x10a4           <- WinMain
+ogrebattle64+0x128962e        <- WinMainCRTStartup
+```
+
+Windows Error Reporting agrees: `Faulting module name: ucrtbase.dll`, `Exception
+code: 0xc0000409`.
+
+The isolation, before cdb, ruled out everything else: a trivial GUI-subsystem
+exe builds and runs from Git Bash on the runner (`gui exit=9`); the
+`AttachConsole` + `freopen_s("CONOUT$")` block runs (`exit=0`); `notepad.exe`
+launches; every system DLL the exe imports is present; and the exe's own imports
+are all either shipped or system DLLs.
+
+**Fix (`app/src/crash_log.cpp`).** A static buffer with a real size, and the
+handlers armed first:
+
+```cpp
+static char stdout_buffer[4096];
+std::setvbuf(stdout, stdout_buffer, _IOLBF, sizeof(stdout_buffer));
+```
+
+`install_handlers()` now runs before the capture setup, so a later fault in the
+capture itself still reaches `write_report`.
+
+## 16. A second, real defect: the package did not carry its runtime DLLs
+
+Found by the new static smoke check, and independent of the cause above.
 `ogrebattle64.exe` statically imports `dxcompiler.dll` and `dxil.dll` (RT64's
 shader compiler; the package bundles both), and **both of those Microsoft
 binaries import `MSVCP140.dll`, `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`**,
 which the package did not ship. A machine without the Visual C++ 2015-2022
-redistributable cannot start the process at all. The same import sets are in the
-0.1.0 package, so the Windows build never was self-contained.
+redistributable cannot start the process at all; the CI runner has the
+redistributable, so a launch there could not have shown it. The same import sets
+are in the 0.1.0 package, so the Windows build never was self-contained.
 
 Landed:
 
@@ -432,7 +477,7 @@ Landed:
   stamp file so a cached Windows SDL2 is rebuilt, and the `dist` recipe copies
   the four DLLs into the package and **fails** when one is missing.
 
-## 16. Silent boot failures
+## 17. Silent boot failures
 
 Even with the DLLs, the build had no way to report why it did not start: the
 GUI-subsystem image has no console, and four paths ended the process with no file
@@ -448,7 +493,7 @@ before its first window. Video and events are required; audio and game
 controllers are initialised separately and may be absent. The audio callbacks
 already handle a null device, so the game runs silently.
 
-## 17. The smoke test the workflow was missing
+## 18. The smoke test the workflow was missing
 
 * `app/src/main.cpp` handles `OGRE_SMOKE=1`: print `[smoke] main reached`, try
   SDL once (reported but not required, because a hosted runner has no display or
@@ -471,32 +516,56 @@ The runtime half of the smoke test cannot catch the missing-redistributable case
 on a CI image, because the image has the redistributable installed; the static
 PE check is what covers the package itself, and it is platform-independent.
 
-## 18. What was run for verification
+## 19. What was run for verification
 
-macOS only, because there is no Windows machine here.
+The Windows diagnosis ran on the `windows-2022` runner through a temporary
+`diag.yml` workflow (removed; `git ls-files .github/workflows` lists only
+`release.yml`), and the fix was verified locally on macOS plus by the rc2
+release run.
+
+**On the runner, against the released v0.2.0 `.exe`:**
+
+* `powershell Start-Process` → `exited code=-1073740791 hex=0xC0000409`;
+  `Get-WinEvent` → `Faulting module name: ucrtbase.dll`, `Exception code:
+  0xc0000409`.
+* `cdb.exe -o -g -G -c "g; .ecxr; kb; q"` → the stack in section 15, which lands
+  in `setvbuf` and then `crash_log::install`.
+* The plain run and `OGRE_CRASH_TEST=segv` both exit 127 with **no `error.log`**,
+  so the process dies before the handlers are armed.
+* Ruled out first: a trivial x64 GUI exe builds and runs from Git Bash
+  (`gui exit=9`); `AttachConsole` + `freopen_s` alone exits 0; `notepad.exe`
+  launches; every system DLL the exe imports is present in `System32`
+  (`d3dcompiler_47.dll`, `d3d12.dll`, `dxgi.dll`, `winmm.dll`, `imm32.dll`,
+  `setupapi.dll`, `version.dll`, `ucrtbase.dll`); and the exe's own imports are
+  all shipped or system DLLs.
+
+**Locally on macOS (the fix and the tooling):**
 
 * `tools/smoke-dist.sh` on the packaged macOS app: PASS (`otool` clean, the
-  binary loaded, reached main, exited 0).
-* `make smoke`: the same, through the Makefile target.
+  binary loaded, reached main, exited 0). `make smoke` is the same path.
 * `tools/smoke-dist.sh /tmp/winrc/ogre-battle-64-recomp` (the v0.2.0 Windows zip
   from the release): FAIL at `msvcp140.dll is missing from the package`, before
-  any launch attempt. With the four DLLs added to a copy of that package the
-  static checks pass.
+  any launch attempt; with the four DLLs added to a copy of that package the
+  static checks pass. `tools/pe_imports.py` reports exactly those four names and
+  no OS-DLL false positives.
+* `OGRE_SMOKE=1` on `build-app/ogrebattle64`: exit 0, `[smoke] main reached`,
+  `[smoke] sdl ok`.
 * `SDL_AUDIODRIVER=doesnotexist` on the macOS build: boots, logs
   `[SDL] audio unavailable, running silently`, reaches the window and exits 0.
 * `SDL_VIDEODRIVER=doesnotexist`: writes `error.log` with
   `reason: SDL could not start: doesnotexist not available` and the captured
   `[boot] init_sdl...` line.
-* `OGRE_SMOKE=1` on `build-app/ogrebattle64`: exit 0, `[smoke] main reached`,
-  `[smoke] sdl ok`.
 * Regression: the maintained 45 s route run is `runlog.py --check` PASS, and the
   window-close path still exits cleanly (part 2).
-* `make -n dist DIST_OS=windows` shows the new DLL copy loop and the SDL2 stamp
-  guard. The Windows build itself is validated by the release workflow; nothing
-  here can compile or run it.
+* `make -n dist DIST_OS=windows` shows the DLL copy loop and the SDL2 stamp
+  guard. **The `setvbuf` fix is only observable on Windows**, so `v0.2.1-rc2`'s
+  Windows job — which now runs the smoke test after packaging — is its
+  verification.
 
-## 19. Files changed in part 3
+## 20. Files changed in part 3
 
+* `app/src/crash_log.cpp` — the `setvbuf` fix (static line-buffer, real size) and
+  `install_handlers()` before the capture setup.
 * `app/src/main.cpp` — `OGRE_SMOKE=1`; `report_boot_failure` on the SDL-init and
   game-window failures.
 * `app/src/sdl_platform.cpp`, `app/src/sdl_platform.hpp` — video/events required,
@@ -514,11 +583,12 @@ macOS only, because there is no Windows machine here.
   note and the smoke-test section and knob.
 * `PLAN.md`, `docs/DECISIONS.md`, this file.
 
-## 20. Open leads
+## 21. Open leads
 
-1. **Windows is still unvalidated by a run.** The RC is the first package with
-   the runtime DLLs and the first with the smoke test; if it still does nothing,
-   the next test should produce `error.log` (or a dialog) with the reason.
+1. **The smoke test caught this bug, and that is the point.** It runs the built
+   binary on the runner image; the `setvbuf` fast-fail fails it. A packaging
+   defect that a runner cannot reproduce (a missing redistributable DLL) is
+   covered by the static `tools/pe_imports.py` check instead.
 2. **`report_boot_failure` shows a modal box**, so a scripted run that hits an
    early failure now waits for a click. Only the boot-failure paths do this, and
    they are fatal; a harness with a bad ROM argument takes the older
@@ -531,3 +601,8 @@ macOS only, because there is no Windows machine here.
    on a DLL that is neither shipped nor listed fails the smoke test with the
    name, which is the intended behaviour, but the list has to be extended for a
    legitimate new system dependency.
+5. **A `setvbuf` on a stream that has already been used is undefined** and the
+   MSVC CRT may still reject it; `install()` runs before the first write, and
+   after `AttachConsole`/`freopen_s` only re-open the stream, so this call is
+   valid. If that order ever changes, the smoke test fails on Windows.
+

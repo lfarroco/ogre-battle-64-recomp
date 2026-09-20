@@ -199,10 +199,12 @@ On Windows the executable links `SDL2-static` and the static CRT
 `app/CMakeLists.txt`), and the package carries the MSVC runtime DLLs beside the
 `.exe`. That is not optional: RT64 statically imports `dxcompiler.dll`/`dxil.dll`,
 and those two Microsoft binaries import `MSVCP140.dll`/`VCRUNTIME140.dll`, so a
-machine without the Visual C++ redistributable cannot start the process at all —
-the loader fails before any code runs, with no window and no log (session 94).
-`make sdl2-static` builds SDL2 with the same runtime-library setting, and the
-`dist` recipe fails rather than shipping a Windows package without the DLLs.
+machine without the Visual C++ redistributable cannot start the process at all.
+The 0.1.0 and 0.2.0 packages shipped neither, which `tools/pe_imports.py` now
+catches on any machine — including a runner that has the redistributable
+installed and where a launch would therefore succeed. `make sdl2-static` builds
+SDL2 with the same runtime-library setting, and the `dist` recipe fails rather
+than shipping a Windows package without the DLLs.
 
 A first launch of the package in an empty folder is the user-facing acceptance
 test: the black start screen appears, clicking/dropping a ROM boots the game,
@@ -243,8 +245,13 @@ no longer has. `crash_log::install()` runs at the top of `main()` and:
 * replaces fd 1 and fd 2 with the write ends of two pipes, each drained by a
   thread into its own 128 KiB ring while every byte is forwarded to the real
   descriptor. A terminal run, `... > run.log 2>&1` and `2> run.log` all behave
-  as before, and `stdout` is set back to line buffering so an interactive run
-  still prints as it goes;
+  as before. `stdout` is put back on line buffering with a **static buffer and a
+  non-zero size**: the MSVC CRT treats `setvbuf(stream, nullptr, _IOLBF, 0)` as an
+  invalid parameter, and its invalid-parameter handler fast-fails the process
+  (`0xC0000409`) before any handler can run. glibc and macOS accept a zero size,
+  so this only ever showed on Windows — it is what made the 0.2.0 Windows build
+  do nothing at all, and why it wrote no `error.log` (session 94). The handlers
+  are installed before the capture for the same reason;
 * installs the fatal handlers: `SIGSEGV`/`SIGBUS`/`SIGABRT`/`SIGFPE`/`SIGILL`
   through `sigaction` on POSIX, the same through `signal` plus
   `SetUnhandledExceptionFilter` on Windows, and `std::set_terminate` on both.

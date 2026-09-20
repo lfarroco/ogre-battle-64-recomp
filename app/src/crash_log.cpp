@@ -706,15 +706,24 @@ void install(const std::filesystem::path& dir) {
     if (g_installed.exchange(true)) {
         return;
     }
+    // Arm the handlers before anything else can fail: a fault in the capture
+    // setup then still reaches write_report.
+    install_handlers();
     g_saved_stdout = redirect_start(1, g_stdout_thread, g_stdout_ring, g_stdout_written);
     g_saved_stderr = redirect_start(2, g_stderr_thread, g_stderr_ring, g_stderr_written);
     // stdout is line-buffered while it is a terminal and becomes block-buffered
     // when it becomes a pipe. Keep the terminal behaviour so an interactive run
     // still prints as it goes.
-    if (g_saved_stdout >= 0) {
-        std::setvbuf(stdout, nullptr, _IOLBF, 0);
-    }
-    install_handlers();
+    //
+    // A static buffer, and not `nullptr` with size 0: the MSVC CRT rejects a
+    // null buffer with a zero size as an invalid parameter, and its
+    // invalid-parameter handler fast-fails the process (0xC0000409) before any
+    // handler can run. That was the whole "the Windows build does nothing"
+    // report of session 94 — the call is at the top of main, so the process died
+    // silently on every launch and wrote no error.log. glibc and macOS accept a
+    // zero size, so only Windows was affected.
+    static char stdout_buffer[4096];
+    std::setvbuf(stdout, stdout_buffer, _IOLBF, sizeof(stdout_buffer));
     std::atexit(flush);
 }
 
