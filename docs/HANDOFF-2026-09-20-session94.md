@@ -606,3 +606,125 @@ release run.
    after `AttachConsole`/`freopen_s` only re-open the stream, so this call is
    valid. If that order ever changes, the smoke test fails on Windows.
 
+
+---
+
+# Part 4: a Windows access violation on game start
+
+**Goal (developer):** the rc2 Windows package now runs, but loading the ROM and
+starting the game dies with `unhandled exception 0xC0000005`, and restarting with
+the stored ROM dies the same way (deleting the ROM lets the launcher run). The
+`error.log` for both has **empty captured sections** and an empty guest
+diagnostics section. The developer also asked for a Windows-only build ("the
+macos build takes 30min") and suggested checking how Zelda64Recomp handles
+Windows.
+
+**Result:** the AV itself is **not fixed yet** — this part is the diagnostics and
+the iteration speed needed to find it. Windows reports now carry the faulting
+instruction and the address it touched with their modules and offsets, a
+`0xC0000005` says whether the access was a read, a write or an execute, the
+handler no longer uses stdio on Windows (so it cannot die on a stream lock and
+truncate the report), `OGRE_CONSOLE=1` gives a double-clicked build a console,
+the smoke test now fails a package whose crash report is empty, and a dispatched
+release can build Windows alone in ~8 minutes.
+
+## 22. What the report showed, and what it did not
+
+Both reports carried a header (`reason: unhandled exception 0xC0000005`, a
+non-null `rdram base`) and then stopped: no fault address, no host pc, no
+captured lines, and an empty `--- guest diagnostics ---`.
+
+Two conclusions. (1) The process got past RDRAM allocation, so the crash is in
+the game boot, not in startup. (2) The report cannot be trusted to be complete:
+the Windows handler called the runtime's `printf`-based dumpers with no
+`ftrylockfile` guard, so a fault arriving while the faulting thread holds a stdio
+stream lock hangs the handler and truncates the file — the same class as the
+macOS window-close freeze of part 2. (The missing fault lines are from an earlier
+filter shape; the fields are unconditionally ordered before the dumps now.)
+
+## 23. Diagnostics landed
+
+* `app/src/crash_log.cpp`: the report prints `fault instruction` and `fault
+  address` separately, each with a host module and offset (`write_host_symbol`
+  uses `GetModuleHandleExW`/`GetModuleFileNameW` on Windows, `dladdr` on macOS),
+  the `access` kind from `ExceptionInformation[0]`, and the RDRAM-relative offset
+  when the address is inside the image. `write_guest_diagnostics` writes the N64
+  thread and the last recompiled function per thread with raw writes on every
+  platform, and only the POSIX path adds the `ftrylockfile`-guarded call-chain
+  dump. **Windows never touches stdio in the handler.**
+* `app/src/main.cpp`: `OGRE_CONSOLE=1` calls `AllocConsole` and points
+  stdio at it, so a double-clicked GUI build shows the `[boot]` log live
+  (Zelda64Recomp's Windows build has the same switch as `--show-console`).
+  `OGRE_CRASH_TEST` flushes and waits 50 ms before raising, so the smoke test's
+  report check is not a race.
+* `tools/smoke-dist.sh` gained check 4: `OGRE_CRASH_TEST=segv` must leave an
+  `error.log` that contains the captured `[boot]` line. A report with empty
+  sections now fails the package.
+* `.github/workflows/release.yml`: a `plan` job builds the matrix from data, and
+  `workflow_dispatch` has a `platforms` input (`all`/`windows`/`linux`/`macos`).
+  A tag push still builds all three; `-f platforms=windows` is ~8 minutes.
+* `app/src/sdl_platform.cpp`: on Windows, `SDL_AUDIODRIVER` is pinned to
+  `wasapi` unless the player set it, the workaround Zelda64Recomp carries for
+  the same runtime ("some issue with sample queueing with directsound").
+* `app/CMakeLists.txt`: `/OPT:NOICF` for a link driven by `cl.exe`, because
+  identical code folding can merge two recompiled functions and the runtime
+  patches a function's own code for a mod hook (Zelda64Recomp disables it for the
+  same reason). The CI's clang-cl + lld-link pair does not fold by default, so
+  nothing changes there.
+
+## 24. What Zelda64Recomp does on Windows, and what was not taken
+
+Checked `Zelda64Recomp/Zelda64Recomp` (`dev`) `CMakeLists.txt` and
+`src/main/main.cpp`:
+
+* It keeps `main` and sets `/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup` for a
+  cl.exe link; this port cannot use `/ENTRY` because its Windows build is
+  clang-cl (clang-cl has no such driver option, session 94 part 1), so it keeps
+  the `WinMain` forwarder.
+* It leaves the CRT dynamic and copies `SDL2.dll` and the two DXC DLLs beside the
+  exe, plus **`/OPT:NOICF`**. This port links SDL2 and the CRT statically and
+  copies the DXC DLLs plus the app-local MSVC runtime DLLs (part 3), and now
+  sets NOICF for a cl.exe link.
+* `preload_executable` maps the exe and `VirtualLock`s it, so a runtime code
+  patch cannot touch a page the loader has dropped. **Not taken**: this port
+  patches function code only for a mod hook, and the crash here happens with no
+  mods loaded. It is the next thing to try if a fault lands in the exe at a
+  patched entry.
+* `timeBeginPeriod(1)`, `SDL_HINT_WINDOWS_DPI_AWARENESS`, `SetConsoleOutputCP`,
+  an `.rc` icon and an `NFD_Init()` call: not taken (timing/cosmetic).
+* Its audio workaround (WASAPI) **was** taken.
+
+## 25. Verification so far
+
+macOS only, plus the Windows job of the rc3 dispatch.
+
+* `OGRE_CRASH_TEST=segv` on `build-app/ogrebattle64`: the report now has
+  `fault instruction: 0x... (/usr/lib/system/libsystem_kernel.dylib+0x7846)`, the
+  captured `[boot] OGRE_CRASH_TEST=segv` line, and a guest-diagnostics section.
+* `tools/smoke-dist.sh`: PASS, including the new crash-report check (check 4) on
+  the packaged macOS app.
+* The maintained 45 s route run is `runlog.py --check` PASS.
+* The Windows job of `v0.2.1-rc3` is the check for the Windows handler path: its
+  smoke run executes check 4 on Windows and fails the package if the capture or
+  the handler is wrong there.
+
+## 26. Files changed in part 4
+
+* `app/src/crash_log.cpp`, `app/src/main.cpp`, `app/src/sdl_platform.cpp`,
+  `app/CMakeLists.txt`, `tools/smoke-dist.sh`,
+  `.github/workflows/release.yml`, `docs/guides/app-build.md`, `PLAN.md`,
+  `docs/DECISIONS.md`, this file.
+
+## 27. Open leads
+
+1. **The AV is unfixed.** The next report (or `OGRE_CONSOLE=1` output) should
+   name the faulting module: `ogrebattle64.exe` means recompiled code or the
+   runtime, a `*wgfx*`/`amdxx*`/`nvwgf2umx` DLL means the GPU driver, `ucrtbase`
+   means a CRT call with a bad argument. `rdram base` was non-null in both
+   reports, so the boot had begun.
+2. **The empty captured sections were never explained.** If rc3's Windows smoke
+   check 4 passes, the capture works and the user's empty report was a truncated
+   handler; if it fails, the Windows capture is broken and that is the first
+   thing to fix.
+3. **The stored-ROM restart crash** is the same boot path; it should be re-tested
+   with the new report.

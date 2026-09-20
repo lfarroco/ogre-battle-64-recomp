@@ -117,4 +117,31 @@ if [ -s "$log" ]; then
     }
 fi
 echo "smoke-dist: the binary loaded, reached main and exited 0"
+
+# --- 4. does a crash leave a report that contains the captured log? ----------
+# `OGRE_CRASH_TEST=segv` raises SIGSEGV right after the logger is armed, so the
+# report must exist and must contain the [boot] line printed immediately before
+# the raise. That line is only in the report if the stdout/stderr capture
+# reached the ring: a handler that dies on a stdio lock, or a capture that never
+# ran, leaves a report with empty sections -- exactly what a Windows report
+# looked like in session 94. `error.log` goes to the executable's own directory,
+# which is the package root for every package kind.
+report_file="$dist/error.log"
+rm -f "$report_file"
+set +e
+# The braces and the redirect swallow the shell's own "Segmentation fault"
+# message for the intentional crash.
+{ OGRE_CRASH_TEST=segv OGRE_PREF_DIR="$work" "$app" >/dev/null 2>&1; } 2>/dev/null
+set -e
+if [ ! -f "$report_file" ]; then
+    fail "OGRE_CRASH_TEST=segv wrote no error.log"
+fi
+if ! grep -q "OGRE_CRASH_TEST" "$report_file"; then
+    echo "--- error.log ---" >&2
+    cat "$report_file" >&2
+    fail "the crash report did not contain the captured boot log"
+fi
+echo "smoke-dist: the crash report captured the boot log"
+rm -f "$report_file"
+
 echo "smoke-dist: PASS"

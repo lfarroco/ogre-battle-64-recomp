@@ -40,6 +40,26 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ⏳ **Windows crashes with `0xC0000005` when the game starts, and the
+  diagnostics to find it are in (session 94, part 4).** The rc2 Windows package
+  boots and the launcher runs, but loading the ROM and starting the game dies on
+  an access violation, and restarting with the stored ROM dies the same way
+  (deleting the ROM lets the launcher run again). Both reports had a header and a
+  non-null RDRAM base and then stopped: empty captured sections, no fault fields.
+  Landed, none of which is the fix: the report prints the faulting instruction
+  and the address it touched separately, each with its host module and offset,
+  plus the access kind for an access violation; the Windows handler uses no
+  stdio at all, so it cannot hang on a stream lock and truncate the report (the
+  way it did); `OGRE_CONSOLE=1` allocates a console so a double-clicked build
+  shows the `[boot]` log; `tools/smoke-dist.sh` check 4 fails a package whose
+  crash report does not contain the captured boot line; the release workflow
+  takes a `platforms` input so `-f platforms=windows` builds and smoke-tests
+  Windows alone in about 8 minutes instead of 30; Windows pins
+  `SDL_AUDIODRIVER=wasapi` (Zelda64Recomp's workaround for this runtime); and a
+  cl.exe link gets `/OPT:NOICF`, because folding can merge two recompiled
+  functions and the runtime patches a function's own code for a mod hook. The AV
+  itself is open; its next report names the faulting module. See
+  `docs/HANDOFF-2026-09-20-session94.md` part 4.
 - ✅ **The Windows build runs, carries its runtime DLLs, and the release workflow
   smoke-tests every package (session 94, part 3).** The developer reported that
   the v0.2.0 Windows build "does nothing": no window, no log, no process. The

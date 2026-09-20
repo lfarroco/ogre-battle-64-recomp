@@ -49,13 +49,80 @@ on:
         description: 'Create the release as a draft instead of publishing it'
         type: boolean
         default: false
+      platforms:
+        description: 'Which platforms to build. `windows` is the fast iteration path (about 8 minutes instead of 30).'
+        type: choice
+        options:
+          - all
+          - windows
+          - linux
+          - macos
+        default: all
 
 permissions:
   contents: write
 
 jobs:
+  # The build matrix is data, so a workflow_dispatch can ask for one platform.
+  # A tag push has no inputs, and `platforms` is then empty -> all.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms || 'all' }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          entries = [
+              {
+                  "name": "macOS (Apple Silicon)",
+                  "os": "macos",
+                  "hosted": "macos-14",
+                  "fallback": '["self-hosted","macOS","ARM64"]',
+                  "archive": "ogre-battle-64-recomp-macos-arm64.tar.gz",
+                  "flavour": "tar.gz",
+                  "cmake_args": "",
+                  "dist_dir": "dist-macos",
+              },
+              {
+                  "name": "Linux (x86-64)",
+                  "os": "linux",
+                  "hosted": "ubuntu-24.04",
+                  "fallback": '["self-hosted","Linux","X64"]',
+                  "archive": "ogre-battle-64-recomp-linux-x86_64.tar.gz",
+                  "flavour": "tar.gz",
+                  "cmake_args": "",
+                  "dist_dir": "dist-linux",
+              },
+              {
+                  "name": "Windows (x86-64)",
+                  "os": "windows",
+                  "hosted": "windows-2022",
+                  "fallback": '["self-hosted","Windows","X64"]',
+                  "archive": "ogre-battle-64-recomp-windows-x86_64.zip",
+                  "flavour": "zip",
+                  # cl.exe rejects the GCC/Clang spellings the app, the runtime and
+                  # RT64 use for their flags (cl : error D8021), so build with
+                  # clang-cl in an MSVC environment, the configuration
+                  # Zelda64Recomp uses.
+                  "cmake_args": "-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl",
+                  "dist_dir": "dist-windows",
+              },
+          ]
+          want = os.environ.get("PLATFORMS") or "all"
+          picked = entries if want == "all" else [e for e in entries if e["os"] == want]
+          if not picked:
+              raise SystemExit(f"no platform matches {want!r}")
+          print("matrix=" + json.dumps({"include": picked}))
+          PY
+
   build:
     name: Build ${{ matrix.name }}
+    needs: plan
     # Empty OGRE_DATA_REPO -> the self-hosted labels, where the generated code
     # already exists. Set -> the hosted label, plus the private data repository
     # that supplies the generated code. `vars` is one of the contexts GitHub
@@ -63,35 +130,7 @@ jobs:
     runs-on: ${{ vars.OGRE_DATA_REPO != '' && matrix.hosted || fromJSON(matrix.fallback) }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: macOS (Apple Silicon)
-            os: macos
-            hosted: macos-14
-            fallback: '["self-hosted","macOS","ARM64"]'
-            archive: ogre-battle-64-recomp-macos-arm64.tar.gz
-            flavour: tar.gz
-            cmake_args: ''
-            dist_dir: dist-macos
-          - name: Linux (x86-64)
-            os: linux
-            hosted: ubuntu-24.04
-            fallback: '["self-hosted","Linux","X64"]'
-            archive: ogre-battle-64-recomp-linux-x86_64.tar.gz
-            flavour: tar.gz
-            cmake_args: ''
-            dist_dir: dist-linux
-          - name: Windows (x86-64)
-            os: windows
-            hosted: windows-2022
-            fallback: '["self-hosted","Windows","X64"]'
-            archive: ogre-battle-64-recomp-windows-x86_64.zip
-            flavour: zip
-            # cl.exe rejects the GCC/Clang spellings the app, the runtime and
-            # RT64 use for their flags (cl : error D8021), so build with clang-cl
-            # in an MSVC environment, the configuration Zelda64Recomp uses.
-            cmake_args: '-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl'
-            dist_dir: dist-windows
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:

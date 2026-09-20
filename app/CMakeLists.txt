@@ -312,6 +312,15 @@ add_executable(ogrebattle64 ${OGRE_APP_SOURCES} ${OGRE_RENDERER_SOURCES})
 # the console for a crash report.
 if (WIN32)
     set_target_properties(ogrebattle64 PROPERTIES WIN32_EXECUTABLE TRUE)
+    # Identical code folding merges functions that compile to the same bytes, and
+    # the runtime patches a function's own code to install a mod hook, so a fold
+    # can make a hook patch the wrong function (Zelda64Recomp disables it on
+    # Windows for that reason). It is a cl.exe-era default; lld-link, which the
+    # CI's clang-cl build uses, does not fold unless asked, so this is only for a
+    # link driven by cl.exe.
+    if (MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        target_link_options(ogrebattle64 PRIVATE /OPT:NOICF)
+    endif()
 endif()
 
 # Copy the app-local MSVC runtime next to the executable.

@@ -420,22 +420,76 @@ void write_prelude(Report& report, const char* reason) {
     }
 }
 
+#if defined(_WIN32)
+// Module name and offset for a host address, written with raw writes. The module
+// (our exe, a GPU driver, the CRT) is the first thing to look at and needs no
+// symbols.
+void write_host_symbol(Report& report, const void* address) {
+    if (address == nullptr) {
+        return;
+    }
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(address), &module) ||
+        module == nullptr) {
+        return;
+    }
+    wchar_t wide[MAX_PATH];
+    const DWORD length = GetModuleFileNameW(module, wide, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        return;
+    }
+    char narrow[MAX_PATH * 4];
+    const int written = WideCharToMultiByte(CP_UTF8, 0, wide, static_cast<int>(length),
+                                            narrow, sizeof(narrow) - 1, nullptr, nullptr);
+    if (written <= 0) {
+        return;
+    }
+    narrow[written] = '\0';
+    report.str(" (");
+    report.str(narrow);
+    report.str("+");
+    report.hex(reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module), 1);
+    report.str(")");
+}
+#endif
+
 // The runtime's dump helpers write to stdout and stderr (`printf` for the
-// per-thread chain, `fprintf(stderr, ...)` elsewhere). Run them with both
-// descriptors pointed at the report so their output lands in error.log, and
-// restore them afterwards.
-//
-// They are stdio calls, and a fault can arrive while the faulting thread holds a
-// stream lock (inside printf). `fflush(nullptr)` re-acquires every stream lock,
-// and the handler then never returns: the process never dies and the window
-// freezes (session 94). So the streams are never flushed here, and the dumps run
-// only when a non-blocking probe shows both locks free. The header and the
-// captured log are written with raw write() and do not depend on this.
+// per-thread chain, `fprintf(stderr, ...)` elsewhere) and are stdio-based. A
+// fault can arrive while the faulting thread holds a stream lock (inside
+// printf): re-entering that lock hangs the handler instead of finishing the
+// report. On POSIX the dumps therefore run only behind a non-blocking
+// ftrylockfile probe; Windows has no such probe, so there the handler uses raw
+// writes only. Everything below is a raw write and cannot block.
 void write_guest_diagnostics(Report& report) {
-    bool stdio_free = true;
+    const uint8_t* rdram = ultramodern::get_rdram_base();
+    const int tid = (rdram != nullptr && ultramodern::this_thread() != 0)
+                        ? static_cast<int>(TO_PTR(OSThread, ultramodern::this_thread())->id)
+                        : -1;
+    report.str("\n--- guest diagnostics ---\n");
+    report.str("n64 thread: ");
+    if (tid < 0) {
+        report.str("-1");
+    } else {
+        report.dec(static_cast<uint64_t>(tid));
+    }
+    report.str("\n");
+    for (int t = 1; t < 32; t++) {
+        const uint32_t func = ultramodern::debug_last_func_vram(t);
+        if (func != 0) {
+            report.str("  t");
+            report.dec(static_cast<uint64_t>(t));
+            report.str(" last func ");
+            report.hex(func, 8);
+            report.str("\n");
+        }
+    }
+
 #if !defined(_WIN32)
-    // Probe and release: holding the lock across the printf calls below would
-    // re-enter a non-recursive stream lock.
+    // The full call chain and the recorded history need the runtime's
+    // printf-based dumpers, so they run only when both stream locks are free.
+    bool stdio_free = true;
     if (ftrylockfile(stdout) != 0) {
         stdio_free = false;
     } else {
@@ -448,12 +502,10 @@ void write_guest_diagnostics(Report& report) {
             funlockfile(stderr);
         }
     }
-#endif
     if (!stdio_free) {
-        report.str("\n--- guest diagnostics skipped: a stdio stream lock is held ---\n");
+        report.str("  (call chain skipped: a stdio stream lock is held)\n");
         return;
     }
-
     const int saved_stdout = io_dup(1);
     const int saved_stderr = io_dup(2);
     if (saved_stdout < 0 && saved_stderr < 0) {
@@ -465,23 +517,9 @@ void write_guest_diagnostics(Report& report) {
     if (saved_stderr >= 0) {
         io_dup2(report.fd, 2);
     }
-    report.str("\n--- guest diagnostics ---\n");
-
-    const uint8_t* rdram = ultramodern::get_rdram_base();
-    const int tid = (rdram != nullptr && ultramodern::this_thread() != 0)
-                        ? static_cast<int>(TO_PTR(OSThread, ultramodern::this_thread())->id)
-                        : -1;
-    std::fprintf(stderr, "n64 thread: %d\n", tid);
     ultramodern::debug_dump_call_chain(tid, "crash");
-    for (int t = 1; t < 32; t++) {
-        const uint32_t func = ultramodern::debug_last_func_vram(t);
-        if (func != 0) {
-            std::fprintf(stderr, "  t%-3d last func 0x%08X\n", t, func);
-        }
-    }
     ultramodern::debug_dump_chain_history();
     std::fflush(stderr);
-
     if (saved_stdout >= 0) {
         io_dup2(saved_stdout, 1);
         io_close(saved_stdout);
@@ -490,13 +528,16 @@ void write_guest_diagnostics(Report& report) {
         io_dup2(saved_stderr, 2);
         io_close(saved_stderr);
     }
+#endif
 }
 
 // Writes the report. `signal_number` is -1 for a non-signal fatal condition.
-// `fault` is the host address the fault named and `host_pc` the faulting
-// program counter, each nullable. `once` suppresses a second report from the
-// same fatal event (a std::terminate that then aborts).
-void write_report(int signal_number, const void* fault, const void* host_pc,
+// `instr` is the faulting instruction, `data_addr` the address it touched (the
+// access-violation address on Windows, `si_addr` on POSIX) and `access` the
+// Windows access kind (0 read, 1 write, 8 execute; -1 when unknown). All are
+// nullable/optional. `once` suppresses a second report from the same fatal
+// event (a std::terminate that then aborts).
+void write_report(int signal_number, const void* instr, const void* data_addr, int access,
                   const char* reason, bool once) {
     if (once && g_reported.exchange(true)) {
         return;
@@ -522,32 +563,48 @@ void write_report(int signal_number, const void* fault, const void* host_pc,
     report.str("rdram base: ");
     report.hex(reinterpret_cast<uintptr_t>(rdram), 1);
     report.str("\n");
-    const uint8_t* fault_bytes = static_cast<const uint8_t*>(fault);
-    if (fault_bytes != nullptr) {
-        report.str("fault address (host): ");
-        report.hex(reinterpret_cast<uintptr_t>(fault_bytes), 1);
-        report.str("\n");
-        if (rdram != nullptr && fault_bytes >= rdram && fault_bytes < rdram + 0x800000) {
-            report.str("fault offset from rdram: ");
-            report.hex(static_cast<uint64_t>(fault_bytes - rdram), 1);
-            report.str("\n");
-        }
-    }
-    if (host_pc != nullptr) {
-        report.str("host pc: ");
-        report.hex(reinterpret_cast<uintptr_t>(host_pc), 1);
+    const uint8_t* instr_bytes = static_cast<const uint8_t*>(instr);
+    if (instr_bytes != nullptr) {
+        report.str("fault instruction: ");
+        report.hex(reinterpret_cast<uintptr_t>(instr_bytes), 1);
 #if defined(__APPLE__)
         Dl_info info{};
-        if (dladdr(host_pc, &info) != 0 && info.dli_fname != nullptr) {
+        if (dladdr(instr, &info) != 0 && info.dli_fname != nullptr) {
             report.str(" (");
             report.str(info.dli_fname);
             report.str("+");
-            report.hex(reinterpret_cast<uintptr_t>(host_pc) -
+            report.hex(reinterpret_cast<uintptr_t>(instr) -
                            reinterpret_cast<uintptr_t>(info.dli_fbase),
                        1);
             report.str(")");
         }
+#elif defined(_WIN32)
+        write_host_symbol(report, instr);
 #endif
+        report.str("\n");
+    }
+    const uint8_t* data_bytes = static_cast<const uint8_t*>(data_addr);
+    if (data_bytes != nullptr) {
+        report.str("fault address: ");
+        report.hex(reinterpret_cast<uintptr_t>(data_bytes), 1);
+#if defined(_WIN32)
+        write_host_symbol(report, data_addr);
+#endif
+        report.str("\n");
+        if (rdram != nullptr && data_bytes >= rdram && data_bytes < rdram + 0x800000) {
+            report.str("fault offset from rdram: ");
+            report.hex(static_cast<uint64_t>(data_bytes - rdram), 1);
+            report.str("\n");
+        }
+    }
+    if (access >= 0) {
+        report.str("access: ");
+        switch (access) {
+            case 0: report.str("read"); break;
+            case 1: report.str("write"); break;
+            case 8: report.str("execute"); break;
+            default: report.dec(static_cast<uint64_t>(access)); break;
+        }
         report.str("\n");
     }
 
@@ -581,7 +638,7 @@ void write_report(int signal_number, const void* fault, const void* host_pc,
 
 // --- fatal handlers ---------------------------------------------------------
 
-void report_signal(int signal_number, const void* fault, const void* host_pc) {
+void report_signal(int signal_number, const void* instr, const void* data_addr, int access) {
     char reason[64];
     const char* name = signal_name(signal_number);
     size_t used = 0;
@@ -595,74 +652,79 @@ void report_signal(int signal_number, const void* fault, const void* host_pc) {
     reason[used++] = static_cast<char>('0' + signal_number % 10);
     reason[used++] = ')';
     reason[used] = '\0';
-    write_report(signal_number, fault, host_pc, reason, true);
+    write_report(signal_number, instr, data_addr, access, reason, true);
 }
 
 #if defined(_WIN32)
 void win_signal_handler(int signal_number) {
-    report_signal(signal_number, nullptr, nullptr);
+    report_signal(signal_number, nullptr, nullptr, -1);
     std::signal(signal_number, SIG_DFL);
     std::raise(signal_number);
 }
 
 LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* info) {
-    const DWORD code = (info != nullptr && info->ExceptionRecord != nullptr)
-                           ? info->ExceptionRecord->ExceptionCode
-                           : 0;
+    const EXCEPTION_RECORD* record =
+        (info != nullptr) ? info->ExceptionRecord : nullptr;
+    const DWORD code = (record != nullptr) ? record->ExceptionCode : 0;
     static const char* table = "0123456789ABCDEF";
     char reason[40] = "unhandled exception 0x";
     for (int i = 0; i < 8; i++) {
         reason[22 + i] = table[(code >> ((7 - i) * 4)) & 0xF];
     }
     reason[30] = '\0';
-    const void* host_pc = nullptr;
+    const void* instr = (record != nullptr) ? record->ExceptionAddress : nullptr;
 #if defined(_M_X64) || defined(__x86_64__)
     if (info != nullptr && info->ContextRecord != nullptr) {
-        host_pc = reinterpret_cast<const void*>(info->ContextRecord->Rip);
+        instr = reinterpret_cast<const void*>(info->ContextRecord->Rip);
     }
 #endif
-    write_report(-1,
-                 (info != nullptr && info->ExceptionRecord != nullptr)
-                     ? info->ExceptionRecord->ExceptionAddress
-                     : nullptr,
-                 host_pc, reason, true);
+    // An access violation carries the access kind and the address it touched;
+    // the instruction address alone cannot say whether a load or a store faulted
+    // or which pointer was bad.
+    int access = -1;
+    const void* data_addr = nullptr;
+    if (code == 0xC0000005 && record != nullptr && record->NumberParameters >= 2) {
+        access = static_cast<int>(record->ExceptionInformation[0]);
+        data_addr = reinterpret_cast<const void*>(record->ExceptionInformation[1]);
+    }
+    write_report(-1, instr, data_addr, access, reason, true);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #else
 void fatal_signal_handler(int signal_number, siginfo_t* info, void* ucontext) {
-    const void* fault = info != nullptr ? info->si_addr : nullptr;
-    const void* host_pc = nullptr;
+    const void* data_addr = info != nullptr ? info->si_addr : nullptr;
+    const void* instr = nullptr;
 #if defined(__APPLE__) && defined(__x86_64__)
     if (ucontext != nullptr) {
-        host_pc = reinterpret_cast<const void*>(
+        instr = reinterpret_cast<const void*>(
             static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss.__rip);
     }
 #elif defined(__APPLE__) && defined(__aarch64__)
     if (ucontext != nullptr) {
-        host_pc = reinterpret_cast<const void*>(
+        instr = reinterpret_cast<const void*>(
             static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc);
     }
 #elif defined(__linux__) && defined(__x86_64__)
     if (ucontext != nullptr) {
-        host_pc = reinterpret_cast<const void*>(
+        instr = reinterpret_cast<const void*>(
             static_cast<const ucontext_t*>(ucontext)->uc_mcontext.gregs[REG_RIP]);
     }
 #elif defined(__linux__) && defined(__aarch64__)
     if (ucontext != nullptr) {
-        host_pc = reinterpret_cast<const void*>(
+        instr = reinterpret_cast<const void*>(
             static_cast<const ucontext_t*>(ucontext)->uc_mcontext.pc);
     }
 #else
     (void)ucontext;
 #endif
-    report_signal(signal_number, fault, host_pc);
+    report_signal(signal_number, instr, data_addr, -1);
     std::signal(signal_number, SIG_DFL);
     std::raise(signal_number);
 }
 #endif
 
 void terminate_handler() {
-    write_report(-1, nullptr, nullptr, "std::terminate (uncaught C++ exception)", true);
+    write_report(-1, nullptr, nullptr, -1, "std::terminate (uncaught C++ exception)", true);
     std::_Exit(EXIT_FAILURE);
 }
 
@@ -732,7 +794,7 @@ void write_error_log(const char* reason) {
     // the message the runtime just printed is in the ring.
     std::fflush(nullptr);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    write_report(-1, nullptr, nullptr, reason != nullptr ? reason : "runtime error", false);
+    write_report(-1, nullptr, nullptr, -1, reason != nullptr ? reason : "runtime error", false);
 }
 
 void flush() {

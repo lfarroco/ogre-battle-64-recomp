@@ -236,6 +236,12 @@ start fails the release instead of reaching a player.
    default 90) so a loader error dialog or a hang cannot stall a release run.
    The launch check is skipped when the package is for another platform (a
    Windows zip checked from macOS still gets checks 1 and 2).
+4. A crash leaves a usable report: the same binary runs with
+   `OGRE_CRASH_TEST=segv`, and `error.log` must exist and contain the `[boot]`
+   line printed immediately before the raise. That line only reaches the report
+   through the stdout/stderr capture, so an empty report (the capture never ran,
+   or the handler died on a stdio lock) fails the package instead of reaching a
+   player. `error.log` is removed afterwards.
 
 ### Crash reports — `error.log`
 
@@ -258,11 +264,13 @@ no longer has. `crash_log::install()` runs at the top of `main()` and:
 
 A fatal event writes `<config dir>/error.log`, which is the executable's own
 directory unless that one is read-only (`resolve_pref_dir`). The file holds the
-reason, the fault address, the N64 thread, the host pc, the last 200 stderr lines
-and the last 100 stdout lines (the boot log, `[bank]` load lines, any
+reason, the **faulting instruction and the address it touched** (each with its
+host module and offset on Windows and macOS; an access violation also says
+whether the access was a read, a write or an execute), the RDRAM base, the N64
+thread, the last recompiled function per thread, the last 200 stderr lines and
+the last 100 stdout lines (the boot log, `[bank]` load lines, any
 `[overlays] streamed function stub called @ ...` line), then the runtime's guest
-call chain with fd 1/2 temporarily redirected into the file. The player attaches
-it to a GitHub issue.
+call chain. The player attaches it to a GitHub issue.
 
 The handler's own output uses only `open`/`write`/`close` and an atomic ring
 length; the runtime's dump helpers are `printf`-based and run after the ring has
@@ -270,7 +278,10 @@ been written. The handler never calls `fflush`: a fault can arrive while the
 faulting thread holds a stdio stream lock, and flushing from the handler
 re-enters that lock and hangs the process instead of killing it (session 94).
 The `printf`-based dumps run only after a non-blocking `ftrylockfile` probe shows
-both stream locks free, and the report says when they were skipped. Only the
+both stream locks free, and the report says when they were skipped. **Windows has
+no `ftrylockfile`, so there the handler uses no stdio at all**: it writes the
+fault fields, the N64 thread and the last function per thread with raw writes,
+and skips the runtime's printf-based call-chain dump. Only the
 first report of a fatal event is written, so a `std::terminate` that then aborts
 does not overwrite it. `OGRE_DUMP_RDRAM=<path>` still adds the whole 8 MiB image,
 on the crash path as on the exit path. `crash_log::flush()` restores the
@@ -334,6 +345,16 @@ git tag v0.1.0 && git push origin v0.1.0
 The release job runs only when every platform's build succeeds. Use **Actions →
 Release → Run workflow** with `tag` set and `draft` enabled to get a draft you
 publish yourself instead.
+
+**`platforms` selects the matrix for a dispatched run** (`all`, `windows`,
+`linux` or `macos`; a tag push always builds all three). A Windows-only run is
+about 8 minutes instead of 30, which is the iteration path for a
+Windows-specific bug; it still runs the smoke test and publishes the release, so
+that release carries only the one platform's asset.
+
+```sh
+gh workflow run release.yml -f tag=v0.2.1-rc3 -f platforms=windows
+```
 
 `tools/release-build.sh` is the single entry point — the workflow just exports
 `DIST_OS` and runs it, so a release artifact is byte-for-byte what `make dist`
@@ -485,6 +506,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_DUMP_RDRAM=<path>` | write the whole 8 MiB RDRAM image for offline analysis: on the exit path (`OGRE_EXIT_AFTER_MS` or a closed window) and beside `error.log` on the crash path |
 | `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed, so a packaged build's `error.log` can be verified without provoking a real crash |
 | `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once (reported, not required) and exit 0. `tools/smoke-dist.sh` and `make smoke` use it to prove a package loads and reaches `main` |
+| `OGRE_CONSOLE=1` | Windows: `AllocConsole()` and point stdin/stdout/stderr at it, so a double-clicked GUI build shows the `[boot]` log (the same switch Zelda64Recomp's Windows build calls `--show-console`) |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
 | `OGRE_COVER=1\|<path>` | recompiled-function **coverage census** (session 83): at exit, when the window is closed, or on the live console's `cover`, print every distinct recompiled function the run entered, one `[cover] 0xADDR count` line per function, for `tools/recompcov.py --log`. **Give it a path** (`OGRE_COVER=/tmp/cover.txt`) for a session played by hand — the census then lands in its own file instead of the end of a very chatty stdout, and the app prints one line saying so. `=1` keeps it on stdout for scripted runs. Unlike `OGRE_PROFILE=1` it starts no sampling thread and skips the shadow call chain, so the entry hooks cost one hash insert per call and a playthrough stays near normal speed |
 | `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |

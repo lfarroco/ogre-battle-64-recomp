@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -127,13 +128,26 @@ static void update_gfx(void*) {
 
 int main(int argc, char** argv) {
 #if defined(_WIN32) && !defined(__MINGW32__)
-    // The distributed build is a GUI-subsystem binary, so it has no console. A
-    // developer who runs it from a terminal expects the [boot] log there, and
-    // AttachConsole gives it to them without ever creating a window: it attaches
-    // only when the parent already has a console (a double-click from Explorer
-    // has none, so it fails and is ignored). This runs before crash_log::install
-    // so the capture forwards to the console like any other terminal.
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    // OGRE_CONSOLE=1: allocate a console and put the [boot] log in it. The
+    // distributed build is a GUI-subsystem image, and AttachConsole below only
+    // finds a console that the parent already has, so a double-click has none.
+    // This is the Windows equivalent of running from a terminal, and the quickest
+    // way to see where a boot stops (Zelda64Recomp's Windows build has the same
+    // `--show-console` switch). It never runs unless the variable is set.
+    if (getenv("OGRE_CONSOLE") != nullptr && GetConsoleWindow() == nullptr && AllocConsole()) {
+        FILE* console = nullptr;
+        freopen_s(&console, "CONIN$", "r", stdin);
+        freopen_s(&console, "CONOUT$", "w", stdout);
+        freopen_s(&console, "CONOUT$", "w", stderr);
+        SetConsoleOutputCP(CP_UTF8);
+    }
+    // A developer who runs the .exe from a terminal expects the [boot] log there,
+    // and AttachConsole gives it to them without ever creating a window: it
+    // attaches only when the parent already has a console (a double-click from
+    // Explorer has none, so it fails and is ignored). This runs before
+    // crash_log::install so the capture forwards to the console like any other
+    // terminal.
+    else if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* console = nullptr;
         freopen_s(&console, "CONOUT$", "w", stdout);
         freopen_s(&console, "CONOUT$", "w", stderr);
@@ -181,6 +195,11 @@ int main(int argc, char** argv) {
 #endif
         if (sig != 0) {
             fprintf(stderr, "[boot] OGRE_CRASH_TEST=%s: raising signal %d\n", crash, sig);
+            // Let the capture threads drain the line above into the ring before
+            // the report is written; otherwise the smoke test's check of the
+            // report races them.
+            std::fflush(nullptr);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             std::raise(sig);
         }
     }

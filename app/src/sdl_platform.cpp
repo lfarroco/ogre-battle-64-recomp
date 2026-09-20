@@ -339,6 +339,15 @@ bool init_sdl() {
     // tell SDL not to wait for SDL_main's setup before SDL_Init. No-op on the
     // platforms where SDL does not wrap main.
     SDL_SetMainReady();
+#if defined(_WIN32)
+    // Pin the Windows audio driver to WASAPI unless the player chose one.
+    // Zelda64Recomp does the same for the same runtime ("there seems to be some
+    // issue with sample queueing with directsound currently"); SDL_AUDIODRIVER
+    // still wins.
+    if (getenv("SDL_AUDIODRIVER") == nullptr) {
+        SDL_setenv("SDL_AUDIODRIVER", "wasapi", 1);
+    }
+#endif
     // Only video and events are required. SDL_Init fails the whole call when any
     // requested subsystem fails, and audio genuinely fails on a machine with no
     // usable output device (a VM, an RDP session, a stopped Windows Audio
