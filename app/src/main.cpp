@@ -29,6 +29,7 @@
 #include "launcher.hpp"
 #include "input_map.hpp"
 #include "overlay.hpp"
+#include "settings.hpp"
 #include "sdl_platform.hpp"
 #include "renderer.hpp"
 #include "rsp.hpp"
@@ -151,6 +152,9 @@ int main(int argc, char** argv) {
     // Player-editable controller bindings live beside the save file
     // (`controls.cfg`). A missing file leaves the built-in map.
     ogre::load_input_map(pref_dir);
+    // The player's game speed (`settings.cfg`) is applied to the runtime here,
+    // before the game starts; `OGRE_SPEED` overrides it for a developer run.
+    ogre::load_settings(pref_dir);
     fprintf(stderr, "[boot] config path ok: %s\n", pref_dir.string().c_str());
 
     // --- game registration ----------------------------------------------------

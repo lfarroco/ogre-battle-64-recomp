@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <vector>
 
+#include "settings.hpp"
+
 namespace ogre::ui {
 namespace {
 
@@ -75,9 +77,74 @@ std::string config_value_text(const recomp::config::ConfigOption& option,
 const char* kLauncherHint =
     "TAB SWITCHES TAB   UP/DOWN SELECT   SPACE ACTIVATE   LEFT/RIGHT CHANGE";
 const char* kOverlayHint =
-    "TAB SWITCHES TAB   UP/DOWN SELECT   SPACE REBIND   ESC RESUMES THE GAME";
+    "TAB SWITCHES TAB   UP/DOWN SELECT   LEFT/RIGHT CHANGE   ESC RESUMES THE GAME";
 const char* kCaptureHint =
     "PRESS A KEY OR GAMEPAD BUTTON   BACKSPACE CLEARS KEY   DELETE CLEARS PAD   ESC CANCELS";
+
+// --- the GAME SPEED radio group -----------------------------------------------
+// A GameSpeed row draws its options as radio markers in the second column
+// instead of one text run, so measure_panel (the row height) and draw_panel (the
+// markers and their click rects) lay the same group out with this helper. The
+// result is a pure function of its arguments, so the measured and the drawn row
+// agree.
+
+struct GameSpeedToken {
+    std::string text;
+    int x = 0;
+    int y = 0;
+    int option = -1;
+};
+
+struct GameSpeedLayout {
+    std::vector<GameSpeedToken> tokens;
+    std::vector<SDL_Rect> option_rects;  // relative to the row's top-left
+    int height = 0;
+};
+
+std::string game_speed_marker(int option_value, int current) {
+    return option_value == current ? "[x]" : "[ ]";
+}
+
+GameSpeedLayout layout_game_speed(const Font& font, int scale, int max_width, int current) {
+    GameSpeedLayout layout;
+    const int line_height = scale * Font::kCellHeight;
+    const int space = font.width(" ", scale);
+    int x = 0;
+    int y = 0;
+    for (int i = 0; i < kGameSpeedCount; i++) {
+        const int value = game_speed_value(i);
+        const std::string marker = game_speed_marker(value, current);
+        const std::string number = std::to_string(value);
+        const int marker_width = font.width(marker, scale);
+        const int option_width = marker_width + space + font.width(number, scale);
+        // A narrow window wraps the group onto another line; the option itself
+        // never splits.
+        if (x > 0 && x + option_width > max_width) {
+            x = 0;
+            y += line_height;
+        }
+        layout.tokens.push_back(GameSpeedToken{marker, x, y, i});
+        layout.tokens.push_back(GameSpeedToken{number, x + marker_width + space, y, i});
+        layout.option_rects.push_back(SDL_Rect{x, y, option_width, line_height});
+        x += option_width + space;
+    }
+    layout.height = y + line_height;
+    return layout;
+}
+
+// The GAME SPEED group as one string, for right_text (the drawn row uses the
+// layout above; this is what a caller outside the panel reads).
+std::string game_speed_text(int current) {
+    std::string text;
+    for (int i = 0; i < kGameSpeedCount; i++) {
+        if (!text.empty()) {
+            text += "  ";
+        }
+        text += game_speed_marker(game_speed_value(i), current) + " " +
+                std::to_string(game_speed_value(i));
+    }
+    return text;
+}
 
 }  // namespace
 
@@ -260,10 +327,10 @@ void Panel::set_rom(std::filesystem::path rom) {
 }
 
 bool Panel::tab_enabled(Tab tab) const {
-    // The overlay shows the same tab bar, but only CONTROLS can be used while
-    // the game is running.
+    // The overlay shows the same tab bar, but only CONTROLS and SETTINGS can be
+    // used while the game is running.
     if (mode_ == Mode::Overlay) {
-        return tab == Tab::Controls;
+        return tab == Tab::Controls || tab == Tab::Settings;
     }
     return true;
 }
@@ -278,6 +345,8 @@ std::string Panel::tab_label(Tab tab) const {
             return "MODS";
         case Tab::Controls:
             return "CONTROLS";
+        case Tab::Settings:
+            return "SETTINGS";
         default:
             return {};
     }
@@ -360,6 +429,10 @@ void Panel::rebuild_rows() {
             rows_.push_back(Row{RowKind::ResetBindings, {}, 0, 0, -1});
             rows_.push_back(Row{RowKind::Section, "L-STICK: N64 ANALOG STICK", 0, 0, -1});
             rows_.push_back(Row{RowKind::Section, "R-STICK: ALSO PRESSES C", 0, 0, -1});
+            break;
+
+        case Tab::Settings:
+            rows_.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
             break;
 
         default:
@@ -462,6 +535,8 @@ std::string Panel::left_text(size_t index) const {
         }
         case RowKind::ResetBindings:
             return "Reset bindings to defaults";
+        case RowKind::GameSpeed:
+            return "GAME SPEED";
     }
     return {};
 }
@@ -487,6 +562,8 @@ std::string Panel::right_text(size_t index) const {
         }
         case RowKind::ResetBindings:
             return "Restore the default keyboard and gamepad map.";
+        case RowKind::GameSpeed:
+            return game_speed_text(game_speed());
         default:
             return {};
     }
@@ -582,8 +659,34 @@ RowAction Panel::activate(size_t index, int direction) {
             update_input_map(map);
             return RowAction::BindingChanged;
         }
+
+        case RowKind::GameSpeed: {
+            // Left/Right and Space step the radio group, wrapping at the ends
+            // like a mod option row. A value that came from `OGRE_SPEED` and is
+            // not one of the offered steps starts the walk at the first step.
+            int current = game_speed_index(game_speed());
+            if (current < 0) {
+                current = 0;
+            }
+            current = ((current + direction) % kGameSpeedCount + kGameSpeedCount) % kGameSpeedCount;
+            set_game_speed(game_speed_value(current));
+            return RowAction::SettingChanged;
+        }
     }
     return RowAction::None;
+}
+
+RowAction Panel::choose_option(size_t index, size_t option) {
+    if (index >= rows_.size() || rows_[index].kind != RowKind::GameSpeed ||
+        option >= static_cast<size_t>(kGameSpeedCount)) {
+        return RowAction::None;
+    }
+    const int value = game_speed_value(static_cast<int>(option));
+    if (value == game_speed()) {
+        return RowAction::None;
+    }
+    set_game_speed(value);
+    return RowAction::SettingChanged;
 }
 
 void Panel::begin_capture(size_t index) {
@@ -643,6 +746,12 @@ Panel::Hit Panel::hit_test(int x, int y) const {
             return Hit{Hit::Kind::Tab, static_cast<int>(i)};
         }
     }
+    // A radio marker sits inside its row, so it is tested first.
+    for (const Geometry::Option& option : geometry_.options) {
+        if (inside(option.rect)) {
+            return Hit{Hit::Kind::RowOption, option.row, option.option};
+        }
+    }
     for (size_t i = 0; i < geometry_.rows.size(); i++) {
         if (inside(geometry_.rows[i])) {
             return Hit{Hit::Kind::Row, static_cast<int>(i)};
@@ -699,6 +808,13 @@ PanelMetrics measure_panel(const Font& font, Panel& panel, int output_width,
         if (panel.row_kind(i) == Panel::RowKind::Section) {
             metrics.row_heights[i] = section_height;
         }
+        else if (panel.row_kind(i) == Panel::RowKind::GameSpeed) {
+            // The radio group is laid out by option, not wrapped as one string;
+            // its height is what the row must reserve.
+            const GameSpeedLayout layout =
+                layout_game_speed(font, metrics.scale, description_width, game_speed());
+            metrics.row_heights[i] = std::max(metrics.row_height, layout.height);
+        }
         else {
             const std::string right = panel.right_text(i);
             if (!right.empty()) {
@@ -732,6 +848,7 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
     const int panel_width = metrics.panel_width;
     const int panel_left = metrics.panel_left;
     const int description_x = panel_left + (panel_width * 2) / 5;
+    const int description_width = panel_left + panel_width - description_x;
     const int left_width = description_x - panel_left - px(16);
 
     TextLayer layer;
@@ -802,11 +919,33 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
         layer.draw(renderer, 0, panel_left, text_y, false);
 
         int right_y = text_y;
-        for (const std::string& line : metrics.right_lines[i]) {
-            layer.build(renderer, font, line, scale,
-                        is_selected ? kWarmColor : kHintColor);
-            layer.draw(renderer, 0, description_x, right_y, false);
-            right_y += line_height;
+        if (kind == Panel::RowKind::GameSpeed) {
+            // The marker of the live speed stays warm so the current value is
+            // readable even when the row is not selected.
+            const int current_speed = game_speed();
+            const GameSpeedLayout layout =
+                layout_game_speed(font, scale, description_width, current_speed);
+            for (const GameSpeedToken& token : layout.tokens) {
+                const bool live = game_speed_value(token.option) == current_speed;
+                layer.build(renderer, font, token.text, scale,
+                            (is_selected || live) ? kWarmColor : kSubtitleColor);
+                layer.draw(renderer, 0, description_x + token.x, text_y + token.y, false);
+            }
+            for (size_t option = 0; option < layout.option_rects.size(); option++) {
+                SDL_Rect rect = layout.option_rects[option];
+                rect.x += description_x;
+                rect.y += text_y;
+                geometry.options.push_back(Panel::Geometry::Option{
+                    static_cast<int>(i), static_cast<int>(option), rect});
+            }
+        }
+        else {
+            for (const std::string& line : metrics.right_lines[i]) {
+                layer.build(renderer, font, line, scale,
+                            is_selected ? kWarmColor : kHintColor);
+                layer.draw(renderer, 0, description_x, right_y, false);
+                right_y += line_height;
+            }
         }
 
         cursor_y += height;

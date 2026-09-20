@@ -40,6 +40,28 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **A SETTINGS tab carries GAME SPEED, and the speed changes while the game
+  runs (session 93).** The shared `ui::Panel` gained a fifth tab whose only row is
+  a radio group, `GAME SPEED  [ ] 1 [ ] 2 [x] 4`; `LEFT`/`RIGHT`/`SPACE` step it
+  and a click on a marker sets that speed. 6 and 8 were offered first and dropped:
+  the developer reports the game's own cursor aiming cannot keep up at those
+  speeds. The value is the runtime's emulated-clock multiplier, the quantity
+  `OGRE_SPEED` sets. It is persisted as `<config>/settings.cfg`
+  (`app/src/settings.{hpp,cpp}`), applied at startup by `load_settings()` before
+  the game boots, and `OGRE_SPEED` overrides the file for one run without writing
+  it; a file naming 6 or 8 loads as the closest offered value (4). In `Overlay`
+  mode CONTROLS **and** SETTINGS are enabled, so `ESC` can change the speed
+  mid-game. The runtime gained `ultramodern::set_speed_multiplier()`, and the
+  guest clock is continuous across a change: the clock is piecewise linear, with
+  the segment anchors published under a seqlock, so `osGetCount`/`osGetTime` and
+  pending `OSTimer` deadlines do not jump. A mutex on that read path cost the boot
+  visible time (scene `0x09` at 7.3 s / 6.5 s against the pre-change binary's
+  6.1 s / 5.3 s at `OGRE_SPEED=4`); the seqlock version matches it within 50 ms
+  on three alternating runs. Proofs:
+  `docs/proofs/native-launcher-settings.png`,
+  `docs/proofs/native-overlay-settings.png`; `runlog.py --check` PASS on the
+  maintained 45 s title-route run; the runtime patch re-applies to pristine
+  `589bbf0`.
 - ✅ **The start screen is tabbed and owns the controller bindings, and `ESC`
   opens the same panel over the running game (session 92).** The start screen's
   three sections became a tab bar — **START GAME**, **ROM**, **MODS**,

@@ -48,6 +48,10 @@ struct OverlayState {
     bool show_at_fired = false;
     const char* shot_path = nullptr;
     bool shot_written = false;
+    // OGRE_OVERLAY_SHOT_MS: delay the capture until the scripted keys have been
+    // delivered. Zero captures the first visible frame.
+    uint32_t shot_at_ms = 0;
+    uint64_t shown_ticks = 0;
     uint64_t boot_ticks = 0;
     float opacity = 0.90f;
 
@@ -120,7 +124,7 @@ bool create_window() {
 
     const uint32_t flags = SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP |
                            SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SKIP_TASKBAR;
-    g_overlay.window = SDL_CreateWindow("Ogre Battle 64: Controls", x, y, width, height, flags);
+    g_overlay.window = SDL_CreateWindow("Ogre Battle 64: Options", x, y, width, height, flags);
     if (g_overlay.window == nullptr) {
         std::fprintf(stderr, "[overlay] window: %s\n", SDL_GetError());
         return false;
@@ -193,6 +197,7 @@ void show() {
     SDL_RaiseWindow(g_overlay.window);
     g_overlay.visible = true;
     g_visible.store(true, std::memory_order_relaxed);
+    g_overlay.shown_ticks = SDL_GetTicks64();
     if (g_overlay.keys_started_ms == 0) {
         g_overlay.keys_started_ms = SDL_GetTicks64();
     }
@@ -276,7 +281,9 @@ void draw() {
                px(2), kHintColor);
     body.draw(g_overlay.renderer, center_x, 0, cursor_y, true);
 
-    if (g_overlay.shot_path != nullptr && !g_overlay.shot_written) {
+    if (g_overlay.shot_path != nullptr && !g_overlay.shot_written &&
+        (g_overlay.shot_at_ms == 0 ||
+         SDL_GetTicks64() - g_overlay.shown_ticks >= g_overlay.shot_at_ms)) {
         if (ui::write_ppm(g_overlay.renderer, g_overlay.shot_path)) {
             std::fprintf(stderr, "[overlay] wrote %s\n", g_overlay.shot_path);
         }
@@ -300,8 +307,20 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
     g_overlay.game_pad_count = 4;
     g_overlay.panel = std::make_unique<ui::Panel>(ui::Panel::Mode::Overlay, mod_game_id,
                                                   std::filesystem::path{});
+    // OGRE_OVERLAY_TAB=<controls|settings>: open the panel on that tab, so a
+    // scripted run or a screenshot reaches it without input.
+    if (const char* tab = std::getenv("OGRE_OVERLAY_TAB")) {
+        const std::string name = tab;
+        if (name == "settings" || name == "setting") {
+            g_overlay.panel->set_tab(ui::Tab::Settings);
+        }
+        else if (name == "controls" || name == "controller") {
+            g_overlay.panel->set_tab(ui::Tab::Controls);
+        }
+    }
     g_overlay.boot_ticks = SDL_GetTicks64();
     g_overlay.show_at_ms = env_millis("OGRE_OVERLAY_AT_MS");
+    g_overlay.shot_at_ms = env_millis("OGRE_OVERLAY_SHOT_MS");
     if (const char* path = std::getenv("OGRE_CAPTURE_OVERLAY");
         path != nullptr && path[0] != '\0') {
         g_overlay.shot_path = path;
@@ -394,6 +413,14 @@ void overlay_handle_event(const SDL_Event& event) {
             else if (key == SDLK_DOWN) {
                 g_overlay.panel->move(1);
             }
+            else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
+                const size_t index = g_overlay.panel->selected();
+                if (index < g_overlay.panel->row_count() &&
+                    (g_overlay.panel->row_kind(index) == ui::Panel::RowKind::GameSpeed ||
+                     g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Option)) {
+                    g_overlay.panel->activate(index, key == SDLK_RIGHT ? 1 : -1);
+                }
+            }
             else if (key == SDLK_SPACE || key == SDLK_RETURN || key == SDLK_RETURN2 ||
                      key == SDLK_KP_ENTER) {
                 const size_t index = g_overlay.panel->selected();
@@ -430,6 +457,14 @@ void overlay_handle_event(const SDL_Event& event) {
                 const ui::Tab tab = static_cast<ui::Tab>(hit.index);
                 if (g_overlay.panel->tab_enabled(tab)) {
                     g_overlay.panel->set_tab(tab);
+                }
+            }
+            else if (hit.kind == ui::Panel::Hit::Kind::RowOption) {
+                const size_t index = static_cast<size_t>(hit.index);
+                if (index < g_overlay.panel->row_count() &&
+                    g_overlay.panel->selectable(index)) {
+                    g_overlay.panel->set_selected(index);
+                    g_overlay.panel->choose_option(index, static_cast<size_t>(hit.option));
                 }
             }
             else if (hit.kind == ui::Panel::Hit::Kind::Row) {

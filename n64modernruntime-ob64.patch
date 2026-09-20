@@ -1819,7 +1819,7 @@ index d60c4ec..77c1df4 100644
          using WindowHandle = SDL_Window*;
  #elif defined(__APPLE__)
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..ef376af 100644
+index 46aea61..5933d99 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
 @@ -23,7 +23,17 @@
@@ -1937,7 +1937,18 @@ index 46aea61..ef376af 100644
  // Thread scheduling.
  void check_running_queue(RDRAM_ARG1);
  void run_next_thread_and_wait(RDRAM_ARG1);
-@@ -121,6 +221,10 @@ void init_audio();
+@@ -102,6 +202,10 @@ bool is_game_thread();
+ void submit_rsp_task(RDRAM_ARG PTR(OSTask) task);
+ void send_si_message();
+ uint32_t get_speed_multiplier();
++// Changes the game speed multiplier (1..64) while the game runs. The guest clock
++// is continuous across the change: pending timers keep their guest deadlines and
++// osGetCount/osGetTime do not jump.
++void set_speed_multiplier(uint32_t multiplier);
+ 
+ // Time
+ std::chrono::high_resolution_clock::time_point get_start();
+@@ -121,6 +225,10 @@ void init_audio();
  void set_audio_frequency(uint32_t freq);
  void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
  uint32_t get_remaining_audio_bytes();
@@ -1948,7 +1959,7 @@ index 46aea61..ef376af 100644
  
  struct audio_callbacks_t {
      using queue_samples_t = void(int16_t*, size_t);
-@@ -170,11 +274,33 @@ void set_callbacks(
+@@ -170,11 +278,33 @@ void set_callbacks(
      const error_handling::callbacks_t& error_handling_callbacks,
      const threads::callbacks_t& threads_callbacks
  );
@@ -4432,34 +4443,34 @@ index 6e3ed18..cc81239 100644
      if (t_ == NULLPTR) {
          t_ = thread_self;
 diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
-index ee26c45..455b1af 100644
+index ee26c45..2a252a5 100644
 --- a/ultramodern/src/timer.cpp
 +++ b/ultramodern/src/timer.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,9 @@
  #include <thread>
  #include <variant>
  #include <set>
++#include <atomic>
++#include <cstdio>
 +#include <cstdlib>
  #include "blockingconcurrentqueue.h"
  
  #include "ultramodern/ultra64.h"
-@@ -15,10 +16,29 @@
+@@ -15,10 +18,77 @@
  static std::chrono::high_resolution_clock::time_point start_time = std::chrono::high_resolution_clock::now();
  // Offset of the duration since program start used to calculate the value for osGetTime. 
  static int64_t ostime_offset = 0;
 -// Game speed multiplier (1 means no speedup)
 -constexpr uint32_t speed_multiplier = 1;
-+// Game speed multiplier (1 means no speedup). OGRE_SPEED=<n> speeds the whole
-+// emulated machine up: the CPU counter advances n times faster and the VI
-+// thread schedules retraces n times faster, so timed sequences (attract mode,
-+// songs) complete in 1/n of the wall-clock time. Debug aid for iterating on a
-+// scene that only comes up minutes into a run.
-+static uint32_t read_speed_multiplier() {
-+    const char* env = getenv("OGRE_SPEED");
-+    if (env == nullptr) {
-+        return 1;
-+    }
-+    long value = strtol(env, nullptr, 10);
+-// N64 CPU counter ticks per millisecond
+-constexpr uint32_t counter_per_ms = 46'875 * speed_multiplier;
++
++// Game speed multiplier (1 means no speedup). OGRE_SPEED=<n> sets the starting
++// value, and the app's SETTINGS tab changes it while the game runs: the
++// emulated machine runs n times faster, so the CPU counter advances n times
++// faster and the VI thread schedules retraces n times faster, which completes
++// timed sequences (attract mode, songs) in 1/n of the wall-clock time.
++static uint32_t clamp_speed_multiplier(long value) {
 +    if (value < 1) {
 +        value = 1;
 +    }
@@ -4469,10 +4480,130 @@ index ee26c45..455b1af 100644
 +    return static_cast<uint32_t>(value);
 +}
 +
-+static const uint32_t speed_multiplier = read_speed_multiplier();
- // N64 CPU counter ticks per millisecond
--constexpr uint32_t counter_per_ms = 46'875 * speed_multiplier;
-+static const uint32_t counter_per_ms = 46'875 * speed_multiplier;
++static uint32_t read_speed_multiplier() {
++    const char* env = getenv("OGRE_SPEED");
++    if (env == nullptr) {
++        return 1;
++    }
++    return clamp_speed_multiplier(strtol(env, nullptr, 10));
++}
++
++// The guest clock is piecewise linear in wall time, at 46'875 * multiplier CPU
++// ticks per millisecond. `start_us`/`start_ticks` mark where the current
++// multiplier took effect, so changing the multiplier does not move the clock:
++// osGetCount, osGetTime and every pending OSTimer timestamp stay continuous
++// across it. Without the anchors, going 1 -> 4 would add the whole elapsed run
++// to the guest clock at once and fire every armed timer.
++//
++// The three values are one snapshot, published under a seqlock. The app's
++// SETTINGS tab writes them from the main thread while the game, VI and timer
++// threads read them, and a mutex on this path costs the boot measurable time.
++struct SpeedClock {
++    uint32_t multiplier;
++    int64_t start_us;
++    int64_t start_ticks;
++};
++
++static std::atomic<uint32_t> speed_seq{0};
++static std::atomic<uint32_t> speed_multiplier{read_speed_multiplier()};
++static std::atomic<int64_t> speed_start_us{0};
++static std::atomic<int64_t> speed_start_ticks{0};
++
++static uint32_t counter_per_ms(uint32_t multiplier) {
++    return 46'875u * multiplier;
++}
++
++static int64_t host_us_now() {
++    return std::chrono::duration_cast<std::chrono::microseconds>(
++        std::chrono::high_resolution_clock::now() - start_time).count();
++}
++
++// A consistent snapshot. The writer holds `speed_seq` odd for the length of an
++// update, so a read that straddles one is retried instead of used.
++static SpeedClock read_speed_clock() {
++    SpeedClock clock;
++    for (;;) {
++        const uint32_t before = speed_seq.load(std::memory_order_acquire);
++        if ((before & 1u) != 0) {
++            continue;
++        }
++        clock.multiplier = speed_multiplier.load(std::memory_order_relaxed);
++        clock.start_us = speed_start_us.load(std::memory_order_relaxed);
++        clock.start_ticks = speed_start_ticks.load(std::memory_order_relaxed);
++        if (speed_seq.load(std::memory_order_acquire) == before) {
++            return clock;
++        }
++    }
++}
  
  struct OSTimer {
      PTR(OSTimer) unused1;
+@@ -45,21 +115,30 @@ struct {
+ } timer_context;
+ 
+ uint64_t duration_to_ticks(std::chrono::high_resolution_clock::duration duration) {
+-    uint64_t delta_micros = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
++    const SpeedClock clock = read_speed_clock();
++    int64_t delta_micros = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+     // More accurate than using a floating point timer, will only overflow after running for 12.47 years
+     // Units: (micros * (counts/millis)) / (micros/millis) = counts
+-    uint64_t total_count = (delta_micros * counter_per_ms) / 1000;
++    int64_t total_count = clock.start_ticks +
++        (delta_micros - clock.start_us) * counter_per_ms(clock.multiplier) / 1000;
+ 
+-    return total_count;
++    return static_cast<uint64_t>(total_count);
+ }
+ 
+ std::chrono::microseconds ticks_to_duration(uint64_t ticks) {
+     using namespace std::chrono_literals;
+-    return ticks * 1000us / counter_per_ms;
++    const SpeedClock clock = read_speed_clock();
++    return ticks * 1000us / counter_per_ms(clock.multiplier);
+ }
+ 
+ std::chrono::high_resolution_clock::time_point ticks_to_timepoint(uint64_t ticks) {
+-    return start_time + ticks_to_duration(ticks);
++    const SpeedClock clock = read_speed_clock();
++    // An absolute guest timestamp, not a duration at the current multiplier: a
++    // timer armed before a speed change must still fire at the same guest tick.
++    int64_t host_us = clock.start_us +
++        (static_cast<int64_t>(ticks) - clock.start_ticks) * 1000 /
++            counter_per_ms(clock.multiplier);
++    return start_time + std::chrono::microseconds{host_us};
+ }
+ 
+ uint64_t time_now() {
+@@ -146,7 +225,31 @@ void ultramodern::init_timers(RDRAM_ARG1) {
+ }
+ 
+ uint32_t ultramodern::get_speed_multiplier() {
+-    return speed_multiplier;
++    return speed_multiplier.load(std::memory_order_relaxed);
++}
++
++void ultramodern::set_speed_multiplier(uint32_t multiplier) {
++    multiplier = clamp_speed_multiplier(multiplier);
++    if (multiplier == speed_multiplier.load(std::memory_order_relaxed)) {
++        return;
++    }
++    // Only the app's main thread calls this, so the fields have one writer; the
++    // seqlock is what keeps the readers off a torn snapshot.
++    speed_seq.fetch_add(1, std::memory_order_acq_rel);
++    const uint32_t previous = speed_multiplier.load(std::memory_order_relaxed);
++    // Close out the current segment before switching, so the guest clock keeps
++    // the ticks it has already earned.
++    const int64_t now_us = host_us_now();
++    const int64_t base_ticks = speed_start_ticks.load(std::memory_order_relaxed) +
++        (now_us - speed_start_us.load(std::memory_order_relaxed)) *
++            counter_per_ms(previous) / 1000;
++    speed_start_ticks.store(base_ticks, std::memory_order_relaxed);
++    speed_start_us.store(now_us, std::memory_order_relaxed);
++    speed_multiplier.store(multiplier, std::memory_order_relaxed);
++    speed_seq.fetch_add(1, std::memory_order_acq_rel);
++    std::fprintf(stderr, "[timer] game speed multiplier = %u (guest tick %lld, host us %lld)\n",
++                 multiplier, static_cast<long long>(base_ticks),
++                 static_cast<long long>(now_us));
+ }
+ 
+ std::chrono::high_resolution_clock::time_point ultramodern::get_start() {

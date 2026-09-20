@@ -3,9 +3,9 @@
 // The launcher (launcher.cpp) and the Esc overlay (overlay.cpp) show the same
 // content in the same style, so the panel model, its rows, the tab bar and the
 // text rendering live here. A Panel is either in Launcher mode (every tab
-// active) or Overlay mode (only CONTROLS is active; the rest are shown disabled,
-// because starting the game, loading a ROM and toggling mods make no sense while
-// the game is running).
+// active) or Overlay mode (only CONTROLS and SETTINGS are active; the rest are
+// shown disabled, because starting the game, loading a ROM and toggling mods
+// make no sense while the game is running).
 //
 // Rendering is the bitmap font (font.hpp) through an SDL_Renderer, into
 // supersampled TextLayer textures, exactly as the launcher drew before.
@@ -68,7 +68,7 @@ std::string truncate_to_width(const Font& font, const std::string& text, int sca
 
 // --- the tabbed panel ---------------------------------------------------------
 
-enum class Tab { Start, Rom, Mods, Controls, Count };
+enum class Tab { Start, Rom, Mods, Controls, Settings, Count };
 
 constexpr int kTabCount = static_cast<int>(Tab::Count);
 
@@ -81,6 +81,7 @@ enum class RowAction {
     ModToggled,
     OptionChanged,
     BindingChanged,
+    SettingChanged,
     CloseOverlay,
 };
 
@@ -88,7 +89,16 @@ class Panel {
 public:
     enum class Mode { Launcher, Overlay };
 
-    enum class RowKind { Section, Start, Rom, Mod, Option, Binding, ResetBindings };
+    enum class RowKind {
+        Section,
+        Start,
+        Rom,
+        Mod,
+        Option,
+        Binding,
+        ResetBindings,
+        GameSpeed,
+    };
 
     struct Row {
         RowKind kind = RowKind::Section;
@@ -131,6 +141,9 @@ public:
 
     // `direction` is +1 forward, -1 backward.
     RowAction activate(size_t index, int direction);
+    // Picks option `option` of a GameSpeed row directly (a click on one of its
+    // radio markers).
+    RowAction choose_option(size_t index, size_t option);
 
     // --- rebinding capture ----------------------------------------------------
     // Activating a Binding row starts capture; the caller then feeds key and pad
@@ -148,12 +161,21 @@ public:
     // Filled by draw_panel() each frame; clicks use the previous frame's
     // geometry, which is one frame of lag and not visible.
     struct Geometry {
+        // One clickable radio marker of a GameSpeed row. `rect` is absolute, and
+        // the entry is only present for markers draw_panel actually laid out.
+        struct Option {
+            int row = -1;
+            int option = -1;
+            SDL_Rect rect{};
+        };
         std::vector<SDL_Rect> tabs;
         std::vector<SDL_Rect> rows;
+        std::vector<Option> options;
     };
     struct Hit {
-        enum class Kind { None, Tab, Row } kind = Kind::None;
-        int index = -1;
+        enum class Kind { None, Tab, Row, RowOption } kind = Kind::None;
+        int index = -1;   // tab or row index
+        int option = -1;  // option index, for RowOption
     };
     void set_geometry(Geometry geometry) { geometry_ = std::move(geometry); }
     Hit hit_test(int x, int y) const;

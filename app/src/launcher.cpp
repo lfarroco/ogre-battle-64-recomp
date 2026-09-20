@@ -1,8 +1,9 @@
 // The app's start screen (see launcher.hpp).
 //
 // The screen's list is the shared tabbed Panel (ui.hpp): a START GAME tab, a ROM
-// tab, a MODS tab and a CONTROLS tab whose rows rebind the pad. The same Panel
-// is what the in-game overlay shows, so the two screens cannot drift apart.
+// tab, a MODS tab, a CONTROLS tab whose rows rebind the pad, and a SETTINGS tab.
+// The same Panel is what the in-game overlay shows, so the two screens cannot
+// drift apart.
 
 #include "launcher.hpp"
 
@@ -373,7 +374,8 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     auto step_option = [&](int direction) {
         const size_t index = panel.selected();
         if (index < panel.row_count() &&
-            panel.row_kind(index) == ui::Panel::RowKind::Option) {
+            (panel.row_kind(index) == ui::Panel::RowKind::Option ||
+             panel.row_kind(index) == ui::Panel::RowKind::GameSpeed)) {
             panel.activate(index, direction);
         }
     };
@@ -387,8 +389,8 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     bool test_drop_pending = test_drop != nullptr && test_drop[0] != '\0';
     const uint64_t test_drop_at = SDL_GetTicks64() + 300;
 
-    // OGRE_LAUNCHER_TAB=<start|rom|mods|controls>: open the screen on that tab,
-    // so a screenshot or a scripted run reaches it without input.
+    // OGRE_LAUNCHER_TAB=<start|rom|mods|controls|settings>: open the screen on
+    // that tab, so a screenshot or a scripted run reaches it without input.
     if (const char* tab = std::getenv("OGRE_LAUNCHER_TAB")) {
         const std::string name = lowercase(tab);
         if (name == "rom") {
@@ -399,6 +401,9 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         }
         else if (name == "controls" || name == "controller") {
             panel.set_tab(ui::Tab::Controls);
+        }
+        else if (name == "settings" || name == "setting") {
+            panel.set_tab(ui::Tab::Settings);
         }
     }
 
@@ -537,6 +542,13 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
                     const ui::Tab tab = static_cast<ui::Tab>(hit.index);
                     if (panel.tab_enabled(tab)) {
                         panel.set_tab(tab);
+                    }
+                }
+                else if (hit.kind == ui::Panel::Hit::Kind::RowOption) {
+                    const size_t index = static_cast<size_t>(hit.index);
+                    if (index < panel.row_count() && panel.selectable(index)) {
+                        panel.set_selected(index);
+                        run_action(panel.choose_option(index, static_cast<size_t>(hit.option)));
                     }
                 }
                 else if (hit.kind == ui::Panel::Hit::Kind::Row) {

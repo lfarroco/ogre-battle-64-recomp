@@ -279,6 +279,7 @@ else()
         src/save_import.cpp
         src/font.cpp
         src/input_map.cpp
+        src/settings.cpp
         src/ui.cpp
         src/launcher.cpp
         src/overlay.cpp
