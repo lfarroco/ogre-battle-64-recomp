@@ -26,7 +26,7 @@ jobs:
           ./g.exe; echo "gui-bash exit=$?"
           ./g.exe >/tmp/g.log 2>&1; echo "gui-bash-redirect exit=$?"
 
-      - name: v0.2.0 release exe: loader probe from Git Bash
+      - name: "v0.2.0 release exe: loader probe from Git Bash"
         shell: bash
         run: |
           mkdir -p rel && cd rel
