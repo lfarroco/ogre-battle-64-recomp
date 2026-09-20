@@ -1,7 +1,6 @@
 name: Diag
 
-# Temporary: find out why a GUI-subsystem exe launched from Git Bash on the
-# windows-2022 runner exits 127. Deleted once answered.
+# Temporary: isolate the windows-2022 fast-fail (0xC0000409) at startup.
 on:
   workflow_dispatch:
 
@@ -13,7 +12,7 @@ jobs:
         with:
           arch: x64
 
-      - name: Console and GUI exes built with lld-link, run from Git Bash
+      - name: Trivial console / GUI / AttachConsole probes
         continue-on-error: true
         shell: bash
         run: |
@@ -23,38 +22,29 @@ jobs:
           #include <windows.h>
           int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) { return 9; }
           EOF
-          lld-link -nologo -subsystem:console -out:c.exe c.c
+          cat > ac.c <<'EOF'
+          #include <windows.h>
+          #include <stdio.h>
+          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) {
+              if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+                  FILE* console = NULL;
+                  freopen_s(&console, "CONOUT$", "w", stdout);
+                  freopen_s(&console, "CONOUT$", "w", stderr);
+              }
+              return 0;
+          }
+          EOF
+          clang-cl -nologo -MT -c c.c
+          clang-cl -nologo -MT -c g.c
+          clang-cl -nologo -MT -c ac.c
+          lld-link -nologo -subsystem:console -out:c.exe c.obj
           echo "console-link=$?"
-          lld-link -nologo -subsystem:windows -out:g.exe g.c
+          lld-link -nologo -subsystem:windows -out:g.exe g.obj
           echo "gui-link=$?"
-          ls -l c.exe g.exe
+          lld-link -nologo -subsystem:windows -out:ac.exe ac.obj
+          echo "ac-link=$?"
+          ls -l c.exe g.exe ac.exe
           ./c.exe; echo "console exit=$?"
           ./g.exe; echo "gui exit=$?"
-
-      - name: Existing GUI exe (notepad) from Git Bash
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          /c/Windows/System32/notepad.exe &
-          pid=$!
-          sleep 5
-          if kill -0 "$pid" 2>/dev/null; then echo "notepad LOADED"; kill -9 "$pid" 2>/dev/null; else wait "$pid" 2>/dev/null; echo "notepad exited $?"; fi
-
-      - name: "v0.2.0 exe: real exit status from PowerShell"
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          mkdir -p rel && cd rel
-          gh release download v0.2.0 --repo "$GITHUB_REPOSITORY" --pattern '*windows*' --dir .
-          unzip -q -o '*.zip'
-          app="$(cygpath -w "$PWD/ogre-battle-64-recomp/ogrebattle64.exe")"
-          echo "app=$app"
-          powershell -NoProfile -Command "
-            \$p = Start-Process -FilePath '$app' -PassThru -ErrorAction Stop
-            Start-Sleep -Seconds 6
-            if (\$p.HasExited) { 'exited code={0} hex=0x{0:X8}' -f \$p.ExitCode }
-            else { 'RUNNING'; \$p.Kill() }
-          "
-          echo "powershell=$?"
+          ./ac.exe; echo "attachconsole exit=$?"
+          ./ac.exe >/tmp/ac.log 2>&1; echo "attachconsole-redirect exit=$?"
