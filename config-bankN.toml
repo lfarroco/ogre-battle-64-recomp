@@ -27,7 +27,19 @@ functions_per_output_file = 100
 # from 30 to 1.4 display lists/s after combat (session 79). Listing the branch
 # here suppresses the yield at that one site and leaves the other 51 sites
 # byte-identical (session 80).
-yield_work_loop_branches = [0x801B3008]
+#
+# The same heuristic misfires on func_ovlN_801DA248 (record 7, 0x801DA248), the
+# 10x5 categorical lookup that the unit-command "use item" screen runs per item:
+# its outer loop is bounded by `slti $a2, 0xA` and its inner loop by
+# `slti $v1, 5`, over the 11-byte records at 0x801969D8. The body makes no calls
+# and no stores; the invariant-base load the heuristic keys on is `lw $v0, 0($a0)`
+# at 0x801DA268 ($a0 is the argument, tested once per iteration for flag bit 3 and
+# never the loop's exit condition -- the exit is `slti $a2, 0xA`). 0x801DA2C0 is
+# the outer loop's backward branch, and the injected blocking yield_self() cost
+# the frame-pump thread up to nine retraces per call: the developer-driven slow
+# frame was 258 ms at OGRE_SPEED=4, i.e. ~61 external messages of ~4.2 ms, or
+# about seven calls to this function per frame (session 90).
+yield_work_loop_branches = [0x801B3008, 0x801DA2C0]
 
 # Splat is given each record's own code/data boundary (see config-bankN.yaml).
 # Extend any piece it still caps in the middle of a call-and-continue emission

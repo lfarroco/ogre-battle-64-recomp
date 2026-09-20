@@ -40,6 +40,19 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The "Use Item" unit-command screen runs at full speed (session 90).** The
+  screen's per-frame lookup `func_ovlN_801DA248` (bank unit N) carried an
+  injected blocking `yield_self` at its outer loop's backward branch
+  `0x801DA2C0` — the session-79/80 misclassified-poll-loop class. The frame-pump
+  thread sat in it 99 % of every slow second and the display-list period was
+  237–275 ms. `0x801DA2C0` is now in `config-bankN.toml`'s
+  `yield_work_loop_branches` beside session 80's `0x801B3008`; regenerating
+  changes exactly one generated file (51 → 50 yield sites), the boot is
+  unchanged, the screen's display-list p99 is 34 ms (was 209 ms), and the
+  developer confirms it is normal. The next candidate of the same shape,
+  `func_ovlN_80204C08` (branch `0x80204C48`), is named in the handoff and is not
+  landed. See `docs/HANDOFF-2026-09-20-session90.md`.
+
 - ✅ **Releases can build on GitHub-hosted runners; the generated code comes from
   a private data repository (session 89).** The repository's name is deliberately
   not recorded in this repository; it is the `OGRE_DATA_REPO` Actions variable.
