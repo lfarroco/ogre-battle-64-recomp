@@ -13,56 +13,48 @@ jobs:
         with:
           arch: x64
 
-      - name: Trivial GUI exe from Git Bash
+      - name: Console and GUI exes built with lld-link, run from Git Bash
         continue-on-error: true
         shell: bash
         run: |
           set +e
+          printf 'int main(void){return 7;}\n' > c.c
           cat > g.c <<'EOF'
           #include <windows.h>
-          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) { return 7; }
+          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) { return 9; }
           EOF
-          clang-cl -nologo -MT -c g.c
-          echo "clang=$?"
-          link -nologo -subsystem:windows -out:g.exe g.obj
-          echo "link=$?"
-          ls -l g.exe
-          ./g.exe
-          echo "gui-bash exit=$?"
-          ./g.exe >/tmp/g.log 2>&1
-          echo "gui-bash-redirect exit=$?"
+          lld-link -nologo -subsystem:console -out:c.exe c.c
+          echo "console-link=$?"
+          lld-link -nologo -subsystem:windows -out:g.exe g.c
+          echo "gui-link=$?"
+          ls -l c.exe g.exe
+          ./c.exe; echo "console exit=$?"
+          ./g.exe; echo "gui exit=$?"
 
-      - name: "v0.2.0 release exe loader probe"
+      - name: Existing GUI exe (notepad) from Git Bash
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          /c/Windows/System32/notepad.exe &
+          pid=$!
+          sleep 5
+          if kill -0 "$pid" 2>/dev/null; then echo "notepad LOADED"; kill -9 "$pid" 2>/dev/null; else wait "$pid" 2>/dev/null; echo "notepad exited $?"; fi
+
+      - name: "v0.2.0 exe: real exit status from PowerShell"
         continue-on-error: true
         shell: bash
         run: |
           set +e
           mkdir -p rel && cd rel
           gh release download v0.2.0 --repo "$GITHUB_REPOSITORY" --pattern '*windows*' --dir .
-          echo "download=$?"
           unzip -q -o '*.zip'
-          cd ogre-battle-64-recomp
-          ls -l ogrebattle64.exe
-          probe() {
-            local label="$1"
-            ./ogrebattle64.exe >/tmp/probe.log 2>&1 &
-            local pid=$!
-            sleep 12
-            if kill -0 "$pid" 2>/dev/null; then
-              echo "$label: LOADED (still running after 12 s)"
-              kill -9 "$pid" 2>/dev/null
-              wait "$pid" 2>/dev/null
-            else
-              wait "$pid" 2>/dev/null
-              echo "$label: exited $?"
-            fi
-            head -3 /tmp/probe.log
-          }
-          probe "v020-plain"
-          redist=$(ls -d "/c/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC"/*/x64/Microsoft.VC1*.CRT 2>/dev/null | head -1)
-          echo "redist=$redist"
-          for d in msvcp140.dll msvcp140_atomic_wait.dll vcruntime140.dll vcruntime140_1.dll; do
-            if [ -f "$redist/$d" ]; then cp "$redist/$d" .; echo "copied $d"; else echo "MISSING $d"; fi
-          done
-          ls -l ./*.dll
-          probe "v020-with-crt"
+          app="$(cygpath -w "$PWD/ogre-battle-64-recomp/ogrebattle64.exe")"
+          echo "app=$app"
+          powershell -NoProfile -Command "
+            \$p = Start-Process -FilePath '$app' -PassThru -ErrorAction Stop
+            Start-Sleep -Seconds 6
+            if (\$p.HasExited) { 'exited code={0} hex=0x{0:X8}' -f \$p.ExitCode }
+            else { 'RUNNING'; \$p.Kill() }
+          "
+          echo "powershell=$?"
