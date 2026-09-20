@@ -1,0 +1,36 @@
+name: Diag
+
+# Temporary: find out why a GUI-subsystem exe launched from Git Bash on the
+# windows-2022 runner exits 127. Deleted once answered.
+on:
+  workflow_dispatch:
+
+jobs:
+  win:
+    runs-on: windows-2022
+    steps:
+      - name: System DLLs the exe imports
+        shell: bash
+        run: |
+          for d in d3dcompiler_47.dll d3d12.dll dxgi.dll winmm.dll imm32.dll setupapi.dll version.dll api-ms-win-shcore-scaling-l1-1-1.dll ucrtbase.dll vcruntime140.dll msvcp140.dll; do
+            if [ -f "/c/Windows/System32/$d" ]; then echo "PRESENT $d"; else echo "ABSENT  $d"; fi
+          done
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: A trivial GUI-subsystem exe, run from Git Bash
+        shell: bash
+        run: |
+          cat > g.c <<'EOF'
+          #include <windows.h>
+          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) { return 7; }
+          EOF
+          clang-cl /nologo /MT /link /SUBSYSTEM:WINDOWS /out:g.exe g.c || echo "compile failed"
+          ./g.exe
+          echo "gui exit=$?"
+          ./g.exe >/tmp/g.log 2>&1
+          echo "gui redirect exit=$?"
+          cmd //c "g.exe"
+          echo "cmd-gui exit=$?"
