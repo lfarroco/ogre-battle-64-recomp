@@ -339,11 +339,34 @@ bool init_sdl() {
     // tell SDL not to wait for SDL_main's setup before SDL_Init. No-op on the
     // platforms where SDL does not wrap main.
     SDL_SetMainReady();
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
+    // Only video and events are required. SDL_Init fails the whole call when any
+    // requested subsystem fails, and audio genuinely fails on a machine with no
+    // usable output device (a VM, an RDP session, a stopped Windows Audio
+    // service): SDL_Init(SDL_INIT_AUDIO) then returns "No available audio
+    // device". Asking for it in the same call made the app exit before it
+    // created a window, which on a console-less build looked like "nothing
+    // happens" (session 94). Audio and controllers are brought up separately and
+    // may be absent; the game runs silently without them.
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "[SDL] Failed to init: %s\n", SDL_GetError());
         return false;
     }
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "[SDL] audio unavailable, running silently: %s\n", SDL_GetError());
+    }
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        fprintf(stderr, "[SDL] game controllers unavailable: %s\n", SDL_GetError());
+    }
     return true;
+}
+
+// A boot failure used to end the process with no window, no text and no file.
+// The macOS package and the Windows build have no console, so that is
+// indistinguishable from "the program does nothing" (session 94). Write the
+// captured log to error.log and put the reason on screen.
+void report_boot_failure(const std::string& message) {
+    crash_log::write_error_log(message.c_str());
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Ogre Battle 64", message.c_str(), nullptr);
 }
 
 // Reads the self-driving-run knobs. Must run after SDL_Init so that

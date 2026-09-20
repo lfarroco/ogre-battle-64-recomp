@@ -452,15 +452,24 @@ endif
 
 # Static SDL2, built once. Its license ships with the binary (see `dist`).
 #
+# SDL2 is linked into a Windows exe that uses the static CRT
+# (CMAKE_MSVC_RUNTIME_LIBRARY in app/CMakeLists.txt), so it must be built the
+# same way or the link fails with LNK2038 (RuntimeLibrary mismatch). The stamp
+# file records a build made with that setting; a cached Windows build without it
+# is rebuilt. On every other platform the flag is inert.
+#
 # The library name depends on the generator: a single-config generator (Unix
 # Makefiles, Ninja, MinGW Makefiles) writes `libSDL2.a`, and a multi-config one
 # (Visual Studio, Xcode -- the default on a windows runner, which has VS but no
 # MinGW) writes `SDL2-static.lib`. `--config Release` is passed to the build and
 # install because a multi-config generator otherwise builds and installs Debug,
 # whose name carries the `d` postfix (`SDL2-staticd.lib`) and would not be found.
+SDL2_STAMP := $(SDL2_PREFIX)/.ogre-static-crt
+
 .PHONY: sdl2-static
 sdl2-static:
-	@if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then \
+	@if { [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; } && \
+	    { [ "$(DIST_OS)" != "windows" ] || [ -f "$(SDL2_STAMP)" ]; }; then \
 	  echo "==> static SDL2 already built ($(SDL2_PREFIX))"; \
 	else \
 	  echo "==> fetching SDL2 $(SDL2_VERSION)"; \
@@ -470,11 +479,13 @@ sdl2-static:
 	  echo "==> building static SDL2 (this takes a minute)"; \
 	  { cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build $(CMAKE_ARGS) \
 	      -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+	      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
 	      -DSDL_TEST=OFF -DSDL_TESTS=OFF \
 	    && cmake --build tools/SDL2-static/build --config Release -j \
 	    && cmake --install tools/SDL2-static/build --config Release --prefix "$(SDL2_PREFIX)"; \
 	  } > tools/SDL2-static/build.log 2>&1 || true; \
 	  if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then \
+	    touch "$(SDL2_STAMP)"; \
 	    echo "==> static SDL2 ready"; \
 	  else \
 	    echo "static SDL2 build failed; last 40 lines of tools/SDL2-static/build.log:"; \
@@ -529,6 +540,16 @@ dist: app
 	    cp "$$src" "$(DIST_DIR)/"; \
 	  done; \
 	  echo "==> bundled the RT64 DXC runtime (dxcompiler.dll, dxil.dll)"; \
+	  for dll in msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do \
+	    src=$$(ls "$(APP_BUILD_DIR)/$$dll" "$(APP_BUILD_DIR)/Release/$$dll" 2>/dev/null | head -1); \
+	    test -n "$$src" || { echo "$$dll is missing from $(APP_BUILD_DIR); app/CMakeLists.txt copies the app-local MSVC runtime from VCToolsRedistDir (dxcompiler.dll imports it, and without it the .exe cannot start)"; exit 1; }; \
+	    cp "$$src" "$(DIST_DIR)/"; \
+	  done; \
+	  for dll in msvcp140_atomic_wait.dll; do \
+	    src=$$(ls "$(APP_BUILD_DIR)/$$dll" "$(APP_BUILD_DIR)/Release/$$dll" 2>/dev/null | head -1); \
+	    if [ -n "$$src" ]; then cp "$$src" "$(DIST_DIR)/"; fi; \
+	  done; \
+	  echo "==> bundled the app-local MSVC runtime (msvcp140, vcruntime140)"; \
 	fi
 	@if [ "$(DIST_OS)" = "macos" ] && [ "$(DIST_STATIC_SDL)" = "1" ]; then \
 	  printf '%s\n' \
@@ -580,7 +601,7 @@ dist: app
 	@if [ "$(DIST_OS)" = "macos" ]; then \
 	  otool -L "$(DIST_BIN_DIR)/$(EXE_NAME)" | tail -n +2 | grep -vE "System/Library|/usr/lib" || echo "    (none: only system frameworks)"; \
 	elif [ "$(DIST_OS)" = "windows" ]; then \
-	  echo "    dxcompiler.dll, dxil.dll (RT64's shader compiler); SDL2 is linked statically"; \
+	  echo "    dxcompiler.dll, dxil.dll (RT64's shader compiler); the app-local MSVC runtime (msvcp140/vcruntime140); SDL2 is linked statically"; \
 	else \
 	  ldd "$(DIST_BIN_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
 	fi
@@ -617,4 +638,12 @@ dist-tar: dist
 	@cd dist && tar czf "$(DIST_NAME)-$(DIST_OS).tar.gz" "$(DIST_NAME)" && \
 	  echo "==> dist/$(DIST_NAME)-$(DIST_OS).tar.gz"
 
-.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check app dist dist-zip dist-tar sdl2-static
+# Smoke-test the package `make dist` just wrote: the companion files exist, on
+# Windows every DLL the binaries import is shipped or a system DLL, and the
+# binary loads and reaches main (OGRE_SMOKE=1). tools/smoke-dist.sh carries the
+# details; the release workflow runs it on each runner image.
+.PHONY: smoke
+smoke:
+	tools/smoke-dist.sh "$(DIST_DIR)"
+
+.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check app dist dist-zip dist-tar sdl2-static smoke

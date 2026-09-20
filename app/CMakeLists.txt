@@ -82,6 +82,20 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 # Root of the third-party tree (sibling of app/).
 set(OGRE_TOOLS "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
 
+# --- Static CRT on Windows ---------------------------------------------------
+# A distributed Windows build must not depend on the Visual C++ redistributable.
+# Without vcruntime140.dll/msvcp140.dll the loader fails before any code runs,
+# and a GUI-subsystem image shows no window and writes no log (session 94: the
+# packaged .exe "did nothing"). Every target this project creates inherits the
+# setting from here, including the N64ModernRuntime and RT64 subdirectories
+# below; the prebuilt static SDL2 is built the same way by `make sdl2-static`.
+# CMP0091 (CMake >= 3.15) makes the policy variable the switch for this, and
+# `project()` above set a new-enough minimum for it.
+if (WIN32 AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING
+        "Static CRT for the distributed Windows build" FORCE)
+endif()
+
 # --- Renderer selection -----------------------------------------------------
 # RT64 is the primary native renderer (Vulkan on Linux, Metal on macOS,
 # D3D12/Vulkan on Windows). It can be disabled for a GPU-free null-renderer
@@ -298,6 +312,54 @@ add_executable(ogrebattle64 ${OGRE_APP_SOURCES} ${OGRE_RENDERER_SOURCES})
 # the console for a crash report.
 if (WIN32)
     set_target_properties(ogrebattle64 PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+# Copy the app-local MSVC runtime next to the executable.
+#
+# RT64 statically imports `dxcompiler.dll` and `dxil.dll`, which the package
+# bundles, and those two are Microsoft binaries that import `MSVCP140.dll`,
+# `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`. A machine without the Visual C++
+# 2015-2022 redistributable therefore cannot start the process at all, and with a
+# GUI-subsystem image that is a dialog at best and "nothing happens" at worst
+# (session 94). Shipping the CRT DLLs beside the .exe is Microsoft's supported
+# "local deployment" of the redistributable, and it is what a player needs. The
+# app itself links the static CRT (see CMAKE_MSVC_RUNTIME_LIBRARY above), so
+# these DLLs exist for the shader compiler only.
+if (WIN32 AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+    set(_ogre_crt_patterns "")
+    if (DEFINED ENV{VCToolsRedistDir} AND NOT "$ENV{VCToolsRedistDir}" STREQUAL "")
+        list(APPEND _ogre_crt_patterns
+            "$ENV{VCToolsRedistDir}x64/Microsoft.VC1*.CRT"
+            "$ENV{VCToolsRedistDir}/x64/Microsoft.VC1*.CRT")
+    endif()
+    if (DEFINED ENV{VCINSTALLDIR} AND NOT "$ENV{VCINSTALLDIR}" STREQUAL "")
+        list(APPEND _ogre_crt_patterns
+            "$ENV{VCINSTALLDIR}/Redist/MSVC/*/x64/Microsoft.VC1*.CRT")
+    endif()
+    set(_ogre_crt_dir "")
+    if (_ogre_crt_patterns)
+        file(GLOB _ogre_crt_dirs ${_ogre_crt_patterns})
+        if (_ogre_crt_dirs)
+            list(GET _ogre_crt_dirs 0 _ogre_crt_dir)
+        endif()
+    endif()
+    if (_ogre_crt_dir)
+        foreach(_ogre_crt_dll msvcp140.dll msvcp140_atomic_wait.dll vcruntime140.dll vcruntime140_1.dll)
+            if (EXISTS "${_ogre_crt_dir}/${_ogre_crt_dll}")
+                add_custom_command(TARGET ogrebattle64 POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_ogre_crt_dir}/${_ogre_crt_dll}"
+                            "$<TARGET_FILE_DIR:ogrebattle64>/${_ogre_crt_dll}"
+                    COMMENT "app-local MSVC runtime: ${_ogre_crt_dll}")
+            endif()
+        endforeach()
+    else()
+        message(WARNING
+            "no Microsoft.VC1*.CRT directory under VCToolsRedistDir/VCINSTALLDIR; "
+            "the app-local MSVC runtime (msvcp140.dll, vcruntime140.dll) will not "
+            "be copied and dxcompiler.dll will not load on a machine without the "
+            "Visual C++ redistributable")
+    endif()
 endif()
 
 # Keep frame pointers in the app + recompiled code so lldb can unwind a host

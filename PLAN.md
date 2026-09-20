@@ -40,6 +40,40 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The Windows package no longer depends on the Visual C++ redistributable,
+  and a failed boot is no longer silent (session 94, part 3).** The developer
+  reported that the v0.2.0 Windows build "does nothing": no window, no log, no
+  process. The `.exe` was sound (GUI subsystem, `WinMainCRTStartup` →
+  `WinMain` → `main`, per its import table), so the failure was before or at the
+  first window. Two real defects were removed: RT64 statically imports
+  `dxcompiler.dll`/`dxil.dll`, which import `MSVCP140.dll`/`VCRUNTIME140.dll`,
+  and the package shipped neither — a machine without the redist cannot start
+  the process. The app now links the static CRT
+  (`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`, inherited by the runtime and RT64
+  targets), SDL2 is built the same way, and `make dist` copies
+  `msvcp140.dll`/`vcruntime140.dll`/`vcruntime140_1.dll` from
+  `VCToolsRedistDir` next to the `.exe`, failing the package if they are absent.
+  Separately, every early exit used to be silent in a console-less build:
+  `init_sdl` failure, game-window failure and start-screen window/renderer
+  failure returned without a file or a dialog. They now call
+  `report_boot_failure()`, which writes `error.log` and shows the reason.
+  `init_sdl` also no longer requires audio: `SDL_Init` fails the whole call when
+  any requested subsystem fails, and `SDL_INIT_AUDIO` can fail on a host with no
+  output device, which stopped the app before its first window; audio and
+  controllers are now optional and the game runs silently without them. The
+  release workflow gained the missing smoke test: after packaging it runs
+  `tools/smoke-dist.sh` on each runner image, which checks the companion files,
+  requires every DLL a Windows package's binaries import to be shipped or a
+  system DLL (`tools/pe_imports.py`; this is what a launch on a runner with the
+  redist installed cannot check), and runs the binary with `OGRE_SMOKE=1` under a
+  deadline to prove it loads and reaches `main`. `make smoke` runs the same
+  locally. Verified on macOS: the package passes `make smoke`, the v0.2.0 Windows
+  zip from the release fails the PE check naming the four missing runtime DLLs,
+  the game boots with `SDL_AUDIODRIVER=doesnotexist`, a forced video failure
+  writes `error.log` with the reason, and the 45 s route run is still
+  `runlog.py --check` PASS. The Windows build itself is validated by the release
+  workflow; `v0.2.1-rc1` ships it. See `docs/HANDOFF-2026-09-20-session94.md`
+  part 3.
 - ✅ **The distributed build opens no console window, and a crash writes
   `error.log` beside the save (session 94).** macOS ships `Ogre Battle 64.app`
   (`packaging/macos-Info.plist`), so Finder launches it without opening Terminal;

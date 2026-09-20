@@ -127,6 +127,13 @@ REQUIREMENTS
 - On Linux the app does not need a desktop environment beyond a normal X11 or
   Wayland session. Some distributions split out SDL2's runtime packages; if
   the app reports a missing library, install your distribution's SDL2 package.
+- On Windows nothing else has to be installed: the package carries the Microsoft
+  C++ runtime that its shader compiler (`dxcompiler.dll`) needs
+  (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`) beside the
+  executable, so the Visual C++ redistributable is not required.
+
+If the game does not start, the reason is written to `error.log` in this folder
+and, when the failure happens before the game window exists, shown in a dialog.
 
 
 IF THE GAME CRASHES

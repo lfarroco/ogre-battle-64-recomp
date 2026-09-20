@@ -380,3 +380,154 @@ crash; the old `bank_overlays.cpp` handler had the same `fflush` pattern.
    immediate. If a future change makes that slow, the window would linger after
    the click.
 
+
+---
+
+# Part 3: the Windows package does nothing
+
+**Goal (developer):** *"nothing happens in the windows version. nothing opens, no
+logs, nothing. can you fix, commit, push and create a rc release?"*, then *"can we
+have a small smoke test in the os image that builds it?"*.
+
+**Result:** the Windows package no longer depends on the Visual C++
+redistributable, every failure before the first window writes `error.log` and
+shows a dialog instead of exiting silently, and the release workflow now
+smoke-tests each package on the runner image that built it. The workflow change
+is what would have caught this class before the release.
+
+## 14. What the shipped v0.2.0 Windows build actually was
+
+The report was "no window, no log, nothing", so the first question was whether
+the process ran at all. The `.exe` in the release zip is sound:
+
+* `Subsystem 2 (Windows GUI)`, `AddressOfEntryPoint 0x128969c`, and its imported
+  CRT entry markers (`_get_narrow_winmain_command_line`, `_configure_narrow_argv`,
+  `_set_app_type`) are the `WinMainCRTStartup` set, so the entry is
+  `WinMainCRTStartup` → the `WinMain` forwarder → `main`. The 0.1.0 build was
+  `Subsystem 3 (Windows CUI)` with the same CRT imports.
+* The zip's CRCs are intact and the PE headers are sane.
+
+So the process start path was correct, and the failure was at or after the first
+window, or in the loader.
+
+## 15. The defect: the package did not carry its runtime DLLs
+
+`ogrebattle64.exe` statically imports `dxcompiler.dll` and `dxil.dll` (RT64's
+shader compiler; the package bundles both), and **both of those Microsoft
+binaries import `MSVCP140.dll`, `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`**,
+which the package did not ship. A machine without the Visual C++ 2015-2022
+redistributable cannot start the process at all. The same import sets are in the
+0.1.0 package, so the Windows build never was self-contained.
+
+Landed:
+
+* `app/CMakeLists.txt` sets `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` for every
+  target on Windows (the app, N64ModernRuntime, RT64), so the app and the
+  recompiled code have no CRT DLL dependency of their own.
+* The same file adds a POST_BUILD copy of `msvcp140.dll`,
+  `msvcp140_atomic_wait.dll`, `vcruntime140.dll` and `vcruntime140_1.dll` from
+  `VCToolsRedistDir`/`VCINSTALLDIR` next to the `.exe`.
+* The `Makefile` builds SDL2 with the same runtime-library setting (a `-MD`
+  SDL2 cannot link into a `-MT` exe: `LNK2038 RuntimeLibrary mismatch`), with a
+  stamp file so a cached Windows SDL2 is rebuilt, and the `dist` recipe copies
+  the four DLLs into the package and **fails** when one is missing.
+
+## 16. Silent boot failures
+
+Even with the DLLs, the build had no way to report why it did not start: the
+GUI-subsystem image has no console, and four paths ended the process with no file
+and no dialog — `init_sdl()` failure, the game `create_window` failure, and the
+start screen's window and renderer failures. `report_boot_failure()`
+(`app/src/sdl_platform.cpp`) now writes `error.log` (with the captured boot log)
+and shows the reason in a message box; all four call it.
+
+`init_sdl()` also stopped requiring audio. `SDL_Init` fails the whole call when
+any requested subsystem fails, and `SDL_INIT_AUDIO` fails with "No available
+audio device" on a host with no usable output device, which stopped the app
+before its first window. Video and events are required; audio and game
+controllers are initialised separately and may be absent. The audio callbacks
+already handle a null device, so the game runs silently.
+
+## 17. The smoke test the workflow was missing
+
+* `app/src/main.cpp` handles `OGRE_SMOKE=1`: print `[smoke] main reached`, try
+  SDL once (reported but not required, because a hosted runner has no display or
+  GPU), flush and exit 0. It runs after `crash_log::install`.
+* `tools/pe_imports.py` parses the import directory of every shipped
+  `.exe`/`.dll` and requires each imported DLL to be shipped beside them or to be
+  a Windows system DLL (`api-ms-win-*` counts as system). On the v0.2.0 package it
+  reports exactly `msvcp140.dll`, `msvcp140_atomic_wait.dll`, `vcruntime140.dll`
+  and `vcruntime140_1.dll`, with no OS-DLL false positives; on a package with
+  those files present it passes.
+* `tools/smoke-dist.sh [dist-dir]` checks the companion files, runs the PE check
+  for a Windows package (or `otool -L`/`ldd` for macOS/Linux), then runs the
+  binary with `OGRE_SMOKE=1` under a deadline so a loader dialog or a hang cannot
+  stall a release. The launch check is skipped when the package is for another
+  platform. `make smoke` runs it against the current `dist/`.
+* `.github/workflows/release.yml` runs `tools/smoke-dist.sh` on every matrix
+  runner between "Build and package" and "Collect the archive".
+
+The runtime half of the smoke test cannot catch the missing-redistributable case
+on a CI image, because the image has the redistributable installed; the static
+PE check is what covers the package itself, and it is platform-independent.
+
+## 18. What was run for verification
+
+macOS only, because there is no Windows machine here.
+
+* `tools/smoke-dist.sh` on the packaged macOS app: PASS (`otool` clean, the
+  binary loaded, reached main, exited 0).
+* `make smoke`: the same, through the Makefile target.
+* `tools/smoke-dist.sh /tmp/winrc/ogre-battle-64-recomp` (the v0.2.0 Windows zip
+  from the release): FAIL at `msvcp140.dll is missing from the package`, before
+  any launch attempt. With the four DLLs added to a copy of that package the
+  static checks pass.
+* `SDL_AUDIODRIVER=doesnotexist` on the macOS build: boots, logs
+  `[SDL] audio unavailable, running silently`, reaches the window and exits 0.
+* `SDL_VIDEODRIVER=doesnotexist`: writes `error.log` with
+  `reason: SDL could not start: doesnotexist not available` and the captured
+  `[boot] init_sdl...` line.
+* `OGRE_SMOKE=1` on `build-app/ogrebattle64`: exit 0, `[smoke] main reached`,
+  `[smoke] sdl ok`.
+* Regression: the maintained 45 s route run is `runlog.py --check` PASS, and the
+  window-close path still exits cleanly (part 2).
+* `make -n dist DIST_OS=windows` shows the new DLL copy loop and the SDL2 stamp
+  guard. The Windows build itself is validated by the release workflow; nothing
+  here can compile or run it.
+
+## 19. Files changed in part 3
+
+* `app/src/main.cpp` — `OGRE_SMOKE=1`; `report_boot_failure` on the SDL-init and
+  game-window failures.
+* `app/src/sdl_platform.cpp`, `app/src/sdl_platform.hpp` — video/events required,
+  audio and controllers optional; `report_boot_failure`.
+* `app/src/launcher.cpp` — `report_boot_failure` on the start screen's window and
+  renderer failures.
+* `app/CMakeLists.txt` — static CRT for all Windows targets; POST_BUILD copy of
+  the app-local MSVC runtime DLLs.
+* `Makefile` — SDL2 built with the static CRT (plus a stamp guard); the `dist`
+  recipe copies the runtime DLLs and fails when they are missing; `make smoke`.
+* `.github/workflows/release.yml` — the smoke step; `-rc` tags become GitHub
+  pre-releases.
+* `tools/pe_imports.py`, `tools/smoke-dist.sh` — new.
+* `packaging/README-dist.txt`, `docs/guides/app-build.md` — the Windows runtime
+  note and the smoke-test section and knob.
+* `PLAN.md`, `docs/DECISIONS.md`, this file.
+
+## 20. Open leads
+
+1. **Windows is still unvalidated by a run.** The RC is the first package with
+   the runtime DLLs and the first with the smoke test; if it still does nothing,
+   the next test should produce `error.log` (or a dialog) with the reason.
+2. **`report_boot_failure` shows a modal box**, so a scripted run that hits an
+   early failure now waits for a click. Only the boot-failure paths do this, and
+   they are fatal; a harness with a bad ROM argument takes the older
+   `fprintf`+exit path instead.
+3. **The app-local runtime is copied from the build machine's Visual Studio.**
+   That is Microsoft's supported local deployment, but it means the Windows
+   release runner must have the redist directory (it does, via `msvc-dev-cmd`);
+   `make dist` now fails rather than shipping without it.
+4. **`tools/pe_imports.py`'s system-DLL allowlist is a list.** A new dependency
+   on a DLL that is neither shipped nor listed fails the smoke test with the
+   name, which is the intended behaviour, but the list has to be extended for a
+   legitimate new system dependency.

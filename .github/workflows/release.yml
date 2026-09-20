@@ -245,6 +245,14 @@ jobs:
           CMAKE_ARGS: ${{ matrix.cmake_args }}
         run: tools/release-build.sh
 
+      # A package that cannot start must fail the release here rather than reach a
+      # player. Checks the companion files, that Windows ships every DLL its
+      # binaries import, and that the binary loads and reaches main
+      # (OGRE_SMOKE=1). See tools/smoke-dist.sh.
+      - name: Smoke-test the package
+        shell: bash
+        run: tools/smoke-dist.sh
+
       - name: Collect the archive
         shell: bash
         run: |
@@ -286,16 +294,25 @@ jobs:
           DRAFT: ${{ inputs.draft }}
         run: |
           set -e
-          # A tag push publishes; workflow_dispatch can ask for a draft.
+          # A tag push publishes; workflow_dispatch can ask for a draft. A tag
+          # containing `-rc` is marked a GitHub pre-release, so an RC never
+          # becomes the "Latest" download.
           draft_args=()
           if [ "${DRAFT:-false}" = "true" ]; then
             draft_args+=(--draft)
           fi
+          case "$TAG" in
+            *-rc*) draft_args+=(--prerelease);;
+          esac
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
             # Publishing a release that a previous run left as a draft.
             if [ "${DRAFT:-false}" != "true" ]; then
-              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+              edit_args=(--draft=false)
+              case "$TAG" in
+                *-rc*) edit_args+=(--prerelease);;
+              esac
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${edit_args[@]}"
             fi
           else
             gh release create "$TAG" artifacts/* \

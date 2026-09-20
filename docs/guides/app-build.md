@@ -194,14 +194,46 @@ that machine. Release builds therefore run on a machine with the ROM, unless the
 generated code is supplied from the private data repository — see "Releases"
 below.
 
-On Windows the executable is dynamically linked against `SDL2.dll` (and the
-platform's system DLLs), so a single-file Windows build needs a static `SDL2`
-built for the `x86_64-w64-mingw32` or MSVC target; the Linux and macOS recipes
-already do the equivalent.
+On Windows the executable links `SDL2-static` and the static CRT
+(`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`, set for every target in
+`app/CMakeLists.txt`), and the package carries the MSVC runtime DLLs beside the
+`.exe`. That is not optional: RT64 statically imports `dxcompiler.dll`/`dxil.dll`,
+and those two Microsoft binaries import `MSVCP140.dll`/`VCRUNTIME140.dll`, so a
+machine without the Visual C++ redistributable cannot start the process at all —
+the loader fails before any code runs, with no window and no log (session 94).
+`make sdl2-static` builds SDL2 with the same runtime-library setting, and the
+`dist` recipe fails rather than shipping a Windows package without the DLLs.
 
 A first launch of the package in an empty folder is the user-facing acceptance
 test: the black start screen appears, clicking/dropping a ROM boots the game,
 and `saves/ogrebattle64-us-rev1.bin` is written next to the executable.
+
+### Smoke test — `make smoke`
+
+```sh
+make dist && make smoke        # or: tools/smoke-dist.sh [dist-dir]
+```
+
+`tools/smoke-dist.sh` runs on the machine that built the package and checks
+three things. The release workflow runs the same script on every runner image
+between "Build and package" and "Collect the archive", so a package that cannot
+start fails the release instead of reaching a player.
+
+1. The app binary and `README.txt` exist, and on Windows the companion DLLs
+   (`dxcompiler.dll`, `dxil.dll`, `msvcp140.dll`, `vcruntime140.dll`,
+   `vcruntime140_1.dll`) do too.
+2. The package is self-contained. On Windows, `tools/pe_imports.py` parses every
+   shipped `.exe`/`.dll` and requires each imported DLL to be either shipped
+   beside them or a Windows system DLL. This is the check a launch cannot make on
+   a runner: the image has the Visual C++ redistributable installed, so a package
+   that is missing `msvcp140.dll` still starts there (session 94 shipped exactly
+   that package). macOS checks `otool -L` for non-system dependencies, Linux
+   checks `ldd` for unresolved libraries.
+3. The binary loads and reaches `main`: it runs with `OGRE_SMOKE=1`, which exits
+   0 as soon as `main` is reached, under a deadline (`SMOKE_TIMEOUT` seconds,
+   default 90) so a loader error dialog or a hang cannot stall a release run.
+   The launch check is skipped when the package is for another platform (a
+   Windows zip checked from macOS still gets checks 1 and 2).
 
 ### Crash reports — `error.log`
 
@@ -245,6 +277,17 @@ provoking a real crash.
 `SDL_ShowSimpleMessageBox` errors from the runtime (its `message_box` channel)
 also write `error.log`, for the same reason: a player who sees the box has no
 console to copy.
+
+`report_boot_failure()` (`app/src/sdl_platform.cpp`) is the sibling for a failure
+that is not a crash: it writes `error.log` and shows the reason in a message box.
+The SDL init, the game window, and the start screen's window and renderer all
+call it, because a silent `EXIT_FAILURE` in a console-less build is
+indistinguishable from "the program does nothing" (session 94). `init_sdl`
+requires only video and events: `SDL_Init` fails the whole call when any
+requested subsystem fails, and `SDL_INIT_AUDIO` can fail on a host with no usable
+output device, which used to stop the app before its first window. Audio and game
+controllers are initialised separately and may be absent; the game runs silently
+without them.
 
 ### Closing the window
 
@@ -434,6 +477,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_DL_DECODE=<n>\|all` | dump the decoded command stream of display list `<n>` (or all): `SETTIMG`/`SETTILE`/`SETTILESIZE`/`LOAD*`/`TEXRECT` with its `RDPHALF` halves/`FILLRECT`/`SETSCISSOR`/combiner/othermode. The ground truth for "which RDP command draws this" |
 | `OGRE_DUMP_RDRAM=<path>` | write the whole 8 MiB RDRAM image for offline analysis: on the exit path (`OGRE_EXIT_AFTER_MS` or a closed window) and beside `error.log` on the crash path |
 | `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed, so a packaged build's `error.log` can be verified without provoking a real crash |
+| `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once (reported, not required) and exit 0. `tools/smoke-dist.sh` and `make smoke` use it to prove a package loads and reaches `main` |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
 | `OGRE_COVER=1\|<path>` | recompiled-function **coverage census** (session 83): at exit, when the window is closed, or on the live console's `cover`, print every distinct recompiled function the run entered, one `[cover] 0xADDR count` line per function, for `tools/recompcov.py --log`. **Give it a path** (`OGRE_COVER=/tmp/cover.txt`) for a session played by hand — the census then lands in its own file instead of the end of a very chatty stdout, and the app prints one line saying so. `=1` keeps it on stdout for scripted runs. Unlike `OGRE_PROFILE=1` it starts no sampling thread and skips the shadow call chain, so the entry hooks cost one hash insert per call and a playthrough stays near normal speed |
 | `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |

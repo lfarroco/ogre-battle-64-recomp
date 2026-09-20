@@ -267,6 +267,8 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         kWindowWidth, kWindowHeight, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (window == nullptr) {
         std::fprintf(stderr, "[launcher] window: %s\n", SDL_GetError());
+        report_boot_failure(std::string("The start screen window could not be created: ") +
+                            SDL_GetError());
         return {};
     }
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
@@ -275,6 +277,8 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     }
     if (renderer == nullptr) {
         std::fprintf(stderr, "[launcher] renderer: %s\n", SDL_GetError());
+        report_boot_failure(std::string("No SDL renderer is available for the start screen: ") +
+                            SDL_GetError());
         SDL_DestroyWindow(window);
         return {};
     }

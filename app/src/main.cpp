@@ -148,6 +148,26 @@ int main(int argc, char** argv) {
     // directory is read-only.
     ogre::crash_log::install(ogre::executable_directory());
 
+    // OGRE_SMOKE=1: prove that the packaged binary loads and reaches main, then
+    // exit 0. `tools/smoke-dist.sh` runs this on the machine that built the
+    // package, so a loader failure (a missing DLL beside the .exe) or a broken
+    // entry point fails the release instead of reaching a player as "nothing
+    // happens" (session 94). SDL is attempted and reported, but a hosted runner
+    // with no display or GPU must not fail the package for that, so the result
+    // does not change the exit code.
+    if (getenv("OGRE_SMOKE") != nullptr) {
+        fprintf(stderr, "[smoke] main reached\n");
+        if (ogre::init_sdl()) {
+            fprintf(stderr, "[smoke] sdl ok\n");
+            ogre::shutdown_sdl(ogre::g_platform);
+        } else {
+            fprintf(stderr, "[smoke] sdl unavailable (not a failure)\n");
+        }
+        fflush(nullptr);
+        ogre::crash_log::flush();
+        return EXIT_SUCCESS;
+    }
+
     // OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>: raise that signal now, so a
     // packaged build's error.log can be checked without provoking a real crash.
     if (const char* crash = getenv("OGRE_CRASH_TEST")) {
@@ -168,6 +188,9 @@ int main(int argc, char** argv) {
     // --- SDL + window --------------------------------------------------------
     fprintf(stderr, "[boot] init_sdl...\n");
     if (!ogre::init_sdl()) {
+        // No window exists yet, so without this a failed boot is indistinguishable
+        // from "the program does nothing" (no console, no file).
+        ogre::report_boot_failure(std::string("SDL could not start: ") + SDL_GetError());
         return EXIT_FAILURE;
     }
     // OGRE_TAP_MS / OGRE_EXIT_AFTER_MS make a run self-driving and bounded (see
@@ -368,6 +391,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[boot] create_window...\n");
     auto window_handle = ogre::create_window(ogre::g_platform, "Ogre Battle 64: Recomp");
     if (ogre::g_platform.window == nullptr) {
+        ogre::report_boot_failure(std::string("The game window could not be created: ") +
+                                  SDL_GetError());
         return EXIT_FAILURE;
     }
     fprintf(stderr, "[boot] window ok\n");

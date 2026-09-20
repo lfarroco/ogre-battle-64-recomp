@@ -53,6 +53,11 @@ struct Platform {
 // Initializes SDL (video, audio, gamecontroller, events).
 bool init_sdl();
 
+// Reports a failure that would otherwise end the process with no window and no
+// console: writes `error.log` (with the captured boot log) and shows the reason
+// in a message box. Safe before and after init_sdl.
+void report_boot_failure(const std::string& message);
+
 // Reads OGRE_TAP_MS / OGRE_TAP_BUTTON / OGRE_EXIT_AFTER_MS for scripted runs.
 // Call after init_sdl.
 void configure_automation(Platform& platform);
