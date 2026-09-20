@@ -78,11 +78,16 @@ made=0
 if command -v tar >/dev/null 2>&1; then
     make dist-tar "DIST_OS=$DIST_OS" >/dev/null && made=1
 fi
-if command -v zip >/dev/null 2>&1; then
+# `make dist-zip` falls back to `cmake -E tar` when `zip` is missing, and Git
+# Bash for Windows ships no zip, so cmake alone is enough to attempt it. Gating
+# this on `zip` left the Windows run with only a tar.gz, and the workflow's
+# Collect step, which takes the zip on Windows, failed with
+# "dist/ogre-battle-64-recomp-windows.zip was not produced".
+if command -v zip >/dev/null 2>&1 || command -v cmake >/dev/null 2>&1; then
     make dist-zip "DIST_OS=$DIST_OS" >/dev/null && made=1
 fi
 if [ "$made" = 0 ]; then
-    echo "release-build.sh: neither tar nor zip is available to create an archive" >&2
+    echo "release-build.sh: no tar, zip or cmake is available to create an archive" >&2
     exit 1
 fi
 

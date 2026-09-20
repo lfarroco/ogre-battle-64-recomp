@@ -120,6 +120,16 @@ hardware. RT64 remains the primary native renderer throughout. See
   (`.tar.gz` macOS/Linux, `.zip` Windows) and the step copies only that file.
   See `docs/guides/app-build.md` → Releases and `docs/DECISIONS.md` (89d).
 
+- 🔧 **Windows builds and links; only the zip packaging was left (session 89f).**
+  The run after 89e reached `[701/702] Linking CXX executable ogrebattle64.exe`,
+  bundled `dxcompiler.dll`/`dxil.dll`, and then failed in the workflow's Collect
+  step: `dist/ogre-battle-64-recomp-windows.zip was not produced`. Cause:
+  `tools/release-build.sh` ran `make dist-zip` only when `zip` was installed, and
+  Git Bash for Windows ships no `zip`, so the Makefile's `cmake -E tar` fallback
+  was never reached. The gate now also accepts `cmake`. Verified on macOS with a
+  PATH of every tool except `zip`: `make dist-zip` writes a real ZIP and the full
+  script produces both archives. See `docs/DECISIONS.md` (89f).
+
 - 🔧 **The Windows job builds with clang-cl under Ninja (session 89e).** The
   run after 89d got through SDL2, the app configure and into the compile, then
   died with 37 `cl : command line error D8021: invalid numeric argument
