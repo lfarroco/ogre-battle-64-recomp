@@ -55,9 +55,19 @@ hardware. RT64 remains the primary native renderer throughout. See
   workflow never did before: both root patches apply cleanly to a fresh
   `N64ModernRuntime` clone at `589bbf01` and the patched clone is byte-identical
   to `tools/N64ModernRuntime`, and `rt64-ob64.patch` plus the two plume patches
-  apply to pristine submodule copies. A full hosted run, the Linux Vulkan patch
-  and the Windows job remain unverified. See `docs/guides/app-build.md` →
-  Releases.
+  apply to pristine submodule copies. A full hosted run and the Linux Vulkan
+  patch remain unverified. The Windows job failed at the RT64 patch step
+  (session 89b): a Windows checkout writes CRLF into both `rt64-ob64.patch` and
+  the RT64 tree, and `git apply` then cannot match the two hunks whose last line
+  has no newline (`\ No newline at end of file`) — `rt64_tmem_hasher.h:203` and
+  `rt64_native_target.cpp:369`, the two failing hunks reported by the job. Root
+  `.gitattributes` now pins `*.patch` to `eol=lf`, and the workflow's
+  `apply_patch` passes `--ignore-whitespace` to both the reverse check and the
+  apply. Verified offline on a CRLF copy of RT64 at `4337374` through the
+  workflow's own function: the patch applies, a second pass reports "already
+  applied", and the tree is byte-identical to the LF baseline including the
+  missing final newlines. The rest of the Windows job is still unrun.
+  See `docs/guides/app-build.md` → Releases.
 
 - ✅ **The boot-Start save menu (scene `0x18`) renders (session 88).** Holding
   Start while the game boots takes the boot branch at `0x800721DC`

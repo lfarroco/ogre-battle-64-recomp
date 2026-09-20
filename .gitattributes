@@ -1,0 +1,5 @@
+# The RT64 and N64ModernRuntime patches are applied with `git apply`, which
+# compares them against a checkout of the upstream tree. A Windows runner checks
+# both out with CRLF, and a patch whose last line has no newline (`\ No newline
+# at end of file`) then fails to apply. Keep the patch files LF everywhere.
+*.patch text eol=lf

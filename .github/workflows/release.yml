@@ -158,11 +158,17 @@ jobs:
         run: |
           set -e
           # apply_patch <directory> <patch path relative to that directory>
+          #
+          # --ignore-whitespace compares the hunk context with the carriage
+          # returns ignored. A Windows runner checks the submodule out with CRLF,
+          # and without the flag `git apply` fails on a hunk whose last line has
+          # no newline (`\ No newline at end of file`; rt64-ob64.patch has two,
+          # in rt64_tmem_hasher.h and rt64_native_target.cpp).
           apply_patch() {
-            if ( cd "$1" && git apply --reverse --check "$2" ) >/dev/null 2>&1; then
+            if ( cd "$1" && git apply --reverse --check --ignore-whitespace "$2" ) >/dev/null 2>&1; then
               echo "==> already applied: $2"
             else
-              ( cd "$1" && git apply "$2" )
+              ( cd "$1" && git apply --ignore-whitespace "$2" )
               echo "==> applied $2"
             fi
           }

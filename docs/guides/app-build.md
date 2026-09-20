@@ -249,6 +249,14 @@ RT64 submodules, and installs what the runner image is missing (`libgtk-3-dev`,
 `libvulkan-dev`, `libx11-dev` on Linux; the Metal toolchain on macOS; `make` on
 Windows). The self-hosted path keeps its own toolchain and dirtied submodules.
 
+The patch step is line-ending tolerant. A Windows checkout gives both the patch
+files and the RT64 tree CRLF, and `git apply` fails on a hunk whose last line has
+no newline (`\ No newline at end of file`; `rt64-ob64.patch` has two) in that
+state. `.gitattributes` pins `*.patch` to `eol=lf` and the workflow passes
+`--ignore-whitespace` to `git apply`. Keep both when editing a patch or the
+`apply_patch` helper: without them the Windows job fails at
+`rt64_tmem_hasher.h:203` and `rt64_native_target.cpp:369`.
+
 A self-hosted runner needs, per platform:
 
 | platform | toolchain | SDL2 |
