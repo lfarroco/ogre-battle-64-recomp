@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -20,12 +21,21 @@
 
 #include <SDL.h>
 
+#if defined(_WIN32) && !defined(__MINGW32__)
+// For the WinMain forwarder at the bottom of this file. WIN32_LEAN_AND_MEAN
+// keeps windows.h small; the runtime's renderer_context.hpp defines it too, and
+// an identical redefinition is harmless.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include "recomp.h"
 #include "funcs.h"
 #include "librecomp/game.hpp"
 #include "librecomp/mods.hpp"
 
 #include "game.hpp"
+#include "crash_log.hpp"
 #include "launcher.hpp"
 #include "input_map.hpp"
 #include "overlay.hpp"
@@ -116,6 +126,45 @@ static void update_gfx(void*) {
 }
 
 int main(int argc, char** argv) {
+#if defined(_WIN32) && !defined(__MINGW32__)
+    // The distributed build is a GUI-subsystem binary, so it has no console. A
+    // developer who runs it from a terminal expects the [boot] log there, and
+    // AttachConsole gives it to them without ever creating a window: it attaches
+    // only when the parent already has a console (a double-click from Explorer
+    // has none, so it fails and is ignored). This runs before crash_log::install
+    // so the capture forwards to the console like any other terminal.
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* console = nullptr;
+        freopen_s(&console, "CONOUT$", "w", stdout);
+        freopen_s(&console, "CONOUT$", "w", stderr);
+    }
+#endif
+
+    // --- crash reporting -----------------------------------------------------
+    // Capture stdout/stderr and arm the fatal handlers before anything else, so
+    // a crash anywhere in the boot still leaves `error.log` beside the
+    // executable. The path is re-pointed at the resolved config directory once
+    // that is known (below); the two differ only when the executable's own
+    // directory is read-only.
+    ogre::crash_log::install(ogre::executable_directory());
+
+    // OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>: raise that signal now, so a
+    // packaged build's error.log can be checked without provoking a real crash.
+    if (const char* crash = getenv("OGRE_CRASH_TEST")) {
+        int sig = 0;
+        if (strcmp(crash, "segv") == 0) sig = SIGSEGV;
+        else if (strcmp(crash, "abrt") == 0) sig = SIGABRT;
+        else if (strcmp(crash, "fpe") == 0) sig = SIGFPE;
+        else if (strcmp(crash, "ill") == 0) sig = SIGILL;
+#ifdef SIGBUS
+        else if (strcmp(crash, "bus") == 0) sig = SIGBUS;
+#endif
+        if (sig != 0) {
+            fprintf(stderr, "[boot] OGRE_CRASH_TEST=%s: raising signal %d\n", crash, sig);
+            std::raise(sig);
+        }
+    }
+
     // --- SDL + window --------------------------------------------------------
     fprintf(stderr, "[boot] init_sdl...\n");
     if (!ogre::init_sdl()) {
@@ -148,6 +197,10 @@ int main(int argc, char** argv) {
     // OGRE_PREF_DIR still overrides (the test harnesses use it), and a
     // read-only install location falls back to the platform preference dir.
     const std::filesystem::path pref_dir = ogre::resolve_pref_dir();
+    // error.log follows the save: the executable's own directory, unless it is
+    // read-only and the config directory fell back to the platform preference
+    // directory.
+    ogre::crash_log::set_directory(pref_dir);
     recomp::register_config_path(pref_dir);
     // Player-editable controller bindings live beside the save file
     // (`controls.cfg`). A missing file leaves the built-in map.
@@ -382,3 +435,14 @@ int main(int argc, char** argv) {
     ogre::shutdown_sdl(ogre::g_platform);
     return EXIT_SUCCESS;
 }
+
+#if defined(_WIN32) && !defined(__MINGW32__)
+// The distributed Windows build is a GUI-subsystem binary (WIN32_EXECUTABLE in
+// app/CMakeLists.txt) so it allocates no console window. That subsystem's CRT
+// entry point is WinMainCRTStartup, which calls WinMain; the app keeps its own
+// `main`, so forward. MinGW is not compiled here: its CRT already forwards
+// WinMain to main, and a second definition would be a duplicate symbol.
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return main(__argc, __argv);
+}
+#endif

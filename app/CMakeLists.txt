@@ -271,6 +271,7 @@ else()
     set(OGRE_APP_SOURCES
         src/main.cpp
         src/sdl_platform.cpp
+        src/crash_log.cpp
         src/synth_frame.cpp
         src/rsp.cpp
         src/overlays.cpp
@@ -287,6 +288,17 @@ else()
 endif()
 
 add_executable(ogrebattle64 ${OGRE_APP_SOURCES} ${OGRE_RENDERER_SOURCES})
+
+# The distributed build has no console window. A default Windows link is a
+# console-subsystem binary, so launching the .exe allocates a console that shows
+# the [boot] log; link a GUI-subsystem binary instead. That subsystem selects the
+# CRT entry point `WinMainCRTStartup`, which calls `WinMain`; the app defines
+# `main`, so app/src/main.cpp adds a `WinMain` forwarder (MinGW's own CRT already
+# supplies one, hence the guard there). app/src/crash_log.cpp is what replaces
+# the console for a crash report.
+if (WIN32)
+    set_target_properties(ogrebattle64 PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
 
 # Keep frame pointers in the app + recompiled code so lldb can unwind a host
 # backtrace at a crash. The runtime keeps a shadow *guest* call chain, but it is

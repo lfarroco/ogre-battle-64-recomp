@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the macOS package. `make dist` copies it to
+  `Ogre Battle 64.app/Contents/Info.plist`.
+
+  SDL_FILESYSTEM_BASE_DIR_TYPE=parent makes SDL_GetBasePath return the folder
+  that contains the .app instead of Contents/Resources, so the app resolves the
+  ROM, saves/, mods/, controls.cfg, settings.cfg and error.log in the same
+  package folder a player extracts, exactly where packaging/README-dist.txt says
+  they are.
+
+  CFBundleShortVersionString must track recomp::Version in app/src/main.cpp.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>ogrebattle64</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.lfarroco.ogrebattle64</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Ogre Battle 64</string>
+    <key>CFBundleDisplayName</key>
+    <string>Ogre Battle 64: Recomp</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>SDL_FILESYSTEM_BASE_DIR_TYPE</key>
+    <string>parent</string>
+</dict>
+</plist>

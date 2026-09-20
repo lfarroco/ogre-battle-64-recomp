@@ -40,6 +40,25 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The distributed build opens no console window, and a crash writes
+  `error.log` beside the save (session 94).** macOS ships `Ogre Battle 64.app`
+  (`packaging/macos-Info.plist`), so Finder launches it without opening Terminal;
+  `SDL_FILESYSTEM_BASE_DIR_TYPE=parent` makes `SDL_GetBasePath` return the folder
+  that holds the `.app`, so the ROM, `saves/`, `mods/`, `controls.cfg`,
+  `settings.cfg` and `error.log` stay in the package folder. Windows links the
+  `.exe` as a GUI-subsystem binary (`WIN32_EXECUTABLE`), and `main.cpp` supplies
+  the `WinMain` forwarder that the CRT entry point for that subsystem needs
+  (MinGW's CRT already forwards). `app/src/crash_log.cpp` replaces the lost
+  console: it tees stdout and stderr into two 128 KiB rings while forwarding
+  every byte to the real descriptor, arms the fatal-signal and `std::terminate`
+  handlers, and writes `<config dir>/error.log` with the reason, the fault
+  address, the host pc, the last lines of the app's own log (including any
+  `uncompiled streamed record` or `stub called` line) and the runtime's guest
+  call chain. Verified on macOS: the bundle launches with no new Terminal window,
+  a synthetic and a live SIGSEGV both write the file in the package folder, and
+  `> out.log 2> err.log` still separates the streams. New knob
+  `OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>`. See
+  `docs/HANDOFF-2026-09-20-session94.md`.
 - ✅ **A SETTINGS tab carries GAME SPEED, and the speed changes while the game
   runs (session 93).** The shared `ui::Panel` gained a fifth tab whose only row is
   a radio group, `GAME SPEED  [ ] 1 [ ] 2 [x] 4`; `LEFT`/`RIGHT`/`SPACE` step it

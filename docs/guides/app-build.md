@@ -127,23 +127,43 @@ without an argument.
 **The config directory is the executable's own directory** (`SDL_GetBasePath`),
 not the per-user preference dir, so a distributed build is self-contained: the
 battery save lands at `saves/<game id>.bin` right beside the executable, and so
-do `mods/`. `OGRE_PREF_DIR=<dir>` still overrides it (the scripted harnesses
+do `mods/`. Inside the macOS bundle `SDL_GetBasePath` returns the folder that
+holds the `.app` (`SDL_FILESYSTEM_BASE_DIR_TYPE=parent`), which is that same
+folder. `OGRE_PREF_DIR=<dir>` still overrides it (the scripted harnesses
 use that), and a read-only install location falls back to the platform
 preference dir automatically. The boot log prints the resolved path.
 
 ### Distribution — `make dist`
 
 ```sh
-make dist        # -> dist/ogre-battle-64-recomp/  (one executable + README + SDL2 license)
+make dist        # -> dist/ogre-battle-64-recomp/  (the app + README + SDL2 license)
 make dist-zip    # -> dist/ogre-battle-64-recomp-<platform>.zip
 ```
+
+**The package shows no console window.** macOS wraps the executable in
+`Ogre Battle 64.app` (`packaging/macos-Info.plist`), so Finder launches it
+without opening Terminal, and Windows links `ogrebattle64.exe` as a GUI-subsystem
+binary (`WIN32_EXECUTABLE` in `app/CMakeLists.txt`; `app/src/main.cpp` supplies
+the `WinMain` forwarder that subsystem's CRT entry point needs, and attaches to
+the parent's console with `AttachConsole` when one exists, so running the `.exe`
+from a terminal still shows the log without ever creating a window). The app's
+`[boot]`/`[bank]` log therefore has no console to reach for a double-clicked
+launch, so a crash writes `error.log` next to the save file — see "Crash
+reports" below.
+
+The macOS bundle carries `SDL_FILESYSTEM_BASE_DIR_TYPE=parent`. `SDL_GetBasePath`
+then returns the folder that holds the `.app`, which is the same folder the
+README describes, so the ROM, `saves/`, `mods/`, `controls.cfg`, `settings.cfg`
+and `error.log` all stay beside the bundle rather than inside it. The bundle is
+ad-hoc signed at the end of the recipe.
 
 **The package is a single file: SDL2 is linked statically.** Everything else is
 a system framework or already static, so the executable has no non-system
 dynamic dependency at all:
 
 ```sh
-otool -L dist/ogre-battle-64-recomp/ogrebattle64 | grep -v "System/Library\|/usr/lib"   # prints nothing
+otool -L "dist/ogre-battle-64-recomp/Ogre Battle 64.app/Contents/MacOS/ogrebattle64" \
+  | grep -v "System/Library\|/usr/lib"   # prints nothing
 ```
 
 Static SDL2 needs the *real* SDL2 sources: Homebrew's `sdl2` formula on macOS is
@@ -182,6 +202,44 @@ already do the equivalent.
 A first launch of the package in an empty folder is the user-facing acceptance
 test: the black start screen appears, clicking/dropping a ROM boots the game,
 and `saves/ogrebattle64-us-rev1.bin` is written next to the executable.
+
+### Crash reports — `error.log`
+
+`app/src/crash_log.cpp` is what replaces the console window a distributed build
+no longer has. `crash_log::install()` runs at the top of `main()` and:
+
+* replaces fd 1 and fd 2 with the write ends of two pipes, each drained by a
+  thread into its own 128 KiB ring while every byte is forwarded to the real
+  descriptor. A terminal run, `... > run.log 2>&1` and `2> run.log` all behave
+  as before, and `stdout` is set back to line buffering so an interactive run
+  still prints as it goes;
+* installs the fatal handlers: `SIGSEGV`/`SIGBUS`/`SIGABRT`/`SIGFPE`/`SIGILL`
+  through `sigaction` on POSIX, the same through `signal` plus
+  `SetUnhandledExceptionFilter` on Windows, and `std::set_terminate` on both.
+
+A fatal event writes `<config dir>/error.log`, which is the executable's own
+directory unless that one is read-only (`resolve_pref_dir`). The file holds the
+reason, the fault address, the N64 thread, the host pc, the last 200 stderr lines
+and the last 100 stdout lines (the boot log, `[bank]` load lines, any
+`[overlays] streamed function stub called @ ...` line), then the runtime's guest
+call chain with fd 1/2 temporarily redirected into the file. The player attaches
+it to a GitHub issue.
+
+The handler's own output uses only `open`/`write`/`close` and an atomic ring
+length; the runtime's dump helpers are `printf`-based and run after the ring has
+been written. Only the first report of a fatal event is written, so a
+`std::terminate` that then aborts does not overwrite it. `OGRE_DUMP_RDRAM=<path>`
+still adds the whole 8 MiB image, on the crash path as on the exit path.
+`crash_log::flush()` restores the descriptors and joins the threads; `atexit`
+calls it, and the bounded-run `_Exit` path calls it explicitly.
+
+`OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>` raises that signal immediately after
+the logger is armed, so a packaged build's `error.log` can be checked without
+provoking a real crash.
+
+`SDL_ShowSimpleMessageBox` errors from the runtime (its `message_box` channel)
+also write `error.log`, for the same reason: a player who sees the box has no
+console to copy.
 
 ### Releases (GitHub Actions)
 
@@ -345,7 +403,8 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_DEBUG_VI=1` | with `OGRE_DEBUG_TRACES`, log every `osViSetMode` (mode pointer + decoded geometry) and every VI geometry change (`[vi-debug]`) |
 | `OGRE_DL_ANALYZE=1` | per-submission F3DEX2 workload counts (commands, triangles, texrects, textures) |
 | `OGRE_DL_DECODE=<n>\|all` | dump the decoded command stream of display list `<n>` (or all): `SETTIMG`/`SETTILE`/`SETTILESIZE`/`LOAD*`/`TEXRECT` with its `RDPHALF` halves/`FILLRECT`/`SETSCISSOR`/combiner/othermode. The ground truth for "which RDP command draws this" |
-| `OGRE_DUMP_RDRAM=<path>` | with `OGRE_EXIT_AFTER_MS`, write the whole 8 MiB RDRAM image for offline analysis |
+| `OGRE_DUMP_RDRAM=<path>` | write the whole 8 MiB RDRAM image for offline analysis: on the exit path (`OGRE_EXIT_AFTER_MS` or a closed window) and beside `error.log` on the crash path |
+| `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed, so a packaged build's `error.log` can be verified without provoking a real crash |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
 | `OGRE_COVER=1\|<path>` | recompiled-function **coverage census** (session 83): at exit, when the window is closed, or on the live console's `cover`, print every distinct recompiled function the run entered, one `[cover] 0xADDR count` line per function, for `tools/recompcov.py --log`. **Give it a path** (`OGRE_COVER=/tmp/cover.txt`) for a session played by hand — the census then lands in its own file instead of the end of a very chatty stdout, and the app prints one line saying so. `=1` keeps it on stdout for scripted runs. Unlike `OGRE_PROFILE=1` it starts no sampling thread and skips the shadow call chain, so the entry hooks cost one hash insert per call and a playthrough stays near normal speed |
 | `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |

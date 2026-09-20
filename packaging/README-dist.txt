@@ -12,7 +12,16 @@ game's copyrighted content is included here.
 HOW TO PLAY
 -----------
 
-1. Run the app: `ogrebattle64` (macOS/Linux) or `ogrebattle64.exe` (Windows).
+1. Run the app:
+
+   - **macOS:** open `Ogre Battle 64.app` (double-click it). The ROM, the save
+     and `error.log` live in this folder, next to the app bundle.
+   - **Windows:** `ogrebattle64.exe`.
+   - **Linux:** `ogrebattle64`.
+
+   On macOS, open the bundle and not the executable inside `Contents/MacOS`:
+   Finder opens a Terminal window for a bare executable, and the bundle is what
+   avoids that.
 
 2. The start screen appears:
 
@@ -119,9 +128,30 @@ REQUIREMENTS
   Wayland session. Some distributions split out SDL2's runtime packages; if
   the app reports a missing library, install your distribution's SDL2 package.
 
-If the game does not start, run the executable from a terminal and read the
-`[boot]` lines it prints; they name the resolved ROM, the renderer and the
-folder where saves are written.
+
+IF THE GAME CRASHES
+-------------------
+
+The app opens no console window, so a crash is not visible in one. If the
+process dies on a fault or an unhandled error it writes:
+
+    error.log
+
+into this folder, next to the save. The file holds the reason, the fault
+address, the N64 thread call chain and the last lines of the app's own log (the
+`[boot]`, `[bank]` and `[overlays]` lines). Attach the whole file to a bug report:
+
+    https://github.com/lfarroco/ogre-battle-64-decomp/issues
+
+`error.log` is overwritten by the next crash. Closing the window normally writes
+nothing. A developer can also make the app crash on demand to check the file:
+set `OGRE_CRASH_TEST=segv` in the environment before launching.
+
+If the game does not start at all, the `[boot]` lines name the resolved ROM,
+the renderer and the folder where saves are written. On macOS they are not
+printed anywhere; run the executable inside the bundle from a Terminal
+(`Ogre Battle 64.app/Contents/MacOS/ogrebattle64`) to see them. On Windows and
+Linux, run the app from a terminal.
 
 Troubleshooting, build instructions from source, and the full list of
 environment options are in the repository:

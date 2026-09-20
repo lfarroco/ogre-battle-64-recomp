@@ -1,6 +1,7 @@
 #include "sdl_platform.hpp"
 #include "synth_frame.hpp"
 #include "bank_overlays.hpp"
+#include "crash_log.hpp"
 #include "input_map.hpp"
 #include "overlay.hpp"
 
@@ -665,6 +666,9 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // finish the snapshot it may be printing concurrently.
         ultramodern::sleep_milliseconds(100);
         fflush(nullptr);
+        // _Exit skips atexit, so the captured stdout/stderr has to be drained
+        // here or the run log loses its last lines.
+        crash_log::flush();
         _Exit(EXIT_SUCCESS);
     }
 
@@ -1706,6 +1710,11 @@ ultramodern::audio_callbacks_t make_audio_callbacks() {
 
 static void show_message_box(const char* msg) {
     extern Platform g_platform;
+    // The runtime's fatal-error channel. There is no console in a distributed
+    // build, so put the same message in error.log for the player to submit.
+    // This does not consume the one-report guard: a real crash afterwards still
+    // writes its own report.
+    crash_log::write_error_log(msg);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Ogre Battle 64", msg, g_platform.window);
 }
 

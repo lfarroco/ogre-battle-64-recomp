@@ -386,6 +386,13 @@ rsp-recomp:
 # beside the executable (app/src/launcher.cpp resolve_pref_dir; OGRE_PREF_DIR
 # overrides it).
 #
+# On macOS the executable is wrapped in `Ogre Battle 64.app` so Finder launches
+# it without opening a Terminal window; `SDL_FILESYSTEM_BASE_DIR_TYPE=parent` in
+# packaging/macos-Info.plist keeps the ROM, saves/, mods/ and error.log in the
+# folder that holds the .app. On Windows the executable is linked as a GUI
+# subsystem binary (app/CMakeLists.txt), so no console window is allocated. A
+# crash writes `error.log` beside the save file (app/src/crash_log.cpp).
+#
 #   make dist            # -> dist/ogre-battle-64-recomp/
 #   make dist-zip        # -> dist/ogre-battle-64-recomp-<host>.zip
 #
@@ -429,6 +436,19 @@ CMAKE_ARGS ?=
 #   make dist DIST_OS=windows
 #
 DIST_OS ?= $(if $(filter Darwin,$(shell uname -s)),macos,$(if $(filter Linux,$(shell uname -s)),linux,windows))
+
+# Where the executable lands inside the package. macOS ships a .app bundle so
+# Finder launches it without opening Terminal; every other platform gets a bare
+# file next to the README. `SDL_FILESYSTEM_BASE_DIR_TYPE=parent` in the bundle's
+# Info.plist makes SDL_GetBasePath return the folder that contains the .app, so
+# the ROM, saves/, mods/ and error.log stay in the package folder the README
+# describes rather than inside the bundle.
+ifeq ($(DIST_OS),macos)
+DIST_APP     := $(DIST_DIR)/Ogre Battle 64.app
+DIST_BIN_DIR := $(DIST_APP)/Contents/MacOS
+else
+DIST_BIN_DIR := $(DIST_DIR)
+endif
 
 # Static SDL2, built once. Its license ships with the binary (see `dist`).
 #
@@ -493,7 +513,12 @@ dist: app
 	rm -rf "$(DIST_DIR)"
 	mkdir -p "$(DIST_DIR)"
 	@test -n "$(EXE_BUILT)" || { echo "no $(EXE_NAME) under $(APP_BUILD_DIR) after the build"; exit 1; }
-	cp "$(EXE_BUILT)" "$(DIST_DIR)/"
+	@if [ "$(DIST_OS)" = "macos" ]; then mkdir -p "$(DIST_BIN_DIR)"; fi
+	cp "$(EXE_BUILT)" "$(DIST_BIN_DIR)/"
+	@if [ "$(DIST_OS)" = "macos" ]; then \
+	  cp "$(CURDIR)/packaging/macos-Info.plist" "$(DIST_APP)/Contents/Info.plist"; \
+	  echo "==> macOS bundle: $(DIST_APP)"; \
+	fi
 	# RT64 loads dxcompiler.dll/dxil.dll at runtime on Windows; its CMake copies
 	# them next to the library, i.e. into $(APP_BUILD_DIR)/RT64. They are not
 	# optional: without them the exe fails before the first frame.
@@ -516,16 +541,25 @@ dist: app
 	  echo "==> static SDL2: no shared library to bundle"; \
 	elif [ "$(DIST_OS)" = "macos" ]; then \
 	  echo "==> bundling shared SDL2"; \
-	  sdl=$$(otool -L "$(DIST_DIR)/$(EXE_NAME)" | awk '/libSDL2-2[^ ]*\.dylib/ {print $$1; exit}'); \
+	  sdl=$$(otool -L "$(DIST_BIN_DIR)/$(EXE_NAME)" | awk '/libSDL2-2[^ ]*\.dylib/ {print $$1; exit}'); \
 	  if [ -n "$$sdl" ] && [ -f "$$sdl" ]; then \
-	    cp "$$sdl" "$(DIST_DIR)/"; \
+	    cp "$$sdl" "$(DIST_BIN_DIR)/"; \
 	    base=$$(basename "$$sdl"); \
-	    install_name_tool -change "$$sdl" "@executable_path/$$base" "$(DIST_DIR)/$(EXE_NAME)"; \
-	    install_name_tool -id "@executable_path/$$base" "$(DIST_DIR)/$$base" 2>/dev/null || true; \
-	    install_name_tool -add_rpath "@executable_path" "$(DIST_DIR)/$(EXE_NAME)" 2>/dev/null || true; \
-	    codesign --force --sign - "$(DIST_DIR)/$$base" 2>/dev/null || true; \
+	    install_name_tool -change "$$sdl" "@executable_path/$$base" "$(DIST_BIN_DIR)/$(EXE_NAME)"; \
+	    install_name_tool -id "@executable_path/$$base" "$(DIST_BIN_DIR)/$$base" 2>/dev/null || true; \
+	    install_name_tool -add_rpath "@executable_path" "$(DIST_BIN_DIR)/$(EXE_NAME)" 2>/dev/null || true; \
+	    codesign --force --sign - "$(DIST_BIN_DIR)/$$base" 2>/dev/null || true; \
 	  else \
 	    echo "    no SDL2 dylib found to bundle (was it linked statically?)"; \
+	  fi; \
+	fi
+	# Ad-hoc sign the bundle last, after any nested dylib is in place. Without a
+	# signature a .app downloaded from a release may refuse to launch on macOS.
+	@if [ "$(DIST_OS)" = "macos" ]; then \
+	  if codesign --force --sign - "$(DIST_APP)" 2>/dev/null; then \
+	    echo "==> ad-hoc signed $(DIST_APP)"; \
+	  else \
+	    echo "    (codesign unavailable; the bundle is unsigned)"; \
 	  fi; \
 	fi
 	@if [ "$(DIST_OS)" = "linux" ]; then \
@@ -544,11 +578,11 @@ dist: app
 	fi
 	@echo "==> dependencies carried in the package:"
 	@if [ "$(DIST_OS)" = "macos" ]; then \
-	  otool -L "$(DIST_DIR)/$(EXE_NAME)" | tail -n +2 | grep -vE "System/Library|/usr/lib" || echo "    (none: only system frameworks)"; \
+	  otool -L "$(DIST_BIN_DIR)/$(EXE_NAME)" | tail -n +2 | grep -vE "System/Library|/usr/lib" || echo "    (none: only system frameworks)"; \
 	elif [ "$(DIST_OS)" = "windows" ]; then \
 	  echo "    dxcompiler.dll, dxil.dll (RT64's shader compiler); SDL2 is linked statically"; \
 	else \
-	  ldd "$(DIST_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
+	  ldd "$(DIST_BIN_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
 	fi
 	cp "$(CURDIR)/packaging/README-dist.txt" "$(DIST_DIR)/README.txt"
 	# Example mods. `make example-mods` builds them (it needs a MIPS cross

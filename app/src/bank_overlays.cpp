@@ -1,16 +1,10 @@
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
-#if defined(__APPLE__)
-#define _XOPEN_SOURCE 700
-#include <ucontext.h>
-#include <dlfcn.h>
-#endif
 
 #include "recomp.h"
 #include "librecomp/overlays.hpp"
@@ -21,73 +15,6 @@
 
 namespace ogre {
 namespace {
-
-#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
-// A cross-bank crash (a bank loaded over another bank's RAM, with a stale or
-// compile-time-bound function still running) dies with a raw SIGSEGV, where the
-// recompiled call stack is lost because the build omits frame pointers. The
-// runtime keeps a shadow per-thread call chain, so print it here. This needs
-// POSIX `siginfo_t`/`sigaction`, which the MSVC CRT does not provide; the
-// Windows build gets no crash handler.
-void on_fatal_signal(int sig, siginfo_t* info, void* uctx) {
-    uint8_t* rdram = ultramodern::get_rdram_base();
-#if defined(__APPLE__) && defined(__x86_64__)
-    if (uctx != nullptr) {
-        const ucontext_t* uc = (const ucontext_t*)uctx;
-        fprintf(stderr, "[crash] host rip=%p rsp=%p rbp=%p\n",
-                (void*)uc->uc_mcontext->__ss.__rip,
-                (void*)uc->uc_mcontext->__ss.__rsp,
-                (void*)uc->uc_mcontext->__ss.__rbp);
-        Dl_info dli{};
-        if (dladdr((void*)uc->uc_mcontext->__ss.__rip, &dli) != 0 && dli.dli_fbase != nullptr) {
-            fprintf(stderr, "[crash] host pc %s + 0x%llX\n",
-                    dli.dli_sname ? dli.dli_sname : "?",
-                    (unsigned long long)((uintptr_t)uc->uc_mcontext->__ss.__rip -
-                                         (uintptr_t)dli.dli_saddr));
-        }
-    }
-#else
-    (void)uctx;
-#endif
-    PTR(OSThread) self = (rdram != nullptr) ? ultramodern::this_thread() : (PTR(OSThread))0;
-    const int tid = (self != 0) ? TO_PTR(OSThread, self)->id : -1;
-    const void* fault = (info != nullptr) ? info->si_addr : nullptr;
-    // Guest words live at rdram + (addr - 0x80000000), so the host fault minus
-    // the base reads back as the faulting N64 address (half/byte accesses xor
-    // the low bits; see recomp_mem_addr in recomp.h).
-    const uint64_t offset = (fault != nullptr && rdram != nullptr)
-        ? (uint64_t)((const uint8_t*)fault - rdram) : 0;
-    fprintf(stderr, "[crash] signal %d on N64 thread %d fault=%p rdram=%p offset=0x%llX\n",
-            sig, tid, fault, (const void*)rdram, (unsigned long long)offset);
-    fflush(stderr);
-    ultramodern::debug_dump_call_chain(tid, "crash");
-    for (int t = 1; t < 32; t++) {
-        const uint32_t func = ultramodern::debug_last_func_vram(t);
-        if (func != 0) {
-            fprintf(stderr, "[crash]   t%-3d last func 0x%08X\n", t, func);
-        }
-    }
-    ultramodern::debug_dump_chain_history();
-    // OGRE_DUMP_RDRAM=<path>: same whole-RDRAM dump as the exit_after path, so
-    // a crash's data pointers can be followed offline instead of guessed.
-    if (const char* dump_path = getenv("OGRE_DUMP_RDRAM")) {
-        if (rdram != nullptr) {
-            if (FILE* f = fopen(dump_path, "wb")) {
-                const size_t size = 0x800000;
-                size_t written = fwrite(rdram, 1, size, f);
-                fclose(f);
-                fprintf(stderr, "[crash] dumped %zu bytes of rdram to %s\n", written, dump_path);
-            } else {
-                fprintf(stderr, "[crash] could not open %s for rdram dump\n", dump_path);
-            }
-        }
-    }
-    fflush(stdout);
-    fflush(stderr);
-    std::signal(sig, SIG_DFL);
-    std::raise(sig);
-}
-#endif
 
 struct BankRecord {
     uint32_t rom_start;
@@ -913,18 +840,6 @@ void dump_dma_trace() {
 }
 
 void register_bank_overlays() {
-#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
-    struct sigaction sa = {};
-    sa.sa_sigaction = on_fatal_signal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-    sigaction(SIGABRT, &sa, nullptr);
-    // A divide-by-zero in the runtime's message-queue math (a queue whose
-    // msgCount is 0) arrives as SIGFPE; report the guest chain for it too.
-    sigaction(SIGFPE, &sa, nullptr);
-#endif
     recomp::overlays::set_streamed_dma_hook(on_streamed_dma);
 
     size_t total_functions = 0;
