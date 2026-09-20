@@ -89,17 +89,25 @@ hardware. RT64 remains the primary native renderer throughout. See
   recipe also built and installed Debug (no `--config Release`), whose name
   carries a `d` postfix. The guard now accepts both names, the build and install
   pass `--config Release`, and a failure prints the tail of
-  `tools/SDL2-static/build.log` instead of hiding it. The same commit fixes the
-  Visual Studio executable path (`build-dist/Release/ogrebattle64.exe`), defines
-  `SDL_MAIN_HANDLED` so the app keeps its own `main` instead of SDL2main's, and
-  points RT64 at the app's SDL2 on Windows when `SDL2_DIR` is set, because RT64
-  otherwise links a second, older bundled SDL2 (2.26.3, shared) against a window
-  the app created with the SDL2 it links. `dist-zip` falls back to
+  `tools/SDL2-static/build.log` instead of hiding it. The next run got through
+  the SDL2 build (`==> static SDL2 ready`) and failed one step later, in RT64's
+  `find_package(SDL2)`: SDL2's CMakeLists installs its package config to
+  `<prefix>/cmake` under MSVC (`if (WINDOWS AND NOT MINGW)`) and to
+  `<prefix>/lib/cmake/SDL2` elsewhere, so the Makefile's `-DSDL2_DIR` pointed at
+  a directory with no `SDL2Config.cmake`. The Makefile now passes
+  `-DOGRE_STATIC_SDL2=ON` and `app/CMakeLists.txt` locates the config in either
+  directory before RT64 is added. The same commit fixes the Visual Studio
+  executable path (`build-dist/Release/ogrebattle64.exe`), defines
+  `SDL_MAIN_HANDLED` and calls `SDL_SetMainReady()` so the app keeps its own
+  `main` instead of SDL2main's, and points RT64 at the app's SDL2 on Windows
+  (otherwise RT64 links a second, older bundled SDL2 2.26.3, shared, against a
+  window the app created with the SDL2 it links). `dist-zip` falls back to
   `cmake -E tar --format=zip`, since Git Bash for Windows ships no `zip`.
-  Verified: a from-scratch macOS build of the committed tree plus these changes
-  packages both archives, and the regenerated `rt64-ob64.patch` applies to
-  pristine RT64 `4337374` and reproduces the working tree. The Windows job has
-  not been run since; the Visual Studio path is reasoned, not observed.
+  Verified: from-scratch macOS builds of the committed tree plus these changes
+  package both archives, including one with SDL2 installed in the MSVC layout
+  (`SDL_INSTALL_CMAKEDIR=cmake`); the regenerated `rt64-ob64.patch` applies to
+  pristine RT64 `4337374` and reproduces the working tree. The MSVC compile of
+  the game code past RT64's configure has not been observed.
   See `docs/guides/app-build.md` → Releases and `docs/DECISIONS.md` (89c).
 
 - ✅ **The boot-Start save menu (scene `0x18`) renders (session 88).** Holding

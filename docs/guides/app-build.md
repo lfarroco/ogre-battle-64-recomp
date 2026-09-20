@@ -274,14 +274,17 @@ Three platform properties of the hosted path are load-bearing.
   reads the header, so a missing entry only shows on Apple Silicon.
 - **A Windows runner builds with the Visual Studio generator.** `cmake` picks it
   because the image has VS and the workflow installs no MinGW. That changes the
-  static SDL2 library name (`SDL2-static.lib`, not `libSDL2.a`), puts build
-  output in a per-config directory (`build-dist/Release/ogrebattle64.exe`), and
-  makes `--config Release` necessary for the build and install — otherwise SDL2
-  is built Debug, whose name is `SDL2-staticd.lib`. `app/CMakeLists.txt` also
-  defines `SDL_MAIN_HANDLED` for the app target, because `SDL.h` otherwise
-  renames `main` to `SDL_main` and the MSVC link looks for SDL2main; `init_sdl`
-  calls `SDL_SetMainReady()` before `SDL_Init` for the same reason. RT64 uses
-  the SDL2 that `SDL2_DIR` selects on Windows too, so one SDL2 owns the window.
+  static SDL2 library name (`SDL2-static.lib`, not `libSDL2.a`), its CMake
+  package directory (`<prefix>/cmake`, not `<prefix>/lib/cmake/SDL2`), puts
+  build output in a per-config directory (`build-dist/Release/ogrebattle64.exe`),
+  and makes `--config Release` necessary for the build and install — otherwise
+  SDL2 is built Debug, whose name is `SDL2-staticd.lib`. `make` passes
+  `-DOGRE_STATIC_SDL2=ON` and `app/CMakeLists.txt` finds the config in either
+  directory before RT64 is added, so RT64 links the app's SDL2 instead of its
+  bundled win32-deps 2.26.3 copy. `app/CMakeLists.txt` also defines
+  `SDL_MAIN_HANDLED` for the app target, because `SDL.h` otherwise renames
+  `main` to `SDL_main` and the MSVC link looks for SDL2main; `init_sdl` calls
+  `SDL_SetMainReady()` before `SDL_Init` for the same reason.
 
 A self-hosted runner needs, per platform:
 

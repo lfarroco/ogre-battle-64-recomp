@@ -50,6 +50,27 @@ if (EMSCRIPTEN)
     set(OGRE_USE_RT64 OFF)
 endif()
 
+# --- Static SDL2 from `make sdl2-static` -------------------------------------
+# `make sdl2-static` builds SDL2 into tools/SDL2-static/prefix and passes
+# -DOGRE_STATIC_SDL2=ON. Point find_package at that copy here, before RT64 is
+# added below, so RT64 and the app link one SDL2 instead of RT64's bundled
+# win32-deps copy. The package config directory differs by generator: SDL2
+# installs it to <prefix>/cmake under MSVC (SDL2's CMakeLists:
+# `if (WINDOWS AND NOT MINGW) set(SDL_INSTALL_CMAKEDIR_DEFAULT "cmake")`) and to
+# <prefix>/lib/cmake/SDL2 everywhere else, so check both instead of passing a
+# path from the Makefile, which cannot know the generator.
+option(OGRE_STATIC_SDL2 "Link the static SDL2 under tools/SDL2-static/prefix" OFF)
+if (OGRE_STATIC_SDL2)
+    set(OGRE_SDL2_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/../tools/SDL2-static/prefix")
+    foreach (OGRE_SDL2_CANDIDATE "${OGRE_SDL2_PREFIX}/cmake" "${OGRE_SDL2_PREFIX}/lib/cmake/SDL2")
+        if (EXISTS "${OGRE_SDL2_CANDIDATE}/SDL2Config.cmake")
+            set(SDL2_DIR "${OGRE_SDL2_CANDIDATE}" CACHE PATH "SDL2 package config directory" FORCE)
+            message(STATUS "static SDL2: ${SDL2_DIR}")
+            break()
+        endif()
+    endforeach()
+endif()
+
 # --- Runtime: ultramodern + librecomp (+ its bundled N64Recomp) --------------
 add_subdirectory(${OGRE_TOOLS}/N64ModernRuntime ${CMAKE_BINARY_DIR}/N64ModernRuntime)
 

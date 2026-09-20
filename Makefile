@@ -390,7 +390,6 @@ EXE_NAME  := ogrebattle64$(if $(filter windows,$(DIST_OS)),.exe,)
 SDL2_VERSION := 2.32.10
 SDL2_SRC     := tools/SDL2-static/SDL2-$(SDL2_VERSION)
 SDL2_PREFIX  := tools/SDL2-static/prefix
-SDL2_DIR     := $(CURDIR)/$(SDL2_PREFIX)/lib/cmake/SDL2
 SDL2_TARBALL := https://github.com/libsdl-org/SDL/releases/download/release-$(SDL2_VERSION)/SDL2-$(SDL2_VERSION).tar.gz
 
 DIST_STATIC_SDL ?= 1
@@ -440,7 +439,9 @@ sdl2-static:
 # DIST_STATIC_SDL never leaves a stale library in the cache.
 ifeq ($(DIST_STATIC_SDL),1)
 APP_BUILD_DIR := build-dist
-APP_CMAKE_SDL := -DSDL2_DIR=$(SDL2_DIR)
+# app/CMakeLists.txt locates the package config itself: its directory is
+# <prefix>/cmake under MSVC and <prefix>/lib/cmake/SDL2 elsewhere.
+APP_CMAKE_SDL := -DOGRE_STATIC_SDL2=ON
 app: sdl2-static
 else
 APP_BUILD_DIR := build-app
