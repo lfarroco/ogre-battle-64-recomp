@@ -164,6 +164,13 @@ if(RSP_RECOMP_SOURCES)
         ${OGRE_TOOLS}/N64ModernRuntime/N64Recomp/include
         ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
         ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
+        # On arm64, librecomp/rsp_vu.hpp includes <sse2neon.h> and not the x86
+        # SSE4.1 intrinsics header. ultramodern propagates this directory
+        # PUBLIC, which reaches the app target, but this static library does not
+        # link ultramodern, so it needs the directory itself. Without it an
+        # Apple Silicon build fails at `rsp_vu.hpp:29: 'sse2neon.h' file not
+        # found`; an x86-64 build never reads the header.
+        ${OGRE_TOOLS}/N64ModernRuntime/thirdparty/sse2neon
     )
 
     target_compile_options(ogrebattle64_rsp PRIVATE
@@ -306,6 +313,13 @@ endif()
 
 if (NOT EMSCRIPTEN)
     target_link_libraries(ogrebattle64 PRIVATE SDL2::SDL2)
+    if (WIN32)
+        # SDL.h renames `main` to `SDL_main` on Windows and expects SDL2main to
+        # provide the real entry point. This app defines its own main and does
+        # not link SDL2main, so opt out of the rename. Without it the MSVC link
+        # fails on an unresolved `main`.
+        target_compile_definitions(ogrebattle64 PRIVATE SDL_MAIN_HANDLED)
+    endif()
     if (UNIX AND NOT APPLE)
         find_package(Threads REQUIRED)
         target_link_libraries(ogrebattle64 PRIVATE Threads::Threads ${CMAKE_DL_LIBS})

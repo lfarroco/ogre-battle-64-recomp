@@ -344,6 +344,10 @@ std::string describe_buttons(uint16_t mask) {
 }  // namespace
 
 bool init_sdl() {
+    // The app keeps its own main (the MSVC build defines SDL_MAIN_HANDLED), so
+    // tell SDL not to wait for SDL_main's setup before SDL_Init. No-op on the
+    // platforms where SDL does not wrap main.
+    SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "[SDL] Failed to init: %s\n", SDL_GetError());
         return false;

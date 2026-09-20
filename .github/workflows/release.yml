@@ -111,6 +111,13 @@ jobs:
         run: |
           set -e
           tar xzf ogre-data/files.tar.gz -C .
+          # A bundle packed on macOS can carry AppleDouble `._*` members, which
+          # extract as ordinary files here. app/CMakeLists.txt globs `*.c`, so
+          # they would be compiled and fail with `stray '\5' in program`.
+          # tools/data-bundle.sh no longer writes them; delete them anyway, so
+          # an existing bundle works.
+          find . -name '._*' -delete
+          find . -name '.DS_Store' -delete
           for p in RecompiledFuncs app/src/bank_funcs.inc RspFuncs; do
             test -e "$p" || { echo "::error::$p is missing from files.tar.gz"; exit 1; }
           done

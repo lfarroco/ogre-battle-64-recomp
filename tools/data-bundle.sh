@@ -66,7 +66,14 @@ fi
 } > "$meta"
 
 mkdir -p "$(dirname -- "$out")"
-tar czf "$out" ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc
+# macOS `tar` writes AppleDouble `._<name>` members for files that carry
+# extended attributes, and those members extract as ordinary files on Linux.
+# app/CMakeLists.txt globs `*.c`/`*.cpp`, so a `._funcs_0.c` gets compiled and
+# fails with `stray '\5' in program`. COPYFILE_DISABLE stops macOS adding them;
+# the excludes cover a bundle produced by other means.
+COPYFILE_DISABLE=1 tar czf "$out" \
+    --exclude '._*' --exclude '*/._*' --exclude '.DS_Store' --exclude '*/.DS_Store' \
+    ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc
 
 # `shasum` is on macOS, `sha256sum` on Linux; one of them exists.
 sha=$( (shasum -a 256 "$out" 2>/dev/null || sha256sum "$out") | awk '{print $1}')

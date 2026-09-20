@@ -403,9 +403,16 @@ DIST_STATIC_SDL ?= 1
 DIST_OS ?= $(if $(filter Darwin,$(shell uname -s)),macos,$(if $(filter Linux,$(shell uname -s)),linux,windows))
 
 # Static SDL2, built once. Its license ships with the binary (see `dist`).
+#
+# The library name depends on the generator: a single-config generator (Unix
+# Makefiles, Ninja, MinGW Makefiles) writes `libSDL2.a`, and a multi-config one
+# (Visual Studio, Xcode -- the default on a windows runner, which has VS but no
+# MinGW) writes `SDL2-static.lib`. `--config Release` is passed to the build and
+# install because a multi-config generator otherwise builds and installs Debug,
+# whose name carries the `d` postfix (`SDL2-staticd.lib`) and would not be found.
 .PHONY: sdl2-static
 sdl2-static:
-	@if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ]; then \
+	@if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then \
 	  echo "==> static SDL2 already built ($(SDL2_PREFIX))"; \
 	else \
 	  echo "==> fetching SDL2 $(SDL2_VERSION)"; \
@@ -413,13 +420,19 @@ sdl2-static:
 	  curl -fsSL -o tools/SDL2-static/sdl2.tar.gz "$(SDL2_TARBALL)"; \
 	  tar xzf tools/SDL2-static/sdl2.tar.gz -C tools/SDL2-static; \
 	  echo "==> building static SDL2 (this takes a minute)"; \
-	  cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build \
-	    -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
-	    -DSDL_TEST=OFF -DSDL_TESTS=OFF > tools/SDL2-static/build.log 2>&1; \
-	  cmake --build tools/SDL2-static/build -j >> tools/SDL2-static/build.log 2>&1; \
-	  cmake --install tools/SDL2-static/build --prefix "$(SDL2_PREFIX)" >> tools/SDL2-static/build.log 2>&1; \
-	  test -f "$(SDL2_PREFIX)/lib/libSDL2.a" || { echo "static SDL2 build failed; see tools/SDL2-static/build.log"; exit 1; }; \
-	  echo "==> static SDL2 ready"; \
+	  { cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build \
+	      -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+	      -DSDL_TEST=OFF -DSDL_TESTS=OFF \
+	    && cmake --build tools/SDL2-static/build --config Release -j \
+	    && cmake --install tools/SDL2-static/build --config Release --prefix "$(SDL2_PREFIX)"; \
+	  } > tools/SDL2-static/build.log 2>&1 || true; \
+	  if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then \
+	    echo "==> static SDL2 ready"; \
+	  else \
+	    echo "static SDL2 build failed; last 40 lines of tools/SDL2-static/build.log:"; \
+	    tail -n 40 tools/SDL2-static/build.log; \
+	    exit 1; \
+	  fi; \
 	fi
 
 # Build (or refresh) the app binary. CMake owns its own dependency tracking.
@@ -434,16 +447,23 @@ APP_BUILD_DIR := build-app
 APP_CMAKE_SDL :=
 endif
 
+# Where the compiler wrote the executable. A single-config generator writes it
+# directly in APP_BUILD_DIR; a multi-config one (Visual Studio, Xcode) writes it
+# in a per-config subdirectory. Recursive on purpose: the wildcard is expanded
+# when the `dist` recipe runs, after `app` has built the binary.
+EXE_BUILT = $(firstword $(wildcard $(APP_BUILD_DIR)/$(EXE_NAME) $(APP_BUILD_DIR)/Release/$(EXE_NAME) $(APP_BUILD_DIR)/RelWithDebInfo/$(EXE_NAME)))
+
 .PHONY: app
 app:
 	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
-	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 -j
+	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 --config Release -j
 
 .PHONY: dist
 dist: app
 	rm -rf "$(DIST_DIR)"
 	mkdir -p "$(DIST_DIR)"
-	cp $(APP_BUILD_DIR)/$(EXE_NAME) "$(DIST_DIR)/"
+	@test -n "$(EXE_BUILT)" || { echo "no $(EXE_NAME) under $(APP_BUILD_DIR) after the build"; exit 1; }
+	cp "$(EXE_BUILT)" "$(DIST_DIR)/"
 	@if [ "$(DIST_OS)" = "macos" ] && [ "$(DIST_STATIC_SDL)" = "1" ]; then \
 	  printf '%s\n' \
 	    'This executable includes SDL2 (https://libsdl.org), linked statically,' \
@@ -495,10 +515,16 @@ dist: app
 
 # Both archive flavours: `zip` is what a Windows player expects, `tar.gz`
 # always exists on Linux/macOS runners. CI uploads whichever each runner makes.
+# Git Bash for Windows ships no `zip`, so fall back to CMake's zip writer, which
+# is present on every runner that builds this.
 .PHONY: dist-zip
 dist-zip: dist
 	@cd dist && rm -f "$(DIST_NAME)-$(DIST_OS).zip" && \
-	  zip -q -r "$(DIST_NAME)-$(DIST_OS).zip" "$(DIST_NAME)" && \
+	  if command -v zip >/dev/null 2>&1; then \
+	    zip -q -r "$(DIST_NAME)-$(DIST_OS).zip" "$(DIST_NAME)"; \
+	  else \
+	    cmake -E tar cf "$(DIST_NAME)-$(DIST_OS).zip" --format=zip "$(DIST_NAME)"; \
+	  fi && \
 	  echo "==> dist/$(DIST_NAME)-$(DIST_OS).zip"
 
 .PHONY: dist-tar

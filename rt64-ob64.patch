@@ -1,3 +1,22 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 79dfc38..3d4997c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -285,7 +285,13 @@ function(build_ray_shader TARGETOBJ SHADERNAME)
+ endfunction()
+ 
+ # Point cmake at src/contrib/mupen64plus-win32-deps/SDL2-2.26.3 for SDL2 on windows, look for an installed package on other systems
+-if (WIN32)
++#
++# OGRE: when app/CMakeLists.txt passes SDL2_DIR, use that SDL2 on Windows too.
++# The bundled copy is a second, older SDL2 (2.26.3, shared). The app creates its
++# window with the SDL2 it links and hands RT64 the handle, so two copies in one
++# process disagree about that window and the package would need SDL2.dll.
++# Without SDL2_DIR (a standalone RT64 build) the bundled copy is kept.
++if (WIN32 AND NOT DEFINED SDL2_DIR)
+     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
+     set(SDL2_LIBRARIES "SDL2" "SDL2main")
+     link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
 diff --git a/src/common/rt64_tmem_hasher.h b/src/common/rt64_tmem_hasher.h
 index 8c6af2b..a614e4e 100644
 --- a/src/common/rt64_tmem_hasher.h

@@ -69,6 +69,39 @@ hardware. RT64 remains the primary native renderer throughout. See
   missing final newlines. The rest of the Windows job is still unrun.
   See `docs/guides/app-build.md` → Releases.
 
+- ✅ **The first hosted run after the CRLF fix got all three platforms past the
+  patch step, and the logs name one cause each (session 89c).** macOS and Linux
+  failed in `Build and package`, not in the patch step, and had failed there in
+  the v0.1.0 run too. Linux: the bundle in the private repository carries
+  AppleDouble `._*` members, which extract as ordinary files here, and
+  `app/CMakeLists.txt`'s `*.c` glob compiled them
+  (`BankAAFuncs/._funcs_0.c:1:2: error: stray '\5' in program`).
+  `tools/data-bundle.sh` now sets `COPYFILE_DISABLE=1` and excludes `._*`, and
+  the workflow's unpack step deletes any that an existing bundle carries.
+  macOS: the runner is arm64, `librecomp/rsp_vu.hpp` includes `<sse2neon.h>` on
+  arm64, and `ogrebattle64_rsp` — which does not link `ultramodern` — had no
+  include directory for it, so `audio_ucode.cpp` and `njpeg_ucode.cpp` failed
+  with `fatal error: 'sse2neon.h' file not found`. The library now includes
+  `N64ModernRuntime/thirdparty/sse2neon`; this machine is x86-64, which never
+  reads the header, so the bug could not show here. Windows: the runner's CMake
+  picks the Visual Studio generator, which installs the static library as
+  `SDL2-static.lib`, and the `sdl2-static` guard only accepted `libSDL2.a`; the
+  recipe also built and installed Debug (no `--config Release`), whose name
+  carries a `d` postfix. The guard now accepts both names, the build and install
+  pass `--config Release`, and a failure prints the tail of
+  `tools/SDL2-static/build.log` instead of hiding it. The same commit fixes the
+  Visual Studio executable path (`build-dist/Release/ogrebattle64.exe`), defines
+  `SDL_MAIN_HANDLED` so the app keeps its own `main` instead of SDL2main's, and
+  points RT64 at the app's SDL2 on Windows when `SDL2_DIR` is set, because RT64
+  otherwise links a second, older bundled SDL2 (2.26.3, shared) against a window
+  the app created with the SDL2 it links. `dist-zip` falls back to
+  `cmake -E tar --format=zip`, since Git Bash for Windows ships no `zip`.
+  Verified: a from-scratch macOS build of the committed tree plus these changes
+  packages both archives, and the regenerated `rt64-ob64.patch` applies to
+  pristine RT64 `4337374` and reproduces the working tree. The Windows job has
+  not been run since; the Visual Studio path is reasoned, not observed.
+  See `docs/guides/app-build.md` → Releases and `docs/DECISIONS.md` (89c).
+
 - ✅ **The boot-Start save menu (scene `0x18`) renders (session 88).** Holding
   Start while the game boots takes the boot branch at `0x800721DC`
   (`*(u16*)0x800E79B0 & 0x1000` → pending scene `0x18`, else `0x09`), which

@@ -257,6 +257,32 @@ state. `.gitattributes` pins `*.patch` to `eol=lf` and the workflow passes
 `apply_patch` helper: without them the Windows job fails at
 `rt64_tmem_hasher.h:203` and `rt64_native_target.cpp:369`.
 
+Three platform properties of the hosted path are load-bearing.
+
+- **The data bundle must not carry AppleDouble files.** macOS `tar` writes
+  `._<name>` members for files with extended attributes. They are metadata on
+  macOS but ordinary files on Linux, and `app/CMakeLists.txt` globs `*.c`, so
+  the Linux build compiles them and fails with
+  `._funcs_0.c:1:2: error: stray '\5' in program`. `tools/data-bundle.sh` sets
+  `COPYFILE_DISABLE=1` and excludes `._*`; the workflow's unpack step deletes
+  any that an older bundle still carries.
+- **The arm64 build needs the `sse2neon` include.** `librecomp/rsp_vu.hpp`
+  includes `<sse2neon.h>` under `__aarch64__` and `<nmmintrin.h>` on x86-64.
+  `ultramodern` propagates `thirdparty/sse2neon` PUBLIC, which reaches the app
+  target, but `ogrebattle64_rsp` does not link `ultramodern`, so
+  `app/CMakeLists.txt` lists the directory for it. An x86-64 machine never
+  reads the header, so a missing entry only shows on Apple Silicon.
+- **A Windows runner builds with the Visual Studio generator.** `cmake` picks it
+  because the image has VS and the workflow installs no MinGW. That changes the
+  static SDL2 library name (`SDL2-static.lib`, not `libSDL2.a`), puts build
+  output in a per-config directory (`build-dist/Release/ogrebattle64.exe`), and
+  makes `--config Release` necessary for the build and install — otherwise SDL2
+  is built Debug, whose name is `SDL2-staticd.lib`. `app/CMakeLists.txt` also
+  defines `SDL_MAIN_HANDLED` for the app target, because `SDL.h` otherwise
+  renames `main` to `SDL_main` and the MSVC link looks for SDL2main; `init_sdl`
+  calls `SDL_SetMainReady()` before `SDL_Init` for the same reason. RT64 uses
+  the SDL2 that `SDL2_DIR` selects on Windows too, so one SDL2 owns the window.
+
 A self-hosted runner needs, per platform:
 
 | platform | toolchain | SDL2 |
