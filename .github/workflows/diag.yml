@@ -13,25 +13,34 @@ jobs:
         with:
           arch: x64
 
-      - name: A trivial GUI-subsystem exe, run from Git Bash
+      - name: Trivial GUI exe from Git Bash
+        continue-on-error: true
         shell: bash
         run: |
+          set +e
           cat > g.c <<'EOF'
           #include <windows.h>
           int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) { return 7; }
           EOF
-          clang-cl /nologo /MT /c g.c || echo "compile failed"
-          link /nologo /subsystem:windows /out:g.exe g.obj || echo "link failed"
-          ls -l g.exe 2>/dev/null || true
-          ./g.exe; echo "gui-bash exit=$?"
-          ./g.exe >/tmp/g.log 2>&1; echo "gui-bash-redirect exit=$?"
+          clang-cl -nologo -MT -c g.c
+          echo "clang=$?"
+          link -nologo -subsystem:windows -out:g.exe g.obj
+          echo "link=$?"
+          ls -l g.exe
+          ./g.exe
+          echo "gui-bash exit=$?"
+          ./g.exe >/tmp/g.log 2>&1
+          echo "gui-bash-redirect exit=$?"
 
-      - name: "v0.2.0 release exe: loader probe from Git Bash"
+      - name: "v0.2.0 release exe loader probe"
+        continue-on-error: true
         shell: bash
         run: |
+          set +e
           mkdir -p rel && cd rel
-          gh release download v0.2.0 --repo "$GITHUB_REPOSITORY" --pattern '*windows*' --dir . || echo "download failed"
-          unzip -q -o *.zip
+          gh release download v0.2.0 --repo "$GITHUB_REPOSITORY" --pattern '*windows*' --dir .
+          echo "download=$?"
+          unzip -q -o '*.zip'
           cd ogre-battle-64-recomp
           ls -l ogrebattle64.exe
           probe() {
@@ -39,14 +48,21 @@ jobs:
             ./ogrebattle64.exe >/tmp/probe.log 2>&1 &
             local pid=$!
             sleep 12
-            if kill -0 "$pid" 2>/dev/null; then echo "$label: LOADED (still running after 12 s)"; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; else wait "$pid" 2>/dev/null; echo "$label: exit=$?"; fi
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "$label: LOADED (still running after 12 s)"
+              kill -9 "$pid" 2>/dev/null
+              wait "$pid" 2>/dev/null
+            else
+              wait "$pid" 2>/dev/null
+              echo "$label: exited $?"
+            fi
+            head -3 /tmp/probe.log
           }
           probe "v020-plain"
-
           redist=$(ls -d "/c/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC"/*/x64/Microsoft.VC1*.CRT 2>/dev/null | head -1)
           echo "redist=$redist"
           for d in msvcp140.dll msvcp140_atomic_wait.dll vcruntime140.dll vcruntime140_1.dll; do
-            [ -f "$redist/$d" ] && cp "$redist/$d" . && echo "copied $d"
+            if [ -f "$redist/$d" ]; then cp "$redist/$d" .; echo "copied $d"; else echo "MISSING $d"; fi
           done
-          file msvcp140.dll 2>/dev/null || true
+          ls -l ./*.dll
           probe "v020-with-crt"
