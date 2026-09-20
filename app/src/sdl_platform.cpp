@@ -1,6 +1,8 @@
 #include "sdl_platform.hpp"
 #include "synth_frame.hpp"
 #include "bank_overlays.hpp"
+#include "input_map.hpp"
+#include "overlay.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -61,23 +63,8 @@ uint32_t env_millis(const char* name) {
 
 }  // namespace
 
-// N64 controller button bits (as read by libultra osContGetReadData).
-enum N64Button : uint16_t {
-    N64_BTN_A = 0x8000,
-    N64_BTN_B = 0x4000,
-    N64_BTN_Z = 0x2000,
-    N64_BTN_START = 0x1000,
-    N64_BTN_UP = 0x0800,
-    N64_BTN_DOWN = 0x0400,
-    N64_BTN_LEFT = 0x0200,
-    N64_BTN_RIGHT = 0x0100,
-    N64_BTN_L = 0x0020,
-    N64_BTN_R = 0x0010,
-    N64_BTN_C_LEFT = 0x0008,
-    N64_BTN_C_RIGHT = 0x0004,
-    N64_BTN_C_DOWN = 0x0002,
-    N64_BTN_C_UP = 0x0001,
-};
+// N64 controller button bits and the player-editable bindings live in
+// input_map.hpp; this file only reads the map.
 
 namespace {
 
@@ -494,6 +481,48 @@ void shutdown_sdl(Platform& platform) {
     SDL_Quit();
 }
 
+bool PadList::handle_event(const SDL_Event& event) {
+    switch (event.type) {
+        case SDL_CONTROLLERDEVICEADDED: {
+            SDL_GameController* controller = SDL_GameControllerOpen(event.cdevice.which);
+            if (controller != nullptr) {
+                for (SDL_GameController*& slot : pads) {
+                    if (slot == nullptr) {
+                        slot = controller;
+                        return true;
+                    }
+                }
+                // No free host slot; do not leave the handle open.
+                SDL_GameControllerClose(controller);
+            }
+            return true;
+        }
+        case SDL_CONTROLLERDEVICEREMOVED: {
+            for (SDL_GameController*& slot : pads) {
+                if (slot != nullptr &&
+                    SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(slot)) ==
+                        event.cdevice.which) {
+                    SDL_GameControllerClose(slot);
+                    slot = nullptr;
+                    return true;
+                }
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+void PadList::close_all() {
+    for (SDL_GameController*& slot : pads) {
+        if (slot != nullptr) {
+            SDL_GameControllerClose(slot);
+            slot = nullptr;
+        }
+    }
+}
+
 void open_audio(Platform& platform, uint32_t frequency) {
     if (platform.audio_device != 0) {
         SDL_CloseAudioDevice(platform.audio_device);
@@ -524,6 +553,43 @@ void open_audio(Platform& platform, uint32_t frequency) {
 }
 
 void pump_sdl_events(Platform& platform, bool* quit) {
+    // Enumerate once: SDL reports already-connected controllers with
+    // SDL_CONTROLLERDEVICEADDED events pushed at SDL_InitSubSystem time, and the
+    // launcher's own event loop drains those before the game window exists
+    // (the start screen is shown whenever a mod is installed). Without this a
+    // pad that was connected before launch is invisible to the game.
+    {
+        static bool enumerated = false;
+        if (!enumerated) {
+            enumerated = true;
+            for (int device = 0; device < SDL_NumJoysticks(); device++) {
+                if (!SDL_IsGameController(device)) {
+                    continue;
+                }
+                SDL_GameController* controller = SDL_GameControllerOpen(device);
+                if (controller == nullptr) {
+                    continue;
+                }
+                // Slot 0 is keyboard-first, so a pad fills slots 1..3.
+                bool placed = false;
+                for (int slot = 1; slot < 4; slot++) {
+                    if (platform.controllers[slot] == nullptr) {
+                        platform.controllers[slot] = controller;
+                        placed = true;
+                        break;
+                    }
+                }
+                if (!placed) {
+                    SDL_GameControllerClose(controller);
+                }
+            }
+            if (platform.controllers[1] != nullptr) {
+                fprintf(stderr, "[input] controller 2: %s\n",
+                        SDL_GameControllerName(platform.controllers[1]));
+            }
+        }
+    }
+
     // Live debug console: the watched command file and the OGRE_KEY_<n>
     // hotkeys. Runs before the exit check so a command sent on the final frame
     // still executes, and on the main thread because a command may write a
@@ -604,6 +670,9 @@ void pump_sdl_events(Platform& platform, bool* quit) {
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // The in-game overlay sees every event first: it owns Escape (open and
+        // close) and, while it is up, the keyboard and mouse.
+        ogre::overlay_handle_event(event);
         switch (event.type) {
             case SDL_QUIT:
                 *quit = true;
@@ -727,27 +796,11 @@ static uint16_t automation_buttons() {
 uint16_t console_input_take(float* x, float* y);
 
 static uint16_t keyboard_buttons() {
-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
-    uint16_t buttons = 0;
-    auto is_down = [&](SDL_Scancode scancode) { return keys[scancode] != 0; };
-
-    if (is_down(SDL_SCANCODE_X)) buttons |= N64_BTN_A;
-    if (is_down(SDL_SCANCODE_Z)) buttons |= N64_BTN_B;
-    if (is_down(SDL_SCANCODE_C)) buttons |= N64_BTN_Z;
-    if (is_down(SDL_SCANCODE_RETURN) || is_down(SDL_SCANCODE_RETURN2)) buttons |= N64_BTN_START;
-    if (is_down(SDL_SCANCODE_Q)) buttons |= N64_BTN_L;
-    if (is_down(SDL_SCANCODE_E)) buttons |= N64_BTN_R;
-    if (is_down(SDL_SCANCODE_UP)) buttons |= N64_BTN_UP;
-    if (is_down(SDL_SCANCODE_DOWN)) buttons |= N64_BTN_DOWN;
-    if (is_down(SDL_SCANCODE_LEFT)) buttons |= N64_BTN_LEFT;
-    if (is_down(SDL_SCANCODE_RIGHT)) buttons |= N64_BTN_RIGHT;
-    if (is_down(SDL_SCANCODE_I)) buttons |= N64_BTN_C_UP;
-    if (is_down(SDL_SCANCODE_K)) buttons |= N64_BTN_C_DOWN;
-    if (is_down(SDL_SCANCODE_J)) buttons |= N64_BTN_C_LEFT;
-    if (is_down(SDL_SCANCODE_L)) buttons |= N64_BTN_C_RIGHT;
-
+    // The map holds one scancode per N64 button (see input_map.cpp); a key the
+    // player clears contributes nothing. The synthetic press of a scripted run
+    // is OR'd on top.
+    uint16_t buttons = keyboard_buttons_from_map(read_input_map());
     buttons |= automation_buttons();
-
     return buttons;
 }
 
@@ -784,26 +837,11 @@ static uint16_t gamecontroller_buttons(SDL_GameController* controller) {
     if (controller == nullptr) {
         return 0;
     }
-    uint16_t buttons = 0;
+    uint16_t buttons = gamecontroller_buttons_from_map(read_input_map(), controller);
 
-    auto is_down = [&](SDL_GameControllerButton button) {
-        return SDL_GameControllerGetButton(controller, button) != 0;
-    };
-
-    if (is_down(SDL_CONTROLLER_BUTTON_A)) buttons |= N64_BTN_A;
-    if (is_down(SDL_CONTROLLER_BUTTON_B)) buttons |= N64_BTN_B;
-    if (is_down(SDL_CONTROLLER_BUTTON_LEFTSTICK)) buttons |= N64_BTN_Z;
-    if (is_down(SDL_CONTROLLER_BUTTON_START)) buttons |= N64_BTN_START;
-    if (is_down(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) buttons |= N64_BTN_L;
-    if (is_down(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) buttons |= N64_BTN_R;
-    if (is_down(SDL_CONTROLLER_BUTTON_DPAD_UP)) buttons |= N64_BTN_UP;
-    if (is_down(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) buttons |= N64_BTN_DOWN;
-    if (is_down(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) buttons |= N64_BTN_LEFT;
-    if (is_down(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) buttons |= N64_BTN_RIGHT;
-    if (is_down(SDL_CONTROLLER_BUTTON_X)) buttons |= N64_BTN_C_UP;
-    if (is_down(SDL_CONTROLLER_BUTTON_Y)) buttons |= N64_BTN_C_DOWN;
-
-    // Right stick maps to the C buttons.
+    // The right stick is a fixed extra layer for the C buttons, in addition to
+    // whatever the map binds to them. C-LEFT and C-RIGHT have no default pad
+    // button, so without this they would be unreachable on a pad.
     if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY) < -8000) buttons |= N64_BTN_C_UP;
     if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY) > 8000) buttons |= N64_BTN_C_DOWN;
     if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX) < -8000) buttons |= N64_BTN_C_LEFT;
@@ -1521,6 +1559,22 @@ static void poll_input() {
 }
 
 static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
+    // The in-game overlay (Esc) owns the keyboard while it is open. The game
+    // still runs behind it, so report an idle pad rather than a disconnected
+    // one: a `false` here would make the game's own menus say "no controller".
+    if (ogre::overlay_visible()) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            fprintf(stderr, "[input] overlay open: game input suppressed\n");
+            fflush(stderr);
+        }
+        *buttons = 0;
+        *x = 0.0f;
+        *y = 0.0f;
+        return true;
+    }
+
     uint16_t out_buttons = 0;
     bool connected = false;
     *x = 0.0f;

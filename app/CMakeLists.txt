@@ -278,7 +278,10 @@ else()
         src/gbi.cpp
         src/save_import.cpp
         src/font.cpp
+        src/input_map.cpp
+        src/ui.cpp
         src/launcher.cpp
+        src/overlay.cpp
     )
 endif()
 

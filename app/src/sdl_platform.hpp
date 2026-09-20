@@ -57,6 +57,21 @@ bool init_sdl();
 // Call after init_sdl.
 void configure_automation(Platform& platform);
 
+// Opens and closes SDL game controllers for a caller that is not the game's own
+// platform state. The launcher (which runs before the runtime exists) uses one
+// of these so the CONTROLS tab can capture a gamepad button; the overlay reuses
+// `Platform::controllers` instead, because the game has already opened them.
+struct PadList {
+    SDL_GameController* pads[4] = {};
+
+    static constexpr int capacity() { return 4; }
+
+    // Handles SDL_CONTROLLERDEVICEADDED / SDL_CONTROLLERDEVICEREMOVED. Returns
+    // true when the event was one of those.
+    bool handle_event(const SDL_Event& event);
+    void close_all();
+};
+
 // Creates the app window and returns the ultramodern window handle.
 ultramodern::renderer::WindowHandle create_window(Platform& platform, const char* title);
 

@@ -329,6 +329,14 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_ROM=<path>` | boot this ROM without passing it as an argument (validated and stored like an argument; the start screen is skipped) |
 | `OGRE_LAUNCHER=1` | force the start screen even when a ROM is available (testing the first-launch experience) |
 | `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
+| `OGRE_LAUNCHER_TAB=<start\|rom\|mods\|controls>` | open the start screen on that tab (screenshot and scripted-run aid) |
+| `OGRE_LAUNCHER_KEYS=<name>,…` | push one synthetic keydown per 150 ms through the start screen's real key handler. Names are SDL scancode names (`Tab`, `Down`, `Space`, `p`, `Return`), so `Tab,Tab,Tab,Space,p` opens CONTROLS, arms the A row's rebind and binds `P` |
+| `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS`) |
+| `OGRE_OVERLAY=1` | open the in-game overlay at startup |
+| `OGRE_OVERLAY_AT_MS=<n>` | push one synthetic `ESC` down `n` ms after the overlay is initialised, so the real open path runs without a human |
+| `OGRE_OVERLAY_KEYS=<name>,…` | push one synthetic keydown per 150 ms while the overlay is visible (same names as `OGRE_LAUNCHER_KEYS`) |
+| `OGRE_OVERLAY_OPACITY=<0.2..1.0>` | the overlay window's opacity (default 0.90) |
+| `OGRE_CAPTURE_OVERLAY=<path>` | write the overlay's renderer as a PPM once, after its first frame |
 | `OGRE_SAVE=<name\|path>` | start the run from that save as the cartridge battery (session 78). A bare name is looked up as the path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`, so `OGRE_SAVE=prologue` finds `assets/saves/prologue.n64`. Accepts the port's 32 KiB image, an emulator wrapper of it (in either byte order, at any offset), a **DexDrive `.N64` Controller Pak dump** — converted through its notes' battery slots, checksums reseeded — or a bare pak. The result is written to `<config>/saves/<game id>.bin`, never back into the source |
 | `OGRE_SAVE_RESET=1` | re-import even when the battery in the config dir is newer than the source. Without it a run **keeps** that battery, so progress the game wrote back survives a re-run, and swapping a save file in re-imports it (its mtime is newer) |
 | `OGRE_SAVE_ALL=1` | with `OGRE_SAVE`, also take the stale records a deleted Controller Pak note leaves behind (still capped at the battery's two save slots) |
@@ -1232,6 +1240,95 @@ frame #1  osRecvMesg         frame #3  func_80088F08 + 717   <- the guest caller
 is a `SIGFPE`/`SIGBUS` inside the runtime, break on that function instead:
 `lldb -b -o "breakpoint set -n do_recv" -o run -o "bt 14" -- ./build-null/ogrebattle64`.)
 
+## Controller bindings and the in-game overlay
+
+The player's keyboard and gamepad bindings are data (`app/src/input_map.cpp`),
+edited from the start screen's **CONTROLS** tab and from the in-game `ESC`
+overlay, and saved as plain text at `<config>/controls.cfg`. The input callbacks
+in `sdl_platform.cpp` read the map on every poll.
+
+### The map
+
+One row per N64 button, in libultra's bit order, with a keyboard scancode and one
+gamepad source (a button, a right-stick direction, or none). The defaults are the
+mapping the port used before the tab existed:
+
+| N64 | key | gamepad |
+|---|---|---|
+| A | `X` | A |
+| B | `Z` | B |
+| Z | `C` | L-Stick |
+| START | `Return` | Start |
+| L | `Q` | LB |
+| R | `E` | RB |
+| D-pad | arrows | D-pad |
+| C-UP / C-DOWN | `I` / `K` | X / Y |
+| C-LEFT / C-RIGHT | `J` / `L` | (none; the right stick) |
+
+The left stick is always the N64 analog stick, and the right stick presses the C
+buttons on top of whatever the map binds to them. Both are fixed, and the
+CONTROLS tab says so. `ESC` is reserved for the overlay and cannot be bound.
+
+The file is line-oriented (`<n64 tag>.<key|pad> = <value>`); `-` and `none` are
+unbound, and a missing file leaves the defaults. Key names are SDL's
+(`SDL_GetScancodeName`), so the file is readable and survives SDL updates.
+
+### The CONTROLS tab
+
+```
+A          KEY X            PAD A              - Selects the highlighted object.
+B          KEY Z            PAD B              - Cancels a selection.
+…
+Reset bindings to defaults   Restore the default keyboard and gamepad map.
+```
+
+`SPACE` on a row arms a capture; the next keydown fills the keyboard slot and a
+pad button fills the pad slot. `BACKSPACE` clears the keyboard slot, `DELETE`
+clears the pad slot, `ESC` cancels. `TAB` / `SHIFT+TAB` (or a mouse click on the
+tab bar) switch tabs. The second column's action text comes from the game's
+controls description.
+
+### The in-game overlay
+
+`ESC` during play opens a borderless, always-on-top SDL window placed over the
+game window (`app/src/overlay.cpp`). It draws the same `ui::Panel` with the same
+bitmap font, so the two screens look identical; the tab bar shows START GAME,
+ROM and MODS greyed and only CONTROLS active, because a running game cannot load
+a ROM or toggle a mod. `ESC` closes it and returns the keyboard to the game.
+
+While it is open, `get_input` reports an idle controller (`buttons=0`, stick 0),
+so the game's own menus do not see the keys used to navigate the panel. The game
+keeps running: the overlay does not pause emulation.
+
+The window is created on the first `ESC`, sized and positioned from
+`SDL_GetWindowPosition`/`SDL_GetWindowSize` of the game window and re-synced each
+frame, and given `SDL_SetWindowOpacity` (default 0.90) because SDL has no
+per-pixel alpha for a normal window. It is not covered on macOS fullscreen: a
+fullscreen window lives in its own Space, which another window cannot overlay.
+No RT64 change was needed.
+
+### Verifying it without a human
+
+```bash
+# every launcher tab, as a PPM
+for tab in start rom mods controls; do
+  OGRE_PREF_DIR=/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=$tab \
+    OGRE_LAUNCHER_SHOT=/tmp/ui-$tab.ppm ./build-app/ogrebattle64
+done
+
+# rebind A to P through the launcher's real key handler
+OGRE_PREF_DIR=/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_KEYS="Tab,Tab,Tab,Space,p" \
+  OGRE_LAUNCHER_SHOT=/tmp/ui-capture.ppm ./build-app/ogrebattle64
+grep '^a.key' /tmp/ui/controls.cfg      # a.key = P
+
+# the overlay's real ESC path, and its own rebind
+OGRE_PREF_DIR=/tmp/ov OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=4000 \
+  OGRE_OVERLAY_KEYS="Space,p" OGRE_CAPTURE_OVERLAY=/tmp/overlay.ppm \
+  OGRE_EXIT_AFTER_MS=8000 ./build-app/ogrebattle64
+```
+
+Convert a PPM with `sips -s format png <in> --out <out>` on macOS.
+
 ## Mods
 
 The runtime (`librecomp/src/mods.cpp`) has a complete mod system: it opens every
@@ -1260,27 +1357,37 @@ list the mods and write a toggle before the game starts. The second scan inside
 
 ### The start screen
 
-`app/src/launcher.cpp` draws the start screen's list under the wordmark. It has
-three sections:
+`app/src/launcher.cpp` draws the start screen's list under the wordmark. The list
+is the shared tabbed `ui::Panel` (`app/src/ui.cpp`), so the in-game overlay shows
+the same rows. There are four tabs:
 
 ```
-== START GAME ==   [x] Start Game starts the game; [ ] until a ROM is loaded,
-                   and then the row cannot be selected
-== ROM ==          [x] Loaded! and the ROM's file name, or [ ] No ROM; the row
-                   opens the file picker
-== MODS ==         one row per mod, then one row per visible option of that mod;
-                   a mod's short description sits in a second column
+[ START GAME ] [ ROM ] [ MODS ] [ CONTROLS ]
 ```
 
 ```
-UP / DOWN        select a row (section headings, and START GAME before a ROM is
-                 loaded, are skipped)
+START GAME   [x] Start Game starts the game; [ ] until a ROM is loaded, and then
+             the row cannot be selected
+ROM          [x] Loaded! and the ROM's file name, or [ ] No ROM; the row opens
+             the file picker
+MODS         one row per mod, then one row per visible option of that mod; a
+             mod's short description sits in a second column
+CONTROLS     one row per N64 button with its keyboard key, its gamepad source and
+             the field-map action; see "Controller bindings and the in-game
+             overlay"
+```
+
+```
+TAB / SHIFT+TAB  switch tab
+UP / DOWN        select a row (note rows, and START GAME before a ROM is loaded,
+                 are skipped)
 SPACE            activate the selected row: START GAME plays, the ROM row opens
-                 the file picker, a mod row toggles, an option row steps
+                 the file picker, a mod row toggles, an option row steps, a
+                 binding row arms a rebind
 LEFT / RIGHT     step the selected option's value
 ENTER            play, or open the ROM picker when no ROM is loaded or the ROM
                  row is selected
-mouse            click a row to activate it; click elsewhere to play
+mouse            click a tab to switch, a row to activate it, elsewhere to play
 ```
 
 Choosing a ROM — by picker or by dropping one on the window — **does not start

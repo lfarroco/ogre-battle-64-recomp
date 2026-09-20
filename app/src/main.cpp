@@ -27,6 +27,8 @@
 
 #include "game.hpp"
 #include "launcher.hpp"
+#include "input_map.hpp"
+#include "overlay.hpp"
 #include "sdl_platform.hpp"
 #include "renderer.hpp"
 #include "rsp.hpp"
@@ -77,6 +79,9 @@ static void update_gfx(void*) {
     ogre::poll_scene();
     bool quit = false;
     ogre::pump_sdl_events(ogre::g_platform, &quit);
+    // The Esc overlay owns a window of its own; drawing it here keeps it on the
+    // main thread, where SDL's Cocoa backend requires window calls to happen.
+    ogre::overlay_render();
     if (quit) {
         // Closing the window is how an *interactive* run ends, so the dumps a
         // bounded run prints on its exit path have to print here too --
@@ -143,6 +148,9 @@ int main(int argc, char** argv) {
     // read-only install location falls back to the platform preference dir.
     const std::filesystem::path pref_dir = ogre::resolve_pref_dir();
     recomp::register_config_path(pref_dir);
+    // Player-editable controller bindings live beside the save file
+    // (`controls.cfg`). A missing file leaves the built-in map.
+    ogre::load_input_map(pref_dir);
     fprintf(stderr, "[boot] config path ok: %s\n", pref_dir.string().c_str());
 
     // --- game registration ----------------------------------------------------
@@ -307,6 +315,11 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "[boot] window ok\n");
 
+    // --- in-game overlay --------------------------------------------------------
+    // The Esc panel is a borderless window placed over the game window, so it is
+    // set up once the window exists and before any frame is presented.
+    ogre::overlay_init(ogre::g_platform, pref_dir, std::string(ogre::MOD_GAME_ID));
+
     // --- OGRE_SAVE: start from a save file as the battery ----------------------
     // The runtime loads `<config>/saves/<game id>.bin` on the game's first SRAM
     // access, which happens after recomp::start, so install it here. Accepts the
@@ -361,6 +374,7 @@ int main(int argc, char** argv) {
     recomp::start(cfg);  // blocks until ultramodern::quit()
 
     game_starter.join();
+    ogre::overlay_shutdown();
     ogre::shutdown_sdl(ogre::g_platform);
     return EXIT_SUCCESS;
 }

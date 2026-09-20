@@ -17,11 +17,9 @@ HOW TO PLAY
 2. The start screen appears:
 
        OGRE BATTLE 64: RECOMP
-       == START GAME ==
-       == ROM ==
-       == MODS ==
+       [ START GAME ] [ ROM ] [ MODS ] [ CONTROLS ]
 
-   - Select the **ROM** row and press SPACE to pick your ROM, or
+   - Select the **ROM** tab and press SPACE to pick your ROM, or
    - drag the ROM file onto the window, or
    - just put the ROM in this folder and launch the app again (it finds
      `ogre64.z64`, or any `.z64`/`.n64`/`.v64` next to the executable).
@@ -57,22 +55,31 @@ START SCREEN
 ------------
 
 The start screen appears when no ROM is loaded, and whenever at least one mod is
-installed (so a shipped mod can always be turned off). It has three sections:
+installed (so a shipped mod can always be turned off). It has four tabs:
 
-    == START GAME ==   [x] Start Game starts the game. It reads [ ] and cannot
-                       be selected until a ROM is loaded.
-    == ROM ==          [x] Loaded! and the ROM's file name, or [ ] No ROM.
-                       Selecting it opens the file picker; the chosen ROM comes
-                       back here as loaded, with START GAME ready.
-    == MODS ==         one row per installed mod, with its short description
+    [ START GAME ]   [x] Start Game starts the game. It reads [ ] and cannot be
+                     selected until a ROM is loaded.
+    [ ROM ]          [x] Loaded! and the ROM's file name, or [ ] No ROM.
+                     Selecting it opens the file picker; the chosen ROM comes
+                     back here as loaded, with START GAME ready.
+    [ MODS ]         one row per installed mod, with its short description
+    [ CONTROLS ]     one row per N64 button, showing the keyboard key and the
+                     gamepad button bound to it, and what the button does
 
+    TAB / SHIFT+TAB  switch tab
     UP / DOWN        select a row
     SPACE            activate the selected row: START GAME starts the game, the
                      ROM row opens the file picker, a mod row turns the mod on
-                     or off, an option row steps its value
+                     or off, an option row steps its value, a CONTROLS row
+                     starts a rebind (press the key or gamepad button you want)
     LEFT / RIGHT     change the selected option's value
     ENTER            start the game, or open the ROM picker when there is no ROM
-    mouse            click a row to activate it, click elsewhere to start
+    mouse            click a tab to switch, a row to activate it, elsewhere to
+                     start
+
+Bindings are saved in `controls.cfg` in this folder. **ESC** opens the same
+panel over the running game, with the ROM and MODS tabs disabled and CONTROLS
+active, so bindings can be changed mid-game; **ESC** closes it again.
 
 A mod's own options live in `mod_config/<mod id>.json`; the start screen is the
 normal way to change them.
@@ -87,11 +94,11 @@ package carries one example mod:
     mods/skip-boot-logos.nrm    Skip Boot Logos (boots straight to the title)
 
 It ships **off**, so the game plays exactly as it did on the console until you
-turn it on: select its row in the **MODS** section and press SPACE. The setting
+turn it on: open the **MODS** tab, select its row and press SPACE. The setting
 is remembered.
 
-Every `.nrm` in `mods/` is opened at startup and listed in the start screen's
-**MODS** section. Dropping another `.nrm` into `mods/` installs it, and deleting
+Every `.nrm` in `mods/` is opened at startup and listed on the start screen's
+**MODS** tab. Dropping another `.nrm` into `mods/` installs it, and deleting
 one uninstalls it.
 
 Mods are recompiled into the client at startup, so a mod built for a different

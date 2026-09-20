@@ -40,6 +40,29 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The start screen is tabbed and owns the controller bindings, and `ESC`
+  opens the same panel over the running game (session 92).** The start screen's
+  three sections became a tab bar — **START GAME**, **ROM**, **MODS**,
+  **CONTROLS** — and the new CONTROLS tab lists one row per N64 button with its
+  keyboard key, its gamepad source and the field-map action from the game's
+  controls description, plus a reset row. `SPACE` arms a rebind, the next key or
+  pad button sets that slot, `BACKSPACE`/`DELETE` clear it. The mapping is data
+  now (`app/src/input_map.{hpp,cpp}`, defaults identical to the old hardcoded
+  map), persisted to `<config>/controls.cfg`, and read every input poll. Pressing
+  `ESC` while playing opens a borderless always-on-top SDL window over the game
+  window (opacity 0.90) drawn with the same `ui::Panel` and bitmap font; its tab
+  bar shows START GAME / ROM / MODS disabled and only CONTROLS active, and
+  `get_input` returns an idle pad while it is up, so the game cannot act on the
+  keys used to navigate. The UI moved into `app/src/ui.{hpp,cpp}` so the two
+  screens cannot drift. The game does not pause behind the overlay (developer's
+  choice). Also fixed: the event pump enumerates already-connected controllers
+  on its first call, because the launcher drains SDL's
+  `SDL_CONTROLLERDEVICEADDED` events before the game window exists. Proofs:
+  `docs/proofs/native-launcher-{start,rom,mods,controls}.png`,
+  `docs/proofs/native-overlay-controls.png`. See
+  `docs/HANDOFF-2026-09-20-session92.md` and `docs/guides/app-build.md` →
+  "Controller bindings and the in-game overlay".
+
 - ✅ **The mod system is on, with an example mod shipped (session 91).** The
   runtime's mod support (`librecomp/src/mods.cpp`) was already present and
   already called by `recomp::start()`, but `GameEntry::mod_game_id` was never
