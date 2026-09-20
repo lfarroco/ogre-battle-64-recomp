@@ -110,6 +110,35 @@ hardware. RT64 remains the primary native renderer throughout. See
   the game code past RT64's configure has not been observed.
   See `docs/guides/app-build.md` → Releases and `docs/DECISIONS.md` (89c).
 
+- ✅ **Releases publish, with one correctly-named archive per platform
+  (session 89d).** The release job ran `gh release create --draft`, so a green
+  run left the archives invisible on the repository's Releases page. It now
+  publishes; a tag push always publishes, and `workflow_dispatch` keeps a
+  `draft` boolean for a review-first flow. The collect step also copied both
+  archive flavours to one matrix name, so macOS and Linux attached ZIP data
+  under a `.tar.gz` name; the matrix now names the flavour each platform ships
+  (`.tar.gz` macOS/Linux, `.zip` Windows) and the step copies only that file.
+  See `docs/guides/app-build.md` → Releases and `docs/DECISIONS.md` (89d).
+
+- 🔧 **The Windows job builds with clang-cl under Ninja (session 89e).** The
+  run after 89d got through SDL2, the app configure and into the compile, then
+  died with 37 `cl : command line error D8021: invalid numeric argument
+  '/Wno-unused-variable'` (the app, the RSP lib and all 34 bank units, plus
+  `ultramodern`). `cl.exe` cannot take the GCC/Clang spellings the code uses, so
+  the Windows leg now uses Zelda64Recomp's configuration:
+  `ilammy/msvc-dev-cmd@v1`, `ninja`, and
+  `-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl` through a
+  new `CMAKE_ARGS` matrix field. The app's compiler guards key on
+  `CMAKE_CXX_COMPILER_ID` (CMake reports `MSVC` for clang-cl too), the runtime
+  patch guards `-Wno-unused-parameter` the same way, and four Windows-only
+  compile blockers are branch-fixed: `create_window` returns RT64's
+  `{ HWND, thread_id }`, the fingerprint uses `_pgmptr` instead of `readlink`,
+  the weak symbol is dropped for `_MSC_VER`, and the POSIX `sigaction` crash
+  handler is compiled out. The package carries `dxcompiler.dll`/`dxil.dll`,
+  which RT64 loads at runtime. macOS builds with all of this pass; the Windows
+  job has not run since. See `docs/guides/app-build.md` → Releases and
+  `docs/DECISIONS.md` (89e).
+
 - ✅ **The boot-Start save menu (scene `0x18`) renders (session 88).** Holding
   Start while the game boots takes the boot branch at `0x800721DC`
   (`*(u16*)0x800E79B0 & 0x1000` → pending scene `0x18`, else `0x09`), which
@@ -171,7 +200,8 @@ hardware. RT64 remains the primary native renderer throughout. See
   (single entry point, checks the generated code and names the commands),
   `packaging/README-dist.txt` (the shipped player README), a platform-generic
   `make dist` (`DIST_OS`, `EXE_NAME`, `dist-tar`), and the tag-driven workflow
-  that creates a **draft** release with one archive per platform. Building for
+  that creates a **draft** release with one archive per platform (session 89d
+  publishes instead, and names the flavour per platform). Building for
   Linux in a container fixed four real bugs: **SSE4.1 was never enabled** for
   `librecomp`'s RSP SIMD path (Apple clang's default `-march` masked it; GCC
   fails on `_mm_shuffle_epi8`), a `const ssize_t n`/`size_t n` collision in the

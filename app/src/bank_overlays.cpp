@@ -22,11 +22,13 @@
 namespace ogre {
 namespace {
 
-#if !defined(__EMSCRIPTEN__)
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 // A cross-bank crash (a bank loaded over another bank's RAM, with a stale or
 // compile-time-bound function still running) dies with a raw SIGSEGV, where the
 // recompiled call stack is lost because the build omits frame pointers. The
-// runtime keeps a shadow per-thread call chain, so print it here.
+// runtime keeps a shadow per-thread call chain, so print it here. This needs
+// POSIX `siginfo_t`/`sigaction`, which the MSVC CRT does not provide; the
+// Windows build gets no crash handler.
 void on_fatal_signal(int sig, siginfo_t* info, void* uctx) {
     uint8_t* rdram = ultramodern::get_rdram_base();
 #if defined(__APPLE__) && defined(__x86_64__)
@@ -911,7 +913,7 @@ void dump_dma_trace() {
 }
 
 void register_bank_overlays() {
-#if !defined(__EMSCRIPTEN__)
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
     struct sigaction sa = {};
     sa.sa_sigaction = on_fatal_signal;
     sigemptyset(&sa.sa_mask);

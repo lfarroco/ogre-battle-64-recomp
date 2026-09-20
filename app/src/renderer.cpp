@@ -1270,10 +1270,22 @@ std::unique_ptr<ultramodern::renderer::RendererContext> create_renderer(
 // OGRE: C entry point for the recompiled game code (declared in the generated
 // funcs file by tools/njpeg_readback.py). On renderers that do not maintain RDP
 // render targets (the null renderer, the web renderer) the symbol is a no-op.
-extern "C" __attribute__((weak)) void ogre_sync_framebuffers() {
+// Only one renderer source is compiled per build, so there is never a second
+// definition to override; the weak attribute is kept for GCC/Clang on ELF/Mach-O
+// and dropped for the MSVC-ABI toolchains, which cannot emit a weak function
+// (cl rejects the attribute, and COFF has no weak symbols). `_MSC_VER` covers
+// both cl.exe and clang-cl; MinGW defines `_WIN32` but not `_MSC_VER` and does
+// support the attribute.
+#if defined(_MSC_VER)
+#define OGRE_WEAK_SYMBOL
+#else
+#define OGRE_WEAK_SYMBOL __attribute__((weak))
+#endif
+extern "C" OGRE_WEAK_SYMBOL void ogre_sync_framebuffers() {
     if (g_renderer != nullptr) {
         g_renderer->sync_framebuffers();
     }
 }
+#undef OGRE_WEAK_SYMBOL
 
 }  // namespace ogre

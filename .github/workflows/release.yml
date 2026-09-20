@@ -4,8 +4,10 @@
 #
 #     git tag v0.1.0 && git push origin v0.1.0
 #
-# It creates a DRAFT release (nothing is published until you press "Publish"
-# in the GitHub UI) with one archive per platform attached.
+# It publishes a release with one archive per platform attached, so the
+# downloads appear on the repository's Releases page. Run it by hand
+# (`workflow_dispatch`) with `draft: true` to get a draft you publish yourself.
+# One asset per platform: `.tar.gz` on macOS and Linux, `.zip` on Windows.
 #
 # ---------------------------------------------------------------------------
 # WHERE THE RECOMPILED GAME CODE COMES FROM
@@ -43,6 +45,10 @@ on:
         description: 'Tag to build and attach to (e.g. v0.1.0)'
         required: true
         type: string
+      draft:
+        description: 'Create the release as a draft instead of publishing it'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -64,18 +70,27 @@ jobs:
             hosted: macos-14
             fallback: '["self-hosted","macOS","ARM64"]'
             archive: ogre-battle-64-recomp-macos-arm64.tar.gz
+            flavour: tar.gz
+            cmake_args: ''
             dist_dir: dist-macos
           - name: Linux (x86-64)
             os: linux
             hosted: ubuntu-24.04
             fallback: '["self-hosted","Linux","X64"]'
             archive: ogre-battle-64-recomp-linux-x86_64.tar.gz
+            flavour: tar.gz
+            cmake_args: ''
             dist_dir: dist-linux
           - name: Windows (x86-64)
             os: windows
             hosted: windows-2022
             fallback: '["self-hosted","Windows","X64"]'
             archive: ogre-battle-64-recomp-windows-x86_64.zip
+            flavour: zip
+            # cl.exe rejects the GCC/Clang spellings the app, the runtime and
+            # RT64 use for their flags (cl : error D8021), so build with clang-cl
+            # in an MSVC environment, the configuration Zelda64Recomp uses.
+            cmake_args: '-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl'
             dist_dir: dist-windows
     steps:
       - uses: actions/checkout@v4
@@ -207,16 +222,27 @@ jobs:
             sudo xcodebuild -downloadComponent MetalToolchain
           fi
 
-      # release-build.sh drives `make dist`; the Windows image has no make.
+      # release-build.sh drives `make dist`; the Windows image has no make, and
+      # the app builds with clang-cl under Ninja (see matrix.cmake_args).
       - name: Install Windows build dependencies
         if: vars.OGRE_DATA_REPO != '' && matrix.os == 'windows'
         shell: bash
-        run: choco install make -y --no-progress
+        run: choco install make ninja -y --no-progress
+
+      # clang-cl needs the MSVC headers, libraries and linker. This exports the
+      # Visual Studio developer environment to the steps that follow, exactly as
+      # in Zelda64Recomp's Windows job.
+      - name: Set up the MSVC developer environment
+        if: vars.OGRE_DATA_REPO != '' && matrix.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Build and package
         shell: bash
         env:
           DIST_OS: ${{ matrix.os }}
+          CMAKE_ARGS: ${{ matrix.cmake_args }}
         run: tools/release-build.sh
 
       - name: Collect the archive
@@ -224,16 +250,14 @@ jobs:
         run: |
           set -e
           mkdir -p "${{ matrix.dist_dir }}"
-          if [ "${DIST_OS:-}" = "" ]; then export DIST_OS="${{ matrix.os }}"; fi
-          shopt -s nullglob
-          # release-build.sh writes dist/<name>-<os>.(tar.gz|zip); take whichever
-          # archive flavour this runner produced and give it the matrix name.
-          for f in dist/ogre-battle-64-recomp-"${{ matrix.os }}".tar.gz dist/ogre-battle-64-recomp-"${{ matrix.os }}".zip; do
-            if [ -f "$f" ]; then
-              cp "$f" "${{ matrix.dist_dir }}/${{ matrix.archive }}"
-              echo "collected $f"
-            fi
-          done
+          # release-build.sh writes both flavours when both tools exist (tar is
+          # in Git Bash, zip is in the macOS/Linux images), so pick the one this
+          # platform ships instead of copying the loop's last match over the
+          # matrix name -- that left the zip under a `.tar.gz` name.
+          src="dist/ogre-battle-64-recomp-${{ matrix.os }}.${{ matrix.flavour }}"
+          test -f "$src" || { echo "::error::$src was not produced"; exit 1; }
+          cp "$src" "${{ matrix.dist_dir }}/${{ matrix.archive }}"
+          echo "collected $src"
           ls -lh "${{ matrix.dist_dir }}"
 
       - uses: actions/upload-artifact@v4
@@ -255,18 +279,28 @@ jobs:
       - name: Show what will be attached
         run: ls -lh artifacts
 
-      - name: Create or update the draft release
+      - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          DRAFT: ${{ inputs.draft }}
         run: |
           set -e
+          # A tag push publishes; workflow_dispatch can ask for a draft.
+          draft_args=()
+          if [ "${DRAFT:-false}" = "true" ]; then
+            draft_args+=(--draft)
+          fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+            # Publishing a release that a previous run left as a draft.
+            if [ "${DRAFT:-false}" != "true" ]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+            fi
           else
             gh release create "$TAG" artifacts/* \
               --repo "$GITHUB_REPOSITORY" \
-              --draft \
+              "${draft_args[@]}" \
               --title "Ogre Battle 64: Recomp $TAG" \
               --notes "$(cat <<'NOTES'
           Native builds of the port for the platforms below.

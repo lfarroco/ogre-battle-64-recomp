@@ -184,11 +184,17 @@ and `saves/ogrebattle64-us-rev1.bin` is written next to the executable.
 ### Releases (GitHub Actions)
 
 `.github/workflows/release.yml` builds macOS, Linux and Windows packages on a
-version tag and attaches them to a **draft** GitHub release:
+version tag, publishes a GitHub release and attaches one archive per platform —
+`.tar.gz` on macOS and Linux, `.zip` on Windows — so the downloads appear on the
+repository's Releases page:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
 ```
+
+The release job runs only when every platform's build succeeds. Use **Actions →
+Release → Run workflow** with `tag` set and `draft` enabled to get a draft you
+publish yourself instead.
 
 `tools/release-build.sh` is the single entry point — the workflow just exports
 `DIST_OS` and runs it, so a release artifact is byte-for-byte what `make dist`
@@ -272,19 +278,28 @@ Three platform properties of the hosted path are load-bearing.
   target, but `ogrebattle64_rsp` does not link `ultramodern`, so
   `app/CMakeLists.txt` lists the directory for it. An x86-64 machine never
   reads the header, so a missing entry only shows on Apple Silicon.
-- **A Windows runner builds with the Visual Studio generator.** `cmake` picks it
-  because the image has VS and the workflow installs no MinGW. That changes the
-  static SDL2 library name (`SDL2-static.lib`, not `libSDL2.a`), its CMake
-  package directory (`<prefix>/cmake`, not `<prefix>/lib/cmake/SDL2`), puts
-  build output in a per-config directory (`build-dist/Release/ogrebattle64.exe`),
-  and makes `--config Release` necessary for the build and install — otherwise
-  SDL2 is built Debug, whose name is `SDL2-staticd.lib`. `make` passes
-  `-DOGRE_STATIC_SDL2=ON` and `app/CMakeLists.txt` finds the config in either
-  directory before RT64 is added, so RT64 links the app's SDL2 instead of its
-  bundled win32-deps 2.26.3 copy. `app/CMakeLists.txt` also defines
-  `SDL_MAIN_HANDLED` for the app target, because `SDL.h` otherwise renames
-  `main` to `SDL_main` and the MSVC link looks for SDL2main; `init_sdl` calls
-  `SDL_SetMainReady()` before `SDL_Init` for the same reason.
+- **A Windows runner builds with clang-cl under Ninja.** `cl.exe` rejects the
+  GCC/Clang spellings the app, the runtime and RT64 use for their flags — `cl :
+  command line error D8021: invalid numeric argument '/Wno-unused-variable'` —
+  so the Windows job uses the configuration Zelda64Recomp uses:
+  `ilammy/msvc-dev-cmd@v1` exports the MSVC headers, libraries and linker,
+  `choco install ninja` provides the generator, and `CMAKE_ARGS=-G Ninja
+  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl` selects the
+  compiler. `app/CMakeLists.txt` then adds `-Xclang -fexceptions
+  -fcxx-exceptions` for clang-cl and keys its flag groups on
+  `CMAKE_CXX_COMPILER_ID`, not on `MSVC` — CMake reports `MSVC` for clang-cl
+  too, because it targets the MSVC ABI. Windows-only consequences: the static
+  SDL2 library is `SDL2-static.lib` and its package config is in
+  `<prefix>/cmake` (SDL2 uses `lib/cmake/SDL2` only off MSVC), so `make` passes
+  `-DOGRE_STATIC_SDL2=ON` and the app finds the config in either directory
+  before RT64 is added; `--config Release` is passed so a multi-config generator
+  would not build Debug; the app defines `SDL_MAIN_HANDLED` and calls
+  `SDL_SetMainReady()` so it keeps its own `main`; `create_window` returns
+  RT64's `{ HWND, thread_id }` handle; `readlink` and `__attribute__((weak))`
+  have Windows branches (the weak attribute is dropped for `_MSC_VER`, and the
+  crash handler uses POSIX `sigaction`, so it is compiled out). The package
+  carries `dxcompiler.dll` and `dxil.dll`, which RT64 copies next to its library
+  and loads at runtime.
 
 A self-hosted runner needs, per platform:
 
@@ -292,7 +307,7 @@ A self-hosted runner needs, per platform:
 |---|---|---|
 | macOS | Xcode command line tools (incl. the Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`) | built by `make sdl2-static` |
 | Linux | `cmake`, `ninja`, `g++`, `pkg-config`, `libgtk-3-dev`, `libvulkan-dev`, `libx11-dev` | `libsdl2-dev` (or `make sdl2-static`) |
-| Windows | Visual Studio 2022 (C++ + CMake) or MSYS2 `mingw-w64-x86_64-*`, `make` | `SDL2-devel` (its `SDL2.dll` is bundled unless a static SDL2 is used) |
+| Windows | Visual Studio 2022 with the C++ Clang tools (`clang-cl`) and `ninja`, `make`, run from a Developer Command Prompt; MinGW is not tested | built by `make sdl2-static` |
 
 ## Scripted runs and diagnostics
 

@@ -1,3 +1,30 @@
+diff --git a/librecomp/CMakeLists.txt b/librecomp/CMakeLists.txt
+index 716d48b..697df58 100644
+--- a/librecomp/CMakeLists.txt
++++ b/librecomp/CMakeLists.txt
+@@ -50,11 +50,17 @@ target_include_directories(librecomp PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/librecomp"
+ )
+ 
+-target_compile_options(librecomp PRIVATE
+-#    -Wall
+-#    -Wextra
+-    -Wno-unused-parameter
+-)
++# OGRE: -Wno-unused-parameter is a GCC/Clang flag. cl.exe errors on it with
++# `cl : command line error D8021: invalid numeric argument '/Wno-unused-parameter'`,
++# while clang-cl (Clang targeting the MSVC ABI) accepts it. Keyed on the
++# compiler ID, not on `MSVC`, which is also true for clang-cl.
++if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
++    target_compile_options(librecomp PRIVATE
++    #    -Wall
++    #    -Wextra
++        -Wno-unused-parameter
++    )
++endif()
+ 
+ if (WIN32)
+     add_compile_definitions(NOMINMAX)
 diff --git a/librecomp/include/librecomp/mods.hpp b/librecomp/include/librecomp/mods.hpp
 index 37556bd..eefe64b 100644
 --- a/librecomp/include/librecomp/mods.hpp
@@ -1583,7 +1610,7 @@ index 1f3a4cf..c5810cc 100644
  
  extern "C" void wait_one_frame(uint8_t* rdram, recomp_context* ctx) {
 diff --git a/ultramodern/CMakeLists.txt b/ultramodern/CMakeLists.txt
-index 5593172..c99c729 100644
+index 5593172..9e7cdd0 100644
 --- a/ultramodern/CMakeLists.txt
 +++ b/ultramodern/CMakeLists.txt
 @@ -10,6 +10,7 @@ add_library(ultramodern STATIC
@@ -1594,6 +1621,29 @@ index 5593172..c99c729 100644
      "${CMAKE_CURRENT_SOURCE_DIR}/src/input.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/mesgqueue.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/misc_ultra.cpp"
+@@ -30,11 +31,17 @@ target_include_directories(ultramodern PUBLIC
+     "${PROJECT_SOURCE_DIR}/../thirdparty/sse2neon"
+ )
+ 
+-target_compile_options(ultramodern PRIVATE
+-#    -Wall
+-#    -Wextra
+-    -Wno-unused-parameter
+-)
++# OGRE: -Wno-unused-parameter is a GCC/Clang flag. cl.exe errors on it with
++# `cl : command line error D8021: invalid numeric argument '/Wno-unused-parameter'`,
++# while clang-cl (Clang targeting the MSVC ABI) accepts it. Keyed on the
++# compiler ID, not on `MSVC`, which is also true for clang-cl.
++if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
++    target_compile_options(ultramodern PRIVATE
++    #    -Wall
++    #    -Wextra
++        -Wno-unused-parameter
++    )
++endif()
+ 
+ if (WIN32)
+     add_compile_definitions(NOMINMAX)
 diff --git a/ultramodern/include/ultramodern/input.hpp b/ultramodern/include/ultramodern/input.hpp
 index 1dab1b8..2e9f83d 100644
 --- a/ultramodern/include/ultramodern/input.hpp

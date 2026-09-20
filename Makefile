@@ -394,6 +394,12 @@ SDL2_TARBALL := https://github.com/libsdl-org/SDL/releases/download/release-$(SD
 
 DIST_STATIC_SDL ?= 1
 
+# Extra arguments for every CMake configure (SDL2 and the app). The Windows CI
+# job sets this to `-G Ninja -DCMAKE_C_COMPILER=clang-cl
+# -DCMAKE_CXX_COMPILER=clang-cl`, because the app and the runtime are written
+# for Clang/GCC spellings of their flags; see docs/guides/app-build.md.
+CMAKE_ARGS ?=
+
 # `DIST_OS` selects the packaging rules. It defaults to the host, and CI passes
 # it explicitly so one recipe serves every runner:
 #
@@ -419,7 +425,7 @@ sdl2-static:
 	  curl -fsSL -o tools/SDL2-static/sdl2.tar.gz "$(SDL2_TARBALL)"; \
 	  tar xzf tools/SDL2-static/sdl2.tar.gz -C tools/SDL2-static; \
 	  echo "==> building static SDL2 (this takes a minute)"; \
-	  { cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build \
+	  { cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build $(CMAKE_ARGS) \
 	      -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
 	      -DSDL_TEST=OFF -DSDL_TESTS=OFF \
 	    && cmake --build tools/SDL2-static/build --config Release -j \
@@ -456,7 +462,7 @@ EXE_BUILT = $(firstword $(wildcard $(APP_BUILD_DIR)/$(EXE_NAME) $(APP_BUILD_DIR)
 
 .PHONY: app
 app:
-	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
+	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) $(CMAKE_ARGS) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
 	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 --config Release -j
 
 .PHONY: dist
@@ -465,6 +471,17 @@ dist: app
 	mkdir -p "$(DIST_DIR)"
 	@test -n "$(EXE_BUILT)" || { echo "no $(EXE_NAME) under $(APP_BUILD_DIR) after the build"; exit 1; }
 	cp "$(EXE_BUILT)" "$(DIST_DIR)/"
+	# RT64 loads dxcompiler.dll/dxil.dll at runtime on Windows; its CMake copies
+	# them next to the library, i.e. into $(APP_BUILD_DIR)/RT64. They are not
+	# optional: without them the exe fails before the first frame.
+	@if [ "$(DIST_OS)" = "windows" ]; then \
+	  for dll in dxcompiler.dll dxil.dll; do \
+	    src=$$(ls "$(APP_BUILD_DIR)/RT64/$$dll" "$(APP_BUILD_DIR)/$$dll" "$(APP_BUILD_DIR)/Release/RT64/$$dll" 2>/dev/null | head -1); \
+	    test -n "$$src" || { echo "$$dll is missing from $(APP_BUILD_DIR); RT64 copies it next to the library on Windows"; exit 1; }; \
+	    cp "$$src" "$(DIST_DIR)/"; \
+	  done; \
+	  echo "==> bundled the RT64 DXC runtime (dxcompiler.dll, dxil.dll)"; \
+	fi
 	@if [ "$(DIST_OS)" = "macos" ] && [ "$(DIST_STATIC_SDL)" = "1" ]; then \
 	  printf '%s\n' \
 	    'This executable includes SDL2 (https://libsdl.org), linked statically,' \
@@ -506,7 +523,7 @@ dist: app
 	@if [ "$(DIST_OS)" = "macos" ]; then \
 	  otool -L "$(DIST_DIR)/$(EXE_NAME)" | tail -n +2 | grep -vE "System/Library|/usr/lib" || echo "    (none: only system frameworks)"; \
 	elif [ "$(DIST_OS)" = "windows" ]; then \
-	  echo "    see the .dll files listed above (Windows bundles SDL2.dll unless built with a static SDL2)"; \
+	  echo "    dxcompiler.dll, dxil.dll (RT64's shader compiler); SDL2 is linked statically"; \
 	else \
 	  ldd "$(DIST_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
 	fi

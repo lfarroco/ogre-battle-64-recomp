@@ -18,6 +18,9 @@
 #include <mach-o/dyld.h>  // _NSGetExecutablePath (the checkpoint build id)
 #include <SDL_metal.h>
 #include <SDL_syswm.h>
+#elif defined(_WIN32)
+#include <SDL_syswm.h>  // SDL_GetWindowWMInfo (RT64 wants the HWND)
+#include <cstdlib>      // _pgmptr (the checkpoint build id)
 #else
 #include <unistd.h>  // readlink (the checkpoint build id)
 #endif
@@ -445,6 +448,21 @@ ultramodern::renderer::WindowHandle create_window(Platform& platform, const char
     }
     fprintf(stderr, "[SDL] window=%p ns_window=%p metal_layer=%p\n",
             static_cast<void*>(window), handle.window, handle.view);
+    return handle;
+#elif defined(_WIN32)
+    // Windows WindowHandle is `{ HWND window; DWORD thread_id; }`: RT64 creates
+    // its D3D12/Vulkan surface from the HWND, and installs a
+    // SetWindowsHookEx(WH_GETMESSAGE) filter on thread_id when it does not have
+    // an SDL window to attach to (rt64_application_window.cpp).
+    SDL_SysWMinfo wm_info;
+    SDL_VERSION(&wm_info.version);
+    if (!SDL_GetWindowWMInfo(window, &wm_info)) {
+        fprintf(stderr, "[SDL] SDL_GetWindowWMInfo failed: %s\n", SDL_GetError());
+        return {};
+    }
+    ultramodern::renderer::WindowHandle handle;
+    handle.window = wm_info.info.win.window;
+    handle.thread_id = GetCurrentThreadId();
     return handle;
 #else
     return window;
@@ -966,6 +984,13 @@ bool executable_fingerprint(uint64_t& out, std::string& error) {
         error = "cannot locate the running executable";
         return false;
     }
+#elif defined(_WIN32)
+    // _pgmptr is the full path of the running executable, set by the CRT.
+    if (strlen(_pgmptr) >= sizeof(path)) {
+        error = "cannot locate the running executable";
+        return false;
+    }
+    strcpy(path, _pgmptr);
 #else
     const ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
     if (n <= 0) {

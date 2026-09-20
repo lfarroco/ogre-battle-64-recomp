@@ -23,6 +23,48 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if (WIN32)
     # Opt out of constexpr mutex constructor on windows to prevent vcredist issues
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR")
+    # SDL_syswm.h pulls in windows.h for the HWND, and windows.h defines min/max
+    # macros that break std::min/std::max.
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+# --- Flags for the app's own targets -----------------------------------------
+# These are GCC/Clang spellings. The Windows build uses clang-cl (see
+# docs/guides/app-build.md -> Releases), which is Clang and accepts all of them;
+# cl.exe rejects them with a hard error rather than a warning:
+#
+#   cl : command line error D8021: invalid numeric argument '/Wno-unused-variable'
+#
+# So they live in one variable that is empty for cl.exe. Keyed on the compiler
+# *ID*, not on `MSVC`: CMake reports `MSVC` as true for clang-cl too, because
+# clang-cl targets the MSVC ABI. cl.exe also needs no -msse4.1 (it exposes the
+# SSSE3/SSE4.1 intrinsics that librecomp/rsp_vu.hpp uses without an /arch
+# switch), while GCC and Clang gate them behind the flag on an x86-64 baseline.
+# -fno-omit-frame-pointer keeps a host backtrace unwindable at a crash: the
+# runtime's shadow guest chain is empty when the fault is in runtime code
+# reached through a bridge (see tools/watch.sh and docs/guides/app-build.md).
+set(OGRE_GCC_FLAGS
+    -fno-strict-aliasing
+    -fno-omit-frame-pointer
+    -Wno-unused-variable
+    -Wno-unused-parameter
+    -Wno-unused-function
+    -Wno-unused-but-set-variable
+    -Wno-implicit-function-declaration
+)
+set(OGRE_X86_SIMD_FLAGS "")
+if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(OGRE_GCC_FLAGS "")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(OGRE_X86_SIMD_FLAGS -msse4.1)
+endif()
+
+# clang-cl does not enable C++ exceptions by default, and RT64's D3D12 path
+# needs them. Mirrors Zelda64Recomp's Windows build (-DCMAKE_CXX_FLAGS="-Xclang
+# -fexceptions -Xclang -fcxx-exceptions"); CMAKE_CXX_FLAGS keeps it off the C
+# compilations of the recompiled game code.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Xclang -fexceptions -Xclang -fcxx-exceptions")
 endif()
 
 # Emscripten: pthreads (SharedArrayBuffer) must be enabled for EVERY target —
@@ -78,43 +120,37 @@ add_subdirectory(${OGRE_TOOLS}/N64ModernRuntime ${CMAKE_BINARY_DIR}/N64ModernRun
 # runtime code reached through a bridge (the message-queue math, for example)
 # has an empty shadow *guest* chain, and without frame pointers lldb prints only
 # the faulting frame and nobody can see who called it. RT64 keeps its own flags
-# (hot path). See docs/guides/app-build.md -> "Diagnostics toolkit".
-foreach(OGRE_FP_TARGET librecomp ultramodern)
-    if (TARGET ${OGRE_FP_TARGET})
-        target_compile_options(${OGRE_FP_TARGET} PRIVATE -fno-omit-frame-pointer)
-    endif()
-endforeach()
+# (hot path). See docs/guides/app-build.md -> "Diagnostics toolkit". cl.exe
+# keeps frame pointers on x64 by default and rejects the flag, so it is skipped
+# there; clang-cl is Clang and takes it.
+if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    foreach(OGRE_FP_TARGET librecomp ultramodern)
+        if (TARGET ${OGRE_FP_TARGET})
+            target_compile_options(${OGRE_FP_TARGET} PRIVATE -fno-omit-frame-pointer)
+        endif()
+    endforeach()
+endif()
 
 # librecomp's RSP vector unit (librecomp/rsp_vu.hpp, which the recompiled RSP
 # microcode in RspFuncs/ includes) enables its SIMD path with
 # `#if defined(__x86_64__) || defined(_M_X64)` and then uses SSSE3/SSE4.1
 # intrinsics (`_mm_shuffle_epi8`, `_mm_blendv_epi8`) with no runtime guard, but
 # no target asks the compiler for those instructions. The x86-64 baseline is
-# SSE2 only, so a non-Apple build fails to compile outright:
+# SSE2 only, so a GCC build fails to compile outright:
 #
 #   error: inlining failed in call to 'always_inline' '_mm_shuffle_epi8':
 #          target specific option mismatch
 #
 # Apple clang defaults to a newer -march that happens to include them, which is
-# why this only bites on Linux and Windows. The header gates the path on
+# why this only bites on Linux. The header gates the path on
 # ARCHITECTURE_SUPPORTS_SSE4_1, so SSE4.1 (a superset of SSSE3) is the right
-# level; every x86-64 CPU this port targets has had it since ~2008.
-# aarch64 needs nothing: rsp_vu.hpp reaches the same code through sse2neon.
-# Both users of the header — the RSP recompilation and librecomp itself — get
-# the flag where those targets are defined below.
-set(OGRE_X86_SIMD_FLAGS "")
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    set(OGRE_X86_SIMD_FLAGS -msse4.1)
-    if (TARGET librecomp)
-        target_compile_options(librecomp PRIVATE ${OGRE_X86_SIMD_FLAGS})
-    endif()
-endif()
-set(OGRE_X86_SIMD_FLAGS "")
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    set(OGRE_X86_SIMD_FLAGS -msse4.1)
-    if (TARGET librecomp)
-        target_compile_options(librecomp PRIVATE ${OGRE_X86_SIMD_FLAGS})
-    endif()
+# level; every x86-64 CPU this port targets has had it since ~2008. aarch64
+# needs nothing (rsp_vu.hpp reaches the same code through sse2neon), and MSVC
+# needs nothing (it allows the intrinsics without an /arch switch).
+# OGRE_X86_SIMD_FLAGS is set next to OGRE_GCC_FLAGS above; the RSP microcode
+# target gets it below.
+if (TARGET librecomp AND OGRE_X86_SIMD_FLAGS)
+    target_compile_options(librecomp PRIVATE ${OGRE_X86_SIMD_FLAGS})
 endif()
 
 # --- Renderer ----------------------------------------------------------------
@@ -157,18 +193,7 @@ target_include_directories(ogrebattle64_recomp PRIVATE
     ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
 )
 
-target_compile_options(ogrebattle64_recomp PRIVATE
-    -fno-strict-aliasing
-    # Keep frame pointers so a host backtrace actually unwinds at a crash: the
-    # runtime's shadow guest chain is empty when the fault is in runtime code
-    # reached through a bridge (see tools/watch.sh and docs/guides/app-build.md).
-    -fno-omit-frame-pointer
-    -Wno-unused-variable
-    -Wno-unused-parameter
-    -Wno-unused-function
-    -Wno-unused-but-set-variable
-    -Wno-implicit-function-declaration
-)
+target_compile_options(ogrebattle64_recomp PRIVATE ${OGRE_GCC_FLAGS})
 
 # --- Recompiled RSP microcode -----------------------------------------------
 # Non-graphics RSP tasks are run through recompiled microcode (src/rsp.cpp).
@@ -195,13 +220,7 @@ if(RSP_RECOMP_SOURCES)
     )
 
     target_compile_options(ogrebattle64_rsp PRIVATE
-        -fno-strict-aliasing
-        -fno-omit-frame-pointer
-        -Wno-unused-variable
-        -Wno-unused-parameter
-        -Wno-unused-function
-        -Wno-unused-but-set-variable
-        -Wno-implicit-function-declaration
+        ${OGRE_GCC_FLAGS}
         ${OGRE_X86_SIMD_FLAGS}
     )
 endif()
@@ -227,15 +246,7 @@ foreach(BANK_UNIT_DIR ${BANK_UNIT_DIRS})
         ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
         ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
     )
-    target_compile_options(${BANK_UNIT_LIB} PRIVATE
-        -fno-strict-aliasing
-        -fno-omit-frame-pointer
-        -Wno-unused-variable
-        -Wno-unused-parameter
-        -Wno-unused-function
-        -Wno-unused-but-set-variable
-        -Wno-implicit-function-declaration
-    )
+    target_compile_options(${BANK_UNIT_LIB} PRIVATE ${OGRE_GCC_FLAGS})
     list(APPEND OGRE_BANK_LIBS ${BANK_UNIT_LIB})
 endforeach()
 
@@ -275,8 +286,11 @@ add_executable(ogrebattle64 ${OGRE_APP_SOURCES} ${OGRE_RENDERER_SOURCES})
 # backtrace at a crash. The runtime keeps a shadow *guest* call chain, but it is
 # empty when the fault is inside runtime code reached through a bridge (a
 # SIGFPE in the message-queue math, for example), and without frame pointers
-# `bt` prints only the faulting frame. RT64 is left alone (hot path).
-target_compile_options(ogrebattle64 PRIVATE -fno-omit-frame-pointer)
+# `bt` prints only the faulting frame. RT64 is left alone (hot path). cl.exe
+# keeps frame pointers on x64 by default and rejects the flag.
+if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(ogrebattle64 PRIVATE -fno-omit-frame-pointer)
+endif()
 
 target_include_directories(ogrebattle64 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
