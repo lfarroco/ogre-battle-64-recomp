@@ -3,9 +3,9 @@
 // The launcher (launcher.cpp) and the Esc overlay (overlay.cpp) show the same
 // content in the same style, so the panel model, its rows, the tab bar and the
 // text rendering live here. A Panel is either in Launcher mode (every tab
-// active) or Overlay mode (only CONTROLS and SETTINGS are active; the rest are
-// shown disabled, because starting the game, loading a ROM and toggling mods
-// make no sense while the game is running).
+// active) or Overlay mode (only CONTROLS, SETTINGS and DEBUG are active; the
+// rest are shown disabled, because starting the game, loading a ROM and
+// toggling mods make no sense while the game is running).
 //
 // Rendering is the bitmap font (font.hpp) through an SDL_Renderer, into
 // supersampled TextLayer textures, exactly as the launcher drew before.
@@ -68,7 +68,7 @@ std::string truncate_to_width(const Font& font, const std::string& text, int sca
 
 // --- the tabbed panel ---------------------------------------------------------
 
-enum class Tab { Start, Rom, Mods, Controls, Settings, Count };
+enum class Tab { Start, Rom, Mods, Controls, Settings, Debug, Count };
 
 constexpr int kTabCount = static_cast<int>(Tab::Count);
 
@@ -98,6 +98,7 @@ public:
         Binding,
         ResetBindings,
         GameSpeed,
+        ChaosFrame,
     };
 
     struct Row {
@@ -116,6 +117,17 @@ public:
     // (enabling one can pull in a dependency), so this is called after a toggle.
     void reload();
     void set_rom(std::filesystem::path rom);
+
+    // --- DEBUG tab readouts ---------------------------------------------------
+    // The DEBUG tab shows live game state, so the panel does not read guest
+    // memory itself: the caller samples the running game and pushes the value in
+    // before draw_panel. The launcher has no running game and never calls the
+    // setter, which is what makes its DEBUG tab say "GAME NOT RUNNING".
+    void set_chaos_frame(int value) {
+        chaos_frame_ = value;
+        chaos_frame_known_ = true;
+    }
+    void clear_chaos_frame() { chaos_frame_known_ = false; }
 
     Tab tab() const { return tab_; }
     void set_tab(Tab tab);
@@ -193,6 +205,8 @@ private:
     Geometry geometry_;
     size_t selected_ = 0;
     int capture_row_ = -1;
+    bool chaos_frame_known_ = false;
+    int chaos_frame_ = 0;
 };
 
 // The panel's on-screen geometry from the last frame. `top_y` is where the panel

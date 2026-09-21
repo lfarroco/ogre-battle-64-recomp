@@ -146,6 +146,19 @@ std::string game_speed_text(int current) {
     return text;
 }
 
+// The band a Chaos Frame value falls in, which is what it means: the endings
+// are chosen by these ranges (developer, this session): 0-35 low, 36-64
+// neutral, 65-100 high.
+const char* chaos_frame_band(int value) {
+    if (value <= 35) {
+        return "LOW";
+    }
+    if (value <= 64) {
+        return "NEUTRAL";
+    }
+    return "HIGH";
+}
+
 }  // namespace
 
 // --- TextLayer ----------------------------------------------------------------
@@ -327,10 +340,10 @@ void Panel::set_rom(std::filesystem::path rom) {
 }
 
 bool Panel::tab_enabled(Tab tab) const {
-    // The overlay shows the same tab bar, but only CONTROLS and SETTINGS can be
-    // used while the game is running.
+    // The overlay shows the same tab bar, but only CONTROLS, SETTINGS and DEBUG
+    // can be used while the game is running.
     if (mode_ == Mode::Overlay) {
-        return tab == Tab::Controls || tab == Tab::Settings;
+        return tab == Tab::Controls || tab == Tab::Settings || tab == Tab::Debug;
     }
     return true;
 }
@@ -347,6 +360,8 @@ std::string Panel::tab_label(Tab tab) const {
             return "CONTROLS";
         case Tab::Settings:
             return "SETTINGS";
+        case Tab::Debug:
+            return "DEBUG";
         default:
             return {};
     }
@@ -433,6 +448,11 @@ void Panel::rebuild_rows() {
 
         case Tab::Settings:
             rows_.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
+            break;
+
+        case Tab::Debug:
+            rows_.push_back(Row{RowKind::Section, "GAME STATE", 0, 0, -1});
+            rows_.push_back(Row{RowKind::ChaosFrame, {}, 0, 0, -1});
             break;
 
         default:
@@ -537,6 +557,8 @@ std::string Panel::left_text(size_t index) const {
             return "Reset bindings to defaults";
         case RowKind::GameSpeed:
             return "GAME SPEED";
+        case RowKind::ChaosFrame:
+            return "Chaos Frame";
     }
     return {};
 }
@@ -564,6 +586,15 @@ std::string Panel::right_text(size_t index) const {
             return "Restore the default keyboard and gamepad map.";
         case RowKind::GameSpeed:
             return game_speed_text(game_speed());
+        case RowKind::ChaosFrame: {
+            if (!chaos_frame_known_) {
+                return "GAME NOT RUNNING";
+            }
+            char buffer[48];
+            std::snprintf(buffer, sizeof(buffer), "%d  %s", chaos_frame_,
+                          chaos_frame_band(chaos_frame_));
+            return buffer;
+        }
         default:
             return {};
     }
@@ -672,6 +703,11 @@ RowAction Panel::activate(size_t index, int direction) {
             set_game_speed(game_speed_value(current));
             return RowAction::SettingChanged;
         }
+
+        case RowKind::ChaosFrame:
+            // A read-only readout: selectable so the value is highlighted, but
+            // activating it does nothing.
+            return RowAction::None;
     }
     return RowAction::None;
 }

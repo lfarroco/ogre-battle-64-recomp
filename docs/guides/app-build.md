@@ -492,7 +492,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS`) |
 | `OGRE_OVERLAY=1` | open the in-game overlay at startup |
 | `OGRE_OVERLAY_AT_MS=<n>` | push one synthetic `ESC` down `n` ms after the overlay is initialised, so the real open path runs without a human |
-| `OGRE_OVERLAY_TAB=<controls\|settings>` | open the overlay's panel on that tab |
+| `OGRE_OVERLAY_TAB=<controls\|settings\|debug>` | open the overlay's panel on that tab |
 | `OGRE_OVERLAY_KEYS=<name>,…` | push one synthetic keydown per 150 ms while the overlay is visible (same names as `OGRE_LAUNCHER_KEYS`) |
 | `OGRE_OVERLAY_OPACITY=<0.2..1.0>` | the overlay window's opacity (default 0.90) |
 | `OGRE_CAPTURE_OVERLAY=<path>` | write the overlay's renderer as a PPM once, after its first frame. `OGRE_OVERLAY_SHOT_MS=<n>` delays it, so the capture can show what `OGRE_OVERLAY_KEYS` changed |

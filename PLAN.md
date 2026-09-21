@@ -40,6 +40,27 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The Esc overlay has a DEBUG tab, and it shows the live Chaos Frame
+  (session 95).** `ui::Tab::Debug` (`app/src/ui.hpp`) adds one read-only row,
+  "Chaos Frame", to the shared launcher/overlay panel. The overlay samples the
+  game's own RDRAM every frame (`guest_byte` in `app/src/overlay.cpp`) at
+  `ogre::CHAOS_FRAME_ADDRESS`, so the value is live while the game runs; the
+  launcher has no running game and says `GAME NOT RUNNING`.
+  `OGRE_OVERLAY_TAB=debug` opens the tab for a scripted run or a screenshot.
+  The row prints the value and its ending band (developer): `LOW` 0-35,
+  `NEUTRAL` 36-64, `HIGH` 65-100. Verified in one run: with `last_perfect` on the
+  battery, a map checkpoint plus `OGRE_OVERLAY_TAB=debug` captured
+  `Chaos Frame 99 HIGH` (`docs/proofs/native-overlay-debug-tab.png`) while the
+  live console read the same byte, and a title capture read `50 NEUTRAL`.
+  **The Chaos Frame is `0x801936C9`, not the community `0x801936A9`.** The
+  game-state initialiser `func_8016C900` bzeroes the flags block at `0x80193698`
+  and stores `50` at `0x801936C9` (`0x8016C998`), the documented starting value;
+  the scene-`0x13` update `func_801B5128` reads that byte and masks it `0x7F`
+  (`0x801B5360`, the only flags-block byte the ending screen reads); and the
+  scene-script VM opcode `0xFF` stores a script operand there (`0x80171480`).
+  `0x801936A9` has no static read or write in the ROM and reads 0 at the title,
+  where the Chaos Frame is 50. See `docs/HANDOFF-2026-09-21-session95.md`.
+
 - ⏳ **The Windows `0xC0000005` is in RT64's renderer setup on an old GPU, and
   `OGRE_GRAPHICS_API` lets a player pin the backend (session 94, part 5).** A
   player reports the first release worked; the developer's own Windows laptop

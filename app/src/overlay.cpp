@@ -2,7 +2,10 @@
 
 #include "overlay.hpp"
 
+#include <ultramodern/ultramodern.hpp>
+
 #include "font.hpp"
+#include "game.hpp"
 #include "input_map.hpp"
 #include "ui.hpp"
 
@@ -72,6 +75,17 @@ uint32_t env_millis(const char* name) {
     }
     const long parsed = std::strtol(value, nullptr, 0);
     return parsed > 0 ? static_cast<uint32_t>(parsed) : 0;
+}
+
+// One logical byte of the running game's RDRAM, or -1 while the runtime has no
+// image yet. The runtime byte-reverses RDRAM, so guest byte `a` is
+// `rdram[(a & 0x1FFFFFFF) ^ 3]` (docs/guides/app-build.md -> "Reading a dump").
+int guest_byte(uint32_t address) {
+    const uint8_t* rdram = ultramodern::get_rdram_base();
+    if (rdram == nullptr) {
+        return -1;
+    }
+    return rdram[(address & 0x1FFFFFFFu) ^ 3u];
 }
 
 // "Tab,Down,Space,p": SDL scancode names, comma separated, trimmed.
@@ -241,6 +255,16 @@ void draw() {
         return static_cast<int>(static_cast<float>(value) * ui_scale);
     };
 
+    // The DEBUG tab reads the game's own state. Sample it here, before the panel
+    // measures or draws, because both read the row text back.
+    const int chaos_frame = guest_byte(CHAOS_FRAME_ADDRESS);
+    if (chaos_frame >= 0) {
+        g_overlay.panel->set_chaos_frame(chaos_frame);
+    }
+    else {
+        g_overlay.panel->clear_chaos_frame();
+    }
+
     SDL_SetRenderDrawColor(g_overlay.renderer, 8, 9, 12, 255);
     SDL_RenderClear(g_overlay.renderer);
 
@@ -307,8 +331,8 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
     g_overlay.game_pad_count = 4;
     g_overlay.panel = std::make_unique<ui::Panel>(ui::Panel::Mode::Overlay, mod_game_id,
                                                   std::filesystem::path{});
-    // OGRE_OVERLAY_TAB=<controls|settings>: open the panel on that tab, so a
-    // scripted run or a screenshot reaches it without input.
+    // OGRE_OVERLAY_TAB=<controls|settings|debug>: open the panel on that tab, so
+    // a scripted run or a screenshot reaches it without input.
     if (const char* tab = std::getenv("OGRE_OVERLAY_TAB")) {
         const std::string name = tab;
         if (name == "settings" || name == "setting") {
@@ -316,6 +340,9 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
         }
         else if (name == "controls" || name == "controller") {
             g_overlay.panel->set_tab(ui::Tab::Controls);
+        }
+        else if (name == "debug") {
+            g_overlay.panel->set_tab(ui::Tab::Debug);
         }
     }
     g_overlay.boot_ticks = SDL_GetTicks64();
