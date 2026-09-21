@@ -821,6 +821,30 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // from the OSTask's ucode data on every send_dl, so no override needed.
         app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Automatic;
 
+        // OGRE_GRAPHICS_API=auto|d3d12|vulkan|metal pins RT64's backend.
+        //
+        // RT64 switches D3D12 to Vulkan on some old drivers ("Falling back to
+        // Vulkan due to device workaround", rt64_application.cpp): an NVIDIA
+        // driver at or below 475.14, an AMD driver at or below Jan 2019, and
+        // Intel 6th-gen graphics at or below 31.0.101.2115. The fallback
+        // destroys the D3D12 device and creates a Vulkan interface on the same
+        // window, so starting in Vulkan directly skips that transition; `d3d12`
+        // is the other side of the same A/B. A player whose old GPU crashes
+        // during renderer setup can pin either one and report which works.
+        if (const char* api_env = getenv("OGRE_GRAPHICS_API")) {
+            if (strcmp(api_env, "d3d12") == 0) {
+                app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::D3D12;
+            } else if (strcmp(api_env, "vulkan") == 0) {
+                app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Vulkan;
+            } else if (strcmp(api_env, "metal") == 0) {
+                app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Metal;
+            } else if (strcmp(api_env, "auto") != 0) {
+                fprintf(stderr, "[renderer] OGRE_GRAPHICS_API=%s is not one of auto/d3d12/vulkan/metal; using auto\n",
+                        api_env);
+            }
+            fprintf(stderr, "[renderer] OGRE_GRAPHICS_API=%s\n", api_env);
+        }
+
         // Set up the RT64 application (window surface, device, shaders, workers).
         uint32_t thread_id = 0;
 #ifdef _WIN32

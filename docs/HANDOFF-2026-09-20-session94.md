@@ -728,3 +728,71 @@ macOS only, plus the Windows job of the rc3 dispatch.
    thing to fix.
 3. **The stored-ROM restart crash** is the same boot path; it should be re-tested
    with the new report.
+
+---
+
+# Part 5: the crash is in RT64's renderer setup on an old GPU
+
+**Goal (developer feedback):** a player reported that the first release worked
+(back when the console window was still there); the developer's own Windows
+laptop fails on every release, including that one, so the difference is the
+machine. **The version with the log window printed something about a Vulkan
+workaround just before the crash.** The developer's reading is that the app is
+not failing on permissions when a ROM is present, but reaching the renderer.
+
+**Result:** the reading matches the code. With a ROM present the app boots the
+game, and the renderer is created on the RT64 gfx thread inside
+`recomp::start`; without a ROM only the launcher's SDL 2D renderer runs, which
+is why deleting the ROM "fixes" the start. The Vulkan line is RT64's
+`rt64_application.cpp`:
+
+```
+Falling back to Vulkan due to device workaround.
+```
+
+which it prints for an NVIDIA driver at or below 475.14, an AMD driver at or
+below Jan 2019, and Intel 6th-gen graphics at or below 31.0.101.2115. The
+fallback **destroys the D3D12 device and creates a Vulkan interface on the same
+window**, so a crash there is a renderer-setup crash, and the same machine would
+fail on every release.
+
+## 28. Landed
+
+`OGRE_GRAPHICS_API=<auto|d3d12|vulkan|metal>` (`app/src/renderer.cpp`) sets
+RT64's `userConfig.graphicsAPI` before `Application::setup`, which is otherwise
+hardcoded to `Automatic`. `vulkan` skips the D3D12 attempt and the fallback
+transition; `d3d12` is the other side of the A/B (note that RT64 still forces
+Vulkan for the broken drivers listed above even when D3D12 is requested, so on
+those the useful test is `vulkan`). The boot log already names the device
+(`Device Name`, `Device Vendor`, `Driver Version`) and whether the fallback ran.
+`packaging/README-dist.txt` tells a player to try the two values, and the knob
+table in `docs/guides/app-build.md` records the driver thresholds.
+
+## 29. What the next report should show
+
+`v0.2.1-rc4` (Windows-only dispatch) has the richer report of part 4, so the
+captured stdout should now contain, in order:
+
+```
+Device Name: <gpu>
+Device Vendor: 0x...
+Driver Version: 0x...
+Falling back to Vulkan due to device workaround.      (if it fires)
+```
+
+and then `fault instruction: 0x... (<module>+0x...)`. The module names the next
+step: `ogrebattle64.exe` is RT64's own code, a `*wgfx*`/`amdxx*`/`nvwgf2umx`/
+`ig*` DLL is the driver, `ucrtbase` is a CRT call. `OGRE_CONSOLE=1` shows the
+same lines live.
+
+## 30. Open leads
+
+1. **Pin the backend on the failing machine.** If `vulkan` starts and `auto`
+   crashes, the D3D12→Vulkan transition is the fault and the app should prefer
+   Vulkan from the start on those devices; if `vulkan` also crashes, the fault
+   is in the Vulkan path itself and the report's module decides between RT64 and
+   the driver.
+2. **The player who could run the first release** is the control: their GPU and
+   driver version, from the boot log, bound the workaround that misfires.
+3. **No null-renderer package is shipped**, so a machine whose Vulkan and D3D12
+   both fail has no fallback; a "no renderer" build would at least start.

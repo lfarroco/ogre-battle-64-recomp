@@ -40,6 +40,25 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ⏳ **The Windows `0xC0000005` is in RT64's renderer setup on an old GPU, and
+  `OGRE_GRAPHICS_API` lets a player pin the backend (session 94, part 5).** A
+  player reports the first release worked; the developer's own Windows laptop
+  fails on every release including that one, and the console-window build
+  printed a **Vulkan workaround** line just before the crash. That matches the
+  code: with a ROM present the app boots the game and RT64 creates its renderer
+  on the gfx thread inside `recomp::start`, while without a ROM only the
+  launcher's SDL 2D renderer runs — so deleting the ROM "fixes" the start, and
+  the same machine fails on every release. The line is RT64's
+  `Falling back to Vulkan due to device workaround.`, printed for an NVIDIA
+  driver ≤ 475.14, an AMD driver ≤ Jan 2019, and Intel 6th-gen ≤
+  31.0.101.2115; the fallback destroys the D3D12 device and builds a Vulkan
+  interface on the same window. Landed:
+  `OGRE_GRAPHICS_API=<auto|d3d12|vulkan|metal>` (`app/src/renderer.cpp`), which
+  sets RT64's `userConfig.graphicsAPI` before setup (`vulkan` skips the
+  transition, `d3d12` is the other side of the A/B), documented in the shipped
+  README and the knob table. The next report names the device, the driver
+  version, whether the fallback ran, and the faulting module. See
+  `docs/HANDOFF-2026-09-20-session94.md` part 5.
 - ⏳ **Windows crashes with `0xC0000005` when the game starts, and the
   diagnostics to find it are in (session 94, part 4).** The rc2 Windows package
   boots and the launcher runs, but loading the ROM and starting the game dies on

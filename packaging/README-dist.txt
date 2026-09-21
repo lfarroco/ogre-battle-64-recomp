@@ -135,6 +135,16 @@ REQUIREMENTS
 If the game does not start, the reason is written to `error.log` in this folder
 and, when the failure happens before the game window exists, shown in a dialog.
 
+On an older GPU the crash is usually the renderer. The boot log names the GPU
+and the graphics API it picked; if it mentions a driver workaround or a Vulkan
+fallback, set one of these to pin the backend and try again:
+
+    set OGRE_GRAPHICS_API=vulkan
+    set OGRE_GRAPHICS_API=d3d12
+
+Setting `OGRE_CONSOLE=1` first opens a console window with the boot log, which
+is the quickest way to see where it stops.
+
 
 IF THE GAME CRASHES
 -------------------
