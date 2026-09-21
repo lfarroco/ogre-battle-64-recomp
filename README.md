@@ -6,6 +6,31 @@ Static recompilation of the N64 game *Ogre Battle 64: Person of Lordly Caliber*
 **This repository contains no copyrighted game data.** You must supply your own
 ROM dump (see below).
 
+## System Requirements
+
+A 64-bit PC and a GPU the renderer supports:
+
+* **GPU** — Direct3D 12.0 (Shader Model 6.0) or Vulkan 1.2 on Windows, Vulkan
+  1.2 on Linux, Metal on macOS. The oldest GPUs those cover are roughly GeForce
+  GT 630, Radeon HD 7750 (2012) and Intel HD 510 (Skylake).
+* **CPU** — x86-64 with SSE4.1 (Intel Core 2 Penryn, AMD Bulldozer or newer).
+  The macOS build needs Apple Silicon.
+* **OS** — Windows 10 or 11 (64-bit); macOS 11 or newer on Apple Silicon; a
+  glibc Linux with a Vulkan 1.2 driver.
+* **RAM** — 2 GB. The emulated N64 machine commits 512 MB.
+* **Disk** — about 150 MB for the app, plus the ROM.
+* **Game data** — your own Ogre Battle 64 (USA, Rev A) cartridge dump, 40 MB in
+  `.z64`, `.n64` or `.v64`. No game data is included.
+
+A keyboard is enough to play; a gamepad with XInput (Windows) or SDL controller
+support is optional. An audio device is optional too: with none, the game runs
+silently. On Windows no Visual C++ redistributable is required — the package
+carries the runtime its shader compiler needs.
+
+If the game crashes as it starts, update the graphics driver first. On an older
+GPU, `OGRE_CONSOLE=1` opens a console with the boot log and `OGRE_GRAPHICS_API`
+pins the backend (`vulkan` or `d3d12`).
+
 ## AI Disclaimer
 
 This work in this project was mostly performed by the DeepSeek v4/v4.1 Flash model.

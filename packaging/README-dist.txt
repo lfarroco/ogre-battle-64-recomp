@@ -9,6 +9,37 @@ USA Rev A cartridge — the executable is useless without it, and none of the
 game's copyrighted content is included here.
 
 
+REQUIREMENTS
+------------
+
+A 64-bit PC and a GPU the renderer supports:
+
+    GPU    Direct3D 12.0 (Shader Model 6.0) or Vulkan 1.2 on Windows, Vulkan 1.2
+           on Linux, Metal on macOS. The oldest GPUs those cover are roughly
+           GeForce GT 630, Radeon HD 7750 (2012) and Intel HD 510 (Skylake).
+    CPU    x86-64 with SSE4.1 (Intel Core 2 Penryn, AMD Bulldozer or newer).
+           The macOS build needs Apple Silicon.
+    OS     Windows 10 or 11 (64-bit); macOS 11 or newer on Apple Silicon; a
+           glibc Linux with a Vulkan 1.2 driver.
+    RAM    2 GB. The emulated N64 machine commits 512 MB.
+    Disk   about 150 MB for the app, plus your ROM.
+    ROM    your own Ogre Battle 64 (USA, Rev A) dump, 40 MB, `.z64`, `.n64` or
+           `.v64`. No game data is included.
+
+A keyboard is enough to play; a gamepad with XInput (Windows) or SDL controller
+support is optional. An audio device is optional too: with none, the game runs
+silently.
+
+On Windows nothing else has to be installed. The package carries the Microsoft
+C++ runtime that its shader compiler (`dxcompiler.dll`) needs.
+
+**If the game crashes as it starts, update your graphics driver first.** On an
+older GPU, set `OGRE_CONSOLE=1` before launching to open a console with the boot
+log, then try `OGRE_GRAPHICS_API=vulkan` or `OGRE_GRAPHICS_API=d3d12` to pin the
+renderer backend (`set OGRE_CONSOLE=1` in `cmd`, or the environment variables
+under System Properties).
+
+
 HOW TO PLAY
 -----------
 
@@ -118,32 +149,13 @@ Mods are recompiled into the client at startup, so a mod built for a different
 build of the game may be refused; the start screen prints the reason.
 
 
-REQUIREMENTS
-------------
+IF THE GAME DOES NOT START
+--------------------------
 
-- A GPU with working Metal (macOS), Vulkan (Linux) or D3D12/Vulkan (Windows)
-  drivers. On Linux, Mesa's radv/ANV drivers or the proprietary ones are fine;
-  a machine with no Vulkan driver at all cannot run the RT64 renderer.
-- On Linux the app does not need a desktop environment beyond a normal X11 or
-  Wayland session. Some distributions split out SDL2's runtime packages; if
-  the app reports a missing library, install your distribution's SDL2 package.
-- On Windows nothing else has to be installed: the package carries the Microsoft
-  C++ runtime that its shader compiler (`dxcompiler.dll`) needs
-  (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`) beside the
-  executable, so the Visual C++ redistributable is not required.
-
-If the game does not start, the reason is written to `error.log` in this folder
-and, when the failure happens before the game window exists, shown in a dialog.
-
-On an older GPU the crash is usually the renderer. The boot log names the GPU
-and the graphics API it picked; if it mentions a driver workaround or a Vulkan
-fallback, set one of these to pin the backend and try again:
-
-    set OGRE_GRAPHICS_API=vulkan
-    set OGRE_GRAPHICS_API=d3d12
-
-Setting `OGRE_CONSOLE=1` first opens a console window with the boot log, which
-is the quickest way to see where it stops.
+The reason is written to `error.log` in this folder and, when the failure
+happens before the game window exists, shown in a dialog. Check the
+REQUIREMENTS section above first: the most common cause on Windows is a GPU
+driver older than the renderer needs.
 
 
 IF THE GAME CRASHES

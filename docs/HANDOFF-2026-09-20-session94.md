@@ -796,3 +796,37 @@ same lines live.
    driver version, from the boot log, bound the workaround that misfires.
 3. **No null-renderer package is shipped**, so a machine whose Vulkan and D3D12
    both fail has no fallback; a "no renderer" build would at least start.
+
+---
+
+# Part 6: player-facing requirements
+
+**Goal (developer):** *"a player confirmed that the latest build works. I guess
+that we should add a list of requirements for players as one of the first
+sections in the readme (just like the zelda 64 recomp does)"*.
+
+**Result:** both player-facing READMEs open with the requirements now.
+
+* `packaging/README-dist.txt` (shipped as `README.txt` in the package) gained
+  `REQUIREMENTS` immediately after the intro and before `HOW TO PLAY`, and its
+  old bottom `REQUIREMENTS` block was replaced by a short `IF THE GAME DOES NOT
+  START` pointer so there is one copy of the guidance.
+* `README.md` (the repository front page) gained `## System Requirements` in the
+  same position, after the "no game data" paragraph.
+* The content, in Zelda64Recomp's `System Requirements` shape: GPU (Direct3D
+  12.0 Shader Model 6.0 or Vulkan 1.2 on Windows, Vulkan 1.2 on Linux, Metal on
+  macOS, with the oldest GPUs those roughly cover), CPU (x86-64 with SSE4.1;
+  Apple Silicon for the macOS build), OS, RAM, disk and the ROM; then the
+  practical notes — a gamepad and an audio device are optional, Windows needs no
+  Visual C++ redistributable, update the GPU driver first if it crashes at
+  start, and `OGRE_CONSOLE=1` / `OGRE_GRAPHICS_API` for an old GPU.
+
+The numbers are the build's own: `mem_size = 512 MiB`
+(`librecomp/include/librecomp/addresses.hpp`), `-msse4.1` on x86-64
+(`app/CMakeLists.txt`), the bundle's `LSMinimumSystemVersion` 11.0
+(`packaging/macos-Info.plist`), and the arm64 macOS CI runner. The GPU API
+levels are RT64's requirement, which is where the old-driver fallback of part 5
+comes from.
+
+No code changed, so no rebuild was needed; the next `make dist` and release
+picks the text up.
