@@ -37,9 +37,7 @@ This work in this project was mostly performed by the DeepSeek v4/v4.1 Flash mod
 
 ## Status
 
-The main code segment (807 functions) has been fully recompiled to C. The runtime
-app (rendering, input, audio) is the next milestone. See [PLAN.md](PLAN.md) for the
-full plan, current status, and technical findings.
+See [PLAN.md](PLAN.md) for the full plan, current status, and technical findings.
 
 ## Directory layout
 
