@@ -830,3 +830,30 @@ comes from.
 
 No code changed, so no rebuild was needed; the next `make dist` and release
 picks the text up.
+
+---
+
+# Part 7: the release pipeline still builds every platform
+
+**Goal (developer):** *"I guess that we need to restore the release pipeline,
+right? otherwise only windows releases will be generated"*, after two
+`-f platforms=windows` dispatches (rc3, rc4) produced Windows-only releases.
+
+**Result:** nothing was broken and nothing needed restoring. `platforms` is a
+`workflow_dispatch` input; a tag push (`push: tags: v*`) never has inputs, so its
+plan selects all three entries and the build matrix is the full set. The rc3/rc4
+releases are Windows-only because they were dispatched that way, and the last
+complete release is `v0.2.1-rc2` (plus `v0.2.0`, still "Latest").
+
+The plan step now says so explicitly instead of relying on an empty input:
+
+* `PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}`
+  — a tag push is pinned to `all`.
+* the step writes `Building: <names>` to the run summary and emits a
+  `::notice::building <names>` (stderr, because stdout is `$GITHUB_OUTPUT`), so
+  every run's log states which platforms it is building.
+
+Checked by running the plan script locally with `PLATFORMS` empty, `windows`,
+`all` and `macos`: empty and `all` both produce the three-entry matrix, each
+filter produces its one entry. `v0.2.1-rc5` is the tag-push run that proves it
+end to end.

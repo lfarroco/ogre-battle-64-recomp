@@ -64,7 +64,9 @@ permissions:
 
 jobs:
   # The build matrix is data, so a workflow_dispatch can ask for one platform.
-  # A tag push has no inputs, and `platforms` is then empty -> all.
+  # A tag push always builds every platform: the `platforms` input only exists on
+  # workflow_dispatch, and the gate below makes that explicit rather than relying
+  # on an empty input.
   plan:
     name: Plan
     runs-on: ubuntu-latest
@@ -73,7 +75,7 @@ jobs:
     steps:
       - id: matrix
         env:
-          PLATFORMS: ${{ inputs.platforms || 'all' }}
+          PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -117,6 +119,12 @@ jobs:
           picked = entries if want == "all" else [e for e in entries if e["os"] == want]
           if not picked:
               raise SystemExit(f"no platform matches {want!r}")
+          names = ", ".join(e["name"] for e in picked)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"Building: {names}\n")
+          # stdout is $GITHUB_OUTPUT here, so the notice goes to stderr.
+          import sys
+          print(f"::notice::building {names}", file=sys.stderr)
           print("matrix=" + json.dumps({"include": picked}))
           PY
 
