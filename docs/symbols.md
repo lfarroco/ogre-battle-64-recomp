@@ -14,7 +14,7 @@ Convention (proposed):
   `dl_emit_8023C894` loses which unit owns it; prefer
   `ovlC_dl_emit_8023C894`). Records overlap in RAM by design.
 * Do **not** invent a name that the runtime already implements (`osXxx`,
-  `alXxx`, `guXxx`, …): `symbol_addrs.txt` warns that a name must exist in the
+  `alXxx`, `guXxx`, …): `config/symbols/symbol_addrs.txt` warns that a name must exist in the
   runtime or the recompiled output will not link.
 * Confidence: **high** = instruction-level evidence recorded below; **medium** =
   strong but partial; **low** = a hypothesis worth a name but not a rename.
@@ -135,8 +135,8 @@ they were checksummed for (`reseed_slot` in `tools/sramsave.py`).
 
 A rename is not free — check the blast radius first:
 
-1. **Size overrides are keyed by name** (`config.toml`: 18 entries;
-   `config-bankC.toml`: 4). Renaming without updating them reintroduces the
+1. **Size overrides are keyed by name** (`config/config.toml`: 18 entries;
+   `config/banks/config-bankC.toml`: 4). Renaming without updating them reintroduces the
    session-41 mis-binding bug through `find_containing_size_override`.
 2. **`asm/` is committed.** A `splat split` after a rename rewrites every
    reference, which is a large but mechanical diff.
@@ -144,7 +144,7 @@ A rename is not free — check the blast radius first:
    `build/bank<U>/symbol_addrs.txt` using the unit's name format; renaming a
    bank symbol changes those seeds too.
 4. **No runtime-name collisions** (see the convention above).
-5. Regenerate and re-verify: `tools/venv/bin/splat split config.yaml` → `make` →
+5. Regenerate and re-verify: `tools/venv/bin/splat split config/config.yaml` → `make` →
    `make recomp && make bank-recomp` → rebuild both app variants, then re-run
    the battery in the newest handoff.
 

@@ -74,7 +74,7 @@ git submodule update --init --recursive
 git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
 
 # apply the OGRE diagnostics (present traces, GPU readback capture, presenter
-# knobs). rt64-plume-ob64.patch is the texture -> buffer readback support in
+# knobs). patches/rt64-plume-ob64.patch is the texture -> buffer readback support in
 # plume's Metal backend.
 git -C tools/RT64 apply ../../rt64-ob64.patch
 git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-ob64.patch
@@ -318,7 +318,7 @@ running recompiled code and nothing joins them. Two things follow, and both are
 needed for the window to close instead of hanging:
 
 * `librecomp/src/recomp.cpp` no longer frees RDRAM when `exited` is set (the
-  change is in `n64modernruntime-ob64.patch`). It used to `munmap` the 8 MiB
+  change is in `patches/n64modernruntime-ob64.patch`). It used to `munmap` the 8 MiB
   image at the end of `recomp::start`, and a game thread that touched it
   afterwards faulted — session 94's window-close freeze, whose fault address was
   inside the image. The process is about to exit, so the OS reclaims the mapping.
@@ -409,15 +409,15 @@ archives; it does not change what the published binary contains.
 
 On the hosted path the workflow reconstructs everything else a fresh checkout
 lacks: it clones `N64ModernRuntime` at the pinned commit and applies
-`n64modernruntime-ob64.patch` and `n64modernruntime-n64recomp.patch`, applies
-`rt64-ob64.patch` and `rt64-plume-ob64.patch`/`tools/rt64-plume-sdl.patch` to the
+`patches/n64modernruntime-ob64.patch` and `patches/n64modernruntime-n64recomp.patch`, applies
+`patches/rt64-ob64.patch` and `patches/rt64-plume-ob64.patch`/`tools/rt64-plume-sdl.patch` to the
 RT64 submodules, and installs what the runner image is missing (`libgtk-3-dev`,
 `libvulkan-dev`, `libx11-dev` on Linux; the Metal toolchain on macOS; `make` on
 Windows). The self-hosted path keeps its own toolchain and dirtied submodules.
 
 The patch step is line-ending tolerant. A Windows checkout gives both the patch
 files and the RT64 tree CRLF, and `git apply` fails on a hunk whose last line has
-no newline (`\ No newline at end of file`; `rt64-ob64.patch` has two) in that
+no newline (`\ No newline at end of file`; `patches/rt64-ob64.patch` has two) in that
 state. `.gitattributes` pins `*.patch` to `eol=lf` and the workflow passes
 `--ignore-whitespace` to `git apply`. Keep both when editing a patch or the
 `apply_patch` helper: without them the Windows job fails at
@@ -1335,9 +1335,9 @@ mislead if the earlier one is skipped.
    has no unit for) or `[overlays] streamed function stub called @ 0x…` (a
    `LOOKUP_FUNC` onto an address nothing registered). Run it, read the address,
    and only then look for the DMA.
-2. **Add the unit.** `config-bank<U>.yaml` (splat: `type: code`, `start`/`vram`,
+2. **Add the unit.** `config/banks/config-bank<U>.yaml` (splat: `type: code`, `start`/`vram`,
    `[start, asm]` + `[<code end>, data]`, `symbol_name_format: "ovl<U>_$VRAM"`)
-   and `config-bank<U>.toml` (N64Recomp), then `BANK_UNITS += <U>` in the
+   and `config/banks/config-bank<U>.toml` (N64Recomp), then `BANK_UNITS += <U>` in the
    `Makefile`. A **bank's size is its DMA size**, and the code/data boundary is
    its last `jr ra` **rounded up to a 16-byte boundary** — otherwise the
    assembler pads `.text` and `make bank-recomp`'s ELF check fails loudly (the
@@ -1346,7 +1346,7 @@ mislead if the earlier one is skipped.
    `ram start + rom size`, add the record to `RAM_END` in
    `tools/gen_bank_funcs.py`; the runtime then zeroes it on load as the game's
    loader does.
-4. **Declare cross-record function entries.** `symbol_addrs-bank<U>.txt`
+4. **Declare cross-record function entries.** `config/symbols/symbol_addrs-bank<U>.txt`
    (`name = 0xADDR; // type:func`, wired with `symbol_addrs_path` in the splat
    config) for every address the game *calls* that the target record never `jal`s
    from inside itself. Each record is disassembled as its own segment, so such an
@@ -1613,7 +1613,7 @@ the boot intro and the publisher stills (~26 s in total). Its manifest sets
 `enabled_by_default = false`, so the shipped package plays the vanilla boot until
 the player turns it on in the MODS section. The runtime has always read that
 field from `mod.json`; `RecompModTool` did not write it, so every mod was enabled
-— the tool now parses and emits it (`n64recomp-ob64.patch`).
+— the tool now parses and emits it (`patches/n64recomp-ob64.patch`).
 
 **Skip to the title from scene `0x09`, not from scene `0x0A`.** Writing the word
 from scene `0x0A`'s update cuts the stills to one frame, and the title then
@@ -1649,7 +1649,7 @@ with functions in the base sections.
 
 ### Four runtime fixes this needed
 
-All four are in `n64modernruntime-ob64.patch`; without them a hook either fails
+All four are in `patches/n64modernruntime-ob64.patch`; without them a hook either fails
 to load, corrupts memory, or the periodic snapshot kills the process.
 
 1. **Section indices.** A generated `RelocEntry.target_section` is the

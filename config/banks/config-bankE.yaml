@@ -1,0 +1,65 @@
+# Secondary splat config: streamed-overlay bank unit E (Phase 4).
+#
+# Scene 0x02 (the path New Game / Tutorial enters after the title menu) requests
+# record mask 0x4001 = records **0 and 14** (descriptor id 3, {0,14}). Record 14
+# is RAM-disjoint from unit C's records and lives there; record 0 loads at
+# 0x80197B90 — the same RAM as records 1 and 2 — so it needs this unit.
+#
+#   rec0 ROM 0x66E30 (0x2AF0) -> RAM 0x80197B90
+#     code 0x26A0 (-> 0x8019A230), data 0x450 (-> 0x8019A680), bss 0x10
+#
+# See config/banks/config-bankA.yaml for the model, and docs/DECISIONS.md (session 33).
+
+name: Ogre Battle 64 - streamed overlay bank unit E
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankE
+  target_path: assets/ogre64.z64
+  elf_path: build/bankE.elf
+  base_path: ../..
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankE/asm
+  build_path: build/bankE
+  asset_path: build/bankE/assets
+  ld_script_path: build/bankE.ld
+  undefined_syms_auto_path: build/bankE/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankE/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlE_$VRAM"
+  symbol_name_format_no_rom: "ovlE_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Bank record 0.
+  - name: bankRec0
+    type: code
+    start: 0x66E30
+    vram: 0x80197B90
+    subsegments:
+      - [0x66E30, asm]
+      - [0x694D0, data]
+
+  # Records 17 (also 0x80197B90) and the rest are not part of this unit.
+  - [0x69920]

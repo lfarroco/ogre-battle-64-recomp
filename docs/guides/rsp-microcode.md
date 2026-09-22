@@ -92,7 +92,7 @@ Manual's JPEG chapter
 `"HUFF"` + `s16 numMB` entropy-coded payload in, 16-bit YUV macroblocks out
 (768 bytes each: 4x128 Y, 128 U, 128 V, 256 unused).
 
-The config is `rsp-njpeg.toml`; `make rsp-recomp` regenerates
+The config is `config/rsp-njpeg.toml`; `make rsp-recomp` regenerates
 `RspFuncs/njpeg_ucode.cpp` (gitignored), which `app/CMakeLists.txt` builds into
 `ogrebattle64_rsp` (the generated code is C++ — it uses librecomp's `RSP` VU
 implementation). `app/src/rsp.cpp` dispatches on the ucode address and runs the
@@ -152,7 +152,7 @@ recompiled task therefore needs `text_address = 0x1080`; the runtime already
 loads the OSTask at DMEM 0xFC0 and `ucode_data` at DMEM 0, and RSPRecomp emits
 the initial `r1 = 0xFC0` itself.
 
-`rsp-audio.toml` compiles `text_offset 0x2E450`, `text_size 0xC60`,
+`config/rsp-audio.toml` compiles `text_offset 0x2E450`, `text_size 0xC60`,
 `text_address 0x1080` into `RspFuncs/audio_ucode.cpp`. Two constraints, both
 load-bearing:
 
@@ -160,13 +160,13 @@ load-bearing:
   RDRAM low bits** (`0x0E50`) and not `0x1000`. Session 74 used `0x1000`; every
   internal `j`/`beq` target (which is absolute in the instruction encoding) then
   resolved 0x80 bytes early, the driver never DMA'd its command list, and the
-  output was silence. This is the same rule as `rsp-njpeg.toml`.
+  output was silence. This is the same rule as `config/rsp-njpeg.toml`.
 * **`text_size = 0xC60`, not the loader's `0xF80`.** The fixed-length text DMA
   runs past the end of the audio code into the boot loader's own ROM bytes and
   the njpeg text at IMEM 0x1CE0, and those bytes' `j` targets point below the
   text. The game never executes that tail; compiling it only emits references to
   labels that do not exist. The audio code's own last instruction is at IMEM
-  0x1CD0. Same rule as `rsp-njpeg.toml`'s `text_size = 0x7B8`.
+  0x1CD0. Same rule as `config/rsp-njpeg.toml`'s `text_size = 0x7B8`.
 
 `extra_indirect_branch_targets` must carry the command handlers, because the
 driver dispatches through a **halfword table in `ucode_data` at DMEM 0**:

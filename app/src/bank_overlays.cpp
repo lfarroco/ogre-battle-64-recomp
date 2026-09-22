@@ -588,7 +588,7 @@ void poll_scene() {
 
 namespace {
 
-// The boot-resident/streamed overlays of the *main* ELF (config.yaml). The
+// The boot-resident/streamed overlays of the *main* ELF (config/config.yaml). The
 // runtime registers these from its own section table, so they are not in
 // kBankRecords; the diagnostic below still has to know them, or it reports
 // overlay C loading into 0x80197B90 as an unknown module.

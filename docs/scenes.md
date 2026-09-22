@@ -98,7 +98,7 @@ The enter chunk-DMAs **unit H** (ROM `0x712A0` → RAM `0x8019A7C0`, the same
 module as the name form) and calls `func_8019D67C` in it; the per-frame update
 and hook call `0x8019C69C` and `0x8019C4A8`. All three go through the runtime
 bank map (`make recomp`'s `cross_bank.py dispatch --only` list). The third one
-(`0x8019D67C`) was **not** in the list until session 88: `config.toml` extends
+(`0x8019D67C`) was **not** in the list until session 88: `config/config.toml` extends
 `func_8019D568` to `0xCB0`, which swallows `0x8019D67C`, so N64Recomp bound the
 `jal` to `func_8019D568` and emitted the redirect-plus-early-`return` shape —
 the enter returned before the menu initialised and the scene stayed black. See
@@ -349,7 +349,7 @@ layout — the session-45/67/72 mis-binding class. It is now **bank unit AG**
 With unit AG in, scene `0x14` renders with **0 stubs**, and the fix is directly
 responsible: the three stubbed addresses (`0x80226B7C`, `0x8022859C`,
 `0x80226CE0`) are record 16 entries, each preceded by `jr $ra`, and they are
-declared in `symbol_addrs-bankAG.txt`.
+declared in `config/symbols/symbol_addrs-bankAG.txt`.
 
 #### The `0xE80` setup fragment — the one bank-shaped load with no unit
 
@@ -472,7 +472,7 @@ birth → personality questions → `0x16`. **Session 57 fixed the stale backdro
 (it was the njpeg readback copying the *previous* screen — RT64's scratch word is
 stale at the first pass of every assembly; `docs/HANDOFF-2026-09-16-session57.md`
 §1) and found what stops the port right after `0x16`: the scene chunk-DMAs **ROM
-`0x244770` → RAM `0x801D0860`**, which `config-bankC.yaml` carries as a `bin` gap
+`0x244770` → RAM `0x801D0860`**, which `config/banks/config-bankC.yaml` carries as a `bin` gap
 while `bankRec10a` owns that RAM, so the calls hit the runtime's streamed stub and
 spin (§2). **Session 59 fixed the sequence-end crash** — the chapter animation's
 step streams a *third bank* of the record-14 arena (ROM `0x286BA0` → RAM
@@ -523,7 +523,7 @@ the last mission and the closing movie.
 
 **The session-85 freeze is fixed (session 86).** The credits hung on their first
 beat with the frame-pump thread's counter frozen (`D_800AEFA4` frozen while
-`D_800C4BCC` counts). Four `config.toml` `function_sizes` overrides were leaking
+`D_800C4BCC` counts). Four `config/config.toml` `function_sizes` overrides were leaking
 t4's stack — each one a `jal` compiled as *call the containing body + early
 `return`* (`func_801AB998`'s `jal 0x801AB770`, `func_801B1BBC`'s
 `jal 0x801B00D4`) or a dropped `jr ra` delay slot (`func_801AB568`'s epilogue

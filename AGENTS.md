@@ -111,7 +111,8 @@ Do not infer a layout from the code that writes it. Find the code that reads it.
 Several walls were the recompiler binding a call to the wrong function, or to the
 wrong half of a function. Check these first.
 
-- **Size overrides** in `config.toml`/`config-bank*.yaml`. An override that runs
+- **Size overrides** in `config/config.toml` and
+  `config/banks/config-bank*.yaml`. An override that runs
   past the next function's start makes the recompiler redirect every `jal` into
   it (session 41: `func_801AFC2C` `0x4A8` → `0x4A4`).
 - **Fall-through and merged tails.** `func_ovlC_802399AC` has no prologue: in

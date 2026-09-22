@@ -160,7 +160,7 @@ straightforward.
 | `tools/N64ModernRuntime/librecomp/CMakeLists.txt` | make `LiveRecomp` optional (excluded on wasm) |
 | `tools/N64ModernRuntime/librecomp/src/mods.cpp` (+ `recomp.cpp` mods glue) | guard live-recompiler init on wasm |
 | `tools/N64ModernRuntime/ultramodern/include/ultramodern/renderer_context.hpp` | explicit `__EMSCRIPTEN__` `WindowHandle` alias (if needed) |
-| `n64modernruntime-ob64.patch` | capture the runtime changes |
+| `patches/n64modernruntime-ob64.patch` | capture the runtime changes |
 | `PLAN.md`, `docs/README.md` | pointer to the web-port plan |
 
 ### Create

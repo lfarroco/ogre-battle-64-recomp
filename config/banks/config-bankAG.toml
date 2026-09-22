@@ -1,0 +1,18 @@
+# N64Recomp config for streamed-overlay bank unit AG (Phase 4).
+# See config/banks/config-bankM.toml for the model; this unit holds bankRec16, the module
+# scene 0x14 and several others stream over record 13's half of RAM 0x802258B0
+# (record 13 itself is unit C, ROM 0x275820).
+
+[input]
+output_func_path = "../../BankAGFuncs"
+elf_path = "../../build/bankAG.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+# The module's code/data boundary is splat's (find_file_boundaries); extend any
+# piece it still caps in the middle of a call-and-continue emission here (the
+# failure is "use of undeclared label" at the `goto after_N`).
+function_sizes = []

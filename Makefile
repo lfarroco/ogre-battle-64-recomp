@@ -3,7 +3,7 @@
 # Stages:
 #   1. splat split   -> asm/*.s + assets/*.bin + ld script
 #   2. make          -> assemble/objcopy to .o, link to build/ogrebattle64.elf
-#   3. N64Recomp     -> generate C from the ELF + config.toml
+#   3. N64Recomp     -> generate C from the ELF + config/config.toml
 
 ROM      := assets/ogre64.z64
 BASENAME := ogrebattle64
@@ -35,16 +35,16 @@ fix-labels:
 
 # splat split is NOT part of the normal build: `make` only assembles and links.
 # The generated `ogrebattle64.ld` therefore keeps describing the previous
-# segment layout, and a `config.yaml` edit that moves a segment is silently
+# segment layout, and a `config/config.yaml` edit that moves a segment is silently
 # ignored — that is how `streamedC` ended up linked at another record's ROM
 # address, so overlay C was never loaded and its effects (the intro smoke, the
 # logo's 3D characters) vanished. Run `make resplit` after any segment change,
 # and check that every streamed segment's ROM start in the map matches
-# config.yaml.
+# config/config.yaml.
 .PHONY: resplit
 resplit:
 	rm -f $(LDSCRIPT) assets/*.bin
-	tools/venv/bin/splat split config.yaml
+	tools/venv/bin/splat split config/config.yaml
 
 # `as` needs the fixed .s files, so re-apply the label patch before they change.
 resplit: fix-labels
@@ -52,10 +52,10 @@ resplit: fix-labels
 clean:
 	rm -rf build
 
-$(ELF): $(OBJS) $(BIN_FILES) $(LDSCRIPT) undefined_syms_auto.txt undefined_funcs_auto.txt
+$(ELF): $(OBJS) $(BIN_FILES) $(LDSCRIPT) config/symbols/undefined_syms_auto.txt config/symbols/undefined_funcs_auto.txt
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -T $(LDSCRIPT) -T undefined_syms_auto.txt \
-		-T undefined_funcs_auto.txt -T extra_syms.txt -o $@ $(OBJS) $(BIN_FILES)
+	$(LD) $(LDFLAGS) -T $(LDSCRIPT) -T config/symbols/undefined_syms_auto.txt \
+		-T config/symbols/undefined_funcs_auto.txt -T config/symbols/extra_syms.txt -o $@ $(OBJS) $(BIN_FILES)
 	@echo "==> linked $(ELF)"
 	@$(OBJCOPY) --dump-section .entry=$@.entry.bin $@ 2>/dev/null || true
 
@@ -78,7 +78,7 @@ recomp: recomp-prep $(ELF)
 	@# the build failed with "conflicting types" in a file the new run no longer
 	@# emits (session 58, after moving bankRec10a out of unit C). Clear first.
 	rm -rf RecompiledFuncs
-	$(N64RECOMP) config.toml
+	$(N64RECOMP) config/config.toml
 	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0
 
 # The cross-bank dispatch inside `recomp` can only see bank records that
@@ -190,7 +190,7 @@ regenerate:
 # right after chunk-DMAing ROM 0x712A0 into RAM 0x8019A7C0 — and scene 0x18 is
 # exactly the menu the game reaches by holding Start through boot
 # (func_800721DC: `D_800E79B0 & 0x1000` -> scene 0x18, else 0x09). The call was
-# bound to func_8019D568 because config.toml extends that symbol over
+# bound to func_8019D568 because config/config.toml extends that symbol over
 # 0x8019D67C (0xCB0, session 30's fall-through closure), so N64Recomp emitted
 # the redirect-plus-early-`return` shape: the enter returned before the menu
 # initialised, the scene sat on a black frame with no display lists, and unit
@@ -248,7 +248,7 @@ recompcov:
 .PHONY: mod-syms
 mod-syms: $(ELF)
 	@mkdir -p mods/reference
-	@cd mods/reference && ../../$(N64RECOMP) ../../config.toml --dump-context >/dev/null
+	@cd mods/reference && ../../$(N64RECOMP) ../../config/config.toml --dump-context >/dev/null
 	@echo "==> mods/reference/dump.toml, mods/reference/data_dump.toml"
 
 .PHONY: example-mods
@@ -258,7 +258,7 @@ example-mods: mod-syms
 # ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C
-# also uses (see config-bankA.yaml / config-bankC.yaml). Kept separate because
+# also uses (see config/banks/config-bankA.yaml / config/banks/config-bankC.yaml). Kept separate because
 # their VMAs overlap overlay C's and one ELF cannot hold both; the main unit is
 # left untouched.
 #
@@ -283,7 +283,7 @@ bank-split: $(BANK_LDS)
 # fails with "multiple definition" (or worse, links silently). Clear the unit's
 # own asm/assets before each split: session 58 moved bankRec10a out of unit C
 # into unit I and hit exactly this.
-build/bank%.ld: config-bank%.yaml
+build/bank%.ld: config/banks/config-bank%.yaml
 	@mkdir -p build
 	@rm -rf build/bank$*/asm build/bank$*/assets
 	tools/venv/bin/splat split $<
@@ -294,7 +294,7 @@ build/bank%.ld: config-bank%.yaml
 # `.ld`) makes every input change re-assemble and re-link; skipping that once
 # silently linked stale objects when splat had rewritten an `.s` without
 # touching the `.ld`.
-build/bank%.elf: config-bank%.yaml | build/bank%.ld
+build/bank%.elf: config/banks/config-bank%.yaml | build/bank%.ld
 	@for f in build/bank$*/asm/*.s build/bank$*/asm/data/*.s; do \
 	    [ -f "$$f" ] || continue; \
 	    $(AS) $(ASFLAGS) -o $${f%.s}.o $$f || exit 1; \
@@ -348,7 +348,7 @@ bank-recomp: bank
 	@# Same stale-output trap as `recomp` above: clear each unit's generated tree
 	@# so a symbol that changed section (or moved to another unit) cannot leave a
 	@# definition behind. `Bank*Funcs/` is gitignored and regenerated here.
-	@for u in $(BANK_UNITS); do rm -rf Bank$${u}Funcs; $(N64RECOMP) config-bank$$u.toml || exit 1; done
+	@for u in $(BANK_UNITS); do rm -rf Bank$${u}Funcs; $(N64RECOMP) config/banks/config-bank$$u.toml || exit 1; done
 	python3 tools/gen_bank_funcs.py
 	@# The njpeg stage-3 readback has to copy the buffer its own YUV draw landed
 	@# in; the game's own pointer can be left at the framebuffer table's
@@ -357,15 +357,15 @@ bank-recomp: bank
 	@# Assert the invariant session 45's wall broke: a unit must never define a
 	@# RAM range another bank can own *and* call into it from another record (the
 	@# call would be bound at build time to the wrong bank's layout). See
-	@# `cross_bank.py check` and config-bankF.yaml.
+	@# `cross_bank.py check` and config/banks/config-bankF.yaml.
 	python3 tools/cross_bank.py check-banks
 
 # ---------------------------------------------------------------------------
 # RSP microcode (RSPRecomp). Only microcodes the runtime's task thread actually
 # executes need this: gfx tasks go to RT64, which parses display lists itself.
-# rsp-njpeg.toml recompiles the game's Nintendo-JPEG decoder (M_NJPEGTASK, type
+# config/rsp-njpeg.toml recompiles the game's Nintendo-JPEG decoder (M_NJPEGTASK, type
 # 4), which decodes the New Game opening's full-screen background images into
-# RspFuncs/njpeg_ucode.cpp; rsp-audio.toml recompiles the audio microcode
+# RspFuncs/njpeg_ucode.cpp; config/rsp-audio.toml recompiles the audio microcode
 # (M_AUDTASK, type 2) into RspFuncs/audio_ucode.cpp. app/src/rsp.cpp dispatches
 # both by ucode address.
 # ---------------------------------------------------------------------------
@@ -373,8 +373,8 @@ RSPRECOMP := tools/N64Recomp/build/RSPRecomp
 
 .PHONY: rsp-recomp
 rsp-recomp:
-	$(RSPRECOMP) rsp-njpeg.toml
-	$(RSPRECOMP) rsp-audio.toml
+	$(RSPRECOMP) config/rsp-njpeg.toml
+	$(RSPRECOMP) config/rsp-audio.toml
 
 # ---------------------------------------------------------------------------
 # make dist -- a self-contained folder a player can run

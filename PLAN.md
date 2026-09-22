@@ -40,6 +40,24 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 ## Current status (as of this session)
 
+- ✅ **The tree layout was reorganised: every config the build reads is under
+  `config/`, and the upstream patches are under `patches/` (session 97).**
+  `config/config.{yaml,toml}` are the main splat and N64Recomp configs;
+  `config/banks/config-bank<U>.{yaml,toml}` are the 34 bank units;
+  `config/symbols/` holds `symbol_addrs*.txt`, `reloc_addrs.txt`,
+  `extra_syms.txt`, `relocatable_sections.txt` and the generated
+  `undefined_{syms,funcs}_auto.txt`; `config/rsp-{njpeg,audio}.toml` are the
+  RSPRecomp configs. The repo root dropped from 181 entries to 64. splat,
+  N64Recomp and RSPRecomp resolve paths relative to the config file's directory,
+  so `config/config.toml` uses `../build/...` and `../RecompiledFuncs`, and each
+  bank yaml sets `base_path: ../..`. Removed: the 10 `.ogre-prefs-*` run
+  sandboxes (400 MB of ROM copies), `.repro/`, `.DS_Store`, the tracked
+  splat-generated `ogrebattle64.d` (now gitignored), and the unreferenced
+  pre-streamed-overlay `ogrebattle64.yaml`. `make regenerate` from the moved
+  configs passes, and a fresh link of each affected bank unit from its original
+  config is byte-identical to the moved one. Handoff
+  `docs/HANDOFF-2026-09-22-session97.md`; `docs/HANDOFF-*.md` written before this
+  session name the old root paths.
 - ✅ **The Esc overlay has a DEBUG tab, and it shows the live Chaos Frame
   (session 95).** `ui::Tab::Debug` (`app/src/ui.hpp`) adds one read-only row,
   "Chaos Frame", to the shared launcher/overlay panel. The overlay samples the
@@ -165,7 +183,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   instead of killing the process, because `fflush(nullptr)` re-acquired a stdio
   stream lock the faulting thread already held. `recomp.cpp` now skips the RDRAM
   free when the run exits through `ultramodern::quit()` (landed in
-  `n64modernruntime-ob64.patch`), `main.cpp` runs the SDL teardown and then
+  `patches/n64modernruntime-ob64.patch`), `main.cpp` runs the SDL teardown and then
   `_Exit(EXIT_SUCCESS)` instead of running the C++ static destructors with those
   threads live, and the signal path no longer flushes and only runs the
   `printf`-based runtime dumps behind a non-blocking `ftrylockfile` probe.
@@ -235,7 +253,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   id into the pending-scene word, so the boot goes straight to the title. Built
   by `make mod-syms` + `make example-mods` and shipped by `make dist` when
   present. The example ships **off** (`enabled_by_default = false` in its
-  `mod.toml`; `RecompModTool` did not carry that field, so `n64recomp-ob64.patch`
+  `mod.toml`; `RecompModTool` did not carry that field, so `patches/n64recomp-ob64.patch`
   adds it), so a fresh package plays the vanilla boot until the player turns it
   on. Verified: the true baseline boots to the title at 27.7 s; with the mod
   enabled the title is at 3.0 s and renders correctly (capture), with the battery
@@ -243,7 +261,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   one frame leaves the title producing no display lists at all and the last
   presented frame on screen, because `0x0A`'s enter/leave touch overlay-C globals
   that only its completed state machine leaves consistent. Four runtime fixes
-  were needed and are in `n64modernruntime-ob64.patch`: the recompiler-context
+  were needed and are in `patches/n64modernruntime-ob64.patch`: the recompiler-context
   section index must be translated to a code-section index before a regenerated
   call is resolved; HI16/LO16 relocations against sections that hold no code must
   keep their absolute immediates; macOS cannot make the executable's `__TEXT`
@@ -261,7 +279,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   injected blocking `yield_self` at its outer loop's backward branch
   `0x801DA2C0` — the session-79/80 misclassified-poll-loop class. The frame-pump
   thread sat in it 99 % of every slow second and the display-list period was
-  237–275 ms. `0x801DA2C0` is now in `config-bankN.toml`'s
+  237–275 ms. `0x801DA2C0` is now in `config/banks/config-bankN.toml`'s
   `yield_work_loop_branches` beside session 80's `0x801B3008`; regenerating
   changes exactly one generated file (51 → 50 yield sites), the boot is
   unchanged, the screen's display-list p99 is 34 ms (was 209 ms), and the
@@ -283,10 +301,10 @@ hardware. RT64 remains the primary native renderer throughout. See
   clones and patches the runtime and the RT64/plume submodules, which the
   workflow never did before: both root patches apply cleanly to a fresh
   `N64ModernRuntime` clone at `589bbf01` and the patched clone is byte-identical
-  to `tools/N64ModernRuntime`, and `rt64-ob64.patch` plus the two plume patches
+  to `tools/N64ModernRuntime`, and `patches/rt64-ob64.patch` plus the two plume patches
   apply to pristine submodule copies. A full hosted run and the Linux Vulkan
   patch remain unverified. The Windows job failed at the RT64 patch step
-  (session 89b): a Windows checkout writes CRLF into both `rt64-ob64.patch` and
+  (session 89b): a Windows checkout writes CRLF into both `patches/rt64-ob64.patch` and
   the RT64 tree, and `git apply` then cannot match the two hunks whose last line
   has no newline (`\ No newline at end of file`) — `rt64_tmem_hasher.h:203` and
   `rt64_native_target.cpp:369`, the two failing hunks reported by the job. Root
@@ -334,7 +352,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   `cmake -E tar --format=zip`, since Git Bash for Windows ships no `zip`.
   Verified: from-scratch macOS builds of the committed tree plus these changes
   package both archives, including one with SDL2 installed in the MSVC layout
-  (`SDL_INSTALL_CMAKEDIR=cmake`); the regenerated `rt64-ob64.patch` applies to
+  (`SDL_INSTALL_CMAKEDIR=cmake`); the regenerated `patches/rt64-ob64.patch` applies to
   pristine RT64 `4337374` and reproduces the working tree. The MSVC compile of
   the game code past RT64's configure has not been observed.
   See `docs/guides/app-build.md` → Releases and `docs/DECISIONS.md` (89c).
@@ -385,7 +403,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   the developer meant by *"a special menu for saves"*. In the port the scene
   entered and stayed **black**: its enter `func_8017BA60` chunk-DMAs unit H
   (ROM `0x712A0` → RAM `0x8019A7C0`) and then `jal 0x8019D67C`, but
-  `config.toml` extends `func_8019D568` to `0xCB0`, swallowing `0x8019D67C`, so
+  `config/config.toml` extends `func_8019D568` to `0xCB0`, swallowing `0x8019D67C`, so
   N64Recomp bound the call to `func_8019D568` and emitted the
   redirect-plus-early-`return` shape — the enter returned before the menu
   initialised (no display lists at all; every captured frame measured
@@ -490,7 +508,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   Frame** total (scene `0x13`) and return to the attract loop — developer
   confirmed ("it worked!! there were some artifacts in the rendered
   backgrounds, but you've done it!!"). The causes are all the session-41 class
-  and all in **`config.toml`**, each producing a `jal`-into-a-body-interior
+  and all in **`config/config.toml`**, each producing a `jal`-into-a-body-interior
   early `return` or a dropped `jr ra` delay slot (so the caller's frame leaked
   and t4's saved comparator died): `func_801AB76C` `0x22C`→`0x4` (swallowed the
   real `func_801AB770`, the credits text drawer called by `func_801AB998`),
@@ -686,7 +704,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   recorded in the handoff (mupen64plus-core forwards raw VI registers; GLideN64
   and angrylion present a fixed window from `VI_ORIGIN`, where RT64 subtracts one
   row — a separate fidelity item, not this fix; GLideN64's `enableTexCoordBounds`
-  has no RT64 equivalent). Both halves are now declared in `rt64-ob64.patch` — it
+  has no RT64 equivalent). Both halves are now declared in `patches/rt64-ob64.patch` — it
   was **stale** and did not carry them (`rt64_vi_renderer.cpp` was missing from the
   patch entirely, so a fresh checkout applying it lost the fix); it was regenerated
   and verified to apply to a pristine `tools/RT64` HEAD, and `OGRE_OVERSCAN` is now
@@ -699,9 +717,9 @@ hardware. RT64 remains the primary native renderer throughout. See
   body load (`lwc1 $f2, 8($s0)`) has a loop-invariant base, and `yield_self`
   blocks until an external message arrives (≈ one VI retrace, 16.7 ms), so a
   ~22-entity scan cost 0.4–0.7 s per frame (30 → 1.4 display lists/s). The fix
-  is **scoped, not a heuristic rewrite**: `config-bankN.toml` now carries
+  is **scoped, not a heuristic rewrite**: `config/banks/config-bankN.toml` now carries
   `yield_work_loop_branches = [0x801B3008]`, a new N64Recomp option (see
-  `n64recomp-ob64.patch`) that says "this backward branch is a work loop, not a
+  `patches/n64recomp-ob64.patch`) that says "this backward branch is a work loop, not a
   poll loop — emit no yield here". Regeneration changes **exactly one generated
   file** (`BankNFuncs/funcs_3.c`, one line removed) and **52 → 51 yield sites**;
   every other generated file is byte-identical, and the boot's scene timeline is
@@ -780,7 +798,7 @@ hardware. RT64 remains the primary native renderer throughout. See
   internal name `OgreBattle64`.
 - ✅ Boot stub disassembled: clears BSS `0x800AEDB0..0x800E9C20`, stack at
   `0x800C6D60`, jumps to `main` at `0x8007F880`.
-- ✅ splat-based disassembly (see `config.yaml`): main code segment ROM `0x1000..`
+- ✅ splat-based disassembly (see `config/config.yaml`): main code segment ROM `0x1000..`
   mapped at `0x80070C00+`; ~185 KB of code split into `asm/`.
 - ✅ ELF built (`make`): `build/ogrebattle64.elf` with relocations
   (`--emit-relocs`) and correct vram/ROM section mapping.
@@ -799,7 +817,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     **boots without crashing** (2026-08-24, session 3): 7 N64 threads start,
     the VI thread swaps buffers at ~50-60 Hz, and the game runs its init.
   - ✅ **Libultra bridging (first 3 batches)**: 24 libultra functions named in
-    `symbol_addrs.txt` so the runtime's native `osXxx_recomp` services replace
+    `config/symbols/symbol_addrs.txt` so the runtime's native `osXxx_recomp` services replace
     OB64's verbatim libultra (see `docs/LIBULTRA-BRIDGING.md`). Also fixed a
     runtime bug in the initial 1MB DMA (sign-extension of the entrypoint).
   - ✅ **Libultra bridging (batches 4-6, session 4)**: osCont family + timers +
@@ -832,7 +850,7 @@ hardware. RT64 remains the primary native renderer throughout. See
       (ROM 0x40E80 → RAM 0x8016AF80); a third, C (ROM 0x1CE040 → RAM
       0x80197B90), is loaded on-demand by the game's streamed loader (segment
       table at ROM 0x387C0).
-    - ✅ `config.yaml` now disassembles A/B/C as code segments (+ data at
+    - ✅ `config/config.yaml` now disassembles A/B/C as code segments (+ data at
       0x40640/0x5C230/0x1EE540); the bin gaps (0x66E30, 0x1F0A00) are pinned to
       their ROM address so they don't occupy RDRAM VMA space. Overlay C needed
       `bss_size` + a `.bss` subsegment for its 0x801BA550 tail.
@@ -1065,7 +1083,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     `func_801A103C` as its own symbol, so N64Recomp compiled a 2-instruction
     stub that returned immediately and the 13 texture records at `base+0x6C0`
     (11 soldier objects + record 10, the object the script walks downward = the
-    fall) were never created. `config.toml` now overrides
+    fall) were never created. `config/config.toml` now overrides
     `func_801A1034 = 0x13C`; with it all 13 records exist with real object
     pointers, `flag=255` on 0-10, and record 10 animating (`x=124 y=-144`).
     `OGRE_SCENE_TRACE=1` shows this live. See
@@ -1288,7 +1306,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     low RDRAM window into it; the port's `recomp_mem_addr` computed
     `a - 0x80000000` and faulted ~2 GiB below the buffer. **Fix:** return
     `a & 0x003FFFFF` for `a < 0x80000000` (recorded in
-    `n64modernruntime-n64recomp.patch`). Effect: the step-2 enter completes —
+    `patches/n64modernruntime-n64recomp.patch`). Effect: the step-2 enter completes —
     the null build runs the scene 110 s with no crash (it died in one frame
     before), the movie still renders, Tutorial/attract unchanged. **Next wall:**
     the RT64 build dies in `do_send` (SIGBUS, guest `0xFE6E2C89`): the guest's PI
@@ -1390,7 +1408,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     ELF), so N64Recomp bound the calls to overlay C's bodies at those addresses
     (of the module's 24 internal `jal` targets, **0** were main-ELF entries) and
     the form drew nothing. The module is now **bank unit H**
-    (`config-bankH.yaml`/`.toml`, `BANK_UNITS` gains `H`; code/data split at ROM
+    (`config/banks/config-bankH.yaml`/`.toml`, `BANK_UNITS` gains `H`; code/data split at ROM
     `0x783C0`, where splat also puts it), and the six calls from resident code
     into it are dispatched (`LOOKUP_FUNC`) from `make recomp`'s `--only` list.
     `tools/cross_bank.py`'s `overloaded()` had a bug that hid the range
@@ -1461,7 +1479,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     58)** — session 57's next lead, done. Scene `0x16` (descriptor `0x8018FC00`,
     mask `0x400`) chunk-DMAs ROM `0x244770` (0x7500, 59 × 0x200) → RAM
     `0x801D0860` (record 10's arena). It is now **bank unit I**
-    (`config-bankI.yaml`/`.toml`: code `0x244770..0x24B3E0`, data to the module
+    (`config/banks/config-bankI.yaml`/`.toml`: code `0x244770..0x24B3E0`, data to the module
     end `0x801D7D60`, 43 functions), and `bankRec10a` — the *other bank* of that
     RAM — moved out of unit C into **unit J** (`BANK_UNITS := … I J`), because a
     unit cannot hold overlapping records and unit C's own code calls into that
@@ -1776,7 +1794,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     `[bank] UNKNOWN module` + `[overlays] streamed function stub called @
     0x80215C38`, and the mission's intro hung on a garbled target-fort draw whose
     winning-condition NOTE never advanced. It is now **bank unit R**
-    (`config-bankR.yaml`/`.toml`, `symbol_addrs-bankR.txt`), and the natural route
+    (`config/banks/config-bankR.yaml`/`.toml`, `config/symbols/symbol_addrs-bankR.txt`), and the natural route
     runs the whole intro — camera pan, winning condition, panic back, losing
     condition, `MISSION START` — with **0 UNKNOWN modules and 0 stub calls**
     (`docs/proofs/native-mission-intro-win-natural.png`,
@@ -1928,7 +1946,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     `0x8022ACB0`, unit L's), so every call from unit C's code into the high half
     was bound to record 13's layout — the session-45/67/72 mis-binding class. It
     is now **bank unit AG** (`bankRec16b`, ROM `0x279FF0`, `0x7840` → RAM
-    `0x802258B0`; `config-bankAG.*`, `symbol_addrs-bankAG.txt`, `BANK_UNITS`),
+    `0x802258B0`; `config-bankAG.*`, `config/symbols/symbol_addrs-bankAG.txt`, `BANK_UNITS`),
     and with it scene `0x14` **renders with 0 stubs** and
     `runlog --check` PASSes: **the Witch's Den**, *"Old Witch / Heh heh heh…
     Can I help you?"*, `WAR FUNDS 0001000 Goth`
@@ -1955,7 +1973,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     `jr 0x1080`. Compiling at `0x1000` (session 74) put every absolute
     `j`/`beq` target 0x80 bytes off, so the driver's command-list DMA helper was
     entered mid-instruction and `$29`/`$30` were never set. With `0x1080` the
-    driver dispatches its real command ABI. `rsp-audio.toml` is now
+    driver dispatches its real command ABI. `config/rsp-audio.toml` is now
     `text_offset 0x2E450`, `text_size 0xC60` (`0xF80` would compile the boot
     loader's own bytes into the image and emit `goto L_1064`-style undeclared
     labels), `text_address 0x1080`, plus
@@ -1965,7 +1983,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     stream is the standard aspMain ABI (CLEARBUFF/LOADBUFF/SAVEBUFF/MIXER/
     INTERLEAVE/LOADADPCM); opcodes 7/8 are 0 in the game's table (no
     SEGMENT/SETBUFF). Session 74's four RSPRecomp fixes stay in
-    `n64recomp-ob64.patch`. `tools/runlog.py` now classifies `M_GFXTASK`=1 /
+    `patches/n64recomp-ob64.patch`. `tools/runlog.py` now classifies `M_GFXTASK`=1 /
     `M_AUDTASK`=2 (it had treated type 2 as gfx) and fails `--check` on any
     non-gfx task served by the stub. **One rough edge, found by chasing a 1-in-25
     crash:** the game's own `SETLOOP` (op 0x0F) stores its loop address as a word
@@ -1991,7 +2009,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     the queue empties. A measured sweep (0/36/52/69 ms → 34.0/58.5/58.0/58.0
     pushes/s, empty pushes 68/15/0/0) picked 52 ms. Final: **58.0 pushes/s = the
     DAC rate, 0 underruns, queue 2–57 ms**. Carried in
-    `n64modernruntime-ob64.patch` (regenerate with the nested `N64Recomp`
+    `patches/n64modernruntime-ob64.patch` (regenerate with the nested `N64Recomp`
     submodule excluded). See
     `docs/HANDOFF-2026-09-18-session76.md`. **Other open follow-ups:** the
     runtime still wakes the game's audio thread with the session-16 dummy
@@ -2069,7 +2087,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     **Only three functions needed bridging**, because the game's PFS is libultra
     the ROM already contains and `make recomp` already compiles: the SI-touching
     `__osContRamRead` `0x80097BD0`, `__osContRamWrite` `0x80097DC0`,
-    `__osPfsGetStatus` `0x80096EC0` (`symbol_addrs.txt` + N64Recomp's
+    `__osPfsGetStatus` `0x80096EC0` (`config/symbols/symbol_addrs.txt` + N64Recomp's
     `reimplemented_funcs`). `osContInit` now reports a pak in controller 1
     (`Pak::ControllerPak`). **The gate:** the pak API is called from **unit H
     only** (the form/UI module) — `func_ovlH_8019C69C` and the three screens
@@ -2181,7 +2199,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     (they are the game's hi-res mode) but scanned out with the runtime's dummy
     320x240 VI geometry, so only the top-left quarter of the RDP framebuffer
     reached the screen. The cause was a **mis-named libultra symbol**: the
-    function at `0x80095820` that `symbol_addrs.txt` called `osViSetMode` is
+    function at `0x80095820` that `config/symbols/symbol_addrs.txt` called `osViSetMode` is
     really `__osViSwapContext`, and the *real* `osViSetMode` (which stores the
     game's `OSViMode` pointer) is `func_800955C0` and was never named — so the
     runtime never learned the game's VI mode and stayed on its dummy mode.
@@ -2207,7 +2225,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     banks at ROM `0x38AB8`, pointer array at `0x38AFC`) are now decoded, and the
     records the game swaps in at t≈95s are entries 2, 3 and 6. Because their
     RAM ranges overlap overlay C's, they are recompiled in a **separate unit**
-    (`config-bankA.yaml` → `build/bankA.elf` → `config-bankA.toml` →
+    (`config/banks/config-bankA.yaml` → `build/bankA.elf` → `config/banks/config-bankA.toml` →
     `BankAFuncs/`) linked at their true RAM addresses with an `ovlA_` symbol
     prefix; `app/src/bank_overlays.cpp` registers a record's functions when the
     game DMA's it and drops whatever bank occupied that RAM. The runtime gained
@@ -2222,7 +2240,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     transition (t≈360.7s) runs scene `0x0C`, whose descriptor at `0x8018FB58`
     carries **record mask `0x3C00` = records 10, 11, 12, 13**. Uncompiled, its
     entry returned through the streamed stub and the scene bounced back to the
-    title. Those four records are now **bank unit C** (`config-bankC.yaml`,
+    title. Those four records are now **bank unit C** (`config/banks/config-bankC.yaml`,
     `BankCFuncs/`, 848 functions). Units are partitioned by *RAM*, not by game
     bank: records whose RAM ranges overlap cannot share an ELF.
   - ✅ **Overlays stream more code into a per-record arena (session 33)**: a
@@ -2280,7 +2298,7 @@ hardware. RT64 remains the primary native renderer throughout. See
     colour across seconds of captures). The new ground truth is
     `OGRE_CAPTURE_PRESENT=<path>`: RT64 GPU-reads back the exact swap-chain
     texture it presents (texture -> buffer readback added to plume's Metal
-    backend; `rt64-plume-ob64.patch`). With that, the synthetic-frame probe
+    backend; `patches/rt64-plume-ob64.patch`). With that, the synthetic-frame probe
     shows the seven bars end to end in **both** paths - the RDRAM upload path
     and the real RDP display-list path - and the result is
     `docs/proofs/native-synth-frame-rdp.png`. Four display-list encoding bugs
@@ -2341,7 +2359,7 @@ hardware. RT64 remains the primary native renderer throughout. See
 
 Our N64Recomp modifications (cop0 register support, TLB/ERET/cache instructions,
 cross-function branch handling, overlay-target function lookup) are in
-`n64recomp-ob64.patch`; apply with `git apply` after cloning upstream.
+`patches/n64recomp-ob64.patch`; apply with `git apply` after cloning upstream.
 
 ## Reproduce (macOS)
 
@@ -2360,7 +2378,7 @@ cmake --build tools/N64Recomp/build --target N64RecompCLI -j4
 # 2. ROM: place your big-endian dump at assets/ogre64.z64
 
 # 3. Disassemble + link + recompile
-tools/venv/bin/splat split config.yaml   # regenerate asm/
+tools/venv/bin/splat split config/config.yaml   # regenerate asm/
 make                                    # assemble .s, link ELF
 make recomp                             # generate RecompiledFuncs/*.c
 ```

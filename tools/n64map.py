@@ -5,8 +5,8 @@ Every session re-derives `vram = rom - 0x1060 + 0x80070C60`, then asks "which
 record owns this address / is this a function entry?". This module answers that
 from the repo's own build inputs:
 
-* `config.yaml`                 -> the main + boot-resident/streamed overlays
-* `config-bank*.yaml`           -> the streamed records (per unit)
+* `config/config.yaml`          -> the main + boot-resident/streamed overlays
+* `config/banks/config-bank*.yaml` -> the streamed records (per unit)
 * `app/src/bank_funcs.inc`      -> the runtime's record table, with unit +
                                    record names (this is the authoritative
                                    "who owns this RAM" for the bank units)
@@ -311,8 +311,8 @@ def _parse_main_overlays(text: str) -> list[Segment]:
 
 def load_map() -> Map:
     m = Map()
-    for path, kind in ((ROOT / "config.yaml", "main"),
-                       *((ROOT / ("config-bank%s.yaml" % u), "record")
+    for path, kind in ((ROOT / "config/config.yaml", "main"),
+                       *((ROOT / ("config/banks/config-bank%s.yaml" % u), "record")
                          for u in "ABCDEFG")):
         if not path.exists():
             continue

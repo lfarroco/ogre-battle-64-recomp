@@ -1,0 +1,76 @@
+# Secondary splat config: streamed-overlay bank unit F (Phase 4).
+#
+# Unit F holds one record-14 arena module: the one the game streams into the
+# record-14 arena for scene 0x0D's *first* visit (the New Game movie):
+#
+#   bankRec14b ROM 0x2AE390 (0xA7E0) -> RAM 0x802395E0
+#
+# Why not in unit C with the rest of record 14: the game streams a *second*
+# module to the very same RAM for the later steps of the New Game sequence:
+#
+#   bankRec14c ROM 0x2A8CF0 (0x56A0) -> RAM 0x802395E0   (unit G)
+#
+# Two records that occupy the same RAM cannot share an ELF, so rec14b is unit F
+# and rec14c is unit G. Keeping *both* out of unit C is what makes unit C's call
+# sites into 0x802395E0+ compile as runtime lookups: N64Recomp resolves a `jal`
+# to a function defined in the same ELF as a direct C call, so while rec14b was
+# part of unit C the 95 calls from records 14/14a into the arena were bound to
+# rec14b's bodies — which are a different layout (bodies, not entries) from
+# rec14c's, and ran with no prologue when rec14c was resident. Session 45's wall
+# (`jal 0x80239C24` from the step-descriptor interpreter corrupting the
+# interpreter's frame) is that mis-binding.
+#
+# See config/banks/config-bankA.yaml for the model and docs/HANDOFF-2026-09-15-session45.md.
+
+name: Ogre Battle 64 - streamed overlay bank unit F
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankF
+  target_path: assets/ogre64.z64
+  elf_path: build/bankF.elf
+  base_path: ../..
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankF/asm
+  build_path: build/bankF
+  asset_path: build/bankF/assets
+  ld_script_path: build/bankF.ld
+  undefined_syms_auto_path: build/bankF/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankF/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlF_$VRAM"
+  symbol_name_format_no_rom: "ovlF_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Record 14's arena module for the first 0x0D visit (all code, chunk-DMA'd).
+  - name: bankRec14b
+    type: code
+    start: 0x2AE390
+    vram: 0x802395E0
+    subsegments:
+      - [0x2AE390, asm]
+
+  - [0x2B8B70]

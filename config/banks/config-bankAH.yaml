@@ -1,0 +1,95 @@
+# Secondary splat config: streamed-overlay bank unit AH (Phase 4).
+#
+# Unit AH holds the small **battle/setup fragment** that scene `0x0E`'s enter
+# (`func_80177754`, and the same arm in scene `0x0D`'s enter `func_80178568`)
+# chunk-DMAs into record 10's arena:
+#
+#   bankRec10s  ROM 0x23a370 (0x00e80) -> RAM 0x801d0860
+#
+# It sits in the ROM between unit J's `bankRec10a` (ROM 0x213AE0, ends 0x23A250)
+# and unit X's battle bank (ROM 0x22A250..0x23A370, which ends exactly at this
+# fragment's start; scene 0x14's enter re-copies its last 0x120 bytes), and
+# `bankRec10b` (ROM 0x23B1F0, unit C). Its RAM range 0x801D0860..0x801D16E0 is a
+# sub-range of unit J's, i.e. another *bank* of the same range, so it cannot live
+# in J (nor in unit I) — the session-45 rule: a swappable range must not be
+# defined in a unit whose own code calls into it.
+#
+# The game's own boundaries (scene 0x0E's enter at `0x8017779c`/`0x801777c4`,
+# identical in scene 0x0D's enter at `0x801785d8`):
+#
+#   code  RAM 0x801d0860..0x801d16d0  (func_ovlAH_801D0860/0AAC/1508)
+#   data  RAM 0x801d16d0..0x801d16e0  (16 zero bytes)
+#   DMA   func_8009DA50(0x23a370, 0x801d0860, 0xe80)
+#   bss   none (RAM end 0x801d16e0 = ram + size)
+#
+# The port had no functions for it, so scene 0x0E's `jal 0x801D0AAC` /
+# `0x801D1508` (and `func_801D0860`) hit the runtime's streamed stub: the
+# battle's participant table was never initialised. Normal battles still work
+# (their units already exist on the field); a **neutral encounter**'s wild unit
+# is created here, so the battle began with an empty enemy side and ended in an
+# instant victory (session 82).
+#
+# Code size 0xE70 is a multiple of 16 (no assembler pad). See config/banks/config-bankI.yaml
+# for the same-RAM sibling and config/banks/config-bankA.yaml for the model.
+
+name: Ogre Battle 64 - streamed overlay bank unit AH
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankAH
+  target_path: assets/ogre64.z64
+  elf_path: build/bankAH.elf
+  base_path: ../..
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankAH/asm
+  build_path: build/bankAH
+  asset_path: build/bankAH/assets
+  ld_script_path: build/bankAH.ld
+  undefined_syms_auto_path: build/bankAH/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankAH/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs-bankAH.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlAH_$VRAM"
+  symbol_name_format_no_rom: "ovlAH_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Everything up to this module: unit J's bankRec10a (the other bank of RAM
+  # 0x801D0860) and the 0x120 pointer blob at 0x23A250 are different modules.
+  - type: bin
+    start: 0x213AE0
+    vram: 0x213AE0
+
+  # The battle/setup fragment scene 0x0E streams: code 0xE70 (-> 0x801D16D0),
+  # data 0x10 (-> 0x801D16E0, the module's RAM end).
+  - name: bankRec10s
+    type: code
+    start: 0x23A370
+    vram: 0x801D0860
+    subsegments:
+      - [0x23A370, asm]
+      - [0x23B1E0, data]
+
+  # Rest of the ROM: bankRec10b (ROM 0x23B1F0) starts unit C's records.
+  - [0x23B1F0]

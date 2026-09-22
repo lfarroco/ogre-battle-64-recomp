@@ -1,0 +1,91 @@
+# Secondary splat config: streamed-overlay bank unit W (Phase 4).
+#
+# Unit W holds the **sixth** bank of record 9's arena — the module the mission
+# streams when combat begins. The same RAM 0x80214FA0 holds units P/Q/R and the
+# settings menu (unit V):
+#
+#   rec9c  ROM 0x165FE0 (0x0BEE0) -> RAM 0x80214FA0   (unit Q)
+#   rec9b  ROM 0x171EC0 (0x06200) -> RAM 0x80214FA0   (unit P)
+#   rec9f  ROM 0x17F9E0 (0x091A0) -> RAM 0x80214FA0   (this unit)
+#   rec9d  ROM 0x195430 (0x02380) -> RAM 0x80214FA0   (unit R)
+#   rec9e  ROM 0x1A4BE0 (0x14680) -> RAM 0x80214FA0   (unit V, settings)
+#
+# Found (session 72) from a developer-driven combat run: entering a battle on
+# the mission (scene 0x03, descriptor 0x8018F350) streamed this module and the
+# port logged
+#
+#   [bank] UNKNOWN module rom=0x17F9E0 ram=0x80214FA0 (0x80214FA0 is also where rom=0x171EC0 loads)
+#   [overlays] streamed function stub called @ 0x80217690 / @ 0x80217660
+#
+# The loader is unit N's own code (`func_ovlN_801B9694+0x163c` tail at
+# 0x801BAD0C):
+#
+#   func_800900C0(0x80214FA0, 0x802178D0-0x80214FA0 = 0x2930)   ; code icache
+#   func_80090010(0x802178D0, 0x8021E140-0x802178D0 = 0x6870)  ; data dcache
+#   func_8009DA50(rom=0x17F9E0, ram=0x80214FA0, size=0x188B80-0x17F9E0 = 0x91A0)
+#   func_80093380(0x8021E140, 0x8021E150-0x8021E140 = 0x10)    ; zero bss
+#
+# So code is ROM 0x17F9E0..0x182310 -> RAM 0x80214FA0..0x802178D0, data to
+# RAM 0x8021E140 and BSS to 0x8021E150. The module's data half is graphic/tile
+# data (font/icon-shaped byte runs) with no plain strings; it is a code module
+# (the loader invalidates icache and the mission `jal`s its entries).
+#
+# The three addresses unit N calls that are real entries in this module's own
+# layout are forced in config/symbols/symbol_addrs-bankW.txt: 0x8021552C, 0x80217660,
+# 0x80217690. Code size 0x2930 is a multiple of 16 (no assembler pad).
+#
+# See config/banks/config-bankA.yaml for the model, config/banks/config-bankV.yaml for the sibling.
+
+name: Ogre Battle 64 - streamed overlay bank unit W
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankW
+  target_path: assets/ogre64.z64
+  elf_path: build/bankW.elf
+  base_path: ../..
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankW/asm
+  build_path: build/bankW
+  asset_path: build/bankW/assets
+  ld_script_path: build/bankW.ld
+  undefined_syms_auto_path: build/bankW/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankW/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs-bankW.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlW_$VRAM"
+  symbol_name_format_no_rom: "ovlW_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's ROM position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # The combat bank: code to the loader's dcache base, then the data half.
+  - name: bankRec9f
+    type: code
+    start: 0x17F9E0
+    vram: 0x80214FA0
+    subsegments:
+      - [0x17F9E0, asm]
+      - [0x182310, data]
+
+  # The loader's size ends here (ROM 0x188B80); unit R (ROM 0x195430) follows.
+  - [0x188B80]

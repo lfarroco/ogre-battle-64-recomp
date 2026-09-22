@@ -1,0 +1,20 @@
+# N64Recomp config for streamed-overlay bank unit L (Phase 4).
+# See config/banks/config-bankC.toml for the model; this unit holds bankRec14a, one of the
+# banks of RAM 0x8022ACB0 (the other is unit K's bankRec14d, the chapter
+# animation module). bankRec14a was part of unit C until this session.
+
+[input]
+output_func_path = "../../BankLFuncs"
+elf_path = "../../build/bankL.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+# Moved here with bankRec14a from config/banks/config-bankC.toml (session 45's session-39
+# note): the switch's case labels run past splat's 0x24C cap, and with the cap
+# N64Recomp sees zero in-function table entries and fails outright.
+function_sizes = [
+    { name = "func_ovlL_8022EA08", size = 0x4CC },
+]

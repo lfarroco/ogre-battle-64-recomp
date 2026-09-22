@@ -1,0 +1,17 @@
+# N64Recomp config for streamed-overlay bank unit I (Phase 4).
+# See config/banks/config-bankC.toml for the model; this unit holds the module scene 0x16
+# (the New Game opening's closing movie) streams into record 10's arena, plus
+# bankRec10a, the module that occupies the same RAM for other scenes.
+
+[input]
+output_func_path = "../../BankIFuncs"
+elf_path = "../../build/bankI.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+# No size overrides yet: splat splits both records cleanly (checked with
+# `make midfunc`-style prologue inspection and by compiling the unit).
+function_sizes = []

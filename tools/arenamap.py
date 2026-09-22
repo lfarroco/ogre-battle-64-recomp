@@ -28,14 +28,14 @@ next bank of the same arena (session 72's unit V, session 59's rule).
 
 Two things make a bank "missing":
 
-* no `config-bank<U>.yaml` covers its ROM start, so nothing is compiled, or
+* no `config/banks/config-bank<U>.yaml` covers its ROM start, so nothing is compiled, or
 * a unit covers its ROM start but with the wrong size, so its ELF runs into the
   next bank.
 
 And two things make calls into it mis-bind (AGENTS §4 / the load-bearing facts):
 a unit must not define a RAM range another bank can own *and* call into it, so
 every call target inside a bank's range that is a real function start in *that*
-bank's layout must be forced as an entry in `symbol_addrs-bank<U>.txt`.
+bank's layout must be forced as an entry in `config/symbols/symbol_addrs-bank<U>.txt`.
 
 **The loader pattern is not the whole map.** The game also loads banks from
 descriptor tables, where the addresses are data and no `jal 0x8009DA50` with a
@@ -631,7 +631,7 @@ def find_loaders(elf: Elf, sites: list[CallSite]) -> dict[int, list[CallSite]]:
 
 
 # ---------------------------------------------------------------------------
-# Unit coverage (config-bank<U>.yaml)
+# Unit coverage (config/banks/config-bank<U>.yaml)
 # ---------------------------------------------------------------------------
 
 
@@ -664,7 +664,7 @@ def read_unit_ranges(unit: str) -> list[UnitRange]:
     took the next `- [0x...]` marker as the end, and unit J does not end where
     its own record does.
     """
-    path = ROOT / f"config-bank{unit}.yaml"
+    path = ROOT / "config/banks" / f"config-bank{unit}.yaml"
     elf = ROOT / f"build/bank{unit}.elf"
     if not path.exists() or not elf.exists():
         return []
@@ -721,7 +721,7 @@ def read_unit_ranges(unit: str) -> list[UnitRange]:
     return out
 
 
-MAIN_SPLITS = {  # streamedA/B code/data boundaries from config.yaml
+MAIN_SPLITS = {  # streamedA/B code/data boundaries from config/config.yaml
     0x03F1B0: (0x1490, 0x840),
     0x040E80: (0x1B3B0, 0xAC00),
 }
@@ -814,7 +814,7 @@ def entry_candidates(
 
     `entries` is the *bank's* set of real function starts, so `real_start`
     answers "is this a real entry in that bank's layout" — the only kind of
-    address that may be forced in `symbol_addrs-bank<U>.txt` (a `LOOKUP_FUNC`
+    address that may be forced in `config/symbols/symbol_addrs-bank<U>.txt` (a `LOOKUP_FUNC`
     onto a body interior is a silent no-op; session 67).
     """
     out: dict[int, Entry] = {}
@@ -1112,7 +1112,7 @@ def build_caller_index(elfs: list[Elf], ranges: list[UnitRange]) -> list[CallerR
 
     A `jal` from a section that also defines the target's RAM is bound at build
     time (no `LOOKUP_FUNC`), so only calls *from a different record* can mis-bind
-    — that is the set `symbol_addrs-bank<U>.txt` has to declare.
+    — that is the set `config/symbols/symbol_addrs-bank<U>.txt` has to declare.
     """
     out: list[CallerRecord] = []
     by_elf_unit: dict[str, str] = {f"bank{u}.elf": u for u in unit_names(ranges)}
@@ -1173,7 +1173,7 @@ def entry_targets(
         # What the unit already declares.
         forced_addrs: set[int] = set()
         if b.unit is not None:
-            symfile = ROOT / f"symbol_addrs-bank{b.unit.unit}.txt"
+            symfile = ROOT / "config/symbols" / f"symbol_addrs-bank{b.unit.unit}.txt"
             if symfile.exists():
                 for m in re.finditer(
                     r"(?:func|D)_ovl\w*_([0-9A-Fa-f]{8})\s*=",

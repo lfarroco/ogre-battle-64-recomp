@@ -44,15 +44,25 @@ See [PLAN.md](PLAN.md) for the full plan, current status, and technical findings
 ```
 assets/                your ROM (gitignored; big-endian .z64 expected)
 asm/                   splat-generated disassembly
+config/                every config the build reads
+config/config.yaml     splat config (segments, vram mapping)
+config/config.toml     N64Recomp config
+config/banks/          per-unit splat + N64Recomp configs (config-bank<U>.{yaml,toml})
+config/symbols/        symbol_addrs*.txt, config/symbols/reloc_addrs.txt, config/symbols/extra_syms.txt,
+                       config/symbols/relocatable_sections.txt, the generated undefined_*.txt
+config/rsp-*.toml      RSPRecomp configs (njpeg, audio)
 debug/                 headless-browser probes for the wasm build (see debug/README.md)
-config.yaml            splat config (segments, vram mapping)
-config.toml            N64Recomp config
+patches/               our upstream patches (N64Recomp, N64ModernRuntime, RT64)
 Makefile               assemble + link + recompile
-n64recomp-ob64.patch   our N64Recomp modifications (apply to upstream clone)
-rt64-plume-sdl.patch   our RT64 plume patch — SDL >= 2.0.22 guard (apply to the
+tools/rt64-plume-sdl.patch
+                       our RT64 plume patch — SDL >= 2.0.22 guard (apply to the
                        tools/RT64 submodule on systems with older SDL2, e.g. Ubuntu 22.04)
 PLAN.md                the project plan
 ```
+
+splat, N64Recomp and RSPRecomp resolve the paths inside a config relative to
+that config's directory, which is why the configs carry `../` entry points and
+why the bank configs set `base_path: ../..`.
 
 ## Getting started
 
@@ -63,7 +73,7 @@ See **Reproduce** in [PLAN.md](PLAN.md). Summary:
 brew install mips-linux-gnu-binutils cmake
 python3 -m venv tools/venv && tools/venv/bin/pip install 'splat64[mips]'
 git clone --recurse-submodules https://github.com/N64Recomp/N64Recomp.git tools/N64Recomp
-git -C tools/N64Recomp apply ../../n64recomp-ob64.patch
+git -C tools/N64Recomp apply ../../patches/n64recomp-ob64.patch
 cmake -S tools/N64Recomp -B tools/N64Recomp/build -DCMAKE_BUILD_TYPE=Release
 cmake --build tools/N64Recomp/build --target N64RecompCLI -j4
 

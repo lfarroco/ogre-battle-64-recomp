@@ -1,0 +1,103 @@
+# Secondary splat config: streamed-overlay bank unit M (Phase 4).
+#
+# Unit M holds the **second bank** of RAM 0x8019A7C0: the module scene `0x05`
+# streams there.
+#
+#   bankRec05  ROM 0x79750 (0xDAD0) -> RAM 0x8019A7C0 .. 0x801A8290
+#
+# The other bank is unit H (`bankRec07`, ROM 0x712A0, 0x84B0), which scene
+# `0x07` — the New Game name-entry form — streams to the same RAM. The two are
+# loaded by consecutive scene enters and neither may be defined in the unit
+# whose code calls them (session-45/55 rule; see config/banks/config-bankH.yaml and
+# config/banks/config-bankK.yaml).
+#
+# Instruction level (scene 0x05's enter `func_8017B60C`, `.streamedB`):
+#
+#   0x8017B614  a0 = 0x8019A7C0, a1 = 0x801B68B0  -> icache invalidate
+#   0x8017B644  a0 = 0x00079750, a1 = 0x8019A7C0, a2 = 0x00087220-0x00079750
+#               (`subu` at 0x8017B660)              -> func_8009DA50: DMA 0xDAD0
+#   0x8017B664  bss range 0x801A8290..0x801A8290 (empty; the beql skips the
+#               bzero)                             -> no BSS
+#   0x8017B6B0  jal 0x8019A7C0                     -> the module's entry
+#
+# Scene `0x07`'s enter (`func_8017B794`) is the same shape with
+# `a2 = 0x00079750 - 0x000712A0 = 0x84B0` — which is why unit H's segment now
+# ends at 0x79750 (it carried 0x798A0, the 67-chunk rounded figure, session 55).
+#
+# The code/data boundary is the module's own last function: the last `jr ra` is
+# at RAM 0x801A68A0 (ROM 0x85830, delay slot at 0x85834), and ROM 0x85838 is a
+# byte table (0x0203FFFF 0xFF030204 …) — the module's data half, to its end
+# 0x801A8290. The module has no BSS (the enter computes bss_start == bss_end).
+#
+# See config/banks/config-bankA.yaml for the model.
+
+name: Ogre Battle 64 - streamed overlay bank unit M
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankM
+  target_path: assets/ogre64.z64
+  elf_path: build/bankM.elf
+  base_path: ../..
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankM/asm
+  build_path: build/bankM
+  asset_path: build/bankM/assets
+  ld_script_path: build/bankM.ld
+  undefined_syms_auto_path: build/bankM/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankM/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlM_$VRAM"
+  symbol_name_format_no_rom: "ovlM_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Scene 0x05's module: code to the module's last `jr ra` (ROM 0x85838),
+  # then its data half (whose first 8 bytes are alignment padding — see below).
+  - name: bankRec05
+    type: code
+    start: 0x79750
+    vram: 0x8019A7C0
+    # The module's last function ends at ROM 0x85838 (RAM 0x801A68A8): `jr ra`
+    # at 0x85830, delay slot at 0x85834. **The data subsegment deliberately
+    # starts at 0x85840, not 0x85838** (session 65). `mips-linux-gnu-as` aligns
+    # `.text` to 16 bytes and pads the section to that boundary, so an `asm`
+    # subsegment of 0xC0E8 bytes assembles to 0xC0F0 and every data label would
+    # land 8 bytes above its ROM address (150 of unit M's 480 address-named
+    # symbols were +8). The `lui/%lo` pairs that reference them then read 8
+    # bytes too high at runtime: the sprite table `D_ovlM_801A6FD8` was read at
+    # 0x801A6FE0, shifting every sprite descriptor by one entry — the map's
+    # party drew a 16x11 crop of the 32x32 knight sheet, the shadow drew as the
+    # 144x23 party band, and the date plate drew as a 16x24 sliver. Ending the
+    # `asm` subsegment on the next 16-byte boundary makes the pad real ROM bytes
+    # (8 zeros at 0x85838, the module's alignment padding) and restores every
+    # data label. `make bank-recomp` then regenerates the correct immediates.
+    subsegments:
+      - [0x79750, asm]
+      - [0x85840, data]
+
+  # Unit H's bankRec07 (ROM 0x712A0, the other bank of this RAM) precedes; the
+  # next module in the ROM starts here.
+  - [0x87220]

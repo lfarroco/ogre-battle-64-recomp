@@ -48,7 +48,7 @@ recomp::do_rom_read(rdram, (gpr)(int32_t)entrypoint, 0x10001000, 0x100000);
 (The IPL3-var writes in `init()` already use `int32_t` constants and were
 correct; only the DMA call was wrong.)
 
-### Confirmed libultra address→name table (applied to `symbol_addrs.txt`)
+### Confirmed libultra address→name table (applied to `config/symbols/symbol_addrs.txt`)
 
 | Addr | Name | Basis | Session |
 |---|---|---|---|
@@ -83,7 +83,7 @@ correct; only the DMA call was wrong.)
 | 0x80090780 | `osVirtualToPhysical` | kseg0/kseg1 mask + range logic | 2 |
 | 0x8007F880 | `main` (renamed `main_recomp`) | — | — |
 
-Names in `symbol_addrs.txt`; the disassembly (`asm/1060.s`) now carries the
+Names in `config/symbols/symbol_addrs.txt`; the disassembly (`asm/1060.s`) now carries the
 labels; N64Recomp renames them to `<name>_recomp` and the runtime provides the
 implementations.
 
@@ -226,7 +226,7 @@ next phases (RSP microcode + RT64 renderer).
 
 ### Step 1 — Build the OB64 libultra address→name table (the core work)
 See *Identification methodology* below. Deliverable: a verified
-`(vram, name)` list applied to **`symbol_addrs.txt`** entries like:
+`(vram, name)` list applied to **`config/symbols/symbol_addrs.txt`** entries like:
 
 ```
 osCreateThread = 0x8009XXXX; // type:func
@@ -239,7 +239,7 @@ debugging). Functions not in the reimplemented set stay verbatim, which is fine.
 
 ### Step 2 — Regenerate & verify
 ```sh
-tools/venv/bin/splat split config.yaml   # re-splat with new symbols
+tools/venv/bin/splat split config/config.yaml   # re-splat with new symbols
 make                                     # assemble + link ELF
 make recomp                              # regenerate RecompiledFuncs/
 ```
@@ -307,7 +307,7 @@ Iterate on failures in this likely order:
 
 > Status update (session 3): the table in the "Progress" section above is the
 > current authoritative confirmed list. This original seed table is kept as the
-> identification record; entries that are now applied to `symbol_addrs.txt` are
+> identification record; entries that are now applied to `config/symbols/symbol_addrs.txt` are
 > marked ✔. The remaining entries are candidates for the `osCont*` family and
 > the thread/timer cluster (next session).
 

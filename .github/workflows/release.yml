@@ -198,7 +198,7 @@ jobs:
 
       # RT64 is a git submodule and is already here. tools/N64ModernRuntime is
       # gitignored, so a GitHub-hosted runner has none: clone the pinned
-      # upstream commit and apply the same two root patches a developer applies.
+      # upstream commit and apply the same two patches in patches/ a developer applies.
       # A self-hosted runner already has it and skips that.
       - name: Prepare third-party trees
         shell: bash
@@ -210,8 +210,8 @@ jobs:
             git clone https://github.com/N64Recomp/N64ModernRuntime.git tools/N64ModernRuntime
             git -C tools/N64ModernRuntime checkout "$N64MODERNRUNTIME_COMMIT"
             git -C tools/N64ModernRuntime submodule update --init --recursive
-            ( cd tools/N64ModernRuntime && git apply ../../n64modernruntime-ob64.patch )
-            ( cd tools/N64ModernRuntime/N64Recomp && git apply ../../../n64modernruntime-n64recomp.patch )
+            ( cd tools/N64ModernRuntime && git apply ../../patches/n64modernruntime-ob64.patch )
+            ( cd tools/N64ModernRuntime/N64Recomp && git apply ../../../patches/n64modernruntime-n64recomp.patch )
           fi
           if [ -f rt64-plume-sdl.patch ] && [ -d tools/RT64/src/contrib/plume ]; then
             git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch 2>/dev/null || true
@@ -231,7 +231,7 @@ jobs:
           # --ignore-whitespace compares the hunk context with the carriage
           # returns ignored. A Windows runner checks the submodule out with CRLF,
           # and without the flag `git apply` fails on a hunk whose last line has
-          # no newline (`\ No newline at end of file`; rt64-ob64.patch has two,
+          # no newline (`\ No newline at end of file`; patches/rt64-ob64.patch has two,
           # in rt64_tmem_hasher.h and rt64_native_target.cpp).
           apply_patch() {
             if ( cd "$1" && git apply --reverse --check --ignore-whitespace "$2" ) >/dev/null 2>&1; then
@@ -241,8 +241,8 @@ jobs:
               echo "==> applied $2"
             fi
           }
-          apply_patch tools/RT64 ../../rt64-ob64.patch
-          apply_patch tools/RT64/src/contrib/plume ../../../../../rt64-plume-ob64.patch
+          apply_patch tools/RT64 ../../patches/rt64-ob64.patch
+          apply_patch tools/RT64/src/contrib/plume ../../../../../patches/rt64-plume-ob64.patch
           apply_patch tools/RT64/src/contrib/plume ../../../../../tools/rt64-plume-sdl.patch
 
       # The runner images ship CMake and a C++ compiler, but not everything the

@@ -1,0 +1,11 @@
+# N64Recomp config for streamed-overlay bank unit E (Phase 4).
+# See config/banks/config-bankA.toml for the model; this unit holds record 0 (scene 0x02).
+
+[input]
+output_func_path = "../../BankEFuncs"
+elf_path = "../../build/bankE.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100

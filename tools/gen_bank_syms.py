@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Define data labels a bank unit references but splat did not emit.
 
-The arena modules (config-bankC.yaml, bankRec10a/b) are streamed code compiled as
+The arena modules (config/banks/config-bankC.yaml, bankRec10a/b) are streamed code compiled as
 `asm` sections. When that code references a data label inside the same module via
 a `%hi/%lo` pair, splat can create the *reference* without emitting the label's
 definition, which leaves the unit's link with undefined symbols.

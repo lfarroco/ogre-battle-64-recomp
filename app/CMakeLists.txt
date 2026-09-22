@@ -215,7 +215,7 @@ target_compile_options(ogrebattle64_recomp PRIVATE ${OGRE_GCC_FLAGS})
 # Non-graphics RSP tasks are run through recompiled microcode (src/rsp.cpp).
 # Today that is the game's Nintendo-JPEG decoder (M_NJPEGTASK, type 4) used for
 # the New Game opening's full-screen backgrounds; regenerate with
-# `make rsp-recomp` (rsp-njpeg.toml -> RspFuncs/njpeg_ucode.cpp). The generated
+# `make rsp-recomp` (config/rsp-njpeg.toml -> RspFuncs/njpeg_ucode.cpp). The generated
 # code is C++ (it uses librecomp's RSP VU implementation).
 file(GLOB RSP_RECOMP_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../RspFuncs/*.cpp)
 
@@ -242,7 +242,7 @@ if(RSP_RECOMP_SOURCES)
 endif()
 
 # --- Streamed-overlay bank units (Phase 4) ----------------------------------
-# Independent recompilations (config-bank<U>.yaml / .toml, built by
+# Independent recompilations (config/banks/config-bank<U>.yaml / .toml, built by
 # `make bank-recomp`) for the streamed overlay records the game loads into RAM
 # that overlay C also uses. They cannot share overlay C's VMAs in one ELF, so
 # each unit namespaces its symbols (`ovl<U>_`) and they are registered at runtime

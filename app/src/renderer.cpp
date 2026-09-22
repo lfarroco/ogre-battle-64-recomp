@@ -1037,7 +1037,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // rate (there is no such wait on hardware) and also drops the one-off
         // 500 ms stall on the run's first list. The RT64-side helper is left in
         // place (unused) so the submodule patch does not have to be regenerated;
-        // it can go with the next rt64-ob64.patch refresh.
+        // it can go with the next patches/rt64-ob64.patch refresh.
 
         // OGRE_DL_ANALYZE=1: walk the submitted display list with the app's own
         // F3DEX2 analyzer and report its geometry. "The cube is missing" is

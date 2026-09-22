@@ -1,0 +1,33 @@
+# N64Recomp config for streamed-overlay bank unit C (Phase 4).
+# See config/banks/config-bankA.toml for the model; this unit holds records 10, 11, 12, 13,
+# record 4 and record 14. Record 14's arena modules are *banks* of RAM
+# 0x8022ACB0 / 0x802395E0 and live in units of their own, not here: L
+# (bankRec14a), K (bankRec14d, the chapter-animation module), F (bankRec14b)
+# and G (bankRec14c) — see config/banks/config-bankK.yaml / config/banks/config-bankL.yaml.
+
+[input]
+output_func_path = "../../BankCFuncs"
+elf_path = "../../build/bankC.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+# function_sizes extends a piece splat capped (nonmatching size) in the middle
+# of a call-and-continue emission — the `goto after_N` then has no label and the
+# build fails with "use of undeclared label". N64Recomp redirects calls to
+# swallowed symbols into the extended body (resolve_jal/has_size_override), so
+# no map entry is lost.
+#
+# func_ovlC_8023BDA8 (rec14b) must NOT be extended over func_ovlC_8023BDC8
+# (session 39): BDC8 is a genuine shared-epilogue shim with its own callers
+# (jal from 0x80229138; the 0x8023BD80 jump to its BDD0 label), and BDA8 is a
+# genuine malloc-tail head with its own jal callers. Extending BDA8 to 0x54
+# redirected both into the head: the epilogue jump re-ran
+# malloc/memcpy/800712C4 with stale s-regs (0x0D list-unlink crash, N64 0x28B0)
+# and the shim callers ran the head instead of the two-move epilogue. Split,
+# BDA8 falls through into BDC8 via tail-call and the epilogue jump compiles to
+# a static duplicate. rec14b now lives in unit F, so that record's overrides
+# moved to config/banks/config-bankF.toml with it (session 45); the 0x8022EA08 switch
+# override moved to config/banks/config-bankL.toml with bankRec14a (this session).
+function_sizes = []

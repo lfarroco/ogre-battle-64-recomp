@@ -43,7 +43,7 @@ release-build.sh: the recompiled game code is missing:$missing
 It is not in the repository (it is generated from the ROM and gitignored), so
 this script cannot build without it. On a machine that has your ROM:
 
-    tools/venv/bin/splat split config.yaml     # once, if asm/ assets/ are absent
+    tools/venv/bin/splat split config/config.yaml   # once, if asm/ assets/ are absent
     make && make recomp && make bank-recomp
 
 Then run this script again. See docs/guides/app-build.md.
@@ -63,8 +63,8 @@ fi
 
 # The RT64 SDL compatibility patch is needed on systems with SDL < 2.0.22 and is
 # harmless elsewhere. Applying it twice fails, hence the `|| true`.
-if [ -f rt64-plume-sdl.patch ] && [ -d tools/RT64/src/contrib/plume ]; then
-    git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch >/dev/null 2>&1 || true
+if [ -f tools/rt64-plume-sdl.patch ] && [ -d tools/RT64/src/contrib/plume ]; then
+    git -C tools/RT64/src/contrib/plume apply ../../../../tools/rt64-plume-sdl.patch >/dev/null 2>&1 || true
 fi
 
 # --- build ------------------------------------------------------------------

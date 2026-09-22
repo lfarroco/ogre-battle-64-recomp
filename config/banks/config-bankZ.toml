@@ -1,0 +1,14 @@
+# N64Recomp config for streamed-overlay bank unit Z (Phase 4).
+# See config/banks/config-bankR.toml for the model. Record 9 arena bank:
+#   ROM 0x188b80 (0x65a0) -> RAM 0x80214FA0 (see config/banks/config-bankZ.yaml).
+
+[input]
+output_func_path = "../../BankZFuncs"
+elf_path = "../../build/bankZ.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+function_sizes = []

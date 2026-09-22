@@ -76,7 +76,7 @@ constexpr uint32_t kNjpegUcodeAddr = 0x8009ED80u;
 // it through the *standard libultra RSP boot code* at `task->t.ucode_boot =
 // 0x8009ECB0`: that loader DMAs `ucode_data` (0x800 bytes) to DMEM 0 and the text
 // (a fixed 0xF80 bytes) from `ucode` to IMEM 0x1080, then `jr 0x1080`. The
-// recompiled function therefore starts at IMEM 0x1080 (rsp-audio.toml,
+// recompiled function therefore starts at IMEM 0x1080 (config/rsp-audio.toml,
 // `text_address = 0x1080`), and the runtime's own task load (DMEM 0xFC0 for the
 // task, DMEM 0 for `ucode_data`) reproduces the rest.
 //

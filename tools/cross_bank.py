@@ -29,7 +29,7 @@ This tool implements the two halves of the fix:
 
 Both halves use one region model: a RAM range is *swappable* when two or more
 overlay/bank sections can live at the same address. The bank sides of the model
-come from each unit's `config-bank<U>.yaml` (so a unit can be edited without
+come from each unit's `config/banks/config-bank<U>.yaml` (so a unit can be edited without
 touching this file); the main side comes from the linker map.
 
 Usage:
@@ -181,7 +181,7 @@ def records_always_co_loaded(caller_rec: str | None, target_rec: str | None,
 # Each line is `<caller vram> <target vram>` — the pair `check` would otherwise
 # fail on. Anything not listed is a hard failure, so a *new* violation still
 # stops `make bank-recomp`. Removing entries as the unit-C records are split
-# into non-calling units is the cleanup path (see config-bankF.yaml).
+# into non-calling units is the cleanup path (see config/banks/config-bankF.yaml).
 KNOWN_HAZARDS_PATH = ROOT / "tools" / "cross_bank_known_hazards.txt"
 
 
@@ -279,7 +279,7 @@ def parse_yaml_segments(path: Path) -> list[dict]:
 def bank_unit_configs() -> dict[str, dict]:
     """unit letter -> {ranges: [(ram lo, hi)], name_format: str}."""
     out: dict[str, dict] = {}
-    for path in sorted(ROOT.glob("config-bank*.yaml")):
+    for path in sorted(ROOT.glob("config/banks/config-bank*.yaml")):
         unit = path.stem.replace("config-bank", "")
         segments = parse_yaml_segments(path)
         # A record's extent ends where the next segment's ROM position starts.
@@ -300,7 +300,7 @@ def bank_unit_configs() -> dict[str, dict]:
             "name_format": fmt.group(1) if fmt else "func_$VRAM",
         }
     if not out:
-        raise ToolError("no config-bank*.yaml found")
+        raise ToolError("no config/banks/config-bank*.yaml found")
     return out
 
 
@@ -919,7 +919,7 @@ def symbol_vram(name: str) -> int | None:
 
 def unit_records(unit: str) -> list[tuple[int, int, str]]:
     """(ram_lo, ram_hi, name) for one unit's code segments, from its config."""
-    path = ROOT / f"config-bank{unit}.yaml"
+    path = ROOT / "config/banks" / f"config-bank{unit}.yaml"
     segments = parse_yaml_segments(path)
     out: list[tuple[int, int, str]] = []
     for i, seg in enumerate(segments):
@@ -986,7 +986,7 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
         if not unit_dir.is_dir():
             continue
         unit = unit_dir.name[len("Bank"):-len("Funcs")]
-        if not (ROOT / f"config-bank{unit}.yaml").exists():
+        if not (ROOT / "config/banks" / f"config-bank{unit}.yaml").exists():
             continue
         records = unit_records(unit)
         for path in sorted(unit_dir.glob("*.c")):
@@ -1036,7 +1036,7 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
     if bank_bad:
         print("cross_bank: check FAILED - a unit defines a swappable range and calls into it.")
         print("cross_bank:   fix: move the target record into a unit that does not call it, so")
-        print("cross_bank:   N64Recomp emits LOOKUP_FUNC (see config-bankF.yaml / session 45).")
+        print("cross_bank:   N64Recomp emits LOOKUP_FUNC (see config/banks/config-bankF.yaml / session 45).")
         return 1
     if main_bad and strict_main:
         print("cross_bank: check FAILED (--strict): main-unit calls into swappable RAM remain.")

@@ -1,0 +1,16 @@
+# N64Recomp config for streamed-overlay bank unit R (Phase 4).
+# See config/banks/config-bankQ.toml for the model. This unit holds the module the mission
+# scene (0x03) streams into record 9's arena on the *natural* map -> mission
+# route:
+#   ROM 0x195430 (0x2380) -> RAM 0x80214FA0 (see config/banks/config-bankR.yaml).
+
+[input]
+output_func_path = "../../BankRFuncs"
+elf_path = "../../build/bankR.elf"
+rom_file_path = "../../assets/ogre64.z64"
+use_absolute_symbols = true
+uses_mips3_float_mode = true
+bss_section_suffix = ".bss"
+functions_per_output_file = 100
+
+function_sizes = []

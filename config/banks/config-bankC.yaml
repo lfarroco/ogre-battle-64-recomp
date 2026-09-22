@@ -1,0 +1,224 @@
+# Secondary splat config: streamed-overlay bank unit C (Phase 4).
+#
+# Unit A (config/banks/config-bankA.yaml) compiles the records of the bank the game swaps in
+# after the title song (records 2, 3, 6). Unit C compiles the records the game
+# swaps in for the *next* attract screen (records 10, 11, 12, 13 — observed at
+# t≈360s, where the scene then called into a stubbed address and bounced) plus
+# the records scene 0x0D (new game) loads: record 4 and record 14's arena
+# continuation (see below).
+#
+# A unit can only hold records whose RAM ranges are mutually disjoint, because
+# all of them are linked at their true RAM addresses in one ELF. Records that
+# overlap (they are banks of the same RAM) must go in different units; the
+# runtime does not care which unit a record came from — it registers a record's
+# functions when the game DMA's it. Unit C's records tile disjointly:
+#
+#   rec4  ROM 0x0FA010 -> RAM 0x8019EE70 (0x005E0, all code per segment table)
+#   rec10 ROM 0x1F0A00 -> RAM 0x801AD5C0 (0x230E0)
+#   rec11 ROM 0x24BC70 -> RAM 0x801F7100 (0x131F0)
+#   rec12 ROM 0x25EE60 -> RAM 0x8020A300 (0x169C0)
+#   rec13 ROM 0x275820 -> RAM 0x802210E0 (0x047D0)
+#   rec14 ROM 0x281830 -> RAM 0x802258B0 (0x05370)
+#   rec14a ROM 0x29A490 -> RAM 0x8022ACB0 (0x0E860, arena, all asm)
+#   rec14b ROM 0x2AE390 -> RAM 0x802395E0 (0x0A7E0, arena, all asm)
+#
+# Record 4 overlaps record 3's RAM (both start at 0x8019EE70), so it cannot
+# live in unit A with it; it is disjoint from everything else here.
+#
+# See config/banks/config-bankA.yaml for the model, and docs/DECISIONS.md (session 33).
+
+name: Ogre Battle 64 - streamed overlay bank unit C
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankC
+  target_path: assets/ogre64.z64
+  elf_path: build/bankC.elf
+  base_path: ../..
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankC/asm
+  build_path: build/bankC
+  asset_path: build/bankC/assets
+  ld_script_path: build/bankC.ld
+  undefined_syms_auto_path: build/bankC/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankC/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  # Unit C's records share RAM addresses with unit A's and overlay C's, so every
+  # generated symbol carries this unit's namespace (the addresses stay the real
+  # RAM addresses; only the names are namespaced).
+  symbol_name_format: "ovlC_$VRAM"
+  symbol_name_format_no_rom: "ovlC_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Bank record 4: all code 0x5E0 (-> 0x8019F450), no data, no bss (per the
+  # segment table at ROM 0x387C0). Scene 0x0D's mask includes it. It overlaps
+  # record 3's RAM, so it lives here instead of unit A.
+  - name: bankRec4
+    type: code
+    start: 0x0FA010
+    vram: 0x8019EE70
+    subsegments:
+      - [0x0FA010, asm]
+
+  # Gap: record 6 (ROM 0x0FA600, unit A) and overlay C (ROM 0x1CE040..0x1F0A00)
+  # are not part of this unit.
+  - type: bin
+    start: 0x0FA5F0
+    vram: 0x0FA5F0
+
+  # Bank record 10: code 0x212F0 (-> 0x801CE8B0), data 0x1DF0 (-> 0x801D06A0),
+  # bss 0x1C0 (-> 0x801D0860).
+  - name: bankRec10
+    type: code
+    start: 0x1F0A00
+    vram: 0x801AD5C0
+    subsegments:
+      - [0x1F0A00, asm]
+      - [0x211CF0, data]
+
+  # Record 10's *arena continuation*: the segment table entry 10 only describes
+  # the resident part (ROM 0x1F0A00..0x213AE0 -> RAM 0x801AD5C0..0x801D0860);
+  # the game streams more code into record 10's reserved arena
+  # (RAM up to 0x801F7100, i.e. record 10's `ram_end` word) from ROM modules that
+  # live in the gap before record 11's ROM start:
+  #
+  #   ROM 0x213AE0 (0x16770) -> RAM 0x801D0860   (unit I: bankRec10a)
+  #   ROM 0x23B1F0 (0x09580) -> RAM 0x801E6FD0   (this unit: bankRec10b)
+  #   ROM 0x244770 (0x07500) -> RAM 0x801D0860   (unit I: bankRec16, scene 0x16)
+  #
+  # bankRec10a and scene 0x16's module are two *banks* of RAM 0x801D0860, so
+  # both moved to unit I in session 58: a unit cannot hold overlapping records,
+  # and unit C may not define a range its own code calls into (the session-45
+  # rule - while bankRec10a was here, a call into that RAM from resident code
+  # was bound at build time to one bank's bodies). The four stubbed calls that
+  # made scene 0x0C bounce all land in bankRec10b (0x801E6FD0, 0x801EE3E8,
+  # 0x801EE600, 0x801EE4A0), which stays here. The modules are contiguous code,
+  # streamed by 0x200-byte DMA chunks, so they are compiled as ordinary
+  # (RAM-disjoint) sections of their unit and registered by the same DMA-driven
+  # mechanism.
+  # Gap: unit I's arena modules (ROM 0x213AE0..0x24BC70). This bin is
+  # load-bearing, not cosmetic: splat extends the `data` subsegment above to the
+  # *next* segment's start, and with no segment here it runs to bankRec11's ROM
+  # 0x24BC70 — which makes `.bankRec10`'s VMA overlap bankRec10b's and
+  # bankRec11's and re-emits their code as data (session 58, when bankRec10a
+  # moved out of this unit: "section .bankRec10b VMA overlaps .bankRec10").
+  - type: bin
+    start: 0x213AE0
+    vram: 0x213AE0
+
+  # Record 10's remaining arena module (bankRec10b); bankRec10a and scene
+  # 0x16's module (bankRec16) are unit I.
+  - name: bankRec10b
+    type: code
+    start: 0x23B1F0
+    vram: 0x801E6FD0
+    subsegments:
+      - [0x23B1F0, asm]
+
+  # Gap: records 18 (ROM 0x1BA020), 15/overlay C (ROM 0x1CE040..0x1F0A00) and
+  # unit I's bankRec10a/bankRec16 (ROM 0x213AE0..0x24BC70) are other units.
+  - type: bin
+    start: 0x244770
+    vram: 0x244770
+
+  # Bank record 11: code 0x12620 (-> 0x80209720), data 0xBD0 (-> 0x8020A2F0),
+  # bss 0x10.
+  - name: bankRec11
+    type: code
+    start: 0x24BC70
+    vram: 0x801F7100
+    subsegments:
+      - [0x24BC70, asm]
+      - [0x25E290, data]
+
+  # Bank record 12: code 0x15170 (-> 0x8021F470), data 0x1850 (-> 0x80220CC0),
+  # bss 0x420 (-> 0x802210E0).
+  - name: bankRec12
+    type: code
+    start: 0x25EE60
+    vram: 0x8020A300
+    subsegments:
+      - [0x25EE60, asm]
+      - [0x273FD0, data]
+
+  # Bank record 13: code 0x4560 (-> 0x80225640), data 0x270 (-> 0x802258B0).
+  - name: bankRec13
+    type: code
+    start: 0x275820
+    vram: 0x802210E0
+    subsegments:
+      - [0x275820, asm]
+      - [0x279D80, data]
+
+  # Bank record 16 (ROM 0x279FF0..0x281830) is not compiled; skip it as a bin so
+  # record 14 can follow.
+  - type: bin
+    start: 0x279FF0
+    vram: 0x279FF0
+
+  # Bank record 14: code 0x4E90 (-> 0x8022A740), data 0x4E0 (-> 0x8022AC20),
+  # bss 0x90 (-> 0x8022ACB0). It shares scene 0x02's record mask (0x4001) with
+  # record 0 (see config/banks/config-bankE.yaml) and is RAM-disjoint from unit C's records.
+  - name: bankRec14
+    type: code
+    start: 0x281830
+    vram: 0x802258B0
+    subsegments:
+      - [0x281830, asm]
+      - [0x2866C0, data]
+
+  # Record 14's *arena continuation* for scene 0x0D (mask 0x40007C14): the
+  # segment table entry 14 only describes the resident part (ROM ..0x286BA0 ->
+  # RAM ..0x8022AC20, bss ..0x8022ACB0); the game streams more code modules
+  # above it, observed as contiguous 0x200-byte DMA runs in scene 0x0D:
+  #
+  #   ROM 0x286BA0 (0x138F0) -> RAM 0x8022ACB0   (unit K, bankRec14d)
+  #   ROM 0x29A490 (0x0E860) -> RAM 0x8022ACB0   (unit L, bankRec14a)
+  #   ROM 0x2AE390 (0x0A7E0) -> RAM 0x802395E0   (unit F, bankRec14b)
+  #   ROM 0x2A8CF0 (0x056A0) -> RAM 0x802395E0   (unit G, bankRec14c)
+  #
+  # (Same shape as record 10's bankRec10a/b above.) The per-frame stub calls
+  # that lobotomized scene 0x0D all land in these modules (0x8022D1CC,
+  # 0x80230E70, 0x80237640, 0x8023A1D8).
+  #
+  # All four are *banks* of the arena, and this record's own code calls into
+  # 0x8022ACB0+ (the interpreter func_ovlC_802282D8 calls 0x8022C270 /
+  # 0x8022C6E4; the command-`-8` callback func_ovlC_80225F60 calls 0x8022E3F0),
+  # so none may be defined here: a unit cannot hold a swappable range *and* call
+  # into it, or N64Recomp binds those calls to one bank's bodies and the other
+  # bank's callers run them with the wrong frame/register contract. bankRec14b
+  # moved out in session 45 (units F/G); bankRec14a and the chapter-animation
+  # module moved out in this session (units L/K) — that mis-binding is the
+  # step-1073 crash. See config/banks/config-bankK.yaml / config/banks/config-bankL.yaml.
+  - type: bin
+    start: 0x286BA0
+    vram: 0x286BA0
+
+  # Gap: bankRec14c (ROM 0x2A8CF0, unit G) and bankRec14b (ROM 0x2AE390,
+  # unit F) are streamed here. (The 0x2A82F0 marker that used to sit here was
+  # wrong: bankRec14a's own DMA runs to 0x2A8CF0 — see config/banks/config-bankL.yaml.)
+  - [0x2B8B70]
+

@@ -1,0 +1,93 @@
+# Secondary splat config: streamed-overlay bank unit R (Phase 4).
+#
+# Unit R holds the module the mission scene (0x03) streams into record 9's arena
+# **when the mission is reached the natural way** (map -> story -> mission).
+# Unit P and unit Q are the other banks of the same RAM:
+#
+#   rec9   ROM 0x14EC00 (0x173E0) -> RAM 0x801FDA90   (unit N)
+#   rec9c  ROM 0x165FE0 (0x0BEE0) -> RAM 0x80214FA0   (unit Q)
+#   rec9b  ROM 0x171EC0 (0x06200) -> RAM 0x80214FA0   (unit P)
+#   rec9d  ROM 0x195430 (0x02380) -> RAM 0x80214FA0   (this unit)
+#
+# All of rec9c/rec9b/rec9d are banks of RAM 0x80214FA0 (unit C's bankRec12 also
+# owns part of that window), so each gets its own unit and the runtime's
+# DMA-driven bank map picks whichever the game actually loaded.
+#
+# Found (session 68) by driving the *natural* route — title -> Load Game ->
+# map -> A on the mission location -> story (0x0D) -> scene 0x16 -> mission
+# (0x03) — instead of the suspend save, which resumes straight into the mission
+# and loads unit Q's bank instead. The run logged
+#
+#   [bank] UNKNOWN module rom=0x195430 ram=0x80214FA0 (0x80214FA0 is also where rom=0x171EC0 loads)
+#   [overlays] streamed function stub called @ 0x80215C38 (not yet loaded)
+#
+# and the mission's intro (camera pan, winning/losing-condition NOTE tooltips,
+# MISSION START) hung on a garbled screen. The loader that pulls it in is record
+# 7's own code — unit N, `func_ovlN_801AE880+0x764` at ROM 0x1036E4:
+#
+#   func_8009DA50(rom=0x195430, ram=0x80214FA0, size=0x1977B0-0x195430 = 0x2380)
+#   jal 0x80215C38                      <- the module's entry, the stub above
+#
+# The module is the enemy/unit constructor for the battle: its data half carries
+# `No free space on TCharacterEnemyData.` / `No free space on EnemySolderData.`
+# and a name table (`Mitsuiye`). Without it the mission's units and target fort
+# are built from stale bytes, which is the garbled draw and the stalled intro.
+#
+# Code/data: the whole module is disassembled as `asm` (the unit-P treatment) —
+# spimdisasm's own analysis splits the embedded data, and 0x2380 is already a
+# multiple of 16, so the assembler adds no pad (session 65's +8 trap).
+#
+# See config/banks/config-bankA.yaml for the model.
+
+name: Ogre Battle 64 - streamed overlay bank unit R
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankR
+  target_path: assets/ogre64.z64
+  elf_path: build/bankR.elf
+  base_path: ../..
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankR/asm
+  build_path: build/bankR
+  asset_path: build/bankR/assets
+  ld_script_path: build/bankR.ld
+  undefined_syms_auto_path: build/bankR/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankR/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs-bankR.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlR_$VRAM"
+  symbol_name_format_no_rom: "ovlR_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's ROM position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  - name: bankRec9d
+    type: code
+    start: 0x195430
+    vram: 0x80214FA0
+    subsegments:
+      - [0x195430, asm]
+
+  # The caller's size ends here (ROM 0x1977B0); bound the subsegment so it
+  # cannot run to the end of the ROM.
+  - [0x1977B0]

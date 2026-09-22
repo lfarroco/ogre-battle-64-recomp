@@ -1,0 +1,86 @@
+# Secondary splat config: streamed-overlay bank unit L (Phase 4).
+#
+# Unit L holds `bankRec14a`, one bank of the record-14 arena at RAM
+# 0x8022ACB0:
+#
+#   bankRec14a  ROM 0x29A490 (0xE860) -> RAM 0x8022ACB0
+#
+# It is the bank the New Game sequence loads for the steps whose commands are
+# -9/-7/-6/-4 (the movie and the forms — the `func_ovlC_8022683C` arms at
+# 0x802268B8 / 0x80226AC4 / 0x80226BEC / 0x80226D10). Its sibling bank, the
+# chapter-animation module ROM 0x286BA0 (command -8), is unit K, and units F/G
+# hold the two modules streamed above it at 0x802395E0 (bankRec14b/c).
+#
+# Why it left unit C: a unit may not *define* a RAM range its own code calls
+# into, or N64Recomp binds those calls at build time to one bank's bodies. Unit
+# C compiles record 14 (`bankRec14`, RAM 0x802258B0), whose interpreter and
+# setup callbacks call into 0x8022ACB0+; with bankRec14a defined in unit C those
+# calls ran rec14a's bodies even when the game had DMA'd unit K's module over
+# that RAM (this session's crash — see config/banks/config-bankK.yaml). Both banks now live
+# in units of their own, so unit C's call sites compile as `LOOKUP_FUNC` and the
+# runtime's DMA-driven bank map picks the resident module.
+#
+# See config/banks/config-bankA.yaml for the model and docs/HANDOFF-2026-09-15-session45.md.
+
+name: Ogre Battle 64 - streamed overlay bank unit L
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankL
+  target_path: assets/ogre64.z64
+  elf_path: build/bankL.elf
+  base_path: ../..
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+  platform: n64
+  compiler: KMC
+
+  # Keep every output out of the other units' trees.
+  asm_path: build/bankL/asm
+  build_path: build/bankL
+  asset_path: build/bankL/assets
+  ld_script_path: build/bankL.ld
+  undefined_syms_auto_path: build/bankL/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankL/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlL_$VRAM"
+  symbol_name_format_no_rom: "ovlL_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Record 14's arena module for the movie/form steps (all code).
+  #
+  # ROM end 0x2A8CF0 (not 0x2A82F0, which config/banks/config-bankC.yaml carried): the game's
+  # command-`-9` arm at 0x802268B8 computes `a2 = 0x2A8CF0 - 0x29A490 = 0xE860`
+  # and DMAs exactly that. The truncated segment cut the module's last 0xA00
+  # bytes (RAM 0x80238B10..0x80239510), which hold its jump tables — including
+  # `jtbl_ovlL_80239270`, referenced by `func_ovlL_8022EA08` and landable by a
+  # `jr`. Splat named the table but could not emit it, so N64Recomp failed with
+  # "Failed to determine size of jump table at 0x80239270".
+  - name: bankRec14a
+    type: code
+    start: 0x29A490
+    vram: 0x8022ACB0
+    subsegments:
+      - [0x29A490, asm]
+
+  # Unit K's bankRec14d (ROM 0x286BA0) is the other bank of this RAM; units
+  # F/G's bankRec14b/c (ROM 0x2AE390 / 0x2A8CF0) follow here.
+  - [0x2A8CF0]

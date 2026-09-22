@@ -1,0 +1,103 @@
+# Secondary splat config: streamed-overlay bank unit V (Phase 4).
+#
+# Unit V holds the **settings / options menu** module the mission streams into
+# record 9's arena when the player opens the settings screen. It is the fifth
+# bank of RAM 0x80214FA0 (units P/Q/R and this one), and the same ROM region is
+# followed by record 18:
+#
+#   rec9c  ROM 0x165FE0 (0x0BEE0) -> RAM 0x80214FA0   (unit Q)
+#   rec9b  ROM 0x171EC0 (0x06200) -> RAM 0x80214FA0   (unit P)
+#   rec9d  ROM 0x195430 (0x02380) -> RAM 0x80214FA0   (unit R)
+#   rec9e  ROM 0x1A4BE0 (0x04680) -> RAM 0x80214FA0   (this unit)
+#
+# Found (session 72) from a developer-driven run: from the title's Load Game
+# into the mission (scene 0x03, descriptor 0x8018F350, mask 0x0000038C) they
+# opened the settings screen and the game stopped responding to input. The log
+# showed one line and no stub:
+#
+#   [bank] UNKNOWN module rom=0x1A4BE0 ram=0x80214FA0 (0x80214FA0 is also where rom=0x171EC0 loads)
+#
+# No `streamed function stub` because the port had **not** evicted unit Q's
+# functions from 0x80214FA0 when the unknown module was DMA'd over them: the
+# call `jal 0x80217E50` (unit N's record 7, `func_ovlN_801B7530` tail @0x801B75D4)
+# compiled as `LOOKUP_FUNC(0x80217E50)` and the runtime's map still held unit Q's
+# body at that address, so the wrong module's code ran and the screen stopped
+# accepting input. This is the session-45/59/67 swappable-arena class in its
+# "no diagnostic fires, the wrong bank just runs" shape.
+#
+# The loader is `func_ovlN_801B7530` (and the sibling arms at 0x801B76B0 /
+# 0x801B86BC), at instruction level:
+#
+#   func_800900C0(0x80214FA0, 0x802192C0-0x80214FA0 = 0x4320)   ; code icache
+#   func_80090010(0x802192C0, 0x80219620-0x802192C0 = 0x360)   ; data dcache
+#   func_8009DA50(rom=0x1A4BE0, ram=0x80214FA0, size=0x1A9260-0x1A4BE0 = 0x4680)
+#   func_80093380(0x80219620, 0x802196B0-0x80219620 = 0x90)     ; zero bss
+#   jal 0x80217E50                                              ; the module's entry
+#
+# So code is ROM 0x1A4BE0..0x1A8F00 -> RAM 0x80214FA0..0x802192C0 (the string
+# table starts exactly at 0x1A8F00: `Message speed`, `Cursor speed`, `Game
+# speed`, `Sound settings`, `Restore defaults`, …), data to RAM 0x80219620 and
+# BSS to 0x802196B0. Code size 0x4320 is a multiple of 16, so the assembler adds
+# no `.text` pad (session 65's +8 trap).
+#
+# The four addresses unit N calls that are real entries in this module are forced
+# in config/symbols/symbol_addrs-bankV.txt: 0x802170EC, 0x80217BE4, 0x80217E50 (the loader's
+# entry) and 0x8021905C.
+#
+# See config/banks/config-bankA.yaml for the model, config/banks/config-bankR.yaml for the sibling.
+
+name: Ogre Battle 64 - streamed overlay bank unit V
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankV
+  target_path: assets/ogre64.z64
+  elf_path: build/bankV.elf
+  base_path: ../..
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankV/asm
+  build_path: build/bankV
+  asset_path: build/bankV/assets
+  ld_script_path: build/bankV.ld
+  undefined_syms_auto_path: build/bankV/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankV/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs-bankV.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlV_$VRAM"
+  symbol_name_format_no_rom: "ovlV_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's ROM position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # The settings module: code to the loader's dcache base (the string table),
+  # then the data half.
+  - name: bankRec9e
+    type: code
+    start: 0x1A4BE0
+    vram: 0x80214FA0
+    subsegments:
+      - [0x1A4BE0, asm]
+      - [0x1A8F00, data]
+
+  # The loader's size ends here (ROM 0x1A9260); the next bank of this arena (ROM
+  # 0x1A9260) follows.
+  - [0x1A9260]

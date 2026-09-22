@@ -161,8 +161,8 @@ entirely).
 # ROM (copy your dump over; big-endian .z64)
 # assets/ogre64.z64
 
-# regenerate recompiled code (after any symbol_addrs.txt changes)
-tools/venv/bin/splat split config.yaml
+# regenerate recompiled code (after any config/symbols/symbol_addrs.txt changes)
+tools/venv/bin/splat split config/config.yaml
 make
 make recomp
 
@@ -185,14 +185,14 @@ cmake --build build-app -j$(nproc)
    git -C tools/RT64/src/contrib/imgui checkout <pinned-sha>
    ```
 2. **Vendored clones** (`tools/N64Recomp`, `tools/N64ModernRuntime`) are
-   gitignored — re-clone + re-apply `n64recomp-ob64.patch`.
+   gitignored — re-clone + re-apply `patches/n64recomp-ob64.patch`.
 3. **Sticky CMake cache**: after toolchain changes, delete `build-app` and
    reconfigure.
 4. **SDL2**: use the distro `libsdl2-dev`; Homebrew's `sdl2` is now `sdl2-compat`
    (an SDL3 shim), which works but is not the combination RT64 is tested against.
 5. **`RecompiledFuncs/` is generated** (gitignored) — regenerate with
    `make recomp`; never hand-edit.
-6. The `n64recomp-ob64.patch` applies to a specific upstream N64Recomp commit;
+6. The `patches/n64recomp-ob64.patch` applies to a specific upstream N64Recomp commit;
    if upstream has moved, re-derive against the vendored clone's current state.
 7. `git submodule update` (or a fresh `git submodule update --init --recursive`)
    resets `tools/RT64` and discards the plume SDL patch — re-apply with

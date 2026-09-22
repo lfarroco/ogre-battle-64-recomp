@@ -1,0 +1,97 @@
+# Secondary splat config: streamed-overlay bank unit AG (Phase 4).
+#
+# Unit AG holds **record 16**: the module scene `0x14` (and several others)
+# streams into RAM `0x802258B0`, immediately on top of record 13's half of the
+# same arena:
+#
+#   bankRec13 ROM 0x275820 (0x47D0) -> RAM 0x802210E0   (unit C)
+#   bankRec16 ROM 0x279FF0 (0x7840) -> RAM 0x802258B0   (this unit)
+#
+# Found (session 73) by booting into scene `0x14`: the port logged
+#
+#   [bank] UNCOMPILED streamed record 16: rom=0x279FF0 ram=0x802258B0 size=0x7840
+#   [overlays] streamed function stub called @ 0x80226B7C (not yet loaded)
+#   [overlays] streamed function stub called @ 0x8022859C (not yet loaded)
+#   [overlays] streamed function stub called @ 0x80226CE0 (not yet loaded)
+#
+# Those three addresses are inside record 16 (`ROM 0x27B2BC`, `0x27CCDC`,
+# `0x27B420`), each preceded by `jr $ra`, and the scene exited without drawing.
+#
+# **Record 16 is not in the segment table.** The table's entry 13 declares
+# record 13 as `rom 0x275820..0x279FF0 -> ram 0x802210E0`, and the port compiled
+# exactly that; the game then loads a second module over the same arena from
+# `0x279FF0` on demand. This is session 55's class (a streamed module that is not
+# a table record still owns a swappable RAM range), so it needs the session-45
+# treatment: its own unit, and no caller may define the range it occupies.
+#
+# The window is **heavily used**: 125 distinct call targets across eight units
+# reach into `0x802258B0..0x8022D0F0` (banks B, C, F, G, K, L, N, T and the main
+# ELF), because three *other* arenas overlap it — record 18's tutorial module
+# (`0x8022A860`, unit T), record 14d's chapter animation (`0x8022ACB0`, unit K)
+# and record 14a (`0x8022ACB0`, unit L). Unit C's record 13 has its own compiled
+# bodies at the low half of this RAM, so calls from unit C's code into the high
+# half were bound at build time to record 13's layout — the mis-binding class of
+# session 45/67/72.
+#
+# `rom 0x279FF0`, size `0x7840`: the segment table's `ram_end` for entry 13 is
+# `0x8022D0F0`, and `0x8022D0F0 - 0x802258B0 = 0x7840` is exactly the size the
+# port itself logged. No loader `subu` states it directly (the load is
+# table-driven), so **this size is the one number here that does not come from a
+# loader** — it comes from the segment table plus the run log.
+#
+# See config/banks/config-bankH.yaml for the model, and docs/scenes.md for the arena table.
+
+name: Ogre Battle 64 - streamed overlay bank unit AG
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankAG
+  target_path: assets/ogre64.z64
+  elf_path: build/bankAG.elf
+  base_path: ../..
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankAG/asm
+  build_path: build/bankAG
+  asset_path: build/bankAG/assets
+  ld_script_path: build/bankAG.ld
+  undefined_syms_auto_path: build/bankAG/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankAG/undefined_funcs_auto.txt
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs-bankAG.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlAG_$VRAM"
+  symbol_name_format_no_rom: "ovlAG_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's ROM position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Record 16's module. splat decides the code/data boundary (`find_file_
+  # boundaries`); the size is the segment table's.
+  - name: bankRec16b
+    type: code
+    start: 0x279FF0
+    vram: 0x802258B0
+    subsegments:
+      - [0x279FF0, asm]
+
+  # Record 14 (ROM 0x281830) is unit C's; the end marker is record 16's own DMA
+  # end, `0x8022D0F0 - 0x802258B0 = 0x7840`.
+  - [0x281830]

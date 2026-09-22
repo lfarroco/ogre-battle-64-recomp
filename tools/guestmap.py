@@ -20,7 +20,7 @@ Addresses are auto-detected: anything >= 0x80000000 is a VRAM address,
 otherwise it is tried as a ROM offset first and then as a VRAM address. Use
 `--rom`/`--vram` to force one.
 
-The map comes from `tools/n64map.py` (config.yaml, config-bank*.yaml,
+The map comes from `tools/n64map.py` (config/config.yaml, config/banks/config-bank*.yaml,
 app/src/bank_funcs.inc, app/src/bank_overlays.cpp, build/*.elf).
 """
 

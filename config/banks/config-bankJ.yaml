@@ -1,0 +1,75 @@
+# Secondary splat config: streamed-overlay bank unit J (Phase 4).
+#
+# Unit J holds record 10's arena module for the scenes that are not 0x16:
+#
+#   bankRec10a  ROM 0x213AE0 (0x16770) -> RAM 0x801D0860
+#
+# It shares RAM 0x801D0860 with unit I's bankRec16 (ROM 0x244770, scene 0x16's
+# closing movie), so the two are *banks* of one range and must live in different
+# units. Both left unit C in session 58: unit C's own code calls into this RAM
+# (scene 0x0D's arena calls), and the session-45 rule is that a swappable range
+# must not be defined in the unit whose code calls into it - otherwise N64Recomp
+# binds the call to one bank's bodies and the other bank's callers run them with
+# the wrong frame/contract.
+#
+# The module is contiguous code, streamed in 0x200-byte chunks (59 x 0x200 for
+# bankRec16's sibling; this one is 0x16770 bytes). See config/banks/config-bankC.yaml for the
+# arena model and docs/DECISIONS.md (sessions 45, 55, 58).
+
+name: Ogre Battle 64 - streamed overlay bank unit J
+sha1: d26b14bee422a09581ce438d45ba9fec9783fbb8
+options:
+  basename: ogrebankJ
+  target_path: assets/ogre64.z64
+  elf_path: build/bankJ.elf
+  base_path: ../..
+  symbol_addrs_path:
+    - config/symbols/symbol_addrs.txt
+  reloc_addrs_path:
+    - config/symbols/reloc_addrs.txt
+  platform: n64
+  compiler: KMC
+
+  asm_path: build/bankJ/asm
+  build_path: build/bankJ
+  asset_path: build/bankJ/assets
+  ld_script_path: build/bankJ.ld
+  undefined_syms_auto_path: build/bankJ/undefined_syms_auto.txt
+  undefined_funcs_auto_path: build/bankJ/undefined_funcs_auto.txt
+
+  find_file_boundaries: True
+  header_encoding: ASCII
+  o_as_suffix: True
+  use_legacy_include_asm: False
+  mips_abi_float_regs: o32
+
+  symbol_name_format: "ovlJ_$VRAM"
+  symbol_name_format_no_rom: "ovlJ_$VRAM"
+
+  extensions_path: tools/splat_ext
+  rodata_string_guesser_level: 2
+  data_string_guesser_level: 2
+  libultra_symbols: False
+
+segments:
+  # Unused ROM prefix, covered as one opaque bin so splat's rom position
+  # tracking stays consistent. Never linked into the app.
+  - type: bin
+    start: 0x0
+    vram: 0x0
+
+  # Record 10's arena module for the non-0x16 scenes (all code).
+  - name: bankRec10a
+    type: code
+    start: 0x213AE0
+    vram: 0x801D0860
+    subsegments:
+      - [0x213AE0, asm]
+
+  # bankRec10b (ROM 0x23B1F0, unit C) and unit I's bankRec16 (ROM 0x244770)
+  # follow; not part of this unit.
+  - type: bin
+    start: 0x22A250
+    vram: 0x22A250
+
+  - [0x24BC70]

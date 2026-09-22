@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate app/src/bank_funcs.inc from the bank units' recomp_overlays.inl files.
 
-Each bank unit (config-bank<U>.yaml / .toml, built by `make bank-recomp`)
+Each bank unit (config/banks/config-bank<U>.yaml / .toml, built by `make bank-recomp`)
 recompiles a set of streamed-overlay records at their true RAM addresses, with
 its own `ovl<U>_` symbol namespace so the units can be linked alongside each
 other and the main unit.
