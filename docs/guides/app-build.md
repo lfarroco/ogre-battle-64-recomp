@@ -94,6 +94,14 @@ The executable is written to `build-app/ogrebattle64`. If it fails with
 "the recompiled game code is missing", you skipped the regeneration section
 above; `tools/release-build.sh` prints the same list.
 
+`make app` is the Makefile wrapper for the same build, and it does **not** use
+`build-app`: `DIST_STATIC_SDL` defaults to `1`, so `make app` builds
+`build-dist/ogrebattle64` with a static SDL2. Use `make app DIST_STATIC_SDL=0`,
+or `cmake --build build-app --target ogrebattle64 -j`, to refresh the
+dynamically linked `build-app` binary. A plain `make app` followed by running
+`./build-app/ogrebattle64` tests the previous build; compare the two files'
+timestamps before interpreting a run.
+
 ### Build variants
 
 | Variant | Configure command | Renderer |

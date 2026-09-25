@@ -12,6 +12,29 @@ live under `config/` and `patches/` (session 97 moved them).
 
 ## Status by session (newest first)
 
+- ✅ **The C buttons produced the wrong directions because their N64 bit masks
+  were rotated one position (session 99).** Developer report: *"it seems that
+  the c buttons are mapped wrongly"*, observed `I → right, J → top, K → left,
+  L → down`, expected `I → top, K → down, J → left, L → right`. The default key
+  table already assigned `I/J/K/L` to the C-UP/C-LEFT/C-DOWN/C-RIGHT rows, so
+  the labels were right and the enum values in `app/src/input_map.hpp` were not:
+  it labelled `0x0001` as C-UP, but libultra reads `0x0001` as `CONT_C_RIGHT`.
+  The four values are now `C_UP 0x0008, C_DOWN 0x0004, C_LEFT 0x0002,
+  C_RIGHT 0x0001`, matching
+  `tools/RecompFrontend/recompinput/include/recompinput/input_types.h` (the
+  layer the recomp frontend uses) and upstream `N64Recomp/RecompFrontend`. The
+  word reaches `osContPad.button` unchanged
+  (`tools/N64ModernRuntime/ultramodern/src/input.cpp:178`), which is why the bit
+  order must be libultra's. `app/web/web.js` held its own copy of the rotated
+  values and is fixed too. One change covers the keyboard poll, the fixed
+  right-stick C layer, `OGRE_TAP_BUTTON`'s `cu/cd/cl/cr` and the CONTROLS tab;
+  saved `controls.cfg` files need no migration. The first pass ran `make app`,
+  which `DIST_STATIC_SDL ?= 1` routes to `build-dist/ogrebattle64`, so the
+  developer's `./build-app/ogrebattle64` was stale and showed the old mapping;
+  `cmake --build build-app --target ogrebattle64` refreshes it, and the trap is
+  now in `docs/guides/app-build.md`. The four constants pass a `static_assert`
+  compiled with `input_map.cpp`'s own flags; the directions were not played back
+  in a run.
 - ✅ **The escort mission's slow field is the session-80 class a third time, and
   the fix is one more branch in `yield_work_loop_branches` (session 98).** The
   developer's report — *"during gameplay, it becomes slow during an escort

@@ -40,10 +40,13 @@ enum N64Button : uint16_t {
     N64_BTN_RIGHT = 0x0100,
     N64_BTN_L = 0x0020,
     N64_BTN_R = 0x0010,
-    N64_BTN_C_LEFT = 0x0008,
-    N64_BTN_C_RIGHT = 0x0004,
-    N64_BTN_C_DOWN = 0x0002,
-    N64_BTN_C_UP = 0x0001,
+    // The four C bits are libultra's CONT_C_UP/DOWN/LEFT/RIGHT values, which are
+    // also the values in the recomp frontend's input_types.h
+    // (tools/RecompFrontend/recompinput/include/recompinput/input_types.h).
+    N64_BTN_C_UP = 0x0008,
+    N64_BTN_C_DOWN = 0x0004,
+    N64_BTN_C_LEFT = 0x0002,
+    N64_BTN_C_RIGHT = 0x0001,
 };
 
 // One row per bindable N64 input. `field` is what the button does on the field
