@@ -61,6 +61,12 @@ Organize Screen, the credits, the ending and the attract loop.
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
   controls, GAME SPEED, mods, `make dist` packages, GitHub releases.
+- **Performance** — three misclassified work loops in bank unit N carried a
+  recompiler-injected blocking `yield_self`; their backward branches are listed
+  in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
+  (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`; sessions 80, 90, 98). A slow screen
+  is measured with `OGRE_PROFILE=1 OGRE_DL_TRACE=1 OGRE_SCENE_LOG=1`: read the
+  frame-pump thread `t4`'s `[prof]` line, then list the branch it names.
 
 What each screen should show is `docs/scenes.md`. Build instructions and every
 `OGRE_*` knob are `docs/guides/app-build.md`. A picture or a display list that a

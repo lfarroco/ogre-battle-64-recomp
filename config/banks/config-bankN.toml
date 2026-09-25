@@ -39,7 +39,20 @@ functions_per_output_file = 100
 # the frame-pump thread up to nine retraces per call: the developer-driven slow
 # frame was 258 ms at OGRE_SPEED=4, i.e. ~61 external messages of ~4.2 ms, or
 # about seven calls to this function per frame (session 90).
-yield_work_loop_branches = [0x801B3008, 0x801DA2C0]
+#
+# The third misfire is func_ovlN_801D0B78 (record 7, 0x801D0B78), which scans
+# the -1-terminated object-id list at obj+0xA8 (obj+0x80 is the caller's own id,
+# and 0x801F0CD0 is the id -> object table). The loop advances $s3 by one entry
+# per iteration and exits when the loaded entry is -1. For each entry it tests
+# `lw $v0,0($s2); andi $v0,0x31` against 0x31, and for an entry inside the
+# distance threshold it mallocs a w*h scratch buffer (0x80070F30), zeroes it and
+# calls func_ovlN_801D08A0. 0x801D0C08 is the `bnel $v0,$v1` skip branch, and
+# the injected blocking yield_self() ran once per skipped entry. With the
+# frame-pump thread parked there the developer's escort mission went from an
+# 8 ms display-list period to 80-183 ms for ~2.6 s (t=57304..59921 ms;
+# T=59000 puts t4 in 0x801D0B78 at 93%), and recovered when the list shortened.
+# The raw ROM bytes at 0x5443FFEE/0x26730001 match bankN.elf.
+yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08]
 
 # Splat is given each record's own code/data boundary (see config/banks/config-bankN.yaml).
 # Extend any piece it still caps in the middle of a call-and-continue emission

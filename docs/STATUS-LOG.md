@@ -12,6 +12,38 @@ live under `config/` and `patches/` (session 97 moved them).
 
 ## Status by session (newest first)
 
+- ✅ **The escort mission's slow field is the session-80 class a third time, and
+  the fix is one more branch in `yield_work_loop_branches` (session 98).** The
+  developer's report — *"during gameplay, it becomes slow during an escort
+  mission (battery save attached)"* — is a 32768-byte raw `QuestOG3` battery that
+  resumes at scene `0x03` (`0x8018F350`, mask `0x38C`) through the title →
+  `0x12` Load Game suspend route. Three profiled runs did not reproduce (100 /
+  152 / 187 s); the fourth did, in the seconds before the developer closed it.
+  The measured phase is `t=57304..59921 ms` with **no scene change**: display-list
+  periods go from 8 ms to **80–183 ms** and then clear, every `[prof] T=` line
+  from `T=57000` puts the frame-pump thread `t4` in **`0x801D0B78`** (40 → 64 →
+  93 %), and the snapshot repeats `[snap] hotloop t4: 0x801D0B78 x100`.
+  `func_ovlN_801D0B78` (bank unit N, record 7) scans the `-1`-terminated
+  object-id list at `obj+0xA8`; N64Recomp's poll-loop heuristic put a blocking
+  `yield_self` at the `bnel` skip branch `0x801D0C08`, so it ran once per skipped
+  entry and `yield_self` blocked about one VI retrace each time. **The reusable
+  part is the ownership check**: `0x801D0B78` is RAM shared by five bank units,
+  so the address names nothing by itself — `app/src/bank_funcs.inc` registers it
+  only for unit N, run 4's last load there before the stall is record 7
+  (`t=51984`, `rom=0x101D00`), unit AH never loaded at all, and no unit except N
+  has a `yield_self` at that branch. `config/banks/config-bankN.toml` now reads
+  `yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08]`; regeneration
+  removes exactly one `yield_self` (50 → 49 tree-wide) and `make recomp` with the
+  old bank config leaves `RecompiledFuncs/` byte-identical. Fixed build, same
+  save, 180 s: `0x801D0B78` in **0 of 180** `[prof]` t4 lines (pre-fix 4 of 61),
+  the longest run of consecutive ≥ 50 ms gaps **20 → 2**, and
+  `[cover] 0x801D0B78 276` in the coverage census, so the scan still runs and
+  only the wait is gone. `check-banks` OK, `elf-rom-check` 0 differing bytes,
+  boot `runlog --check` PASS. **Developer-confirmed**, including a second symptom
+  of the same site: the slowdown when **opening the list of units** is gone too,
+  which also makes the unit list a deterministic trigger for this class in place
+  of waiting for the mission state to drift. See
+  `docs/HANDOFF-2026-09-25-session98.md`.
 - ✅ **The tree layout was reorganised: every config the build reads is under
   `config/`, and the upstream patches are under `patches/` (session 97).**
   `config/config.{yaml,toml}` are the main splat and N64Recomp configs;
