@@ -57,6 +57,12 @@ Organize Screen, the credits, the ending and the attract loop.
   are paths nobody has played.
 - **Renderer** — RT64 (Metal, Vulkan, D3D12) with a null renderer for bring-up.
 - **Audio** — the game's own audio microcode is recompiled and runs by default.
+  The Linux package needs a static SDL2 with an ALSA, PulseAudio or PipeWire
+  backend. The 0.3.0 build host had no audio development headers, SDL2 dropped
+  all three without failing, and the shipped binary ran silently on every
+  PipeWire and PulseAudio machine (`dsp: No such audio device`). `make
+  sdl2-static` and `tools/smoke-dist.sh` now fail instead of shipping that
+  (session 100, issue #8).
 - **Saves** — the cartridge battery is SRAM and works; the Controller Pak menus
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable

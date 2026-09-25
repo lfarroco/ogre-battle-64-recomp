@@ -361,7 +361,22 @@ bool init_sdl() {
         return false;
     }
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
-        fprintf(stderr, "[SDL] audio unavailable, running silently: %s\n", SDL_GetError());
+        // Name the audio drivers this SDL2 was compiled with. SDL2's CMake
+        // silently drops a backend whose development headers are missing, so a
+        // statically linked SDL2 built without the Linux audio -dev packages
+        // keeps only the OSS driver; its failure message is "dsp: No such audio
+        // device" on every PipeWire and PulseAudio machine, and without the list
+        // that reads as "this computer has no sound" (session 100, issue #8).
+        std::string audio_drivers;
+        const int audio_driver_count = SDL_GetNumAudioDrivers();
+        for (int i = 0; i < audio_driver_count; ++i) {
+            if (i != 0) {
+                audio_drivers += ", ";
+            }
+            audio_drivers += SDL_GetAudioDriver(i);
+        }
+        fprintf(stderr, "[SDL] audio unavailable, running silently: %s (%d drivers compiled in: %s)\n",
+                SDL_GetError(), audio_driver_count, audio_drivers.c_str());
     }
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "[SDL] game controllers unavailable: %s\n", SDL_GetError());

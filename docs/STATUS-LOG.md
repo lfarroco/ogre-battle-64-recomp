@@ -12,6 +12,34 @@ live under `config/` and `patches/` (session 97 moved them).
 
 ## Status by session (newest first)
 
+- ✅ **The Linux release had no audio because its statically linked SDL2 had only
+  the OSS driver (session 100, issue #8).** Developer report from GitHub: 0.3.0
+  on CachyOS KDE and on a fresh Fedora box both print `[SDL] audio unavailable,
+  running silently: dsp: No such audio device` and repeat `[SDL] Failed to open
+  audio device: Audio subsystem is not initialized`. That string is SDL2's OSS
+  driver (`SDL_dspaudio.c:293`), and `strings` on the released
+  `ogre-battle-64-recomp-linux-x86_64.tar.gz` binary shows `OSS /dev/dsp standard
+  audio` with no `ALSA PCM audio`, `PulseAudio` or `Pipewire`: the package's
+  SDL2 2.32.10 was built on a host without the audio development headers, and
+  SDL2's CMake drops such a backend without failing (`SDL_ALSA (Wanted: ON):
+  OFF`, while `CMakeCache.txt` still reads `SDL_ALSA:BOOL=ON`, so only the built
+  archive is a check). Reproduced in a bare `ubuntu:24.04` with the repo's own
+  pinned SDL2: without the headers `libSDL2.a` defines only
+  `DSP`/`DUMMYAUDIO`/`DISKAUDIO_bootstrap`; with `libasound2-dev libpulse-dev
+  libpipewire-0.3-dev` it also defines `ALSA`/`PULSEAUDIO`/`PIPEWIRE_bootstrap`.
+  Both reporter machines are healthy and neither is consulted before the error:
+  a driver that is not compiled in cannot be tried, so `SDL_AUDIODRIVER` cannot
+  help either. Landed: `tools/check-sdl2-audio.sh` (new) rejects an archive
+  without a real backend and names the packages; `make sdl2-static` asks for the
+  three Linux backends, verifies the archive, and removes and rebuilds a cached
+  prefix that fails; `tools/smoke-dist.sh` fails a Linux package whose binary
+  carries none of the three, and does so on the real 0.3.0 binary; the hosted
+  Linux CI step installs the packages; `app/src/sdl_platform.cpp`'s failure line
+  now appends the compiled-in driver list. Reference: Zelda64Recomp links the
+  system SDL2 on Linux, so it never met this. No game or runtime code changed.
+  Open: the 0.3.0 Linux archive on the releases page is still the broken one, so
+  a new tag has to be built and published, and no Linux run with sound was
+  possible on this machine.
 - ✅ **The C buttons produced the wrong directions because their N64 bit masks
   were rotated one position (session 99).** Developer report: *"it seems that
   the c buttons are mapped wrongly"*, observed `I → right, J → top, K → left,

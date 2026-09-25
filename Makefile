@@ -408,6 +408,12 @@ rsp-recomp:
 # `sdl2-compat`, a shim over libSDL3 with no static library, so a static link
 # needs the real SDL2 sources -- hence the fetch. Set DIST_STATIC_SDL=0 to skip
 # it and bundle the shared SDL2 instead (much faster, but two files).
+#
+# On Linux the static build needs SDL2's audio development headers
+# (`libasound2-dev`, `libpulse-dev`, `libpipewire-0.3-dev`; the first two are
+# dependencies of `libsdl2-dev`). Without them SDL2 keeps only its OSS driver and
+# the packaged binary runs silently; `make sdl2-static` fails with that list
+# instead, and `tools/smoke-dist.sh` checks the packaged binary.
 # ---------------------------------------------------------------------------
 DIST_NAME := ogre-battle-64-recomp
 DIST_DIR  := dist/$(DIST_NAME)
@@ -466,12 +472,32 @@ endif
 # whose name carries the `d` postfix (`SDL2-staticd.lib`) and would not be found.
 SDL2_STAMP := $(SDL2_PREFIX)/.ogre-static-crt
 
+# SDL2's CMake drops an audio backend whose development headers are missing, and
+# it drops it without failing: the configure summary prints
+# `SDL_ALSA (Wanted: ON): OFF` and the cache variable still reads ON, so only the
+# built archive says what is in it. On Linux the OSS driver's header is the one
+# that is always present, so a host without the audio -dev packages gets an SDL2
+# whose only output driver is `/dev/dsp`, and the packaged binary then runs
+# silently on every PipeWire and PulseAudio machine (issue #8;
+# tools/check-sdl2-audio.sh has the mechanism and the package list). Ask for the
+# three Linux backends explicitly to keep that intent in the build log, and
+# verify the archive, because the check is the gate and not the flags.
+SDL2_AUDIO_ARGS := $(if $(filter linux,$(DIST_OS)),-DSDL_ALSA=ON -DSDL_PULSEAUDIO=ON -DSDL_PIPEWIRE=ON,)
+SDL2_AUDIO_CHECK := tools/check-sdl2-audio.sh
+
 .PHONY: sdl2-static
 sdl2-static:
-	@if { [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; } && \
-	    { [ "$(DIST_OS)" != "windows" ] || [ -f "$(SDL2_STAMP)" ]; }; then \
+	@lib=""; \
+	if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ]; then lib="$(SDL2_PREFIX)/lib/libSDL2.a"; \
+	elif [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then lib="$(SDL2_PREFIX)/lib/SDL2-static.lib"; fi; \
+	if [ -n "$$lib" ] && { [ "$(DIST_OS)" != "windows" ] || [ -f "$(SDL2_STAMP)" ]; } && \
+	   { [ "$(DIST_OS)" = "windows" ] || "$(SDL2_AUDIO_CHECK)" "$$lib"; }; then \
 	  echo "==> static SDL2 already built ($(SDL2_PREFIX))"; \
 	else \
+	  if [ -n "$$lib" ]; then \
+	    echo "==> cached static SDL2 is unusable; rebuilding from scratch"; \
+	    rm -rf "$(SDL2_PREFIX)" tools/SDL2-static/build; \
+	  fi; \
 	  echo "==> fetching SDL2 $(SDL2_VERSION)"; \
 	  mkdir -p tools/SDL2-static; \
 	  curl -fsSL -o tools/SDL2-static/sdl2.tar.gz "$(SDL2_TARBALL)"; \
@@ -479,16 +505,20 @@ sdl2-static:
 	  echo "==> building static SDL2 (this takes a minute)"; \
 	  { cmake -S "$(SDL2_SRC)" -B tools/SDL2-static/build $(CMAKE_ARGS) \
 	      -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+	      $(SDL2_AUDIO_ARGS) \
 	      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
 	      -DSDL_TEST=OFF -DSDL_TESTS=OFF \
 	    && cmake --build tools/SDL2-static/build --config Release -j \
 	    && cmake --install tools/SDL2-static/build --config Release --prefix "$(SDL2_PREFIX)"; \
 	  } > tools/SDL2-static/build.log 2>&1 || true; \
-	  if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ] || [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then \
+	  lib=""; \
+	  if [ -f "$(SDL2_PREFIX)/lib/libSDL2.a" ]; then lib="$(SDL2_PREFIX)/lib/libSDL2.a"; \
+	  elif [ -f "$(SDL2_PREFIX)/lib/SDL2-static.lib" ]; then lib="$(SDL2_PREFIX)/lib/SDL2-static.lib"; fi; \
+	  if [ -n "$$lib" ] && { [ "$(DIST_OS)" = "windows" ] || "$(SDL2_AUDIO_CHECK)" "$$lib"; }; then \
 	    touch "$(SDL2_STAMP)"; \
 	    echo "==> static SDL2 ready"; \
 	  else \
-	    echo "static SDL2 build failed; last 40 lines of tools/SDL2-static/build.log:"; \
+	    echo "static SDL2 build is unusable; last 40 lines of tools/SDL2-static/build.log:"; \
 	    tail -n 40 tools/SDL2-static/build.log; \
 	    exit 1; \
 	  fi; \

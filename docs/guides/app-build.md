@@ -190,6 +190,23 @@ works) into the gitignored `tools/SDL2-static/` and builds it with
 builds the app in its own `build-dist/` directory against that prefix, and
 copies SDL2's zlib license into the package as `SDL2-LICENSE.txt`.
 
+On Linux the static SDL2 also needs the audio development headers:
+`libasound2-dev`, `libpulse-dev` and `libpipewire-0.3-dev` (the first two are
+dependencies of `libsdl2-dev`). SDL2's CMake **drops an audio backend whose
+headers are missing without failing** — the configure summary prints
+`SDL_ALSA (Wanted: ON): OFF` while the cache variable still reads ON — and the
+OSS driver's header is the one that is always present on Linux. The result is an
+SDL2 whose only output driver is `/dev/dsp`, which no PipeWire or PulseAudio
+machine has: `SDL_InitSubSystem(SDL_INIT_AUDIO)` fails with
+`dsp: No such audio device`, the app prints `[SDL] audio unavailable, running
+silently`, and the game has no sound. The 0.3.0 Linux release was built on such
+a host and shipped that binary (issue #8). `make sdl2-static` therefore verifies
+the archive with `tools/check-sdl2-audio.sh` and rebuilds from scratch when a
+cached copy fails, and `tools/smoke-dist.sh` checks the packaged binary for an
+ALSA, PulseAudio or PipeWire backend. The system SDL2 a Linux distribution ships
+always has them, which is why `DIST_STATIC_SDL=0` (system `libsdl2-dev`) is
+unaffected.
+
 The static link pulls in the frameworks SDL2 uses (Cocoa, IOKit, CoreAudio,
 AudioToolbox, AVFoundation, Carbon, CoreVideo, Foundation, plus weakly
 GameController/Metal/QuartzCore/CoreHaptics), which is why the package still
@@ -245,7 +262,11 @@ start fails the release instead of reaching a player.
    a runner: the image has the Visual C++ redistributable installed, so a package
    that is missing `msvcp140.dll` still starts there (session 94 shipped exactly
    that package). macOS checks `otool -L` for non-system dependencies, Linux
-   checks `ldd` for unresolved libraries.
+   checks `ldd` for unresolved libraries and greps the binary for an ALSA,
+   PulseAudio or PipeWire SDL backend. SDL2 is linked statically, so its audio
+   backends are compiled in; the OSS-only build that a host without the audio
+   headers produces cannot open a device on any PipeWire or PulseAudio machine,
+   and the 0.3.0 Linux package shipped exactly that (session 100, issue #8).
 3. The binary loads and reaches `main`: it runs with `OGRE_SMOKE=1`, which exits
    0 as soon as `main` is reached, under a deadline (`SMOKE_TIMEOUT` seconds,
    default 90) so a loader error dialog or a hang cannot stall a release run.
@@ -481,7 +502,7 @@ A self-hosted runner needs, per platform:
 | platform | toolchain | SDL2 |
 |---|---|---|
 | macOS | Xcode command line tools (incl. the Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`) | built by `make sdl2-static` |
-| Linux | `cmake`, `ninja`, `g++`, `pkg-config`, `libgtk-3-dev`, `libvulkan-dev`, `libx11-dev` | `libsdl2-dev` (or `make sdl2-static`) |
+| Linux | `cmake`, `ninja`, `g++`, `pkg-config`, `libgtk-3-dev`, `libvulkan-dev`, `libx11-dev` | `libsdl2-dev` (or `make sdl2-static`, which also needs `libasound2-dev libpulse-dev libpipewire-0.3-dev` so the static SDL2 has audio) |
 | Windows | Visual Studio 2022 with the C++ Clang tools (`clang-cl`) and `ninja`, `make`, run from a Developer Command Prompt; MinGW is not tested | built by `make sdl2-static` |
 
 ## Scripted runs and diagnostics

@@ -14,7 +14,10 @@
 #      (tools/pe_imports.py). This is the check that finds a missing runtime DLL
 #      even on a machine that has the redistributable installed, where launching
 #      the program would succeed anyway (session 94: dxcompiler.dll imports
-#      MSVCP140.dll/VCRUNTIME140.dll and neither was in the package);
+#      MSVCP140.dll/VCRUNTIME140.dll and neither was in the package). Linux: the
+#      statically linked SDL2 must carry an ALSA, PulseAudio or PipeWire backend,
+#      because the OSS-only build that is otherwise possible cannot open a device
+#      on any PipeWire or PulseAudio machine (session 100, issue #8);
 #   3. the binary loads and reaches main: it is run with OGRE_SMOKE=1, which
 #      exits 0 as soon as main is reached, under a deadline so a loader error
 #      dialog or a hang cannot stall a release run.
@@ -67,12 +70,26 @@ elif [ "$kind" = macos ] && command -v otool >/dev/null 2>&1; then
     extra=$(otool -L "$app" | tail -n +2 | grep -vE "System/Library|/usr/lib|@executable_path" || true)
     [ -z "$extra" ] || fail "non-system dynamic dependencies: $extra"
     echo "smoke-dist: no non-system dynamic dependency"
-elif [ "$kind" = linux ] && command -v ldd >/dev/null 2>&1; then
-    if ldd "$app" 2>/dev/null | grep -q "not found"; then
-        ldd "$app" | grep "not found" >&2
-        fail "the executable has unresolved shared libraries"
+elif [ "$kind" = linux ]; then
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd "$app" 2>/dev/null | grep -q "not found"; then
+            ldd "$app" | grep "not found" >&2
+            fail "the executable has unresolved shared libraries"
+        fi
+        echo "smoke-dist: every shared library resolves"
     fi
-    echo "smoke-dist: every shared library resolves"
+    # SDL2 is linked statically, so its audio backends are compiled in and the
+    # binary itself names them. SDL2's CMake drops a backend whose development
+    # headers are missing with no error, and on Linux the OSS driver's header is
+    # the one that is always present: a static SDL2 built without
+    # libasound2-dev/libpulse-dev/libpipewire-0.3-dev keeps only `dsp`, which no
+    # PipeWire or PulseAudio desktop can open ("dsp: No such audio device"), and
+    # the game runs silently (issue #8). Fail the release here, and not on the
+    # player's machine.
+    if ! LC_ALL=C grep -aqE "ALSA PCM audio|PulseAudio|Pipewire" "$app"; then
+        fail "the binary carries no ALSA, PulseAudio or PipeWire SDL audio backend (issue #8)"
+    fi
+    echo "smoke-dist: the binary carries a Linux SDL audio backend"
 fi
 
 # --- 3. does it load and reach main? ----------------------------------------

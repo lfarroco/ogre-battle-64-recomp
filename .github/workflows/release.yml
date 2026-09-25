@@ -254,7 +254,15 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libvulkan-dev libx11-dev
+          # The audio headers are for the static SDL2 that `make sdl2-static`
+          # builds, not for the app. SDL2's CMake drops an audio backend whose
+          # development headers are missing with no error, and the OSS-only
+          # result cannot open a device on a PipeWire or PulseAudio machine, so
+          # the package would run silently (tools/check-sdl2-audio.sh, issue #8).
+          # The ALSA and PulseAudio packages are dependencies of `libsdl2-dev`;
+          # PipeWire is not, so it is named here.
+          sudo apt-get install -y libgtk-3-dev libvulkan-dev libx11-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev
 
       # The Metal compiler is a separate download from Xcode 16 on. Probe first,
       # so an image that already has it is untouched.
