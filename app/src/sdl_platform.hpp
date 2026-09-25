@@ -18,6 +18,10 @@ namespace ogre {
 namespace console {
 bool tick();
 void exec(const std::string& line);
+// Installs the togglable `OGRE_CAPTURE_PRESENT` entry the `snap` command uses
+// (see the block comment in sdl_platform.cpp). Call once, before the runtime
+// starts its game and present threads.
+void init_capture_env();
 }
 
 // Platform I/O for the app: SDL2 window, N64-style input, and SDL audio queue.

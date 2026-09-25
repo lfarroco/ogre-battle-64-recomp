@@ -56,6 +56,11 @@ Organize Screen, the credits, the ending and the attract loop.
   (session 85). A hand-played session executes 44.4% of the entries; the rest
   are paths nobody has played.
 - **Renderer** — RT64 (Metal, Vulkan, D3D12) with a null renderer for bring-up.
+  RT64's **"Fix LR with Scissor"** rect enhancement is off by default here
+  (`OGRE_RECT_LR_FIX=1` restores it): it rewrites a rectangle's right edge to the
+  scissor's edge whenever the two are within one pixel, which widened the unit
+  profile's rightmost DEF/MDEF digit rectangle and made it sample the next font
+  cell (session 101).
 - **Audio** — the game's own audio microcode is recompiled and runs by default.
   The Linux package needs a static SDL2 with an ALSA, PulseAudio or PipeWire
   backend. The 0.3.0 build host had no audio development headers, SDL2 dropped
@@ -66,13 +71,22 @@ Organize Screen, the credits, the ending and the attract loop.
 - **Saves** — the cartridge battery is SRAM and works; the Controller Pak menus
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
-  controls, GAME SPEED, mods, `make dist` packages, GitHub releases.
+  controls, GAME SPEED, WIDESCREEN, mods, `make dist` packages, GitHub releases.
+  WIDESCREEN is `off` / `missions` / `always`: `missions` turns RT64's Expand
+  aspect ratio on only while scene `0x03` runs, so the mission field is hor+
+  16:9 and the 4:3 2D screens are untouched (session 102). The window shape
+  follows the mode and never the scene: `off` opens 4:3 with no pillarbox, and
+  the widescreen modes open 16:9 with the 4:3 scenes pillarboxed inside.
 - **Performance** — three misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
   (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`; sessions 80, 90, 98). A slow screen
   is measured with `OGRE_PROFILE=1 OGRE_DL_TRACE=1 OGRE_SCENE_LOG=1`: read the
   frame-pump thread `t4`'s `[prof]` line, then list the branch it names.
+- **Debug console** — the live console's `snap [prefix] [ms]` writes the whole
+  8 MiB RDRAM image with the game threads parked and, for `ms`, RT64's
+  presented-frame capture for the same screen, so a player-reported defect can be
+  read offline without a bounded run (`docs/guides/app-build.md`, session 101).
 
 What each screen should show is `docs/scenes.md`. Build instructions and every
 `OGRE_*` knob are `docs/guides/app-build.md`. A picture or a display list that a
@@ -136,7 +150,6 @@ holds the evidence.
    stub, and its renderer is a WebGL2 prototype. Re-pointing it at the working
    audio microcode and choosing a browser renderer are deferred. See
    `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md`.
-
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off

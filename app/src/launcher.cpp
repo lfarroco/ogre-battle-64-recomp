@@ -379,7 +379,8 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         const size_t index = panel.selected();
         if (index < panel.row_count() &&
             (panel.row_kind(index) == ui::Panel::RowKind::Option ||
-             panel.row_kind(index) == ui::Panel::RowKind::GameSpeed)) {
+             panel.row_kind(index) == ui::Panel::RowKind::GameSpeed ||
+             panel.row_kind(index) == ui::Panel::RowKind::Widescreen)) {
             panel.activate(index, direction);
         }
     };

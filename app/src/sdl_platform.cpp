@@ -4,6 +4,7 @@
 #include "crash_log.hpp"
 #include "input_map.hpp"
 #include "overlay.hpp"
+#include "widescreen.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -440,12 +441,24 @@ ultramodern::renderer::WindowHandle create_window(Platform& platform, const char
     flags |= SDL_WINDOW_VULKAN;
 #endif
 #endif
-    SDL_Window* window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
+    // The window opens at the shape of the WIDESCREEN mode: 4:3 for `off`, 16:9
+    // for `missions`/`always`. It never changes shape while the game runs; the
+    // 4:3 scenes of a widescreen run are pillarboxed inside the wide window.
+    int window_width = 1280;
+    int window_height = 720;
+    widescreen_initial_window_size(window_width, window_height);
+    SDL_Window* window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                          window_width, window_height, flags);
     if (window == nullptr) {
         fprintf(stderr, "[SDL] Failed to create window: %s\n", SDL_GetError());
         return {};
     }
     platform.window = window;
+    // The window manager can hand back a height other than the one requested, so
+    // the width is re-derived from the size the window actually got. Without
+    // this the 4:3 picture keeps a few pixels of pillarbox at the default
+    // setting.
+    widescreen_fit_window(window);
 
 #if defined(__APPLE__)
     // RT64's Metal path needs two native handles, and neither of them is the
@@ -1208,6 +1221,69 @@ uint32_t range_check(uint32_t addr, uint32_t len) {
     return addr >= 0x80000000u && addr + len <= 0x80800000u;
 }
 
+bool write_rdram_image(const char* path, const uint8_t* rdram, std::string& error) {
+    FILE* f = fopen(path, "wb");
+    if (f == nullptr) {
+        error = "could not open for writing";
+        return false;
+    }
+    const size_t written = fwrite(rdram, 1, kRdramSize, f);
+    fclose(f);
+    if (written != kRdramSize) {
+        error = "short write";
+        return false;
+    }
+    return true;
+}
+
+// --- `snap`: an RDRAM image plus the presented frame ------------------------
+//
+// RT64's capture path (`OGRE_CAPTURE_PRESENT`,
+// tools/RT64/src/hle/rt64_present_queue.cpp) re-reads the variable on **every**
+// present, so enabling and disabling the environment entry turns capturing on
+// and off while the game runs, and it names each file `<path>.<present>.ppm`.
+//
+// `setenv`/`unsetenv` cannot toggle it: `unsetenv` frees the value string that
+// the present thread still holds a `const char*` to and dereferences later in
+// the same present. Instead one static `NAME=value` buffer is installed once with
+// `putenv`, before the renderer starts (`init_capture_env`, called from main),
+// and the entry is toggled by rewriting the **first byte of the name**:
+// `getenv("OGRE_CAPTURE_PRESENT")` then either matches or finds nothing, while
+// the value bytes a present thread already holds never change.
+//
+// `putenv` keeps the caller's pointer, so the buffer must be a mutable global
+// and must stay valid for the process lifetime. A path the user set in the
+// environment wins; `snap` then only reports that it cannot toggle it.
+char g_capture_env[] = "OGRE_CAPTURE_PRESENT=/tmp/ogre-shot";
+bool g_capture_installed = false;
+bool g_capture_enabled = false;
+// Wall clock, not frames: `tick()` runs on the main loop, which is not the
+// present rate, so a frame count can elapse between two presents and capture
+// nothing (measured: a 6-tick window wrote no file). The default window is a few
+// presents at the ~20/s the boot presents at.
+uint64_t g_capture_until_ms = 0;
+constexpr uint32_t kCaptureDefaultMs = 400;
+
+void capture_enable(bool on) {
+    if (!g_capture_installed || g_capture_enabled == on) {
+        return;
+    }
+    // 'O' keeps "OGRE_CAPTURE_PRESENT=..."; 'X' makes the entry unmatchable.
+    g_capture_env[0] = on ? 'O' : 'X';
+    g_capture_enabled = on;
+}
+
+// Called from main before the runtime starts its threads, so the one `putenv`
+// that touches `environ` cannot race a `getenv` in the present thread.
+void init_capture_env() {
+    if (getenv("OGRE_CAPTURE_PRESENT") != nullptr) {
+        return;
+    }
+    putenv(g_capture_env);
+    g_capture_env[0] = 'X';  // installed, disabled until `snap`
+    g_capture_installed = true;
+}
+
 void console_exec(const std::string& line_in) {
     const std::string line = trim_copy(line_in);
     if (line.empty() || line[0] == '#') {
@@ -1252,6 +1328,8 @@ void console_exec(const std::string& line_in) {
                "[console] press <buttons> [polls] [x] [y]  (hold a synthetic pad press and analog\n"
                "[console]                stick, e.g. `press a`, `press start+down`, `press none 60 -1 0`)\n"
                "[console] dump [path]   (bare `dump` writes /tmp/ogre-rdram-NNNN.bin, one per press)\n"
+               "[console] snap [prefix] [ms] (bare `snap` writes /tmp/ogre-snap-NNNN.bin: RDRAM at\n"
+               "[console]                this instant plus 400 ms of presents as /tmp/ogre-shot.<n>.ppm)\n"
                "[console] save [path]   (checkpoint: RDRAM + overlay state; bare `save` writes\n"
                "[console]                /tmp/ogre-checkpoint-NNNN.ckpt)\n"
                "[console] load [path]   (restore a checkpoint this build wrote; bare `load` uses\n"
@@ -1449,12 +1527,52 @@ void console_exec(const std::string& line_in) {
             snprintf(auto_path, sizeof(auto_path), "/tmp/ogre-rdram-%04u.bin", ++dump_seq);
             path = auto_path;
         }
-        if (FILE* f = fopen(path.c_str(), "wb")) {
-            const size_t written = fwrite(rdram, 1, 0x800000u, f);
-            fclose(f);
-            printf("[console] dumped %zu bytes to %s\n", written, path.c_str());
+        std::string error;
+        if (write_rdram_image(path.c_str(), rdram, error)) {
+            printf("[console] dumped %u bytes to %s\n", kRdramSize, path.c_str());
         } else {
-            printf("[console] could not open %s\n", path.c_str());
+            printf("[console] could not write %s: %s\n", path.c_str(), error.c_str());
+        }
+    } else if (cmd == "snap") {
+        // One shortcut for a report: the RDRAM image at this instant, plus the
+        // next presented frames as PPMs. The image is what `tools/rdram.py`
+        // reads; `OGRE_VI_TRACE=1` names the framebuffer in the same run, so the
+        // image in the dump can be rendered with `rdram.py <dump> image <addr>
+        // <w> <h> --fmt rgba16`. The PPMs are RT64's own present readback, so the
+        // two together separate "the game drew it" from "the presenter did".
+        static uint32_t snap_seq = 0;
+        std::string base;
+        if (ntok > 1) {
+            base = tok[1];
+        } else {
+            char auto_path[128];
+            snprintf(auto_path, sizeof(auto_path), "/tmp/ogre-snap-%04u", ++snap_seq);
+            base = auto_path;
+        }
+        std::string error;
+        // Same thread-park as `save`: the image must be one instant, not a mix
+        // of two frames. `dump` keeps its unpaused behaviour because it is the
+        // cheap command a bound key can hit repeatedly.
+        const int parked = ultramodern::checkpoint_pause_begin();
+        const bool dumped = write_rdram_image((base + ".bin").c_str(), rdram, error);
+        ultramodern::checkpoint_pause_end();
+        if (dumped) {
+            printf("[console] snap: RDRAM -> %s.bin (%d thread(s) parked)\n", base.c_str(), parked);
+        } else {
+            printf("[console] snap: RDRAM dump failed: %s\n", error.c_str());
+        }
+        if (g_capture_installed) {
+            const uint32_t window_ms = (ntok > 2) ? num(2, kCaptureDefaultMs) : kCaptureDefaultMs;
+            g_capture_until_ms = SDL_GetTicks64() + window_ms;
+            capture_enable(true);
+            printf("[console] snap: capturing presented frames for %u ms to "
+                   "/tmp/ogre-shot.<present>.ppm\n", window_ms);
+        } else if (getenv("OGRE_CAPTURE_PRESENT") != nullptr) {
+            printf("[console] snap: the environment already sets OGRE_CAPTURE_PRESENT, so "
+                   "this command does not toggle the presented-frame capture\n");
+        } else {
+            printf("[console] snap: presented-frame capture unavailable "
+                   "(putenv failed at boot?)\n");
         }
     } else if (cmd == "save" || cmd == "load") {
         // Checkpoints: see the block comment above `write_checkpoint`. The file
@@ -1525,6 +1643,14 @@ void exec(const std::string& line) {
 // a command ran, so the caller can skip other edge handling for that frame.
 bool tick() {
     bool ran = false;
+
+    // 0. `snap`'s presented-frame capture runs for a short wall-clock window so a
+    //    present lands inside it, then goes off again. This runs before the file
+    //    and key triggers so a `snap` in the same frame still counts. The clock is
+    //    SDL's, so `OGRE_SPEED` does not stretch the window.
+    if (g_capture_enabled && SDL_GetTicks64() >= g_capture_until_ms) {
+        capture_enable(false);
+    }
 
     // 1. The watched file. Written by an external tool (an agent can create it
     //    mid-run), read wholesale, then removed so it fires exactly once.

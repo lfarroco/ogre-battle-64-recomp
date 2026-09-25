@@ -558,10 +558,12 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CAPTURE_AFTER=<n>` | skip the first `n` presents before capturing |
 | `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, capture only every `n`th present — a multi-minute run becomes a slideshow instead of one 3 MB PPM per frame (files stay numbered by present index) |
 | `OGRE_SPEED=<n>` | scale the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64), so timed sequences — the attract loop, songs — complete in `1/n` of the wall time. Semantics are unchanged: every timer scales together (audio is off in these runs). `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s. This is the debug spelling of **GAME SPEED**: with the variable unset the runtime takes its starting value from `<config>/settings.cfg`, and `OGRE_SPEED` overrides that file for one run without writing it |
+| `OGRE_WIDESCREEN=off\|missions\|always` | debug spelling of **WIDESCREEN**: `missions` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`, and `always` leaves it on everywhere. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
 | `OGRE_FORCE_SCENE=<hex>` | switch a run to attract scene `<hex>` by poking the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it active — no need to wait out the attract loop. `OGRE_FORCE_SCENE_AFTER_MS` (default 3000) delays the first poke so boot can settle |
 | `OGRE_PRESENT_ALWAYS=1` | push a present on every VI even when nothing changed (a stalled boot changes nothing, so the window otherwise freezes on an old frame) |
 | `OGRE_PRESENT_FBTARGET=1` | if the framebuffer manager has no framebuffer at the VI address, present a non-empty render target there instead of the RDRAM copy |
 | `OGRE_INSTANT_PRESENT=1` | switch RT64 to `PresentEarly` (a display list presents the framebuffer it drew) |
+| `OGRE_RECT_LR_FIX=1` | restore RT64's **"Fix LR with Scissor"** rect enhancement, which is **off** by default here. RT64's `RDP::drawRect` (`rt64_rdp.cpp`) rewrites a rectangle's right edge to the scissor's right edge whenever the two are within one pixel, on the assumption that a game under-drew a full-screen background. OB64's rectangles are correct, and the unit profile's rightmost DEF/MDEF digit sits exactly one pixel inside the panel scissor, so the snap widened a 6-px glyph rectangle to 7 px and it sampled the next font cell's first column (`28` read as a cropped `9`, `11` as a cropped `2`). `OGRE_RECT_LR_FIX=1` A/Bs the old behaviour. See `docs/HANDOFF-2026-09-25-session101.md` |
 | `OGRE_PRESENT_TRACE=1` | `[present]`/`[state]` traces: what each present carries and which path it took |
 | `OGRE_RDP_TRACE=1` | `[rdp]` traces: `setColorImage`, `fillRect`, `drawRect` (with the scissor/empty checks) |
 | `OGRE_WORKLOAD_TRACE=1` | `[workload]` traces: the framebuffer pair RT64 built (colour image, scissor, call count) |
@@ -793,6 +795,7 @@ Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
 | `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
 | `cover` | the recompiled functions entered so far (needs `OGRE_COVER=1`), one per line — a mid-run coverage snapshot without ending the run; `tools/recompcov.py --log` reads the same lines |
 | `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
+| `snap [prefix] [ms]` | **the one-key report for "something looks wrong on screen"**: writes the whole 8 MiB RDRAM image **at this instant** to `<prefix>.bin` (bare: `/tmp/ogre-snap-NNNN.bin`) with the game threads parked so the image is one instant, and turns RT64's presented-frame capture on for `ms` (default 400) so `<prefix>.<present>.ppm` files land for the same screen. The PPM path is fixed at `/tmp/ogre-shot.<present>.ppm`; the toggle rewrites the *name* byte of a `putenv`'d `OGRE_CAPTURE_PRESENT` entry so it never frees the path the present thread holds (see the block comment in `sdl_platform.cpp`). Add `OGRE_VI_TRACE=1` to the run and the same log names the framebuffer, which renders out of the dump with `tools/rdram.py <dump> image <addr> <w> <h> --fmt rgba16` |
 | `save [path]` | write a **checkpoint** (whole RDRAM + the runtime's overlay state). A bare `save` writes `/tmp/ogre-checkpoint-NNNN.ckpt` and remembers it |
 | `load [path]` | **restore** a checkpoint this build wrote — the machine rewinds to the instant of the save and the game re-runs from there. A bare `load` uses the most recent bare `save` |
 | `press <buttons> [polls] [x] [y]` | **hold a synthetic pad press** for `polls` input polls and then release it, so an external tool can walk a menu interactively ("press right", look at the capture, "press a") instead of guessing a wall-clock tap schedule (session 68). `<buttons>` is the `+`-joined `OGRE_TAP_BUTTON` vocabulary (`start`, `a`, `up`, `left`, …), `polls` and the stick values are parsed as **hex** for the poll count and `atof` for `x`/`y`, so `press a 400` is 1024 polls and `press none 60 -1 0` is a full-left analog stick. **A short press is much shorter than it looks: the game polls input about once per VI retrace (measured, session 70: `min=1 max=2 mean=1.01` calls per retrace), so `polls` ≈ emulated frames — `press right 8` is invisible, `press right 2000` walks the map cursor across the world; budget a few hundred polls per cursor step** |
@@ -1514,6 +1517,99 @@ clock is piecewise linear: `speed_start_us`/`speed_start_ticks` anchor where the
 current multiplier took effect, and the three values are published under a
 seqlock, because the game, VI and timer threads read them while the app's main
 thread changes them.
+
+### Widescreen (the SETTINGS tab)
+
+WIDESCREEN puts RT64 into its **Expand** aspect ratio, which widens the field of
+view instead of stretching the picture. `rt64_workload_queue.cpp:134-211` derives
+an `aspectRatioScale` from the output window, and `ProjectionProcessor::
+processScene` (`rt64_projection_processor.cpp:101`) counter-scales the game's
+projection matrices by `1/scale` for the projections that cover the screen and
+are wider than tall, so the 3D field keeps its proportions and gains width. The
+setting reaches RT64 through the runtime: `ultramodern::renderer::
+set_graphics_config` flags an `UpdateConfigAction`, the renderer thread picks it
+up in `events.cpp`, and `RT64Renderer::update_config` (`app/src/renderer.cpp:917`)
+forwards it to `app_->updateUserConfig`.
+
+The modes are named for the scene gate rather than for the aspect ratio, because
+the game's 2D screens are authored for 4:3:
+
+```
+WIDESCREEN   [x] OFF [ ] MISSIONS [ ] ALWAYS
+```
+
+* `OFF` (the default) never changes the aspect ratio.
+* `MISSIONS` turns Expand on only while the dispatcher's active scene
+  (`D_800E810E`) is `0x03`, the mission. The setting exists for this mode.
+* `ALWAYS` leaves Expand on. The game's full-screen 2D blits (the boot's
+  publisher stills, njpeg story backgrounds) are stretched horizontally, which is
+  why it is not the default.
+
+`app/src/widescreen.cpp` is the only writer of `ar_option`, and it is called
+once per frame from `update_gfx` beside `poll_scene`, because the active scene can
+change on any frame. It reads the live `GraphicsConfig` and writes only when the
+wanted value differs, so a steady scene costs one comparison per frame.
+
+`LEFT`/`RIGHT` (or `SPACE`) step the group, and a mouse click on a marker sets
+that mode, exactly like GAME SPEED; the value is saved at
+`<config>/settings.cfg` (`widescreen = off|missions|always`).
+
+#### The window's shape follows the mode, not the scene
+
+The window is sized once, from the mode, and never changes shape while the game
+runs. `create_window` asks `widescreen_initial_window_size` (`sdl_platform.cpp`)
+and then `widescreen_fit_window` re-derives the width from the height the window
+actually got, because the window manager can hand back a different height than
+the one requested.
+
+| mode | window | a 4:3 scene | the mission |
+|---|---|---|---|
+| `OFF` | 4:3 | fills the window, no bars | 4:3, no bars |
+| `MISSIONS` | 16:9 | **pillarboxed: black bars on the sides** | fills the width |
+| `ALWAYS` | 16:9 | stretched to the width | stretched to the width |
+
+`widescreen_update` returns whether the **mode** changed, and only that makes the
+app re-fit the window (`main.cpp`). A scene transition must not resize the
+window: the first version did exactly that, and the developer rejected it —
+*"the window changes its size while the game is running"*. Changing the mode from
+the launcher or the `ESC` overlay re-fits the window once, which is the one case
+where the shape is expected to change. A manual resize or a double-click to fill
+the screen is left alone until the mode changes.
+
+#### Observations
+
+Observations from the verification runs (2026-09-25, `docs/HANDOFF-2026-09-25-session102.md`):
+
+* Entering and leaving scene `0x03` toggles Expand and back. A mission that
+  interleaves the story scenes `0x02`/`0x0D` toggles on every visit, and the run
+  continues normally (`[widescreen]` lines in the log).
+* With `OFF` the window opens 953x715 (4:3 at a 715 window height) and the
+  4:3 picture reaches both edges — no pillarbox, which was the developer's first
+  report about the old fixed 1280x720 window.
+* With `MISSIONS`/`ALWAYS` the window opens 1271x715 (16:9) and stays; the boot,
+  the title, the Load Game book and the story cutscenes are pillarboxed inside
+  it, which is what the developer asked for.
+* The mission field and its projected 2D HUD (the `NOTE` tooltip, the dialogue
+  box, the battle unit panels) keep their proportions and the field fills the
+  width.
+* The `MISSION` banner row clips at both screen edges in 4:3 as well: it is the
+  game's own scrolling marquee and not an Expand artifact.
+* Proofs: `native-widescreen-launcher.png` (the row),
+  `native-widescreen-pillarbox.png` and `native-widescreen-43-window.png` (the
+  Load Game book in `MISSIONS` and `OFF` — the identical screen with and without
+  the side bars), `native-widescreen-mission-expand.png` and
+  `native-widescreen-mission-43.png` (a battle in the mission, in `MISSIONS` and
+  `OFF`; not the same battle frame, but the same area and camera).
+
+```bash
+# the row, as a PPM (a ROM is auto-found, so force the launcher)
+OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=settings OGRE_LAUNCHER_SHOT=/tmp/ws.ppm \
+  ./build-app/ogrebattle64
+
+# the scene gate: Expand exactly while scene 0x03 runs, and the window unchanged
+OGRE_WIDESCREEN=missions OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
+  ./build-app/ogrebattle64 2>&1 | grep -E '\[scene\].*0x0003|\[widescreen\]'
+```
 
 ### The in-game overlay
 

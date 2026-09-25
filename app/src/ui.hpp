@@ -98,6 +98,7 @@ public:
         Binding,
         ResetBindings,
         GameSpeed,
+        Widescreen,
         ChaosFrame,
     };
 
@@ -153,8 +154,8 @@ public:
 
     // `direction` is +1 forward, -1 backward.
     RowAction activate(size_t index, int direction);
-    // Picks option `option` of a GameSpeed row directly (a click on one of its
-    // radio markers).
+    // Picks option `option` of a radio row (GAME SPEED, WIDESCREEN) directly (a
+    // click on one of its markers).
     RowAction choose_option(size_t index, size_t option);
 
     // --- rebinding capture ----------------------------------------------------
@@ -173,7 +174,7 @@ public:
     // Filled by draw_panel() each frame; clicks use the previous frame's
     // geometry, which is one frame of lag and not visible.
     struct Geometry {
-        // One clickable radio marker of a GameSpeed row. `rect` is absolute, and
+        // One clickable radio marker of a radio row. `rect` is absolute, and
         // the entry is only present for markers draw_panel actually laid out.
         struct Option {
             int row = -1;

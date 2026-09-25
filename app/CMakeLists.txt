@@ -295,6 +295,7 @@ else()
         src/font.cpp
         src/input_map.cpp
         src/settings.cpp
+        src/widescreen.cpp
         src/ui.cpp
         src/launcher.cpp
         src/overlay.cpp

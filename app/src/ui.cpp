@@ -81,55 +81,78 @@ const char* kOverlayHint =
 const char* kCaptureHint =
     "PRESS A KEY OR GAMEPAD BUTTON   BACKSPACE CLEARS KEY   DELETE CLEARS PAD   ESC CANCELS";
 
-// --- the GAME SPEED radio group -----------------------------------------------
-// A GameSpeed row draws its options as radio markers in the second column
-// instead of one text run, so measure_panel (the row height) and draw_panel (the
-// markers and their click rects) lay the same group out with this helper. The
-// result is a pure function of its arguments, so the measured and the drawn row
-// agree.
+// --- radio rows (GAME SPEED, WIDESCREEN) --------------------------------------
+// A radio row draws its options as markers in the second column instead of one
+// text run, so measure_panel (the row height) and draw_panel (the markers and
+// their click rects) lay the same group out with this helper. The result is a
+// pure function of its arguments, so the measured and the drawn row agree.
 
-struct GameSpeedToken {
+struct RadioToken {
     std::string text;
     int x = 0;
     int y = 0;
     int option = -1;
 };
 
-struct GameSpeedLayout {
-    std::vector<GameSpeedToken> tokens;
+struct RadioLayout {
+    std::vector<RadioToken> tokens;
     std::vector<SDL_Rect> option_rects;  // relative to the row's top-left
     int height = 0;
 };
 
-std::string game_speed_marker(int option_value, int current) {
-    return option_value == current ? "[x]" : "[ ]";
-}
-
-GameSpeedLayout layout_game_speed(const Font& font, int scale, int max_width, int current) {
-    GameSpeedLayout layout;
+// `labels` in display order; `current` is the index of the live option, or -1
+// when the live value is not one the row offers.
+RadioLayout layout_radio(const Font& font, int scale, int max_width,
+                         const std::vector<std::string>& labels, int current) {
+    RadioLayout layout;
     const int line_height = scale * Font::kCellHeight;
     const int space = font.width(" ", scale);
     int x = 0;
     int y = 0;
-    for (int i = 0; i < kGameSpeedCount; i++) {
-        const int value = game_speed_value(i);
-        const std::string marker = game_speed_marker(value, current);
-        const std::string number = std::to_string(value);
+    for (size_t i = 0; i < labels.size(); i++) {
+        const std::string marker = static_cast<int>(i) == current ? "[x]" : "[ ]";
         const int marker_width = font.width(marker, scale);
-        const int option_width = marker_width + space + font.width(number, scale);
+        const int option_width = marker_width + space + font.width(labels[i], scale);
         // A narrow window wraps the group onto another line; the option itself
         // never splits.
         if (x > 0 && x + option_width > max_width) {
             x = 0;
             y += line_height;
         }
-        layout.tokens.push_back(GameSpeedToken{marker, x, y, i});
-        layout.tokens.push_back(GameSpeedToken{number, x + marker_width + space, y, i});
+        layout.tokens.push_back(
+            RadioToken{marker, x, y, static_cast<int>(i)});
+        layout.tokens.push_back(
+            RadioToken{labels[i], x + marker_width + space, y, static_cast<int>(i)});
         layout.option_rects.push_back(SDL_Rect{x, y, option_width, line_height});
         x += option_width + space;
     }
     layout.height = y + line_height;
     return layout;
+}
+
+std::vector<std::string> game_speed_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kGameSpeedCount; i++) {
+        labels.push_back(std::to_string(game_speed_value(i)));
+    }
+    return labels;
+}
+
+RadioLayout layout_game_speed(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, game_speed_labels(),
+                        game_speed_index(current));
+}
+
+std::vector<std::string> widescreen_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kWidescreenModeCount; i++) {
+        labels.push_back(widescreen_mode_label(i));
+    }
+    return labels;
+}
+
+RadioLayout layout_widescreen(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, widescreen_labels(), current);
 }
 
 // The GAME SPEED group as one string, for right_text (the drawn row uses the
@@ -140,7 +163,7 @@ std::string game_speed_text(int current) {
         if (!text.empty()) {
             text += "  ";
         }
-        text += game_speed_marker(game_speed_value(i), current) + " " +
+        text += std::string(game_speed_value(i) == current ? "[x] " : "[ ] ") +
                 std::to_string(game_speed_value(i));
     }
     return text;
@@ -448,6 +471,7 @@ void Panel::rebuild_rows() {
 
         case Tab::Settings:
             rows_.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
+            rows_.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
@@ -557,6 +581,8 @@ std::string Panel::left_text(size_t index) const {
             return "Reset bindings to defaults";
         case RowKind::GameSpeed:
             return "GAME SPEED";
+        case RowKind::Widescreen:
+            return "WIDESCREEN";
         case RowKind::ChaosFrame:
             return "Chaos Frame";
     }
@@ -586,6 +612,8 @@ std::string Panel::right_text(size_t index) const {
             return "Restore the default keyboard and gamepad map.";
         case RowKind::GameSpeed:
             return game_speed_text(game_speed());
+        case RowKind::Widescreen:
+            return widescreen_mode_text();
         case RowKind::ChaosFrame: {
             if (!chaos_frame_known_) {
                 return "GAME NOT RUNNING";
@@ -704,6 +732,20 @@ RowAction Panel::activate(size_t index, int direction) {
             return RowAction::SettingChanged;
         }
 
+        case RowKind::Widescreen: {
+            // Like GAME SPEED: Left/Right and Space step the radio group,
+            // wrapping at the ends. `widescreen.cpp` applies the new value on
+            // the next frame, so a change under the overlay lands immediately.
+            int current = widescreen_mode_index();
+            if (current < 0) {
+                current = 0;
+            }
+            current = ((current + direction) % kWidescreenModeCount + kWidescreenModeCount) %
+                      kWidescreenModeCount;
+            set_widescreen_mode(static_cast<WidescreenMode>(current));
+            return RowAction::SettingChanged;
+        }
+
         case RowKind::ChaosFrame:
             // A read-only readout: selectable so the value is highlighted, but
             // activating it does nothing.
@@ -713,16 +755,35 @@ RowAction Panel::activate(size_t index, int direction) {
 }
 
 RowAction Panel::choose_option(size_t index, size_t option) {
-    if (index >= rows_.size() || rows_[index].kind != RowKind::GameSpeed ||
-        option >= static_cast<size_t>(kGameSpeedCount)) {
+    if (index >= rows_.size()) {
         return RowAction::None;
     }
-    const int value = game_speed_value(static_cast<int>(option));
-    if (value == game_speed()) {
-        return RowAction::None;
+    switch (rows_[index].kind) {
+        case RowKind::GameSpeed: {
+            if (option >= static_cast<size_t>(kGameSpeedCount)) {
+                return RowAction::None;
+            }
+            const int value = game_speed_value(static_cast<int>(option));
+            if (value == game_speed()) {
+                return RowAction::None;
+            }
+            set_game_speed(value);
+            return RowAction::SettingChanged;
+        }
+        case RowKind::Widescreen: {
+            if (option >= static_cast<size_t>(kWidescreenModeCount)) {
+                return RowAction::None;
+            }
+            const WidescreenMode mode = static_cast<WidescreenMode>(option);
+            if (mode == widescreen_mode()) {
+                return RowAction::None;
+            }
+            set_widescreen_mode(mode);
+            return RowAction::SettingChanged;
+        }
+        default:
+            return RowAction::None;
     }
-    set_game_speed(value);
-    return RowAction::SettingChanged;
 }
 
 void Panel::begin_capture(size_t index) {
@@ -844,11 +905,15 @@ PanelMetrics measure_panel(const Font& font, Panel& panel, int output_width,
         if (panel.row_kind(i) == Panel::RowKind::Section) {
             metrics.row_heights[i] = section_height;
         }
-        else if (panel.row_kind(i) == Panel::RowKind::GameSpeed) {
+        else if (panel.row_kind(i) == Panel::RowKind::GameSpeed ||
+                 panel.row_kind(i) == Panel::RowKind::Widescreen) {
             // The radio group is laid out by option, not wrapped as one string;
             // its height is what the row must reserve.
-            const GameSpeedLayout layout =
-                layout_game_speed(font, metrics.scale, description_width, game_speed());
+            const RadioLayout layout =
+                panel.row_kind(i) == Panel::RowKind::GameSpeed
+                    ? layout_game_speed(font, metrics.scale, description_width, game_speed())
+                    : layout_widescreen(font, metrics.scale, description_width,
+                                        widescreen_mode_index());
             metrics.row_heights[i] = std::max(metrics.row_height, layout.height);
         }
         else {
@@ -955,14 +1020,18 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
         layer.draw(renderer, 0, panel_left, text_y, false);
 
         int right_y = text_y;
-        if (kind == Panel::RowKind::GameSpeed) {
-            // The marker of the live speed stays warm so the current value is
+        if (kind == Panel::RowKind::GameSpeed || kind == Panel::RowKind::Widescreen) {
+            // The marker of the live option stays warm so the current value is
             // readable even when the row is not selected.
-            const int current_speed = game_speed();
-            const GameSpeedLayout layout =
-                layout_game_speed(font, scale, description_width, current_speed);
-            for (const GameSpeedToken& token : layout.tokens) {
-                const bool live = game_speed_value(token.option) == current_speed;
+            const bool game_speed_row = kind == Panel::RowKind::GameSpeed;
+            const int current = game_speed_row ? game_speed_index(game_speed())
+                                               : widescreen_mode_index();
+            const RadioLayout layout =
+                game_speed_row
+                    ? layout_game_speed(font, scale, description_width, game_speed())
+                    : layout_widescreen(font, scale, description_width, current);
+            for (const RadioToken& token : layout.tokens) {
+                const bool live = token.option == current;
                 layer.build(renderer, font, token.text, scale,
                             (is_selected || live) ? kWarmColor : kSubtitleColor);
                 layer.draw(renderer, 0, description_x + token.x, text_y + token.y, false);

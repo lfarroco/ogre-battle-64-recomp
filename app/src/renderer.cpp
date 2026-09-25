@@ -858,6 +858,30 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
             return;
         }
 
+        // Fix the Organize Screen's DEF/MDEF "extra digit": RT64's "Fix LR with
+        // Scissor" enhancement (`enhancementConfig.rect.fixRectLR`, default on)
+        // snaps a rectangle's right edge to the scissor's right edge whenever the
+        // two are within one pixel (rt64_rdp.cpp, `RDP::drawRect`). OB64's font
+        // rectangles are correct as authored, and the unit profile's rightmost
+        // digit sits exactly 1 px inside the panel scissor — scissor lrx `1180`,
+        // digit rect lrx `1176` — so the snap widens that 6-px glyph rectangle to
+        // 7 px, and the seventh pixel samples the *next* font-sheet cell's first
+        // column (`28` reads as a cropped `9`, `11` as a cropped `2`). The
+        // enhancement exists for games that under-draw a full-screen background;
+        // OB64 does not, and mupen64plus + parallel-rdp, which has no such
+        // enhancement, renders the same display list without the column.
+        // `OGRE_RECT_LR_FIX=1` restores RT64's default for an A/B. This runs after
+        // `setup`, because `updateEnhancementConfig` writes through the shared
+        // queue resources that `setup` creates.
+        {
+            const char* lr_fix = getenv("OGRE_RECT_LR_FIX");
+            app_->enhancementConfig.rect.fixRectLR = (lr_fix != nullptr) && (lr_fix[0] != '0');
+            app_->updateEnhancementConfig();
+            fprintf(stderr, "[renderer] rect/scissor snap (fixRectLR) = %d%s\n",
+                    app_->enhancementConfig.rect.fixRectLR ? 1 : 0,
+                    app_->enhancementConfig.rect.fixRectLR ? " (OGRE_RECT_LR_FIX=1)" : "");
+        }
+
         app_->setFullScreen(cur_config.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
         // OGRE_DUMP_TEX=<dir>: make RT64 dump every texture it decodes (a 4 KiB
         // .tmem plus its .tile.json) into <dir>. Used to inspect what the

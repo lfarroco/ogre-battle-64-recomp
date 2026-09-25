@@ -444,6 +444,7 @@ void overlay_handle_event(const SDL_Event& event) {
                 const size_t index = g_overlay.panel->selected();
                 if (index < g_overlay.panel->row_count() &&
                     (g_overlay.panel->row_kind(index) == ui::Panel::RowKind::GameSpeed ||
+                     g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Widescreen ||
                      g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Option)) {
                     g_overlay.panel->activate(index, key == SDLK_RIGHT ? 1 : -1);
                 }

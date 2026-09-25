@@ -21,9 +21,10 @@ const int kGameSpeeds[kGameSpeedCount] = {1, 2, 4};
 // in which case a change still applies to the runtime but is not persisted.
 std::filesystem::path g_pref_dir;
 
-// The live value. Only the main thread (the launcher loop and the overlay's
-// update_gfx callback) reads and writes it, so it needs no lock.
+// The live values. Only the main thread (the launcher loop and the overlay's
+// update_gfx callback) reads and writes them, so they need no lock.
 int g_game_speed = 1;
+WidescreenMode g_widescreen = WidescreenMode::Off;
 
 // `OGRE_SPEED`'s value, or 0 when unset or unparsable. The runtime reads the
 // same variable itself for its initial value, so this is only used to decide
@@ -41,9 +42,27 @@ int env_game_speed() {
     return static_cast<int>(value);
 }
 
-// `game_speed = <n>`; a bare integer on its own line is accepted too, so a file
-// edited by hand keeps working.
-int parse_game_speed(const std::string& text) {
+std::string lowercase(std::string text) {
+    for (char& c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return text;
+}
+
+std::string trim(const std::string& text) {
+    const size_t first = text.find_first_not_of(" \t\r");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const size_t last = text.find_last_not_of(" \t\r");
+    return text.substr(first, last - first + 1);
+}
+
+// The value of `wanted` in a `key = value` file: comments start at `#`, the key
+// is matched case-insensitively after trimming, and the first match wins.
+std::string setting_value(const std::string& text, const char* wanted) {
     size_t pos = 0;
     while (pos <= text.size()) {
         const size_t end = text.find('\n', pos);
@@ -54,23 +73,60 @@ int parse_game_speed(const std::string& text) {
             line = line.substr(0, hash);
         }
         const size_t equals = line.find('=');
-        std::string value = equals == std::string::npos ? line : line.substr(equals + 1);
-        const size_t first = value.find_first_not_of(" \t\r");
-        const size_t last = value.find_last_not_of(" \t\r");
-        value = first == std::string::npos ? std::string{} : value.substr(first, last - first + 1);
-        if (!value.empty()) {
-            char* value_end = nullptr;
-            const long parsed = std::strtol(value.c_str(), &value_end, 10);
-            if (value_end != value.c_str() && parsed >= 1 && parsed <= 64) {
-                return static_cast<int>(parsed);
-            }
+        if (equals != std::string::npos &&
+            lowercase(trim(line.substr(0, equals))) == wanted) {
+            return trim(line.substr(equals + 1));
         }
         if (end == std::string::npos) {
             break;
         }
         pos = end + 1;
     }
+    return {};
+}
+
+// `game_speed = <n>`; a bare integer on its own line is accepted too, so a file
+// edited by hand before WIDESCREEN existed keeps working.
+int parse_game_speed(const std::string& text) {
+    std::string value = setting_value(text, "game_speed");
+    if (value.empty()) {
+        size_t pos = 0;
+        while (pos <= text.size()) {
+            const size_t end = text.find('\n', pos);
+            std::string line = text.substr(pos, end == std::string::npos ? std::string::npos
+                                                                        : end - pos);
+            const size_t hash = line.find('#');
+            if (hash != std::string::npos) {
+                line = line.substr(0, hash);
+            }
+            value = trim(line);
+            if (!value.empty() && value.find('=') == std::string::npos) {
+                break;
+            }
+            if (end == std::string::npos) {
+                return 1;
+            }
+            pos = end + 1;
+        }
+    }
+    char* value_end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &value_end, 10);
+    if (value_end != value.c_str() && parsed >= 1 && parsed <= 64) {
+        return static_cast<int>(parsed);
+    }
     return 1;
+}
+
+// `off` / `missions` / `always`, or 0 / 1 / 2.
+WidescreenMode parse_widescreen(const std::string& text) {
+    const std::string value = lowercase(setting_value(text, "widescreen"));
+    if (value == "always" || value == "2") {
+        return WidescreenMode::Always;
+    }
+    if (value == "missions" || value == "mission" || value == "1") {
+        return WidescreenMode::Missions;
+    }
+    return WidescreenMode::Off;
 }
 
 std::string read_file(const std::filesystem::path& path, bool& ok) {
@@ -104,7 +160,9 @@ void write_settings() {
         "# Ogre Battle 64: Recomp settings.\n"
         "# Edited from the launcher's SETTINGS tab, or the in-game Esc overlay.\n"
         "# game_speed: the emulated clock's multiplier (1, 2 or 4).\n"
-        "game_speed = " + std::to_string(g_game_speed) + "\n";
+        "game_speed = " + std::to_string(g_game_speed) + "\n"
+        "# widescreen: off, missions (only the mission scene) or always.\n"
+        "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n";
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
 }
@@ -159,6 +217,44 @@ void set_game_speed(int multiplier) {
     write_settings();
 }
 
+const char* widescreen_mode_label(int index) {
+    switch (static_cast<WidescreenMode>(index)) {
+        case WidescreenMode::Off:      return "OFF";
+        case WidescreenMode::Missions: return "MISSIONS";
+        case WidescreenMode::Always:   return "ALWAYS";
+    }
+    return "OFF";
+}
+
+WidescreenMode widescreen_mode() {
+    return g_widescreen;
+}
+
+int widescreen_mode_index() {
+    const int index = static_cast<int>(g_widescreen);
+    return index >= 0 && index < kWidescreenModeCount ? index : -1;
+}
+
+void set_widescreen_mode(WidescreenMode mode) {
+    if (mode == g_widescreen) {
+        return;
+    }
+    g_widescreen = mode;
+    write_settings();
+}
+
+std::string widescreen_mode_text() {
+    std::string text;
+    for (int i = 0; i < kWidescreenModeCount; i++) {
+        if (!text.empty()) {
+            text += "  ";
+        }
+        text += std::string(i == static_cast<int>(g_widescreen) ? "[x] " : "[ ] ") +
+                widescreen_mode_label(i);
+    }
+    return text;
+}
+
 std::filesystem::path settings_path(const std::filesystem::path& pref_dir) {
     return pref_dir / "settings.cfg";
 }
@@ -166,12 +262,14 @@ std::filesystem::path settings_path(const std::filesystem::path& pref_dir) {
 void load_settings(const std::filesystem::path& pref_dir) {
     g_pref_dir = pref_dir;
     int speed = 1;
+    WidescreenMode widescreen = WidescreenMode::Off;
     bool have_file = false;
     const std::string text = read_file(settings_path(pref_dir), have_file);
     if (have_file) {
         // A file written by an older build can name a value the panel no longer
         // offers; the closest offered one keeps it selectable.
         speed = nearest_game_speed(parse_game_speed(text));
+        widescreen = parse_widescreen(text);
     }
     if (const int env = env_game_speed(); env != 0) {
         // A developer run names its speed on the command line; the value is
@@ -179,9 +277,18 @@ void load_settings(const std::filesystem::path& pref_dir) {
         speed = env;
         std::fprintf(stderr, "[settings] OGRE_SPEED=%d overrides the saved game speed\n", env);
     }
+    // OGRE_WIDESCREEN=off|missions|always: the same rule as OGRE_SPEED. It is
+    // also how a scripted run reaches the setting without the UI.
+    if (const char* env = std::getenv("OGRE_WIDESCREEN"); env != nullptr && env[0] != '\0') {
+        widescreen = parse_widescreen(std::string("widescreen = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_WIDESCREEN=%s overrides the saved widescreen mode\n",
+                     env);
+    }
     g_game_speed = speed;
+    g_widescreen = widescreen;
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(speed));
-    std::fprintf(stderr, "[settings] game speed x%d\n", speed);
+    std::fprintf(stderr, "[settings] game speed x%d, widescreen %s\n", speed,
+                 lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str());
 }
 
 }  // namespace ogre

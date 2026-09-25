@@ -41,6 +41,7 @@
 #include "input_map.hpp"
 #include "overlay.hpp"
 #include "settings.hpp"
+#include "widescreen.hpp"
 #include "sdl_platform.hpp"
 #include "renderer.hpp"
 #include "rsp.hpp"
@@ -89,6 +90,15 @@ static void update_gfx(void*) {
     // OGRE_SCENE=<name|hex>: boot straight into a screen (see bank_overlays.cpp).
     // Polled here because this callback runs once per frame.
     ogre::poll_scene();
+    // The WIDESCREEN setting is a function of the active scene (Missions mode
+    // turns RT64's Expand aspect ratio on for scene 0x03 only), and the scene
+    // can change on any frame, so it is applied here beside poll_scene. The
+    // return value is the *mode* changing, which is the only thing that changes
+    // the window's shape: a scene transition must not resize the window, and in
+    // a widescreen mode the 4:3 scenes are pillarboxed instead.
+    if (ogre::widescreen_update()) {
+        ogre::widescreen_fit_window(ogre::g_platform.window);
+    }
     bool quit = false;
     ogre::pump_sdl_events(ogre::g_platform, &quit);
     // The Esc overlay owns a window of its own; drawing it here keeps it on the
@@ -215,6 +225,12 @@ int main(int argc, char** argv) {
     // OGRE_TAP_MS / OGRE_EXIT_AFTER_MS make a run self-driving and bounded (see
     // sdl_platform.hpp); both are off unless set.
     ogre::configure_automation(ogre::g_platform);
+
+    // Install the togglable OGRE_CAPTURE_PRESENT entry the console's `snap`
+    // command flips. This must run before the runtime creates the present
+    // thread: `putenv` is the only write to `environ`, and it cannot race a
+    // `getenv` in that thread. See the block comment in sdl_platform.cpp.
+    ogre::console::init_capture_env();
 
     // OGRE_PROFILE=1: sample every game thread's current recompiled function so
     // a "busy but not rendering" stall can be attributed to real work.
