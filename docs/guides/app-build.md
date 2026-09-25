@@ -8,7 +8,8 @@ and links the renderer (RT64), then boots the game on your ROM.
 - CMake ≥ 3.20 and a C++20 compiler (clang/gcc/msvc).
 - SDL2. On macOS: `brew install sdl2` (installs `sdl3` + `sdl2-compat`).
 - The toolchain from the main [PLAN.md](../../PLAN.md) reproduce section
-  (splat, mips binutils, N64Recomp, RT64, N64ModernRuntime submodules).
+  (splat, mips binutils, the N64Recomp and N64ModernRuntime vendored clones, and
+  the RT64 submodule).
 - Your own big-endian `.z64` dump at `assets/ogre64.z64`.
 
 ## Regenerating the recompiled code (start here on a fresh clone)
@@ -27,7 +28,7 @@ That runs the whole pipeline in the one order that works:
 
 | step | what it produces |
 |---|---|
-| `make resplit` | `asm/`, `assets/*.bin`, `ogrebattle64.ld`, `undefined_*_auto.txt` (splat) |
+| `make resplit` | `asm/`, `assets/*.bin`, `ogrebattle64.ld`, `config/symbols/undefined_*_auto.txt` (splat) |
 | `make` | `build/ogrebattle64.elf` (assemble + link the MIPS ELF) |
 | `make bank-recomp` | `Bank*Funcs/`, `app/src/bank_funcs.inc` (the 34 streamed-bank units) |
 | `make recomp` | `RecompiledFuncs/` (N64Recomp + the cross-bank dispatch) |
@@ -38,7 +39,7 @@ and boots, and `RecompiledFuncs/` comes out **byte-identical** to the tree the
 project has been testing.
 
 **The order near the end is load-bearing.** `make recomp`'s cross-bank dispatch
-(`tools/cross_bank.py dispatch --only …`) rewrites 15 call sites that N64Recomp
+(`tools/cross_bank.py dispatch --only …`) rewrites 16 call sites that N64Recomp
 otherwise binds to the wrong bank, but it can only see bank records that
 `bank_funcs.inc` already lists. Recompile before regenerating the banks and the
 dispatch is skipped: the build succeeds and quietly runs wrong-bank code — the
@@ -66,18 +67,23 @@ Two things worth knowing:
 Once the code above exists:
 
 ```sh
-# one-time: initialize all third-party submodules
+# one-time: initialize the RT64 submodule (it is the only submodule; the
+# N64Recomp and N64ModernRuntime trees are gitignored vendored clones)
 git submodule update --init --recursive
 
 # apply the SDL >= 2.0.22 compatibility patch to RT64's plume submodule
 # (needed on systems with older SDL2, e.g. Ubuntu 22.04's 2.0.20)
 git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
 
+# apply the runtime patches to their vendored clones
+git -C tools/N64ModernRuntime apply ../../patches/n64modernruntime-ob64.patch
+git -C tools/N64ModernRuntime/N64Recomp apply ../../../patches/n64modernruntime-n64recomp.patch
+
 # apply the OGRE diagnostics (present traces, GPU readback capture, presenter
 # knobs). patches/rt64-plume-ob64.patch is the texture -> buffer readback support in
 # plume's Metal backend.
-git -C tools/RT64 apply ../../rt64-ob64.patch
-git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-ob64.patch
+git -C tools/RT64 apply ../../patches/rt64-ob64.patch
+git -C tools/RT64/src/contrib/plume apply ../../../../../patches/rt64-plume-ob64.patch
 
 # build the app
 cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
@@ -110,12 +116,13 @@ pthreads).
 ./build-app/ogrebattle64 [path-to-rom.z64]
 ```
 
-The app starts on its own **start screen** — a black window reading
-`OGRE BATTLE 64: RECOMP` / `CLICK TO LOAD YOUR ROM (OR DROP IT IN THIS WINDOW)`
-— when it has no ROM to boot. Click it to open a native file picker, or drop a
-ROM file onto the window. A ROM placed in the app's folder (or `<app>/roms/`) is
-found automatically, so "put the ROM next to the executable and launch" works
-with no click at all.
+The app starts on its own **start screen** when it has no ROM to boot: the
+`OGRE BATTLE 64: RECOMP` title over a tabbed panel (**START GAME**, **ROM**,
+**MODS**, **CONTROLS**). The ROM tab reads `[ ] No ROM` and
+`PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN A WINDOW`. `SPACE` opens a native
+file picker, or drop a ROM file onto the window. A ROM placed in the app's folder
+(or `<app>/roms/`) is found automatically, so "put the ROM next to the executable
+and launch" works with no click at all.
 
 The ROM is validated by XXH3 hash and the runtime stores a copy in the config
 directory, so **later launches skip the start screen and boot straight into the

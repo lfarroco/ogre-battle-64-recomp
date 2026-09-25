@@ -23,7 +23,7 @@ from.
 | Pillar | What an emulator does | What this port does |
 |---|---|---|
 | **GBI identification** | Hash the OSTask's ucode text+data and dispatch to the matching GBI table | **Has it.** RT64's `GBIManager::getGBIForUCode` XXH3-hashes the ucode and picks the GBI; the app calls it on every `send_dl` (`app/src/renderer.cpp`). §3 is the recipe to verify which GBI a given list got. |
-| **RSP** | HLE the known ucodes (audio, JPEG, …); LLE anything else by running the real microcode | **Does not have it.** `app/src/rsp.cpp` is a **stub for everything except** the game's Nintendo-JPEG decoder. A task the stub swallows produces *no output at all*, and the game then renders whatever the missing task should have filled. Before blaming game data, check whether an RSP task went missing (§4, check 2). |
+| **RSP** | HLE the known ucodes (audio, JPEG, …); LLE anything else by running the real microcode | **Partly.** `app/src/rsp.cpp` runs the game's own recompiled microcode for the Nintendo-JPEG decoder (type 4) and the audio driver (type 2) by default; any other task gets a **stub** that completes without executing microcode. A task the stub swallows produces *no output at all*, and the game then renders whatever the missing task should have filled. Before blaming game data, check whether an RSP task went missing (§4, check 2). |
 | **Ground truth** | Its own existence: mupen/GLideN64/parallel-rdp render the ROM, so "retail does X" is measurable, not inferred | **Does not have it.** The port only knows what the port does. §5 is how to borrow one — RetroArch with Mupen64Plus-Next is already installed on this machine. |
 
 **The rule that follows:** a display list the port emitted is evidence about *the
@@ -111,9 +111,11 @@ recompiler, ucode dispatch, renderer, RDRAM contents, or game state.
    type and flags any non-gfx task the stub swallowed. For scene `0x05` the
    answer (session 64, forced scene at 4×) is: type 1 (gfx, `ucode=0x8009F540`)
    and type 2 (audio, `ucode=0x8009E050`, 1706 tasks in 9 s), **and nothing
-   else** — so no missing task explains this screen. (The audio stub is expected:
-   the port has no audio yet.) On 32-bit-stub tasks the game will not notice, so
-   this check is about *geometry-producing* work, not audio.
+   else** — so no missing task explains this screen. (The audio microcode is
+   recompiled and runs by default, so the 1706 tasks are real work; a task type
+   the port has no microcode for is the one that goes missing.) On
+   32-bit-stub tasks the game will not notice, so this check is about
+   *geometry-producing* work, not audio.
 3. **Is the code the code we compiled?** `tools/rdram.py <dump> banks` says which
    module is resident at each streamed RAM window, and `make midfunc` lists the
    prologue-less tails. The sprites are drawn by CPU code in unit **M**; a wrong
@@ -194,12 +196,11 @@ machinery this port already has (sessions 51–52).
 
 **Read this as a lead, not a conclusion.** Both hooks are in GLideN64's **S2DEX**
 handler, and the map's party draw is F3DEX2 `G_TEXRECT` (§3), so neither hook is
-obviously the map's bug. What it does establish is that OB64's 2D drawing leans
-on RDP behaviour (texcoord clamping against a tile window) that a naive
-implementation gets wrong — which is exactly the shape of the map's symptom.
-**Before writing any code, find out whether RT64 has an equivalent of
-`enableTexCoordBounds`; if it does not, that is a renderer-side difference worth
-an A/B, and it needs *no* game-data theory at all.**
+the map's bug. Session 65 fixed the map's sprites: unit M's `.data` labels were
+linked 8 bytes high, so every sprite descriptor was read one entry late. Session
+81 recorded that GLideN64's `enableTexCoordBounds` **has no RT64 equivalent**.
+What the two hooks do establish is that OB64's 2D drawing leans on RDP behaviour
+(texcoord clamping against a tile window) that a naive implementation gets wrong.
 
 ## 7. The pattern to stop
 

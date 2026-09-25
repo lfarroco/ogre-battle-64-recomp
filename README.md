@@ -33,7 +33,8 @@ pins the backend (`vulkan` or `d3d12`).
 
 ## AI Disclaimer
 
-This work in this project was mostly performed by the DeepSeek v4/v4.1 Flash model.
+This project is mostly an experiment of checking "How far can DeepSeek go?". So far,
+the results are quite impressive!
 
 ## Status
 
@@ -42,6 +43,7 @@ See [PLAN.md](PLAN.md) for the full plan, current status, and technical findings
 ## Directory layout
 
 ```
+app/                   the port's CMake project (the executable)
 assets/                your ROM (gitignored; big-endian .z64 expected)
 asm/                   splat-generated disassembly
 config/                every config the build reads
@@ -99,11 +101,13 @@ cmake --build build-app -j
 ./build-app/ogrebattle64
 ```
 
-On launch the app shows a black start screen — `OGRE BATTLE 64: RECOMP` /
-`CLICK TO LOAD YOUR ROM (OR DROP IT IN THIS WINDOW)`. Click it to pick your ROM,
-drag the ROM onto the window, or just put the ROM next to the executable. The
-ROM is validated by hash and stored, so later launches go straight into the
-game. The battery save lands in `saves/` **beside the executable**.
+On launch the app shows the start screen — `OGRE BATTLE 64: RECOMP` with a tab
+bar (**START GAME**, **ROM**, **MODS**, **CONTROLS**). The ROM row reads
+`[ ] No ROM` until a ROM is loaded: press `SPACE` to pick one, drag the ROM onto
+the window, or put the ROM next to the executable. `ESC` opens the same panel
+over the running game. The ROM is validated by hash and stored, so later launches
+go straight into the game. The battery save lands in `saves/` **beside the
+executable**.
 
 ### A playable build
 

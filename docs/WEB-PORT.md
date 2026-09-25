@@ -1,8 +1,14 @@
 # Ogre Battle 64 — WebAssembly / Browser Port Plan
 
 > Status: **feasibility milestones 1–5 achieved (2026-08-29)** (see `docs/WEB-PORT-REPORT.md` for the
-> current implementation report). This document is the plan; it is updated as
+> implementation report of that date). This document is the plan; it is updated as
 > milestones land.
+>
+> **Not updated since 2026-08-29.** The native port moved on for ~70 further
+> sessions (streamed banks, audio, saves, the launcher and overlay, packaging and
+> releases), and session 97 moved every build config under `config/` and the
+> patches under `patches/`. Read the date on any path or status here as
+> 2026-08-29, and `PLAN.md` for the current state.
 
 ## Overview
 

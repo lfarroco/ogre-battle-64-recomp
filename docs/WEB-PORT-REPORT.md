@@ -1,8 +1,10 @@
 # WebAssembly Port — Implementation Report
 
 > Companion to `docs/WEB-PORT.md`. This is the audit/implementation report
-> produced before making invasive changes (plan §25 "Second"). Updated as work
-> progresses.
+> produced before making invasive changes (plan §25 "Second"). It describes the
+> tree as of 2026-08-29 and has not been updated since; paths and statuses in it
+> predate the later native work and the session-97 config move. See `PLAN.md`
+> for the current state.
 
 Date: 2026-08-29
 State: **Phase 2–10 complete (Milestones 1–5 achieved)**; Milestone 6 started

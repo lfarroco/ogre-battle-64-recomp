@@ -1,12 +1,12 @@
-# Libultra bridging plan (next milestone)
+# Libultra bridging (completed)
 
-Status: **in progress** (2026-08-24, third session on Linux). The game now boots
-with the null renderer and the runtime's native services — see "Progress" below.
-This document captures the plan and the identification work.
+Status: **completed** (sessions 3-6, 2026-08-24/25). The game boots and runs with
+the runtime's native services. This document is kept for the identification
+method, the seed table and the staged plan that got there; the current state of
+the port is `PLAN.md`, and the standing rules are `AGENTS.md`.
 
 The previous session's handoff (`HANDOFF-2026-08-24.md`) identified the problem;
-this document turns that into an actionable, staged plan with the seed data we
-already have.
+this document turned that into a staged plan with the seed data.
 
 ---
 
@@ -353,7 +353,7 @@ a narrow MMIO shim).
 
 ---
 
-## Risks / open questions
+## Risks / open questions (as of session 3; outcomes noted)
 
 1. **Libultra revision mismatch** with whatever reference we match against →
    more manual identification (bounded, a few hours).
@@ -361,9 +361,11 @@ a narrow MMIO shim).
    libultra, but a few need review.
 3. **OSThread/mesg layout compat** with the runtime — expected fine (standard
    libultra 2.0.x), verify at the first thread crash.
-4. **Save type** (PFS/EEPROM/Flash) is deferred to Phase 6; `SaveType::None` is
-   fine for boot.
-5. **Plan.md's "3659 functions" is stale** — actual recompiled count is 807.
+4. **Save type** (PFS/EEPROM/Flash) — resolved: the chip is 32 KiB of battery
+   SRAM, and the Controller Pak is the copy/backup device (session 66).
+5. **The recompiled function count** was 807 for the main segment at the time.
+   The current build registers 5037 function entries across 44 bank records in
+   34 units; `tools/recompcov.py` prints the current figures.
 
 ---
 

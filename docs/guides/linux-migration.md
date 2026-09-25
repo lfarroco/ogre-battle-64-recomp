@@ -1,34 +1,19 @@
 # Migrating the dev environment to Linux (Ubuntu)
 
-Status: **optional** — revised 2026-09-11. Originally "planned" (2026-08-24) on
-the assumption that the macOS renderer path was blocked. That assumption was
-wrong: the native RT64/Metal build now runs on the Intel Mac (see
-`docs/DECISIONS.md`, session 24 native bring-up). The two blockers were in this
-app's own SDL glue, not in macOS or RT64:
-
-* `create_window` passed the `SDL_Window*` where plume requires an `NSWindow*`
-  (instant `EXC_BAD_ACCESS` in `objc_msgSend`), and left the `CAMetalLayer*` null;
-* `poll_input` called `SDL_PumpEvents` from the game thread, which Cocoa rejects
-  with `NSInternalInconsistencyException`.
-
-With both fixed, RT64 initialises Metal (`api=3`), the window opens, and the game
-runs stably. So the switch is now a **preference** — RT64's most-tested backend is
-Vulkan, and the N64Recomp/N64ModernRuntime/RT64 ecosystem is Linux/Windows-first —
-not a requirement. It still makes sense for the best-tested backend or CI parity;
-it is no longer needed to get pixels on screen. The instructions below remain
-correct for a move.
-
----
+Status: **optional setup guide**, revised 2026-09-22. The native port builds and
+runs on macOS (RT64/Metal), Linux (RT64/Vulkan) and Windows (RT64/D3D12 or
+Vulkan), so a Linux machine is a preference, not a requirement. The original
+2026-08-24 plan assumed the macOS renderer path was blocked; that was wrong, and
+the two blockers were in this app's own SDL glue (a `SDL_Window*` passed where
+plume requires an `NSWindow*`, and `SDL_PumpEvents` called from the game thread).
 
 ## When to switch
 
-- **Not needed for the libultra-bridging milestone** (`docs/LIBULTRA-BRIDGING.md`):
-  that work is CPU-side and platform-independent. The SIGBUS crash reproduces
-  identically on Linux.
-- **Recommended for the RT64/renderer phase** (RSP microcode + RT64 integration):
-  RT64's Vulkan backend is the primary, most-tested path, and the whole
-  N64Recomp/N64ModernRuntime/RT64 ecosystem is Linux/Windows-first. This is a
-  preference, not a blocker — see the status note above.
+- **For RT64's best-tested backend.** Vulkan is RT64's primary path.
+- **For Linux release parity**, or to reproduce the Linux leg of
+  `.github/workflows/release.yml`.
+- **Not required for any feature.** The recompiler, the runtime and the app are
+  platform-independent and build on all three platforms.
 
 ---
 
@@ -55,7 +40,7 @@ Toolchain setup (same as the macOS flow, see `PLAN.md` "Reproduce"):
 ```sh
 python3 -m venv tools/venv && tools/venv/bin/pip install 'splat64[mips]'
 git clone --recurse-submodules https://github.com/N64Recomp/N64Recomp.git tools/N64Recomp
-git -C tools/N64Recomp apply ../../n64recomp-ob64.patch
+git -C tools/N64Recomp apply ../../patches/n64recomp-ob64.patch
 cmake -S tools/N64Recomp -B tools/N64Recomp/build -DCMAKE_BUILD_TYPE=Release
 cmake --build tools/N64Recomp/build --target N64RecompCLI -j
 ```
@@ -90,68 +75,19 @@ the patch — re-apply it whenever RT64 is re-checked-out.
 
 ---
 
-## macOS-specific code to remove
+## macOS-specific code in the app
 
-These are the only macOS-specific pieces in our own `app/` source. They are
-guarded by `APPLE`/`__APPLE__`, so they do **not** break the Linux build on
-their own — removing them is cleanup (and drops the Metal window-handle path
-entirely).
+The app still carries macOS-only branches. All are guarded, and none has to be
+removed for a Linux build:
 
-### 1. `app/CMakeLists.txt`
-
-- **Delete** the `APPLE` deployment-target block (lines 12-14):
-  ```cmake
-  if (APPLE)
-      set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum OS X deployment version")
-  endif()
-  ```
-- **Update** the comment on line 36 (RT64 backend note) — on Linux
-  `RT64_SDL_WINDOW_VULKAN` is meaningful (creates a Vulkan surface from the SDL
-  window), not the Metal auto-select.
-- **Fix** the stale comment on line 52: `3659 functions` → `807 functions`.
-- **Restructure** the platform link block (lines 101-110). On Linux the
-  `elseif (UNIX AND NOT APPLE)` branch is the active one; simplify to:
-  ```cmake
-  if (UNIX AND NOT APPLE)
-      find_package(Threads REQUIRED)
-      target_link_libraries(ogrebattle64 PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
-  endif()
-  ```
-  (the `if (APPLE) ... -framework Cocoa -framework Metal -framework QuartzCore`
-  branch becomes dead and can be deleted).
-
-### 2. `app/src/sdl_platform.cpp`
-
-- **Simplify `create_window`**: the `#if defined(__APPLE__)` block now builds a
-  real handle (Cocoa `NSWindow*` from `SDL_GetWindowWMInfo` + the `CAMetalLayer*`
-  from `SDL_Metal_CreateView`/`SDL_Metal_GetLayer`, with the `SDL_MetalView`
-  owned by `Platform`). On Linux the Vulkan path just passes the `SDL_Window*`:
-  ```cpp
-  platform.window = window;
-  return window;
-  ```
-  Delete the `#if defined(__APPLE__) ... #else ... #endif` entirely.
-- **Keep the `poll_input` no-op.** It must not pump SDL events on any platform
-  (see the session-24 native bring-up entry): on macOS pumping off the main
-  thread terminates the process, and the main thread already pumps in
-  `pump_sdl_events`. Do not "restore" the `SDL_PumpEvents()` call.
-
-### 3. `tools/` (macOS-only build artifacts, not committed)
-
-- **Delete** `tools/RT64/src/contrib/dxc/lib/x64/libz.dylib` — an untracked
-  symlink to Homebrew zlib created to fix the macOS `dxc` shader-compiler abort.
-  On Linux RT64 uses `dxc-linux` (or glslang/SPIRV-Cross), so this is
-  unnecessary.
-- **Delete** the `.DS_Store` files (cosmetic).
-
-### 4. System-level (not in the repo)
-
-- The Metal toolchain component (`xcodebuild -downloadComponent MetalToolchain`)
-  is not needed — RT64 uses **Vulkan** on Linux.
-- Homebrew's sdl2-compat is an SDL3 shim; it works for the Metal path (verified),
-  but distro SDL2 is the better-tested combination for RT64.
-- If the RT64 shader pipeline hits issues, install the relevant drivers:
-  NVIDIA proprietary driver (recommended) or `mesa-vulkan-drivers` for AMD/Intel.
+- `app/CMakeLists.txt` links the macOS frameworks only under `if (APPLE)`; Linux
+  takes the `elseif (UNIX AND NOT APPLE)` branch (`Threads` and `${CMAKE_DL_LIBS}`).
+- `app/src/sdl_platform.cpp`'s `create_window` builds the Metal window handle
+  (`SDL_GetWindowWMInfo`, `SDL_Metal_CreateView`, `SDL_Metal_GetLayer`) under
+  `#if defined(__APPLE__)`; on Linux it passes the `SDL_Window*` through.
+- `poll_input` must stay a no-op on every platform: pumping SDL events off the
+  main thread terminates the process on macOS, and the main thread already pumps
+  in `pump_sdl_events`. Do not "restore" the `SDL_PumpEvents()` call.
 
 ---
 
@@ -161,10 +97,8 @@ entirely).
 # ROM (copy your dump over; big-endian .z64)
 # assets/ogre64.z64
 
-# regenerate recompiled code (after any config/symbols/symbol_addrs.txt changes)
-tools/venv/bin/splat split config/config.yaml
-make
-make recomp
+# regenerate the recompiled code (see docs/guides/app-build.md)
+make regenerate
 
 # build the app
 cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
@@ -191,10 +125,9 @@ cmake --build build-app -j$(nproc)
 4. **SDL2**: use the distro `libsdl2-dev`; Homebrew's `sdl2` is now `sdl2-compat`
    (an SDL3 shim), which works but is not the combination RT64 is tested against.
 5. **`RecompiledFuncs/` is generated** (gitignored) — regenerate with
-   `make recomp`; never hand-edit.
+   `make regenerate`; never hand-edit.
 6. The `patches/n64recomp-ob64.patch` applies to a specific upstream N64Recomp commit;
    if upstream has moved, re-derive against the vendored clone's current state.
 7. `git submodule update` (or a fresh `git submodule update --init --recursive`)
    resets `tools/RT64` and discards the plume SDL patch — re-apply with
    `git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch`.
-

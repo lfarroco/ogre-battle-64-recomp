@@ -8,7 +8,7 @@ Companion docs:
 
 - `PLAN.md` — status and roadmap.
 - `docs/README.md` — doc index.
-- `DECISIONS.md` — decision log.
+- `docs/DECISIONS.md` — decision log.
 - `docs/HANDOFF-*.md` — per-session record; the newest number wins.
 - `docs/guides/app-build.md` — build, run, and every `OGRE_*` knob.
 - `docs/guides/emulator-first.md` — read this before interpreting a display list:
@@ -23,7 +23,7 @@ Companion docs:
 > **Write in simple, technical English. No mannerisms ("it's x, not y", "why x
 > matters", etc).**
 
-This covers generated docs (`PLAN.md`, `DECISIONS.md`, handoffs, `docs/**`),
+This covers generated docs (`PLAN.md`, `docs/DECISIONS.md`, handoffs, `docs/**`),
 code comments, commit messages, and everything you say in session to the
 developer.
 
@@ -91,7 +91,7 @@ A previous session's prose is a lead. Verify it before repeating it.
   `RecompiledFuncs/` are generated and gitignored, so a fact read there may come
   from a probe or an older patch.
 - When you correct a previous session, say so, give the instruction addresses,
-  and update `PLAN.md`, the handoff and `DECISIONS.md`.
+  and update `PLAN.md`, the handoff and `docs/DECISIONS.md`.
 
 ## 3. Verify the consumer before naming a struct, table or field
 
@@ -118,9 +118,9 @@ wrong half of a function. Check these first.
 - **Fall-through and merged tails.** `func_ovlC_802399AC` has no prologue: in
   `bankRec14b` it is the continuation of `func_ovlC_80239874`, and a `jal` into
   it runs a body with a frame contract (`sp+0x1EC`, `s0`, the `f` regs) that the
-  caller does not satisfy. Run `make midfunc` first; it lists all 67 such tails
-  with the frame slots and registers the tail reads before writing, and the `jal`
-  sites that reach each one.
+  caller does not satisfy. Run `make midfunc` first; it lists every such tail
+  (23 in the current build) with the frame slots and registers the tail reads
+  before writing, and the `jal` sites that reach each one.
   Check which bank is resident first (session 45). In `bankRec14c`, the module
   scene `0x0D` streams to that RAM for steps ≥ 2, `0x802399AC` and `0x80239C24`
   are ordinary function entries. A prologue-less `jal` target in one bank is a
@@ -129,7 +129,7 @@ wrong half of a function. Check these first.
   (`0x80197B90` holds records 0/1/2/15/17), so a fixed-address call can land in a
   different resident bank. `python3 tools/cross_bank.py report` lists the sites;
   `dispatch --only …` is wired into `make recomp`. Bank code compiles into
-  `Bank{A..M}Funcs/` and is registered at runtime in
+  `Bank{A..Z,AA..AH}Funcs/` (34 units) and is registered at runtime in
   `app/src/bank_overlays.cpp`. Unit H is the scene-`0x07` form module; unit I is
   scene `0x16`'s closing movie; unit J is the `bankRec10a` bank of the same RAM;
   K and L are the chapter-animation module and `bankRec14a`; M is scene `0x05`'s
@@ -242,8 +242,9 @@ contents and game state. Recipes are in `docs/guides/emulator-first.md`.
    `OGRE_DL_ANALYZE`; they decode every list as F3DEX2 and print plausible wrong
    geometry (session 50 §9).
 2. **Did an RSP task go missing?** `tools/runlog.py <run.log>` flags non-gfx tasks
-   that the stub swallowed. `app/src/rsp.cpp` is a stub for every ucode except
-   njpeg, so un-recompiled work produces no output at all.
+   that the stub swallowed. `app/src/rsp.cpp` runs the game's recompiled njpeg and
+   audio microcodes and stubs every other task, so un-recompiled work produces no
+   output at all.
 3. **Is the code the code we compiled?** `tools/rdram.py <dump> banks` (which
    module is resident) and `make midfunc` (prologue-less tails).
 4. **Are the bytes what hardware would have?** Decode an asset with an independent
@@ -298,9 +299,10 @@ it means stop chasing the path as a port bug.
 
 ## 10. Leave the tree and the record clean
 
-- Per session: update `PLAN.md`'s status list (it is per-session and goes stale
-  fast), write `docs/HANDOFF-YYYY-MM-DD-sessionN.md`, and add the decision to
-  `DECISIONS.md` when a choice was made.
+- Per session: update `PLAN.md`'s **Status** and **Open work** lists (the
+  session-by-session log is `docs/STATUS-LOG.md`, and the per-session detail goes
+  in the handoff), write `docs/HANDOFF-YYYY-MM-DD-sessionN.md`, and add the
+  decision to `docs/DECISIONS.md` when a choice was made.
 - The handoff must state the goal, the result, the instruction-level evidence,
   what was run for verification, the files changed, and which probes were used and
   reverted.

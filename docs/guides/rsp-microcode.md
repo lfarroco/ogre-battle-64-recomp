@@ -4,8 +4,9 @@ Ogre Battle 64 submits RSP tasks for graphics. Display lists are **not** run
 through recompiled microcode in this port: the runtime routes gfx tasks
 (`M_GFXTASK`) to the renderer's `send_dl`, and **RT64 parses the display lists
 itself** with its built-in GBI interpreters (`tools/RT64/src/gbi/`). RSPRecomp
-is only needed for the **audio** ucode (task type `M_AUDTASK`, 2), which the
-runtime routes through `recomp::rsp::get_rsp_microcode`.
+compiles the game's **njpeg** ucode (task type `M_NJPEGTASK`, 4) and its
+**audio** ucode (task type `M_AUDTASK`, 2); the runtime routes both through
+`recomp::rsp::get_rsp_microcode`. Any other task gets the stub.
 
 ## The game's gfx ucode (identified, session 5)
 
@@ -115,23 +116,27 @@ load-bearing:**
   are data (`0x0900060E` decodes as `j 0x1838`, and RSPRecomp emits a `goto` to
   a label that does not exist).
 
-The background is **still black** (session 49 re-verified; the RT64 build shows
-`0x000400` with 5 distinct 16-bit values, 76 314 of 76 800 near-black). The game
-converts the YUV macroblocks to RGBA by drawing them (per-macroblock 16x16
-**YUV16** textures, a *second* gfx ucode `0x800A5110`), then copying the
-framebuffer back with the CPU. **A YUV16 decoder was tried in RT64's
-`TextureDecoder.hlsli` and reverted**: the shader's `case G_IM_FMT_YUV:` does fall
-through to `float4(0,0,0,1)`, but adding a decoder turns the frame into a corrupt
-magenta/green blob rather than the backdrop, so the decode was wrong and the
-hypothesis unproven. The game's CPU readback
-(`func_ovlE_8019976C`'s stage-3 loop) runs 4×, all during scene `0x02`, and
-**every copy reads a zero framebuffer** — upstream of any decode.
-`tools/njpeg_readback.py` (run by `make bank-recomp`) calls
-`ogre_sync_framebuffers()` → RT64's `State::syncFramebuffers()` first; that is a
-readback-correctness improvement, not a fix. See
-`docs/HANDOFF-2026-09-15-session49.md` (§7 has the next lead: check GLideN64,
-which upstream fixed issue #102 with, before writing another decoder) and
-`-session48.md`/`-session47.md` §4-5 for the superseded readings.
+The background **renders** (sessions 50-52). The game converts the YUV
+macroblocks to RGBA by drawing them (per-macroblock 16x16 **YUV16** textures, a
+*second* gfx ucode `0x800A5110`), then copying the framebuffer back with the CPU.
+Three fixes were needed after session 49's reverted first attempt:
+
+- **Session 50** implemented RT64's YUV16 decode (its `case G_IM_FMT_YUV:` fell
+  through to `float4(0,0,0,1)`) and bounded the render wait on the RSP worker.
+- **Session 51** found why no geometry was drawn: `0x800A5110` is **S2DEX 2.08**,
+  so its per-macroblock `0xDC`/`0xDA` are `G_OBJ_MOVEMEM` and
+  `G_OBJ_RECTANGLE_R` (the draw), not F3DEX2 `G_MOVEMEM`/`G_MTX`; RT64 mapped
+  neither. The YUV16 TMEM planes and the UYVY source word were redone too.
+- **Session 52** fixed the conversion: RT64 fed `G_SETCONVERT`'s raw unsigned
+  9-bit fields into the matrix, while the hardware sign-extends each field and
+  scales it `2*K+1`, and the green row paired `K1` with V instead of U.
+
+The result is `docs/proofs/native-newgame-cathedral.png`; the assembled `'B5'`
+image at `0x80243E28` renders as the cathedral. Session 49's reading and the
+earlier "still black" notes in `-session48.md`/`-session47.md` are superseded.
+The readback's source selection is `tools/njpeg_readback.py`, and
+`ogre_sync_framebuffers()` → RT64's `State::syncFramebuffers()` forces the RDP's
+pixels back to RDRAM before the copy.
 
 ## Audio ucode (resolved, session 75)
 
