@@ -5,7 +5,7 @@
 // does for the controller bindings: the panel reads them to draw a row and
 // writes them through these functions, which apply the change and persist it.
 //
-// Two settings:
+// Four settings:
 //
 // * GAME SPEED, the runtime's emulated-clock multiplier
 //   (`ultramodern::set_speed_multiplier`). n means the emulated CPU counter and
@@ -16,6 +16,9 @@
 // * WIDESCREEN, a toggle that puts RT64 into its Expand aspect ratio (a wider
 //   field of view) for the mission. See `WidescreenMode` below and
 //   `widescreen.cpp`.
+// * SOUNDS and VOLUME, the audio output's mute and gain. The app's audio
+//   callback scales every buffer it queues by `audio_gain_percent()`. See
+//   `SoundMode` and the block below it.
 //
 // The file is `<config>/settings.cfg`, plain text.
 #pragma once
@@ -83,13 +86,71 @@ void set_widescreen_mode(WidescreenMode mode);
 // `right_text`; the drawn row uses the panel's own radio layout.
 std::string widescreen_mode_text();
 
+// The SOUNDS row: the same two-option radio group as WIDESCREEN. `Off` queues
+// silence instead of skipping the buffer, because the runtime paces the game's
+// audio generation from the queued depth (`ultramodern::audio_dma_busy()` reads
+// `get_frames_remaining`): a mute that queued nothing would leave the AI idle
+// and make the game overproduce.
+//
+// The enumerators follow the row's display order, so `On` is the marker of the
+// first option and the default, as index 0 is on the other radio rows.
+enum class SoundMode {
+    On = 0,
+    Off = 1,
+};
+
+constexpr int kSoundModeCount = 2;
+
+// "ON" or "OFF" for the radio row's `index`-th option.
+const char* sound_mode_label(int index);
+
+// The live mode. `On` is the default, and `On` with volume 100 is what the app
+// did before the row existed.
+SoundMode sound_mode();
+
+// The index of the live mode in the radio row.
+int sound_mode_index();
+
+// Stores `mode` and writes `<config>/settings.cfg`.
+void set_sound_mode(SoundMode mode);
+
+// The SOUNDS row's options as one string (radio markers and labels).
+std::string sound_mode_text();
+
+// The VOLUME row: a slider over 0..100 percent, drawn as `kVolumeCells`
+// characters with the handle on one of them.
+constexpr int kVolumeStepPercent = 5;
+constexpr int kVolumeCells = 11;
+constexpr int kVolumeDefaultPercent = 100;
+
+// The live volume, 0..100.
+int volume_percent();
+
+// The cell the handle is drawn on for `percent`, 0..kVolumeCells-1.
+int volume_handle_cell(int percent);
+
+// The percent a click on slider cell `cell` sets.
+int volume_percent_for_cell(int cell);
+
+// The slider's text: the bar with its handle, a space and the percent, for
+// example `-----|----- 50%`.
+std::string volume_text(int percent);
+
+// Stores `percent` (clamped to 0..100) and writes `<config>/settings.cfg`.
+void set_volume_percent(int percent);
+
+// The gain the audio callbacks scale every queued sample by: 0 while SOUNDS is
+// `Off`, else the volume. Atomic, because the game's audio thread reads it while
+// the main thread (the panel) writes it.
+int audio_gain_percent();
+
 // The configuration file's path for a given config directory.
 std::filesystem::path settings_path(const std::filesystem::path& pref_dir);
 
 // Loads `<config>/settings.cfg` if it exists, applies the result to the
-// runtime, and remembers the directory for later writes. `OGRE_SPEED` and
-// `OGRE_WIDESCREEN` win over the file. Call once at startup, after
-// `resolve_pref_dir()`.
+// runtime, and remembers the directory for later writes. `OGRE_SPEED`,
+// `OGRE_WIDESCREEN`, `OGRE_SOUNDS` and `OGRE_VOLUME` win over the file. Call
+// once at startup, after `resolve_pref_dir()`.
 void load_settings(const std::filesystem::path& pref_dir);
 
 }  // namespace ogre

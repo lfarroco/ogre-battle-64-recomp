@@ -381,7 +381,9 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         if (index < panel.row_count() &&
             (panel.row_kind(index) == ui::Panel::RowKind::Option ||
              panel.row_kind(index) == ui::Panel::RowKind::GameSpeed ||
-             panel.row_kind(index) == ui::Panel::RowKind::Widescreen)) {
+             panel.row_kind(index) == ui::Panel::RowKind::Widescreen ||
+             panel.row_kind(index) == ui::Panel::RowKind::Sound ||
+             panel.row_kind(index) == ui::Panel::RowKind::Volume)) {
             panel.activate(index, direction);
         }
     };

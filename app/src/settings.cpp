@@ -2,6 +2,8 @@
 
 #include "settings.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +27,17 @@ std::filesystem::path g_pref_dir;
 // update_gfx callback) reads and writes them, so they need no lock.
 int g_game_speed = 1;
 WidescreenMode g_widescreen = WidescreenMode::Off;
+SoundMode g_sound = SoundMode::On;
+int g_volume = kVolumeDefaultPercent;
+
+// The audio callbacks' gain, derived from the two values above. The game's
+// audio thread reads it through `audio_gain_percent()` while the main thread
+// writes it, hence the atomic.
+std::atomic<int> g_audio_gain{kVolumeDefaultPercent};
+
+void publish_audio_gain() {
+    g_audio_gain.store(g_sound == SoundMode::On ? g_volume : 0, std::memory_order_relaxed);
+}
 
 // `OGRE_SPEED`'s value, or 0 when unset or unparsable. The runtime reads the
 // same variable itself for its initial value, so this is only used to decide
@@ -128,6 +141,29 @@ WidescreenMode parse_widescreen(const std::string& text) {
     return WidescreenMode::Off;
 }
 
+// `sounds = off` / `on`, or 0 / 1. A file written before the row existed has no
+// key, and the value is then the default `on`; a typo is read as `on` too,
+// because silently starting muted is worse than ignoring a bad spelling.
+SoundMode parse_sound(const std::string& text) {
+    const std::string value = lowercase(setting_value(text, "sounds"));
+    if (value == "off" || value == "0" || value == "false" || value == "no") {
+        return SoundMode::Off;
+    }
+    return SoundMode::On;
+}
+
+// `volume = <n>` in percent, clamped to 0..100. A missing or unparsable value
+// is the default, 100.
+int parse_volume(const std::string& text) {
+    const std::string value = setting_value(text, "volume");
+    char* value_end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &value_end, 10);
+    if (value_end == value.c_str()) {
+        return kVolumeDefaultPercent;
+    }
+    return static_cast<int>(std::clamp(parsed, 0L, 100L));
+}
+
 std::string read_file(const std::filesystem::path& path, bool& ok) {
     FILE* file = std::fopen(path.string().c_str(), "rb");
     if (file == nullptr) {
@@ -161,7 +197,11 @@ void write_settings() {
         "# game_speed: the emulated clock's multiplier (1, 2 or 4).\n"
         "game_speed = " + std::to_string(g_game_speed) + "\n"
         "# widescreen: off or on.\n"
-        "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n";
+        "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n"
+        "# sounds: off or on.\n"
+        "sounds = " + lowercase(sound_mode_label(static_cast<int>(g_sound))) + "\n"
+        "# volume: the output gain in percent (0..100).\n"
+        "volume = " + std::to_string(g_volume) + "\n";
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
 }
@@ -253,6 +293,85 @@ std::string widescreen_mode_text() {
     return text;
 }
 
+const char* sound_mode_label(int index) {
+    switch (static_cast<SoundMode>(index)) {
+        case SoundMode::On:  return "ON";
+        case SoundMode::Off: return "OFF";
+    }
+    return "ON";
+}
+
+SoundMode sound_mode() {
+    return g_sound;
+}
+
+int sound_mode_index() {
+    const int index = static_cast<int>(g_sound);
+    return index >= 0 && index < kSoundModeCount ? index : static_cast<int>(SoundMode::On);
+}
+
+void set_sound_mode(SoundMode mode) {
+    if (mode == g_sound) {
+        return;
+    }
+    g_sound = mode;
+    publish_audio_gain();
+    write_settings();
+}
+
+std::string sound_mode_text() {
+    std::string text;
+    for (int i = 0; i < kSoundModeCount; i++) {
+        if (!text.empty()) {
+            text += "  ";
+        }
+        text += std::string(i == static_cast<int>(g_sound) ? "[x] " : "[ ] ") +
+                sound_mode_label(i);
+    }
+    return text;
+}
+
+int volume_percent() {
+    return g_volume;
+}
+
+int volume_handle_cell(int percent) {
+    percent = std::clamp(percent, 0, 100);
+    // kVolumeCells cells span the 0..100 range, so the handle moves
+    // kVolumeCells-1 times and lands on the nearest cell.
+    return (percent * (kVolumeCells - 1) + 50) / 100;
+}
+
+int volume_percent_for_cell(int cell) {
+    cell = std::clamp(cell, 0, kVolumeCells - 1);
+    return cell * 100 / (kVolumeCells - 1);
+}
+
+std::string volume_text(int percent) {
+    const int cell = volume_handle_cell(percent);
+    std::string text;
+    for (int i = 0; i < kVolumeCells; i++) {
+        text += i == cell ? '|' : '-';
+    }
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), " %d%%", std::clamp(percent, 0, 100));
+    return text + buffer;
+}
+
+void set_volume_percent(int percent) {
+    percent = std::clamp(percent, 0, 100);
+    if (percent == g_volume) {
+        return;
+    }
+    g_volume = percent;
+    publish_audio_gain();
+    write_settings();
+}
+
+int audio_gain_percent() {
+    return g_audio_gain.load(std::memory_order_relaxed);
+}
+
 std::filesystem::path settings_path(const std::filesystem::path& pref_dir) {
     return pref_dir / "settings.cfg";
 }
@@ -261,6 +380,8 @@ void load_settings(const std::filesystem::path& pref_dir) {
     g_pref_dir = pref_dir;
     int speed = 1;
     WidescreenMode widescreen = WidescreenMode::Off;
+    SoundMode sound = SoundMode::On;
+    int volume = kVolumeDefaultPercent;
     bool have_file = false;
     const std::string text = read_file(settings_path(pref_dir), have_file);
     if (have_file) {
@@ -268,6 +389,8 @@ void load_settings(const std::filesystem::path& pref_dir) {
         // offers; the closest offered one keeps it selectable.
         speed = nearest_game_speed(parse_game_speed(text));
         widescreen = parse_widescreen(text);
+        sound = parse_sound(text);
+        volume = parse_volume(text);
     }
     if (const int env = env_game_speed(); env != 0) {
         // A developer run names its speed on the command line; the value is
@@ -283,11 +406,25 @@ void load_settings(const std::filesystem::path& pref_dir) {
         std::fprintf(stderr, "[settings] OGRE_WIDESCREEN=%s overrides the saved widescreen mode\n",
                      env);
     }
+    // OGRE_SOUNDS=off|on and OGRE_VOLUME=<0..100>: the same rule. They let a
+    // scripted run set the audio output without the overlay.
+    if (const char* env = std::getenv("OGRE_SOUNDS"); env != nullptr && env[0] != '\0') {
+        sound = parse_sound(std::string("sounds = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_SOUNDS=%s overrides the saved sound mode\n", env);
+    }
+    if (const char* env = std::getenv("OGRE_VOLUME"); env != nullptr && env[0] != '\0') {
+        volume = parse_volume(std::string("volume = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_VOLUME=%s overrides the saved volume\n", env);
+    }
     g_game_speed = speed;
     g_widescreen = widescreen;
+    g_sound = sound;
+    g_volume = volume;
+    publish_audio_gain();
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(speed));
-    std::fprintf(stderr, "[settings] game speed x%d, widescreen %s\n", speed,
-                 lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str());
+    std::fprintf(stderr, "[settings] game speed x%d, widescreen %s, sounds %s, volume %d%%\n", speed,
+                 lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str(),
+                 lowercase(sound_mode_label(static_cast<int>(sound))).c_str(), volume);
 }
 
 }  // namespace ogre

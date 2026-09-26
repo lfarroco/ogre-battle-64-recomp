@@ -4,6 +4,7 @@
 #include "crash_log.hpp"
 #include "input_map.hpp"
 #include "overlay.hpp"
+#include "settings.hpp"
 #include "widescreen.hpp"
 
 #include <algorithm>
@@ -1853,9 +1854,29 @@ ultramodern::input::callbacks_t make_input_callbacks() {
 
 static void queue_audio_samples(int16_t* samples, size_t count) {
     extern Platform g_platform;
-    if (g_platform.audio_device != 0) {
-        SDL_QueueAudio(g_platform.audio_device, samples, static_cast<Uint32>(count * sizeof(int16_t)));
+    if (g_platform.audio_device == 0 || samples == nullptr || count == 0) {
+        return;
     }
+    // The SOUNDS and VOLUME settings scale the samples on their way to the
+    // device. The frame count is the same at every gain, including 0: the
+    // runtime paces the game's audio generation from the queued depth
+    // (`ultramodern::audio_dma_busy()` reads `get_frames_remaining`), so a mute
+    // that queued nothing would leave the AI idle and make the game overproduce.
+    const int gain = audio_gain_percent();
+    if (gain >= 100) {
+        SDL_QueueAudio(g_platform.audio_device, samples,
+                       static_cast<Uint32>(count * sizeof(int16_t)));
+        return;
+    }
+    // Scale into a scratch buffer rather than in place: `samples` points into
+    // the game's RDRAM, and the next AI buffer may already be live there.
+    static std::vector<int16_t> scaled;
+    scaled.resize(count);
+    for (size_t i = 0; i < count; i++) {
+        scaled[i] = static_cast<int16_t>(static_cast<int32_t>(samples[i]) * gain / 100);
+    }
+    SDL_QueueAudio(g_platform.audio_device, scaled.data(),
+                   static_cast<Uint32>(count * sizeof(int16_t)));
 }
 
 static size_t get_audio_frames_remaining() {

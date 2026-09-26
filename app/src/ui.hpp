@@ -104,6 +104,8 @@ public:
         ResetBindings,
         GameSpeed,
         Widescreen,
+        Sound,
+        Volume,
         ChaosFrame,
     };
 
@@ -167,8 +169,8 @@ public:
 
     // `direction` is +1 forward, -1 backward.
     RowAction activate(size_t index, int direction);
-    // Picks option `option` of a radio row (GAME SPEED, WIDESCREEN) directly (a
-    // click on one of its markers).
+    // Picks option `option` of a radio row (GAME SPEED, WIDESCREEN, SOUNDS) or a
+    // cell of the VOLUME slider directly (a click on it).
     RowAction choose_option(size_t index, size_t option);
 
     // --- rebinding capture ----------------------------------------------------

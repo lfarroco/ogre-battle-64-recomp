@@ -155,6 +155,41 @@ RadioLayout layout_widescreen(const Font& font, int scale, int max_width, int cu
     return layout_radio(font, scale, max_width, widescreen_labels(), current);
 }
 
+std::vector<std::string> sound_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kSoundModeCount; i++) {
+        labels.push_back(sound_mode_label(i));
+    }
+    return labels;
+}
+
+RadioLayout layout_sound(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, sound_labels(), current);
+}
+
+// --- slider rows (VOLUME) -----------------------------------------------------
+// The volume row draws one text run, the bar with its handle and the percent,
+// and then lays a click rect over each bar cell. The layout is a pure function
+// of its arguments, so the measured and the drawn row agree, as with the radio
+// rows above.
+
+struct SliderLayout {
+    std::string text;
+    std::vector<SDL_Rect> cell_rects;  // relative to the row's top-left
+    int height = 0;
+};
+
+SliderLayout layout_volume(const Font& font, int scale, int percent) {
+    SliderLayout layout;
+    layout.text = volume_text(percent);
+    layout.height = scale * Font::kCellHeight;
+    const int cell_width = font.width("-", scale);
+    for (int cell = 0; cell < kVolumeCells; cell++) {
+        layout.cell_rects.push_back(SDL_Rect{cell * cell_width, 0, cell_width, layout.height});
+    }
+    return layout;
+}
+
 // The GAME SPEED group as one string, for right_text (the drawn row uses the
 // layout above; this is what a caller outside the panel reads).
 std::string game_speed_text(int current) {
@@ -209,14 +244,28 @@ RowsLayout layout_rows(const Font& font, const Panel& panel, const std::vector<P
             layout.heights[i] = section_height;
         }
         else if (row.kind == Panel::RowKind::GameSpeed ||
-                 row.kind == Panel::RowKind::Widescreen) {
+                 row.kind == Panel::RowKind::Widescreen ||
+                 row.kind == Panel::RowKind::Sound) {
             // The radio group is laid out by option, not wrapped as one string;
             // its height is what the row must reserve.
-            const RadioLayout radio =
-                row.kind == Panel::RowKind::GameSpeed
-                    ? layout_game_speed(font, scale, description_width, game_speed())
-                    : layout_widescreen(font, scale, description_width, widescreen_mode_index());
+            RadioLayout radio;
+            switch (row.kind) {
+                case Panel::RowKind::GameSpeed:
+                    radio = layout_game_speed(font, scale, description_width, game_speed());
+                    break;
+                case Panel::RowKind::Widescreen:
+                    radio = layout_widescreen(font, scale, description_width,
+                                              widescreen_mode_index());
+                    break;
+                default:
+                    radio = layout_sound(font, scale, description_width, sound_mode_index());
+                    break;
+            }
             layout.heights[i] = std::max(row_height, radio.height);
+        }
+        else if (row.kind == Panel::RowKind::Volume) {
+            const SliderLayout slider = layout_volume(font, scale, volume_percent());
+            layout.heights[i] = std::max(row_height, slider.height);
         }
         else {
             const std::string right = panel.right_text_for(row);
@@ -529,6 +578,9 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
         case Tab::Settings:
             rows.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Section, "AUDIO", 0, 0, -1});
+            rows.push_back(Row{RowKind::Sound, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Volume, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
@@ -641,6 +693,10 @@ std::string Panel::left_text(size_t index) const {
             return "GAME SPEED";
         case RowKind::Widescreen:
             return "WIDESCREEN";
+        case RowKind::Sound:
+            return "SOUNDS";
+        case RowKind::Volume:
+            return "VOLUME";
         case RowKind::ChaosFrame:
             return "Chaos Frame";
     }
@@ -675,6 +731,10 @@ std::string Panel::right_text_for(const Row& row) const {
             return game_speed_text(game_speed());
         case RowKind::Widescreen:
             return widescreen_mode_text();
+        case RowKind::Sound:
+            return sound_mode_text();
+        case RowKind::Volume:
+            return volume_text(volume_percent());
         case RowKind::ChaosFrame: {
             if (!chaos_frame_known_) {
                 return "GAME NOT RUNNING";
@@ -807,6 +867,20 @@ RowAction Panel::activate(size_t index, int direction) {
             return RowAction::SettingChanged;
         }
 
+        case RowKind::Sound: {
+            // Like WIDESCREEN: Left/Right and Space step the group and wrap.
+            int current = sound_mode_index();
+            current = ((current + direction) % kSoundModeCount + kSoundModeCount) % kSoundModeCount;
+            set_sound_mode(static_cast<SoundMode>(current));
+            return RowAction::SettingChanged;
+        }
+
+        case RowKind::Volume:
+            // Left/Right and Space move the handle one step; the value is
+            // clamped at the ends rather than wrapped.
+            set_volume_percent(volume_percent() + direction * kVolumeStepPercent);
+            return RowAction::SettingChanged;
+
         case RowKind::ChaosFrame:
             // A read-only readout: selectable so the value is highlighted, but
             // activating it does nothing.
@@ -840,6 +914,30 @@ RowAction Panel::choose_option(size_t index, size_t option) {
                 return RowAction::None;
             }
             set_widescreen_mode(mode);
+            return RowAction::SettingChanged;
+        }
+        case RowKind::Sound: {
+            if (option >= static_cast<size_t>(kSoundModeCount)) {
+                return RowAction::None;
+            }
+            const SoundMode mode = static_cast<SoundMode>(option);
+            if (mode == sound_mode()) {
+                return RowAction::None;
+            }
+            set_sound_mode(mode);
+            return RowAction::SettingChanged;
+        }
+        case RowKind::Volume: {
+            // A click lands on one bar cell; the cell sets the percent, at the
+            // 10% the 11 cells divide the range into.
+            if (option >= static_cast<size_t>(kVolumeCells)) {
+                return RowAction::None;
+            }
+            const int percent = volume_percent_for_cell(static_cast<int>(option));
+            if (percent == volume_percent()) {
+                return RowAction::None;
+            }
+            set_volume_percent(percent);
             return RowAction::SettingChanged;
         }
         default:
@@ -1064,16 +1162,26 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
         layer.draw(renderer, 0, panel_left, text_y, false);
 
         int right_y = text_y;
-        if (kind == Panel::RowKind::GameSpeed || kind == Panel::RowKind::Widescreen) {
+        if (kind == Panel::RowKind::GameSpeed || kind == Panel::RowKind::Widescreen ||
+            kind == Panel::RowKind::Sound) {
             // The marker of the live option stays warm so the current value is
             // readable even when the row is not selected.
-            const bool game_speed_row = kind == Panel::RowKind::GameSpeed;
-            const int current = game_speed_row ? game_speed_index(game_speed())
-                                               : widescreen_mode_index();
-            const RadioLayout layout =
-                game_speed_row
-                    ? layout_game_speed(font, scale, description_width, game_speed())
-                    : layout_widescreen(font, scale, description_width, current);
+            int current = -1;
+            RadioLayout layout;
+            switch (kind) {
+                case Panel::RowKind::GameSpeed:
+                    current = game_speed_index(game_speed());
+                    layout = layout_game_speed(font, scale, description_width, game_speed());
+                    break;
+                case Panel::RowKind::Widescreen:
+                    current = widescreen_mode_index();
+                    layout = layout_widescreen(font, scale, description_width, current);
+                    break;
+                default:
+                    current = sound_mode_index();
+                    layout = layout_sound(font, scale, description_width, current);
+                    break;
+            }
             for (const RadioToken& token : layout.tokens) {
                 const bool live = token.option == current;
                 layer.build(renderer, font, token.text, scale,
@@ -1086,6 +1194,21 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
                 rect.y += text_y;
                 geometry.options.push_back(Panel::Geometry::Option{
                     static_cast<int>(i), static_cast<int>(option), rect});
+            }
+        }
+        else if (kind == Panel::RowKind::Volume) {
+            // The bar and its handle are one text run, so the handle is always
+            // visible; the cells under it are click targets.
+            const SliderLayout slider = layout_volume(font, scale, volume_percent());
+            layer.build(renderer, font, slider.text, scale,
+                        is_selected ? kWarmColor : kSubtitleColor);
+            layer.draw(renderer, 0, description_x, text_y, false);
+            for (size_t cell = 0; cell < slider.cell_rects.size(); cell++) {
+                SDL_Rect rect = slider.cell_rects[cell];
+                rect.x += description_x;
+                rect.y += text_y;
+                geometry.options.push_back(Panel::Geometry::Option{
+                    static_cast<int>(i), static_cast<int>(cell), rect});
             }
         }
         else {

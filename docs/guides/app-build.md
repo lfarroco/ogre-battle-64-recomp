@@ -560,6 +560,8 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, capture only every `n`th present — a multi-minute run becomes a slideshow instead of one 3 MB PPM per frame (files stay numbered by present index) |
 | `OGRE_SPEED=<n>` | scale the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64), so timed sequences — the attract loop, songs — complete in `1/n` of the wall time. Semantics are unchanged: every timer scales together (audio is off in these runs). `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s. This is the debug spelling of **GAME SPEED**: with the variable unset the runtime takes its starting value from `<config>/settings.cfg`, and `OGRE_SPEED` overrides that file for one run without writing it |
 | `OGRE_WIDESCREEN=off\|on` | debug spelling of **WIDESCREEN**: `on` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`. The retired `missions` and `always` spellings are read as `on`. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
+| `OGRE_SOUNDS=off\|on` | debug spelling of **SOUNDS**: `off` queues silence. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED` |
+| `OGRE_VOLUME=<0..100>` | debug spelling of **VOLUME**, the output gain in percent, clamped. Same override rule |
 | `OGRE_FORCE_SCENE=<hex>` | switch a run to attract scene `<hex>` by poking the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it active — no need to wait out the attract loop. `OGRE_FORCE_SCENE_AFTER_MS` (default 3000) delays the first poke so boot can settle |
 | `OGRE_PRESENT_ALWAYS=1` | push a present on every VI even when nothing changed (a stalled boot changes nothing, so the window otherwise freezes on an old frame) |
 | `OGRE_PRESENT_FBTARGET=1` | if the framebuffer manager has no framebuffer at the VI address, present a non-empty render target there instead of the RDRAM copy |
@@ -1616,6 +1618,43 @@ OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=settings OGRE_LAUNCHER_SHOT=/tmp/ws.ppm \
 OGRE_WIDESCREEN=on OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
   ./build-app/ogrebattle64 2>&1 | grep -E '\[scene\].*0x0003|\[widescreen\]'
 ```
+
+### Sounds and volume (the SETTINGS tab)
+
+```
+AUDIO
+SOUNDS   [x] ON [ ] OFF
+VOLUME   ----------| 100%
+```
+
+SOUNDS is the audio output's mute and VOLUME is its gain. `LEFT`/`RIGHT` (or
+`SPACE`) step both: SOUNDS wraps between `ON` and `OFF` like the other radio
+rows, and VOLUME moves the handle 5% per press and clamps at the ends rather than
+wrapping. A mouse click sets a radio marker or the slider cell it lands on (11
+cells, 10% each).
+
+The bar is `kVolumeCells` = 11 characters with the handle on the cell nearest the
+percent, so 0 renders `|----------`, 50 renders `-----|-----` and 100 renders
+`----------|`.
+
+The gain is applied in `queue_audio_samples` (`app/src/sdl_platform.cpp`): 100
+queues the game's buffer unchanged, a lower gain scales a copy into a scratch
+buffer, and 0 queues silence. The frame count is the same at every gain. That is
+deliberate: `ultramodern::audio_dma_busy()` paces the game's audio generation
+from the queued depth (`get_frames_remaining`), so a mute that queued nothing
+would report the AI idle and make the game overproduce. Measured with a probe
+(session 106, reverted): at gain 50 `peak_out = peak_in/2`, and at gain 0
+`peak_out = 0` with 1104 samples still queued per buffer.
+
+Both values are saved at `<config>/settings.cfg` (`sounds = off|on`,
+`volume = <0..100>`). `OGRE_SOUNDS` and `OGRE_VOLUME` override the file for one
+run without writing it, the same rule as `OGRE_SPEED`. A file written before the
+rows existed has neither key and loads as `ON` / `100`, which is what the app did
+before them. The browser build does not read `settings.cfg` and has no settings
+UI, so `app/src/web_platform.cpp` still plays at full volume.
+
+Proofs: `native-launcher-settings.png` and `native-overlay-settings.png` (the
+rows, in the launcher and in the `ESC` overlay).
 
 ### The in-game overlay
 
