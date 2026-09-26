@@ -1,9 +1,9 @@
 // The app's start screen (see launcher.hpp).
 //
-// The screen's list is the shared tabbed Panel (ui.hpp): a START GAME tab, a ROM
-// tab, a MODS tab, a CONTROLS tab whose rows rebind the pad, and a SETTINGS tab.
-// The same Panel is what the in-game overlay shows, so the two screens cannot
-// drift apart.
+// The screen's list is the shared tabbed Panel (ui.hpp): a START GAME tab that
+// also carries the ROM row, a MODS tab, a CONTROLS tab whose rows rebind the
+// pad, a SETTINGS tab and a DEBUG tab. The same Panel is what the in-game
+// overlay shows, so the two screens cannot drift apart.
 
 #include "launcher.hpp"
 
@@ -29,10 +29,11 @@ namespace ogre {
 namespace {
 
 // The branding and the error lines. The old prompt line ("click to load your
-// ROM") is gone: the ROM tab states it, and the row's second column says how.
+// ROM") is gone: the START GAME tab carries the ROM row, and that row's second
+// column says how.
 constexpr const char* kTitle = "OGRE BATTLE 64: RECOMP";
 constexpr const char* kErrorTitle = "THAT IS NOT A USABLE ROM";
-constexpr const char* kErrorHint = "PRESS SPACE ON THE ROM TAB TO TRY AGAIN";
+constexpr const char* kErrorHint = "PRESS SPACE ON THE ROM ROW TO TRY AGAIN";
 
 // A black window; the content sits slightly above centre.
 constexpr int kWindowWidth = 1280;
@@ -394,14 +395,11 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     bool test_drop_pending = test_drop != nullptr && test_drop[0] != '\0';
     const uint64_t test_drop_at = SDL_GetTicks64() + 300;
 
-    // OGRE_LAUNCHER_TAB=<start|rom|mods|controls|settings>: open the screen on
-    // that tab, so a screenshot or a scripted run reaches it without input.
+    // OGRE_LAUNCHER_TAB=<start|mods|controls|settings>: open the screen on that
+    // tab, so a screenshot or a scripted run reaches it without input.
     if (const char* tab = std::getenv("OGRE_LAUNCHER_TAB")) {
         const std::string name = lowercase(tab);
-        if (name == "rom") {
-            panel.set_tab(ui::Tab::Rom);
-        }
-        else if (name == "mods") {
+        if (name == "mods") {
             panel.set_tab(ui::Tab::Mods);
         }
         else if (name == "controls" || name == "controller") {
@@ -620,8 +618,10 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             block_height += px(8) + line_height;
         }
         // The footer follows the panel instead of being pinned to the window
-        // bottom: the CONTROLS tab is tall enough that the two would collide.
-        block_height += px(30) + metrics.height + px(14) + footer.height();
+        // bottom, and the block is laid out with the layout reference tab's
+        // height so the header, the tab bar and the footer do not move when the
+        // active tab changes.
+        block_height += px(30) + metrics.layout_height + px(14) + footer.height();
 
         int cursor_y = std::max(px(24), (output_height - block_height) / 2);
         const int center_x = output_width / 2;
@@ -657,7 +657,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
 
         cursor_y += px(30);
         ui::draw_panel(renderer, font, panel, output_width, output_height, cursor_y, ui_scale);
-        cursor_y += metrics.height + px(14);
+        cursor_y += metrics.layout_height + px(14);
 
         footer.draw(renderer, center_x, 0, cursor_y, true);
 

@@ -102,12 +102,13 @@ cmake --build build-app -j
 ```
 
 On launch the app shows the start screen — `OGRE BATTLE 64: RECOMP` with a tab
-bar (**START GAME**, **ROM**, **MODS**, **CONTROLS**). The ROM row reads
-`[ ] No ROM` until a ROM is loaded: press `SPACE` to pick one, drag the ROM onto
-the window, or put the ROM next to the executable. `ESC` opens the same panel
-over the running game. The ROM is validated by hash and stored, so later launches
-go straight into the game. The battery save lands in `saves/` **beside the
-executable**.
+bar (**START GAME**, **MODS**, **CONTROLS**, **SETTINGS**, **DEBUG**). The START
+GAME tab carries the ROM row, which reads `[ ] No ROM` until a ROM is loaded and
+is the selected row while there is none: press `SPACE` to pick one, drag the ROM
+onto the window, or put the ROM next to the executable. `ESC` opens the same panel
+over the running game, at the same position. The ROM is validated by hash and
+stored, so later launches go straight into the game. The battery save lands in
+`saves/` **beside the executable**.
 
 ### A playable build
 

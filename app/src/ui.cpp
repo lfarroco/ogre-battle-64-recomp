@@ -182,6 +182,59 @@ const char* chaos_frame_band(int value) {
     return "HIGH";
 }
 
+// --- row heights --------------------------------------------------------------
+// One tab's row heights at the measured scale. `panel` supplies the right-column
+// text, which depends on the panel's ROM, mods and input map. `right_lines` is
+// filled only when `keep_lines` is set: only the active tab is drawn, so the
+// layout reference tab needs its total height alone.
+
+struct RowsLayout {
+    std::vector<int> heights;
+    std::vector<std::vector<std::string>> right_lines;
+    int total = 0;
+};
+
+RowsLayout layout_rows(const Font& font, const Panel& panel, const std::vector<Panel::Row>& rows,
+                       int scale, int row_height, int section_height, int description_width,
+                       int wrap_pad, bool keep_lines) {
+    const int line_height = scale * Font::kCellHeight;
+    RowsLayout layout;
+    layout.heights.assign(rows.size(), row_height);
+    if (keep_lines) {
+        layout.right_lines.assign(rows.size(), {});
+    }
+    for (size_t i = 0; i < rows.size(); i++) {
+        const Panel::Row& row = rows[i];
+        if (row.kind == Panel::RowKind::Section) {
+            layout.heights[i] = section_height;
+        }
+        else if (row.kind == Panel::RowKind::GameSpeed ||
+                 row.kind == Panel::RowKind::Widescreen) {
+            // The radio group is laid out by option, not wrapped as one string;
+            // its height is what the row must reserve.
+            const RadioLayout radio =
+                row.kind == Panel::RowKind::GameSpeed
+                    ? layout_game_speed(font, scale, description_width, game_speed())
+                    : layout_widescreen(font, scale, description_width, widescreen_mode_index());
+            layout.heights[i] = std::max(row_height, radio.height);
+        }
+        else {
+            const std::string right = panel.right_text_for(row);
+            if (!right.empty()) {
+                std::vector<std::string> lines =
+                    wrap_text(right, chars_per_line(font, scale, description_width));
+                const int count = static_cast<int>(lines.size());
+                layout.heights[i] = std::max(row_height, count * line_height + wrap_pad);
+                if (keep_lines) {
+                    layout.right_lines[i] = std::move(lines);
+                }
+            }
+        }
+        layout.total += layout.heights[i];
+    }
+    return layout;
+}
+
 }  // namespace
 
 // --- TextLayer ----------------------------------------------------------------
@@ -375,8 +428,6 @@ std::string Panel::tab_label(Tab tab) const {
     switch (tab) {
         case Tab::Start:
             return "START GAME";
-        case Tab::Rom:
-            return "ROM";
         case Tab::Mods:
             return "MODS";
         case Tab::Controls:
@@ -432,56 +483,63 @@ void Panel::reload() {
 }
 
 void Panel::rebuild_rows() {
-    rows_.clear();
-    switch (tab_) {
-        case Tab::Start:
-            rows_.push_back(Row{RowKind::Start, {}, 0, 0, -1});
-            break;
+    rows_ = build_rows(tab_);
+    // The layout reference tab's rows are built alongside the active tab's, so
+    // the fixed top edge cannot drift from what that tab would draw.
+    layout_rows_ = build_rows(kLayoutReferenceTab);
+}
 
-        case Tab::Rom:
-            rows_.push_back(Row{RowKind::Rom, {}, 0, 0, -1});
+std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
+    std::vector<Row> rows;
+    switch (tab) {
+        case Tab::Start:
+            // The ROM row lives here: with no ROM loaded it is the first
+            // selectable row, so the start screen can still pick one.
+            rows.push_back(Row{RowKind::Start, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Rom, {}, 0, 0, -1});
             break;
 
         case Tab::Mods:
             if (mods_.empty()) {
-                rows_.push_back(Row{RowKind::Section, "(none installed)", 0, 0, -1});
+                rows.push_back(Row{RowKind::Section, "(none installed)", 0, 0, -1});
             }
             for (size_t mod = 0; mod < mods_.size(); mod++) {
-                rows_.push_back(Row{RowKind::Mod, {}, mod, 0, -1});
+                rows.push_back(Row{RowKind::Mod, {}, mod, 0, -1});
                 const recomp::config::ConfigSchema& schema =
                     recomp::mods::get_mod_config_schema(mods_[mod].mod_id);
                 for (size_t option = 0; option < schema.options.size(); option++) {
                     if (schema.options[option].hidden) {
                         continue;
                     }
-                    rows_.push_back(Row{RowKind::Option, {}, mod, option, -1});
+                    rows.push_back(Row{RowKind::Option, {}, mod, option, -1});
                 }
             }
             break;
 
         case Tab::Controls:
-            rows_.push_back(Row{RowKind::Section, "KEYBOARD + GAMEPAD TO N64", 0, 0, -1});
+            rows.push_back(Row{RowKind::Section, "KEYBOARD + GAMEPAD TO N64", 0, 0, -1});
             for (int i = 0; i < kN64ButtonCount; i++) {
-                rows_.push_back(Row{RowKind::Binding, {}, 0, 0, i});
+                rows.push_back(Row{RowKind::Binding, {}, 0, 0, i});
             }
-            rows_.push_back(Row{RowKind::ResetBindings, {}, 0, 0, -1});
-            rows_.push_back(Row{RowKind::Section, "L-STICK: N64 ANALOG STICK", 0, 0, -1});
-            rows_.push_back(Row{RowKind::Section, "R-STICK: ALSO PRESSES C", 0, 0, -1});
+            rows.push_back(Row{RowKind::ResetBindings, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Section, "L-STICK: N64 ANALOG STICK", 0, 0, -1});
+            rows.push_back(Row{RowKind::Section, "R-STICK: ALSO PRESSES C", 0, 0, -1});
             break;
 
         case Tab::Settings:
-            rows_.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
-            rows_.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
-            rows_.push_back(Row{RowKind::Section, "GAME STATE", 0, 0, -1});
-            rows_.push_back(Row{RowKind::ChaosFrame, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Section, "GAME STATE", 0, 0, -1});
+            rows.push_back(Row{RowKind::ChaosFrame, {}, 0, 0, -1});
             break;
 
         default:
             break;
     }
+    return rows;
 }
 
 size_t Panel::first_selectable() const {
@@ -555,7 +613,7 @@ std::string Panel::left_text(size_t index) const {
         case RowKind::Start:
             return rom_.empty() ? "[ ] Start Game" : "[x] Start Game";
         case RowKind::Rom:
-            return rom_.empty() ? "[ ] No ROM" : "[x] Loaded!";
+            return rom_.empty() ? "[ ] No ROM" : "[x] ROM loaded";
         case RowKind::Mod: {
             const recomp::mods::ModDetails& mod = mods_[row.mod];
             const bool enabled = recomp::mods::is_mod_enabled(mod.mod_id);
@@ -593,7 +651,10 @@ std::string Panel::right_text(size_t index) const {
     if (index >= rows_.size()) {
         return {};
     }
-    const Row& row = rows_[index];
+    return right_text_for(rows_[index]);
+}
+
+std::string Panel::right_text_for(const Row& row) const {
     switch (row.kind) {
         case RowKind::Start:
             return rom_.empty() ? std::string("CHOOSE A ROM FIRST")
@@ -898,41 +959,23 @@ PanelMetrics measure_panel(const Font& font, Panel& panel, int output_width,
     const int description_x = metrics.panel_left + (metrics.panel_width * 2) / 5;
     const int description_width = metrics.panel_left + metrics.panel_width - description_x;
 
-    metrics.row_heights.assign(panel.row_count(), metrics.row_height);
-    metrics.right_lines.assign(panel.row_count(), {});
-    int rows_height = 0;
-    for (size_t i = 0; i < panel.row_count(); i++) {
-        if (panel.row_kind(i) == Panel::RowKind::Section) {
-            metrics.row_heights[i] = section_height;
-        }
-        else if (panel.row_kind(i) == Panel::RowKind::GameSpeed ||
-                 panel.row_kind(i) == Panel::RowKind::Widescreen) {
-            // The radio group is laid out by option, not wrapped as one string;
-            // its height is what the row must reserve.
-            const RadioLayout layout =
-                panel.row_kind(i) == Panel::RowKind::GameSpeed
-                    ? layout_game_speed(font, metrics.scale, description_width, game_speed())
-                    : layout_widescreen(font, metrics.scale, description_width,
-                                        widescreen_mode_index());
-            metrics.row_heights[i] = std::max(metrics.row_height, layout.height);
-        }
-        else {
-            const std::string right = panel.right_text(i);
-            if (!right.empty()) {
-                metrics.right_lines[i] = wrap_text(
-                    right, chars_per_line(font, metrics.scale, description_width));
-                const int lines = static_cast<int>(metrics.right_lines[i].size());
-                metrics.row_heights[i] =
-                    std::max(metrics.row_height, lines * metrics.line_height + px(4));
-            }
-        }
-        rows_height += metrics.row_heights[i];
-    }
+    RowsLayout rows = layout_rows(font, panel, panel.rows(), metrics.scale, metrics.row_height,
+                                  section_height, description_width, px(4), true);
+    metrics.row_heights = std::move(rows.heights);
+    metrics.right_lines = std::move(rows.right_lines);
 
     const int tab_bar_height = metrics.line_height + px(10);
+    const int chrome = tab_bar_height + px(10) + px(12) + metrics.line_height + px(12);
     metrics.rows_top = top_y + tab_bar_height + px(10);
-    metrics.hint_y = metrics.rows_top + rows_height + px(12);
-    metrics.height = tab_bar_height + px(10) + rows_height + px(12) + metrics.line_height + px(12);
+    metrics.hint_y = metrics.rows_top + rows.total + px(12);
+    metrics.height = chrome + rows.total;
+
+    // The same layout for the tab that fixes the panel's position. Only its
+    // height is read, so the wrapped right-column lines are not kept.
+    const RowsLayout reference =
+        layout_rows(font, panel, panel.layout_rows(), metrics.scale, metrics.row_height,
+                    section_height, description_width, px(4), false);
+    metrics.layout_height = std::max(metrics.height, chrome + reference.total);
     return metrics;
 }
 
@@ -956,10 +999,11 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
     Panel::Geometry geometry;
 
     // The panel background is drawn first: the tab bar and the rows both sit on
-    // top of it.
+    // top of it. It reserves the layout height, so the frame does not change
+    // size when the active tab changes.
     SDL_SetRenderDrawColor(renderer, kPanelColor.r, kPanelColor.g, kPanelColor.b, kPanelColor.a);
     const SDL_Rect background{panel_left - px(18), top_y - px(12),
-                              panel_width + px(36), metrics.height};
+                              panel_width + px(36), metrics.layout_height};
     SDL_RenderFillRect(renderer, &background);
 
     // --- tab bar ---
@@ -1071,7 +1115,7 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
     PanelDraw result;
     result.panel_left = panel_left;
     result.panel_width = panel_width;
-    result.height = metrics.height;
+    result.height = metrics.layout_height;
     result.text_scale = scale;
     return result;
 }

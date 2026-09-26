@@ -68,9 +68,14 @@ std::string truncate_to_width(const Font& font, const std::string& text, int sca
 
 // --- the tabbed panel ---------------------------------------------------------
 
-enum class Tab { Start, Rom, Mods, Controls, Settings, Debug, Count };
+enum class Tab { Start, Mods, Controls, Settings, Debug, Count };
 
 constexpr int kTabCount = static_cast<int>(Tab::Count);
+
+// The tab whose content sets the panel's on-screen position. CONTROLS is the
+// tallest tab, so the header, the tab bar and the first row sit where they do
+// on CONTROLS whatever tab is active.
+constexpr Tab kLayoutReferenceTab = Tab::Controls;
 
 // What activating a row asks the caller to do. Everything that touches the
 // runtime (the file picker, the mod system) is handled outside the panel.
@@ -151,6 +156,14 @@ public:
     std::string left_text(size_t index) const;
     // The text in the right column (a description, a file name, a hint).
     std::string right_text(size_t index) const;
+    // The right column of an arbitrary row. measure_panel sizes the layout
+    // reference tab with this, and that tab is not the active one.
+    std::string right_text_for(const Row& row) const;
+
+    // The active tab's rows, and the layout reference tab's rows. Both are
+    // rebuilt by reload().
+    const std::vector<Row>& rows() const { return rows_; }
+    const std::vector<Row>& layout_rows() const { return layout_rows_; }
 
     // `direction` is +1 forward, -1 backward.
     RowAction activate(size_t index, int direction);
@@ -195,6 +208,7 @@ public:
 
 private:
     void rebuild_rows();
+    std::vector<Row> build_rows(Tab tab) const;
     size_t first_selectable() const;
 
     Mode mode_;
@@ -203,6 +217,7 @@ private:
     std::filesystem::path rom_;
     std::vector<recomp::mods::ModDetails> mods_;
     std::vector<Row> rows_;
+    std::vector<Row> layout_rows_;
     Geometry geometry_;
     size_t selected_ = 0;
     int capture_row_ = -1;
@@ -229,7 +244,13 @@ struct PanelMetrics {
     int row_height = 0;
     int rows_top = 0;   // absolute y of the first row
     int hint_y = 0;     // absolute y of the hint line
-    int height = 0;     // total panel height, background included
+    int height = 0;     // total panel height for the active tab, background included
+    // The height the block reserves: the taller of the active tab's panel and
+    // the layout reference tab's (kLayoutReferenceTab). A caller centres the
+    // whole block and places its footer with this, so the header, the tab bar and
+    // the footer stay put when the active tab changes. A tab that is taller than
+    // the reference still grows the block, because it genuinely needs the room.
+    int layout_height = 0;
     std::vector<int> row_heights;
     std::vector<std::vector<std::string>> right_lines;
 };

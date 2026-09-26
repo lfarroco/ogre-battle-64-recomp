@@ -125,12 +125,13 @@ pthreads).
 ```
 
 The app starts on its own **start screen** when it has no ROM to boot: the
-`OGRE BATTLE 64: RECOMP` title over a tabbed panel (**START GAME**, **ROM**,
-**MODS**, **CONTROLS**). The ROM tab reads `[ ] No ROM` and
-`PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN A WINDOW`. `SPACE` opens a native
-file picker, or drop a ROM file onto the window. A ROM placed in the app's folder
-(or `<app>/roms/`) is found automatically, so "put the ROM next to the executable
-and launch" works with no click at all.
+`OGRE BATTLE 64: RECOMP` title over a tabbed panel (**START GAME**, **MODS**,
+**CONTROLS**, **SETTINGS**, **DEBUG**). The START GAME tab carries the ROM row,
+which reads `[ ] No ROM` and `PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN A
+WINDOW`. With no ROM loaded that row is the selected one, so `SPACE` (or a click)
+opens a native file picker; a ROM can also be dropped onto the window. A ROM
+placed in the app's folder (or `<app>/roms/`) is found automatically, so "put the
+ROM next to the executable and launch" works with no click at all.
 
 The ROM is validated by XXH3 hash and the runtime stores a copy in the config
 directory, so **later launches skip the start screen and boot straight into the
@@ -523,7 +524,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_ROM=<path>` | boot this ROM without passing it as an argument (validated and stored like an argument; the start screen is skipped) |
 | `OGRE_LAUNCHER=1` | force the start screen even when a ROM is available (testing the first-launch experience) |
 | `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
-| `OGRE_LAUNCHER_TAB=<start\|rom\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
+| `OGRE_LAUNCHER_TAB=<start\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
 | `OGRE_LAUNCHER_KEYS=<name>,…` | push one synthetic keydown per 150 ms through the start screen's real key handler. Names are SDL scancode names (`Tab`, `Down`, `Space`, `p`, `Return`), so `Tab,Tab,Tab,Space,p` opens CONTROLS, arms the A row's rebind and binds `P` |
 | `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS`) |
 | `OGRE_OVERLAY=1` | open the in-game overlay at startup |
@@ -1615,10 +1616,10 @@ OGRE_WIDESCREEN=missions OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
 
 `ESC` during play opens a borderless, always-on-top SDL window placed over the
 game window (`app/src/overlay.cpp`). It draws the same `ui::Panel` with the same
-bitmap font, so the two screens look identical; the tab bar shows START GAME,
-ROM and MODS greyed and only CONTROLS and SETTINGS active, because a running game
-cannot load a ROM or toggle a mod. `ESC` closes it and returns the keyboard to
-the game.
+bitmap font, so the two screens look identical; the tab bar shows START GAME and
+MODS greyed and only CONTROLS, SETTINGS and DEBUG active, because a running game
+cannot start, load a ROM or toggle a mod. `ESC` closes it and returns the keyboard
+to the game.
 
 While it is open, `get_input` reports an idle controller (`buttons=0`, stick 0),
 so the game's own menus do not see the keys used to navigate the panel. The game
@@ -1635,7 +1636,7 @@ No RT64 change was needed.
 
 ```bash
 # every launcher tab, as a PPM
-for tab in start rom mods controls settings; do
+for tab in start mods controls settings debug; do
   OGRE_PREF_DIR=/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=$tab \
     OGRE_LAUNCHER_SHOT=/tmp/ui-$tab.ppm ./build-app/ogrebattle64
 done

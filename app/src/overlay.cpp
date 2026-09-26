@@ -277,12 +277,13 @@ void draw() {
         ui::measure_panel(g_overlay.font, *g_overlay.panel, output_width, 0, ui_scale);
 
     const int rule_height = px(2);
-    // The footer sits after the panel; the CONTROLS tab is tall enough that a
-    // pinned footer would overlap it.
+    // The block is laid out with the layout reference tab's height, so the
+    // header, the tab bar and the footer do not move when the active tab
+    // changes.
     const int gap = px(20);
     const int footer_height = px(2) * Font::kCellHeight;
-    int block_height = title_height + px(30) + rule_height + px(26) + metrics.height +
-                       gap + footer_height;
+    int block_height = title_height + px(30) + rule_height + px(26) +
+                       metrics.layout_height + gap + footer_height;
     int cursor_y = std::max(px(24), (output_height - block_height) / 2);
 
     title.build(g_overlay.renderer, g_overlay.font, "OGRE BATTLE 64: RECOMP",
@@ -299,7 +300,7 @@ void draw() {
 
     ui::draw_panel(g_overlay.renderer, g_overlay.font, *g_overlay.panel, output_width,
                    output_height, cursor_y, ui_scale);
-    cursor_y += metrics.height + gap;
+    cursor_y += metrics.layout_height + gap;
 
     body.build(g_overlay.renderer, g_overlay.font, "ESC RESUMES THE GAME",
                px(2), kHintColor);
