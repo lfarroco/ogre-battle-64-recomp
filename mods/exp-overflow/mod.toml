@@ -1,0 +1,58 @@
+# Build definition for the "EXP Overflow" mod.
+#
+# RecompModTool takes this file and the ELF named in `[inputs]` and writes a
+# `.nrm` (the packaged mod the client loads) plus the symbol and binary files it
+# is built from. `tools/build-example-mods.sh` runs the whole thing.
+
+[manifest]
+
+# The id `mods.json` stores the player's toggle against. It must stay stable.
+id = "ogre_exp_overflow"
+
+version = "1.0.0"
+
+display_name = "EXP Overflow"
+
+description = """
+A character levels up at 100 EXP. When a battle award takes them past 100 the
+game discards the remainder: 90 EXP plus a 30 EXP gain becomes level +1 and 0
+EXP. This mod carries the remainder over, so the same fight leaves 20 EXP.
+
+The character's level and stats are unchanged; only the leftover EXP changes."""
+
+short_description = "Carry leftover EXP over after a level up."
+
+authors = [ "Ogre Battle 64 Recomp" ]
+
+# The id the port registers for mods. See `MOD_GAME_ID` in app/src/game.hpp.
+game_id = "ogrebattle64"
+
+# The port's `project_version` is 0.1.0 (app/src/main.cpp). A mod whose minimum
+# is higher is refused at load.
+minimum_recomp_version = "0.1.0"
+
+dependencies = [ ]
+
+native_libraries = [ ]
+
+# Ships off. The client turns a mod on by default only when its manifest says
+# so, and the shipped package should behave like the vanilla game until the
+# player opts in from the start screen's MODS section. RecompModTool writes this
+# into the `.nrm`'s `mod.json`, where the runtime reads it.
+enabled_by_default = false
+
+[inputs]
+
+# Written by tools/build-example-mods.sh.
+elf_path = "build/mod.elf"
+
+# The output `<mod_filename>.nrm`.
+mod_filename = "exp-overflow"
+
+# The base game's symbols, written by `make mod-syms`. The mod names the
+# functions it hooks, and the mod tool resolves those names against this file.
+# Paths here are relative to this file.
+func_reference_syms_file = "../reference/dump.toml"
+data_reference_syms_files = [ "../reference/data_dump.toml" ]
+
+additional_files = [ ]

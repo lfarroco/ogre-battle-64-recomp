@@ -72,6 +72,8 @@ Organize Screen, the credits, the ending and the attract loop.
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
   controls, GAME SPEED, WIDESCREEN, mods, `make dist` packages, GitHub releases.
+  `mods/skip-boot-logos/` is the mod reference; `mods/exp-overflow/` carries a
+  level-up's leftover EXP over instead of letting the game zero it (session 103).
   WIDESCREEN is `off` / `missions` / `always`: `missions` turns RT64's Expand
   aspect ratio on only while scene `0x03` runs, so the mission field is hor+
   16:9 and the 4:3 2D screens are untouched (session 102). The window shape
