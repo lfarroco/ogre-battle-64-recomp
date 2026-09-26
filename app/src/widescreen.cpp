@@ -9,7 +9,7 @@
 // (`ProjectionProcessor::processScene`). The portable result is hor+: the same
 // vertical framing with more world at the sides. The 2D draws that are not
 // counter-scaled are stretched horizontally, which is why the default is Off
-// and `Missions` is the mode the setting exists for.
+// and Expand is limited to the mission scene the setting exists for.
 //
 // The value lives in `GraphicsConfig` and reaches RT64 through the runtime:
 // `ultramodern::renderer::set_graphics_config` flags an `UpdateConfigAction`,
@@ -39,8 +39,8 @@ namespace {
 
 // Scene `0x03` is the mission: the 3D field with the party, its intro, and the
 // battles inside it. Descriptor `0x8018F350`; see docs/scenes.md. It is the
-// scene the developer asked widescreen for, and the only one `Missions` turns
-// the mode on for.
+// scene the developer asked widescreen for, and the only one the toggle turns
+// Expand on for.
 constexpr uint16_t kMissionScene = 0x0003;
 
 // The VI framebuffer is 320x240, so 4:3 is the game's own shape. 16:9 is the
@@ -62,16 +62,10 @@ int width_for_height(int height, float aspect) {
     return static_cast<int>(std::lround(static_cast<double>(height) * aspect));
 }
 
+// Whether Expand is on this frame: the toggle is on and the dispatcher is
+// running the mission.
 bool wants_expand() {
-    switch (widescreen_mode()) {
-        case WidescreenMode::Off:
-            return false;
-        case WidescreenMode::Always:
-            return true;
-        case WidescreenMode::Missions:
-            return active_scene_id() == kMissionScene;
-    }
-    return false;
+    return widescreen_mode() != WidescreenMode::Off && active_scene_id() == kMissionScene;
 }
 
 // The shape the *window* has, which is the mode's and not the scene's: any

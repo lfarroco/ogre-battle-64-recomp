@@ -13,9 +13,9 @@
 //   sequences complete in 1/n of the wall time. `OGRE_SPEED=<n>` sets the
 //   starting value as a debug override; the SETTINGS tab then changes and saves
 //   it.
-// * WIDESCREEN, which puts RT64 into its Expand aspect ratio (a wider field of
-//   view) for the mission. See `WidescreenMode` below and `widescreen.cpp` for
-//   why it is not simply on.
+// * WIDESCREEN, a toggle that puts RT64 into its Expand aspect ratio (a wider
+//   field of view) for the mission. See `WidescreenMode` below and
+//   `widescreen.cpp`.
 //
 // The file is `<config>/settings.cfg`, plain text.
 #pragma once
@@ -46,23 +46,27 @@ int game_speed();
 // Clamped to the runtime's range (1..64). Called from the UI.
 void set_game_speed(int multiplier);
 
-// The WIDESCREEN row. RT64's Expand aspect ratio widens the view: its
+// The WIDESCREEN row: a toggle. RT64's Expand aspect ratio widens the view: its
 // `ProjectionProcessor` counter-scales the projection matrices, so a 3D scene
 // keeps its proportions and gains width instead of being stretched
-// (`tools/RT64/src/render/rt64_projection_processor.cpp:101-115`). The game's
-// 2D screens were authored for 4:3, so `Off` is the default and `Missions`
-// limits Expand to the mission scene (`0x03`). `Always` is offered because the
-// choice belongs to the player, and the modes are what make the setting
-// expressible at all.
+// (`tools/RT64/src/render/rt64_projection_processor.cpp:101-115`). The game's 2D
+// screens were authored for 4:3, so `Off` is the default and Expand is on only
+// while the dispatcher runs the mission scene (`0x03`). The window itself is
+// 16:9 for the whole run whenever the toggle is on, and the 4:3 scenes are
+// pillarboxed inside it.
+//
+// Earlier builds offered `missions` and `always` as separate modes. The two
+// opened the same 16:9 window and pillarboxed the same 4:3 scenes, so the split
+// is gone (developer, session 105). The loader still reads the old spellings as
+// `On`.
 enum class WidescreenMode {
     Off = 0,
-    Missions = 1,
-    Always = 2,
+    On = 1,
 };
 
-constexpr int kWidescreenModeCount = 3;
+constexpr int kWidescreenModeCount = 2;
 
-// "OFF", "MISSIONS" or "ALWAYS" for the radio row's `index`-th option.
+// "OFF" or "ON" for the radio row's `index`-th option.
 const char* widescreen_mode_label(int index);
 
 // The live mode.

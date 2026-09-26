@@ -559,7 +559,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CAPTURE_AFTER=<n>` | skip the first `n` presents before capturing |
 | `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, capture only every `n`th present — a multi-minute run becomes a slideshow instead of one 3 MB PPM per frame (files stay numbered by present index) |
 | `OGRE_SPEED=<n>` | scale the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64), so timed sequences — the attract loop, songs — complete in `1/n` of the wall time. Semantics are unchanged: every timer scales together (audio is off in these runs). `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s. This is the debug spelling of **GAME SPEED**: with the variable unset the runtime takes its starting value from `<config>/settings.cfg`, and `OGRE_SPEED` overrides that file for one run without writing it |
-| `OGRE_WIDESCREEN=off\|missions\|always` | debug spelling of **WIDESCREEN**: `missions` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`, and `always` leaves it on everywhere. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
+| `OGRE_WIDESCREEN=off\|on` | debug spelling of **WIDESCREEN**: `on` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`. The retired `missions` and `always` spellings are read as `on`. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
 | `OGRE_FORCE_SCENE=<hex>` | switch a run to attract scene `<hex>` by poking the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it active — no need to wait out the attract loop. `OGRE_FORCE_SCENE_AFTER_MS` (default 3000) delays the first poke so boot can settle |
 | `OGRE_PRESENT_ALWAYS=1` | push a present on every VI even when nothing changed (a stalled boot changes nothing, so the window otherwise freezes on an old frame) |
 | `OGRE_PRESENT_FBTARGET=1` | if the framebuffer manager has no framebuffer at the VI address, present a non-empty render target there instead of the RDRAM copy |
@@ -1532,19 +1532,24 @@ set_graphics_config` flags an `UpdateConfigAction`, the renderer thread picks it
 up in `events.cpp`, and `RT64Renderer::update_config` (`app/src/renderer.cpp:917`)
 forwards it to `app_->updateUserConfig`.
 
-The modes are named for the scene gate rather than for the aspect ratio, because
-the game's 2D screens are authored for 4:3:
+WIDESCREEN is a toggle, and its `ON` state is scoped by a scene gate rather than
+by the aspect ratio, because the game's 2D screens are authored for 4:3:
 
 ```
-WIDESCREEN   [x] OFF [ ] MISSIONS [ ] ALWAYS
+WIDESCREEN   [ ] OFF [x] ON
 ```
 
 * `OFF` (the default) never changes the aspect ratio.
-* `MISSIONS` turns Expand on only while the dispatcher's active scene
-  (`D_800E810E`) is `0x03`, the mission. The setting exists for this mode.
-* `ALWAYS` leaves Expand on. The game's full-screen 2D blits (the boot's
-  publisher stills, njpeg story backgrounds) are stretched horizontally, which is
-  why it is not the default.
+* `ON` turns Expand on only while the dispatcher's active scene (`D_800E810E`) is
+  `0x03`, the mission. The setting exists for this scene: the 3D field gains
+  width, and the game's 2D blits (the boot's publisher stills, njpeg story
+  backgrounds) keep their 4:3 proportions and are pillarboxed in the window.
+
+Earlier builds offered three options, `OFF` / `MISSIONS` / `ALWAYS`. Both
+widescreen options opened the same 16:9 window and pillarboxed the same 4:3
+scenes, so the split is gone (developer, session 105); the retired `missions`,
+`always`, `1` and `2` spellings in the file and in `OGRE_WIDESCREEN` are read as
+`on`.
 
 `app/src/widescreen.cpp` is the only writer of `ar_option`, and it is called
 once per frame from `update_gfx` beside `poll_scene`, because the active scene can
@@ -1552,30 +1557,29 @@ change on any frame. It reads the live `GraphicsConfig` and writes only when the
 wanted value differs, so a steady scene costs one comparison per frame.
 
 `LEFT`/`RIGHT` (or `SPACE`) step the group, and a mouse click on a marker sets
-that mode, exactly like GAME SPEED; the value is saved at
-`<config>/settings.cfg` (`widescreen = off|missions|always`).
+that option, exactly like GAME SPEED; the value is saved at
+`<config>/settings.cfg` (`widescreen = off|on`).
 
-#### The window's shape follows the mode, not the scene
+#### The window's shape follows the toggle, not the scene
 
-The window is sized once, from the mode, and never changes shape while the game
+The window is sized once, from the toggle, and never changes shape while the game
 runs. `create_window` asks `widescreen_initial_window_size` (`sdl_platform.cpp`)
 and then `widescreen_fit_window` re-derives the width from the height the window
 actually got, because the window manager can hand back a different height than
 the one requested.
 
-| mode | window | a 4:3 scene | the mission |
+| toggle | window | a 4:3 scene | the mission |
 |---|---|---|---|
 | `OFF` | 4:3 | fills the window, no bars | 4:3, no bars |
-| `MISSIONS` | 16:9 | **pillarboxed: black bars on the sides** | fills the width |
-| `ALWAYS` | 16:9 | stretched to the width | stretched to the width |
+| `ON` | 16:9 | **pillarboxed: black bars on the sides** | fills the width |
 
-`widescreen_update` returns whether the **mode** changed, and only that makes the
+`widescreen_update` returns whether the **toggle** changed, and only that makes the
 app re-fit the window (`main.cpp`). A scene transition must not resize the
 window: the first version did exactly that, and the developer rejected it —
-*"the window changes its size while the game is running"*. Changing the mode from
+*"the window changes its size while the game is running"*. Changing the toggle from
 the launcher or the `ESC` overlay re-fits the window once, which is the one case
 where the shape is expected to change. A manual resize or a double-click to fill
-the screen is left alone until the mode changes.
+the screen is left alone until the toggle changes.
 
 #### Observations
 
@@ -1587,7 +1591,7 @@ Observations from the verification runs (2026-09-25, `docs/HANDOFF-2026-09-25-se
 * With `OFF` the window opens 953x715 (4:3 at a 715 window height) and the
   4:3 picture reaches both edges — no pillarbox, which was the developer's first
   report about the old fixed 1280x720 window.
-* With `MISSIONS`/`ALWAYS` the window opens 1271x715 (16:9) and stays; the boot,
+* With `ON` the window opens 1271x715 (16:9) and stays; the boot,
   the title, the Load Game book and the story cutscenes are pillarboxed inside
   it, which is what the developer asked for.
 * The mission field and its projected 2D HUD (the `NOTE` tooltip, the dialogue
@@ -1595,11 +1599,12 @@ Observations from the verification runs (2026-09-25, `docs/HANDOFF-2026-09-25-se
   width.
 * The `MISSION` banner row clips at both screen edges in 4:3 as well: it is the
   game's own scrolling marquee and not an Expand artifact.
-* Proofs: `native-widescreen-launcher.png` (the row),
+* Proofs: `native-widescreen-launcher.png` (the row) and
+  `native-widescreen-overlay.png` (the same row in the `ESC` overlay),
   `native-widescreen-pillarbox.png` and `native-widescreen-43-window.png` (the
-  Load Game book in `MISSIONS` and `OFF` — the identical screen with and without
+  Load Game book in `ON` and `OFF` — the identical screen with and without
   the side bars), `native-widescreen-mission-expand.png` and
-  `native-widescreen-mission-43.png` (a battle in the mission, in `MISSIONS` and
+  `native-widescreen-mission-43.png` (a battle in the mission, in `ON` and
   `OFF`; not the same battle frame, but the same area and camera).
 
 ```bash
@@ -1608,7 +1613,7 @@ OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=settings OGRE_LAUNCHER_SHOT=/tmp/ws.ppm \
   ./build-app/ogrebattle64
 
 # the scene gate: Expand exactly while scene 0x03 runs, and the window unchanged
-OGRE_WIDESCREEN=missions OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
+OGRE_WIDESCREEN=on OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
   ./build-app/ogrebattle64 2>&1 | grep -E '\[scene\].*0x0003|\[widescreen\]'
 ```
 

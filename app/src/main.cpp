@@ -90,12 +90,12 @@ static void update_gfx(void*) {
     // OGRE_SCENE=<name|hex>: boot straight into a screen (see bank_overlays.cpp).
     // Polled here because this callback runs once per frame.
     ogre::poll_scene();
-    // The WIDESCREEN setting is a function of the active scene (Missions mode
+    // The WIDESCREEN toggle is a function of the active scene (its ON state
     // turns RT64's Expand aspect ratio on for scene 0x03 only), and the scene
     // can change on any frame, so it is applied here beside poll_scene. The
-    // return value is the *mode* changing, which is the only thing that changes
-    // the window's shape: a scene transition must not resize the window, and in
-    // a widescreen mode the 4:3 scenes are pillarboxed instead.
+    // return value is the *toggle* changing, which is the only thing that
+    // changes the window's shape: a scene transition must not resize the window,
+    // and while the toggle is on the 4:3 scenes are pillarboxed instead.
     if (ogre::widescreen_update()) {
         ogre::widescreen_fit_window(ogre::g_platform.window);
     }

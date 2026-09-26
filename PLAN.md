@@ -78,11 +78,11 @@ Organize Screen, the credits, the ending and the attract loop.
   keep one position on every tab (session 104). `mods/skip-boot-logos/` is the
   mod reference; `mods/exp-overflow/` carries a level-up's leftover EXP over
   instead of letting the game zero it (session 103).
-  WIDESCREEN is `off` / `missions` / `always`: `missions` turns RT64's Expand
-  aspect ratio on only while scene `0x03` runs, so the mission field is hor+
-  16:9 and the 4:3 2D screens are untouched (session 102). The window shape
-  follows the mode and never the scene: `off` opens 4:3 with no pillarbox, and
-  the widescreen modes open 16:9 with the 4:3 scenes pillarboxed inside.
+  WIDESCREEN is a toggle (`off` / `on`): `on` turns RT64's Expand aspect ratio
+  on only while scene `0x03` runs, so the mission field is hor+ 16:9 and the 4:3
+  2D screens are untouched (sessions 102, 105). The window shape follows the
+  toggle and never the scene: `off` opens 4:3 with no pillarbox, and `on` opens
+  16:9 with the 4:3 scenes pillarboxed inside.
 - **Performance** — three misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`

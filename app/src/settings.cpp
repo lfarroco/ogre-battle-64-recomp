@@ -117,14 +117,13 @@ int parse_game_speed(const std::string& text) {
     return 1;
 }
 
-// `off` / `missions` / `always`, or 0 / 1 / 2.
+// `off` / `on`, or 0 / 1. The retired `missions` / `always` spellings were the
+// two on states of the old three-option row; both are read as `on`.
 WidescreenMode parse_widescreen(const std::string& text) {
     const std::string value = lowercase(setting_value(text, "widescreen"));
-    if (value == "always" || value == "2") {
-        return WidescreenMode::Always;
-    }
-    if (value == "missions" || value == "mission" || value == "1") {
-        return WidescreenMode::Missions;
+    if (value == "on" || value == "1" || value == "true" || value == "missions" ||
+        value == "mission" || value == "always" || value == "2") {
+        return WidescreenMode::On;
     }
     return WidescreenMode::Off;
 }
@@ -161,7 +160,7 @@ void write_settings() {
         "# Edited from the launcher's SETTINGS tab, or the in-game Esc overlay.\n"
         "# game_speed: the emulated clock's multiplier (1, 2 or 4).\n"
         "game_speed = " + std::to_string(g_game_speed) + "\n"
-        "# widescreen: off, missions (only the mission scene) or always.\n"
+        "# widescreen: off or on.\n"
         "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n";
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
@@ -219,9 +218,8 @@ void set_game_speed(int multiplier) {
 
 const char* widescreen_mode_label(int index) {
     switch (static_cast<WidescreenMode>(index)) {
-        case WidescreenMode::Off:      return "OFF";
-        case WidescreenMode::Missions: return "MISSIONS";
-        case WidescreenMode::Always:   return "ALWAYS";
+        case WidescreenMode::Off: return "OFF";
+        case WidescreenMode::On:  return "ON";
     }
     return "OFF";
 }
@@ -277,8 +275,9 @@ void load_settings(const std::filesystem::path& pref_dir) {
         speed = env;
         std::fprintf(stderr, "[settings] OGRE_SPEED=%d overrides the saved game speed\n", env);
     }
-    // OGRE_WIDESCREEN=off|missions|always: the same rule as OGRE_SPEED. It is
-    // also how a scripted run reaches the setting without the UI.
+    // OGRE_WIDESCREEN=off|on: the same rule as OGRE_SPEED. The retired
+    // `missions` / `always` spellings still parse, as on. It is also how a
+    // scripted run reaches the setting without the UI.
     if (const char* env = std::getenv("OGRE_WIDESCREEN"); env != nullptr && env[0] != '\0') {
         widescreen = parse_widescreen(std::string("widescreen = ") + env);
         std::fprintf(stderr, "[settings] OGRE_WIDESCREEN=%s overrides the saved widescreen mode\n",
