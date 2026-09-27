@@ -664,6 +664,13 @@ OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=900 OGRE_SYNTH_PERIOD=30 OGRE_NO_DUMMY_VI=1 
 the swap-chain texture itself, with no window server in the path. Add
 `OGRE_CAPTURE_TARGET=/tmp/target` to also dump the render target the VI renderer
 sampled, which separates "the RDP did not draw" from "the presenter dropped it".
+The port reads `OGRE_CAPTURE_PRESENT` **once** at startup and passes the path to
+RT64 through `ogre_present_capture_path()`; the console's `snap` command toggles
+it without touching the environment, because the UCRT's `putenv` copies the
+string and hiding an entry by rewriting its name is a POSIX-only trick (that
+copy left the capture on in v0.4.0's Windows build and crashed the D3D12 backend
+on the first present — session 107). A value you set in the environment wins over
+`snap`, and `snap` says so.
 
 `OGRE_SYNTH_FRAME` turns on `OGRE_PRESENT_ALWAYS` and `OGRE_PRESENT_FBTARGET` for
 you (with `setenv(..., overwrite=0)`, so an explicit value still wins); with
@@ -798,7 +805,7 @@ Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
 | `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
 | `cover` | the recompiled functions entered so far (needs `OGRE_COVER=1`), one per line — a mid-run coverage snapshot without ending the run; `tools/recompcov.py --log` reads the same lines |
 | `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
-| `snap [prefix] [ms]` | **the one-key report for "something looks wrong on screen"**: writes the whole 8 MiB RDRAM image **at this instant** to `<prefix>.bin` (bare: `/tmp/ogre-snap-NNNN.bin`) with the game threads parked so the image is one instant, and turns RT64's presented-frame capture on for `ms` (default 400) so `<prefix>.<present>.ppm` files land for the same screen. The PPM path is fixed at `/tmp/ogre-shot.<present>.ppm`; the toggle rewrites the *name* byte of a `putenv`'d `OGRE_CAPTURE_PRESENT` entry so it never frees the path the present thread holds (see the block comment in `sdl_platform.cpp`). Add `OGRE_VI_TRACE=1` to the run and the same log names the framebuffer, which renders out of the dump with `tools/rdram.py <dump> image <addr> <w> <h> --fmt rgba16` |
+| `snap [prefix] [ms]` | **the one-key report for "something looks wrong on screen"**: writes the whole 8 MiB RDRAM image **at this instant** to `<prefix>.bin` (bare: `/tmp/ogre-snap-NNNN.bin`) with the game threads parked so the image is one instant, and turns RT64's presented-frame capture on for `ms` (default 400) so `<prefix>.<present>.ppm` files land for the same screen. The PPM path is fixed at `/tmp/ogre-shot.<present>.ppm`; the toggle sets a flag the app owns and never frees the path the present thread holds, so `OGRE_CAPTURE_PRESENT` is read once at startup and a value you set wins over `snap` (see the block comment in `sdl_platform.cpp`). Add `OGRE_VI_TRACE=1` to the run and the same log names the framebuffer, which renders out of the dump with `tools/rdram.py <dump> image <addr> <w> <h> --fmt rgba16` |
 | `save [path]` | write a **checkpoint** (whole RDRAM + the runtime's overlay state). A bare `save` writes `/tmp/ogre-checkpoint-NNNN.ckpt` and remembers it |
 | `load [path]` | **restore** a checkpoint this build wrote — the machine rewinds to the instant of the save and the game re-runs from there. A bare `load` uses the most recent bare `save` |
 | `press <buttons> [polls] [x] [y]` | **hold a synthetic pad press** for `polls` input polls and then release it, so an external tool can walk a menu interactively ("press right", look at the capture, "press a") instead of guessing a wall-clock tap schedule (session 68). `<buttons>` is the `+`-joined `OGRE_TAP_BUTTON` vocabulary (`start`, `a`, `up`, `left`, …), `polls` and the stick values are parsed as **hex** for the poll count and `atof` for `x`/`y`, so `press a 400` is 1024 polls and `press none 60 -1 0` is a full-left analog stick. **A short press is much shorter than it looks: the game polls input about once per VI retrace (measured, session 70: `min=1 max=2 mean=1.01` calls per retrace), so `polls` ≈ emulated frames — `press right 8` is invisible, `press right 2000` walks the map cursor across the world; budget a few hundred polls per cursor step** |

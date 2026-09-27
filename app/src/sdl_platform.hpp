@@ -18,10 +18,13 @@ namespace ogre {
 namespace console {
 bool tick();
 void exec(const std::string& line);
-// Installs the togglable `OGRE_CAPTURE_PRESENT` entry the `snap` command uses
-// (see the block comment in sdl_platform.cpp). Call once, before the runtime
-// starts its game and present threads.
+// Reads the user's `OGRE_CAPTURE_PRESENT` once, so a later `snap` cannot
+// overwrite it. Call once, before the runtime starts its present thread.
 void init_capture_env();
+// The path RT64's presented-frame capture should write to, or nullptr while the
+// capture is off (see the block comment in sdl_platform.cpp). RT64 declares it
+// with C linkage; the namespace here does not change the symbol.
+extern "C" const char* ogre_present_capture_path();
 }
 
 // Platform I/O for the app: SDL2 window, N64-style input, and SDL audio queue.

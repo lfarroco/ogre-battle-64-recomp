@@ -20,7 +20,9 @@
 #      on any PipeWire or PulseAudio machine (session 100, issue #8);
 #   3. the binary loads and reaches main: it is run with OGRE_SMOKE=1, which
 #      exits 0 as soon as main is reached, under a deadline so a loader error
-#      dialog or a hang cannot stall a release run.
+#      dialog or a hang cannot stall a release run. The same run asserts that the
+#      presented-frame capture is off, which is the v0.4.0 Windows crash
+#      (session 107);
 #
 # `SMOKE_TIMEOUT` (seconds, default 90) bounds check 3.
 set -euo pipefail
@@ -132,6 +134,16 @@ if [ -s "$log" ]; then
         cat "$log" >&2
         fail "the app exited 0 without reaching the smoke marker"
     }
+    # The presented-frame capture must be off unless the caller set the variable.
+    # A stale entry made RT64 read a buffer destination as a texture on the first
+    # present: the v0.4.0 Windows access violation (session 107).
+    if [ -z "${OGRE_CAPTURE_PRESENT:-}" ]; then
+        grep -q "\[smoke\] capture path: (unset)" "$log" || {
+            grep "capture path" "$log" >&2 || true
+            fail "the presented-frame capture is on without OGRE_CAPTURE_PRESENT"
+        }
+        echo "smoke-dist: the presented-frame capture is off by default"
+    fi
 fi
 echo "smoke-dist: the binary loaded, reached main and exited 0"
 

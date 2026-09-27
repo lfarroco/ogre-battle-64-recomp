@@ -1239,24 +1239,26 @@ bool write_rdram_image(const char* path, const uint8_t* rdram, std::string& erro
 
 // --- `snap`: an RDRAM image plus the presented frame ------------------------
 //
-// RT64's capture path (`OGRE_CAPTURE_PRESENT`,
-// tools/RT64/src/hle/rt64_present_queue.cpp) re-reads the variable on **every**
-// present, so enabling and disabling the environment entry turns capturing on
-// and off while the game runs, and it names each file `<path>.<present>.ppm`.
+// RT64's capture path (tools/RT64/src/hle/rt64_present_queue.cpp) asks this
+// module for the path through `ogre_present_capture_path()` on every present, so
+// setting `g_capture_enabled` turns capturing on and off while the game runs.
+// Each file is named `<path>.<present>.ppm`.
 //
-// `setenv`/`unsetenv` cannot toggle it: `unsetenv` frees the value string that
-// the present thread still holds a `const char*` to and dereferences later in
-// the same present. Instead one static `NAME=value` buffer is installed once with
-// `putenv`, before the renderer starts (`init_capture_env`, called from main),
-// and the entry is toggled by rewriting the **first byte of the name**:
-// `getenv("OGRE_CAPTURE_PRESENT")` then either matches or finds nothing, while
-// the value bytes a present thread already holds never change.
+// The path does not travel through the environment. The earlier version
+// installed one `NAME=value` buffer with `putenv` and toggled the capture by
+// rewriting the first byte of the name, which relies on `putenv` storing the
+// caller's pointer. The UCRT's `_putenv` copies the string and owns the copy, so
+// on Windows the entry stayed `OGRE_CAPTURE_PRESENT=/tmp/ogre-shot`: RT64 read it
+// on the first present, and its presented-frame readback (a buffer destination)
+// made the D3D12 backend read sample positions out of a null texture
+// (v0.4.0, session 107). Removing the entry instead is not an option either,
+// because that frees a string a present thread may still be reading.
 //
-// `putenv` keeps the caller's pointer, so the buffer must be a mutable global
-// and must stay valid for the process lifetime. A path the user set in the
+// This process therefore owns `g_capture_path` for its lifetime, and a toggle
+// cannot invalidate a path RT64 already holds. A path the user set in the
 // environment wins; `snap` then only reports that it cannot toggle it.
-char g_capture_env[] = "OGRE_CAPTURE_PRESENT=/tmp/ogre-shot";
-bool g_capture_installed = false;
+char g_capture_path[] = "/tmp/ogre-shot";
+const char* g_user_capture_path = nullptr;
 bool g_capture_enabled = false;
 // Wall clock, not frames: `tick()` runs on the main loop, which is not the
 // present rate, so a frame count can elapse between two presents and capture
@@ -1266,23 +1268,25 @@ uint64_t g_capture_until_ms = 0;
 constexpr uint32_t kCaptureDefaultMs = 400;
 
 void capture_enable(bool on) {
-    if (!g_capture_installed || g_capture_enabled == on) {
+    if (g_user_capture_path != nullptr || g_capture_enabled == on) {
         return;
     }
-    // 'O' keeps "OGRE_CAPTURE_PRESENT=..."; 'X' makes the entry unmatchable.
-    g_capture_env[0] = on ? 'O' : 'X';
     g_capture_enabled = on;
 }
 
-// Called from main before the runtime starts its threads, so the one `putenv`
-// that touches `environ` cannot race a `getenv` in the present thread.
+// Reads the user's variable once, so `snap` cannot overwrite it and no entry is
+// ever installed or freed. Called from main before the runtime starts its
+// threads.
 void init_capture_env() {
-    if (getenv("OGRE_CAPTURE_PRESENT") != nullptr) {
-        return;
+    g_user_capture_path = getenv("OGRE_CAPTURE_PRESENT");
+}
+
+// C linkage because RT64 calls it; the namespace does not change the symbol.
+extern "C" const char* ogre_present_capture_path() {
+    if (g_user_capture_path != nullptr) {
+        return g_user_capture_path;
     }
-    putenv(g_capture_env);
-    g_capture_env[0] = 'X';  // installed, disabled until `snap`
-    g_capture_installed = true;
+    return g_capture_enabled ? g_capture_path : nullptr;
 }
 
 void console_exec(const std::string& line_in) {
@@ -1562,18 +1566,15 @@ void console_exec(const std::string& line_in) {
         } else {
             printf("[console] snap: RDRAM dump failed: %s\n", error.c_str());
         }
-        if (g_capture_installed) {
+        if (g_user_capture_path != nullptr) {
+            printf("[console] snap: the environment sets OGRE_CAPTURE_PRESENT, so "
+                   "this command does not toggle the presented-frame capture\n");
+        } else {
             const uint32_t window_ms = (ntok > 2) ? num(2, kCaptureDefaultMs) : kCaptureDefaultMs;
             g_capture_until_ms = SDL_GetTicks64() + window_ms;
             capture_enable(true);
             printf("[console] snap: capturing presented frames for %u ms to "
                    "/tmp/ogre-shot.<present>.ppm\n", window_ms);
-        } else if (getenv("OGRE_CAPTURE_PRESENT") != nullptr) {
-            printf("[console] snap: the environment already sets OGRE_CAPTURE_PRESENT, so "
-                   "this command does not toggle the presented-frame capture\n");
-        } else {
-            printf("[console] snap: presented-frame capture unavailable "
-                   "(putenv failed at boot?)\n");
         }
     } else if (cmd == "save" || cmd == "load") {
         // Checkpoints: see the block comment above `write_checkpoint`. The file

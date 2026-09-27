@@ -96,6 +96,14 @@ Organize Screen, the credits, the ending and the attract loop.
   8 MiB RDRAM image with the game threads parked and, for `ms`, RT64's
   presented-frame capture for the same screen, so a player-reported defect can be
   read offline without a bounded run (`docs/guides/app-build.md`, session 101).
+- **Windows** — v0.4.0's access violation on the first present is root-caused and
+  fixed on main: the presented-frame capture was left enabled by
+  `init_capture_env`'s `putenv` name-mangling (the UCRT copies the string), and
+  RT64's readback handed the D3D12 backend a null texture. The capture path is
+  now app-owned and the D3D12 copy skips sample positions for a buffer
+  destination (session 107). The build is not re-released yet, and the
+  developer's own Windows machine still fails on releases older than the
+  capture code.
 
 What each screen should show is `docs/scenes.md`. Build instructions and every
 `OGRE_*` knob are `docs/guides/app-build.md`. A picture or a display list that a
@@ -107,16 +115,30 @@ run produces is evidence about the port until the five checks in
 Ordered by how much each item blocks a player. Each item names the handoff that
 holds the evidence.
 
-1. **Windows access violation when the game starts (`0xC0000005`).** The
-   launcher runs and loading the ROM dies on an access violation. The first
-   release on a player's machine worked and the developer's Windows laptop fails
-   on every release. The console build printed RT64's `Falling back to Vulkan
-   due to device workaround.` just before the crash; the fallback destroys the
-   D3D12 device and builds a Vulkan interface on the same window.
+1. **Windows access violation when the game starts (`0xC0000005`).** Split by
+   session 107:
+   (a) **v0.4.0 crashes on the first present on Windows, and it is fixed on
+   main.** The report's `fault instruction` (`ogrebattle64.exe+0x10001AE`) is
+   `plume::d3d12::D3D12CommandList::setSamplePositions` with a null `texture`
+   argument, called from `copyTextureRegion` with a `PlacedFootprint` (buffer)
+   destination. The only such call is the port's presented-frame readback, and it
+   ran because `init_capture_env` hid `OGRE_CAPTURE_PRESENT` by rewriting the
+   first byte of a `putenv`'d name, which the UCRT's copying `_putenv` ignores.
+   `snap` now toggles an app-owned path through `ogre_present_capture_path()`,
+   the D3D12 path skips sample positions for a non-texture destination, and
+   `tools/smoke-dist.sh` fails a package whose capture is on. Verified on macOS
+   only; players on v0.4.0 need a release. See
+   `docs/HANDOFF-2026-09-27-session107.md`.
+   (b) **The developer's Windows laptop fails on every release, v0.3.0
+   included**, which has no capture code, so that is a different crash. The
+   console build printed RT64's `Falling back to Vulkan due to device
+   workaround.` just before it; the fallback destroys the D3D12 device and builds
+   a Vulkan interface on the same window.
    `OGRE_GRAPHICS_API=<auto|d3d12|vulkan|metal>` lets a player pin the backend.
-   The next report names the device, the driver version, whether the fallback
-   ran, and the faulting module. See `docs/HANDOFF-2026-09-20-session94.md`
-   part 5.
+   Every Windows report so far has had empty captured `stdout`/`stderr` sections,
+   so the device, the driver version and whether the fallback ran have never been
+   visible; that capture is itself open. See
+   `docs/HANDOFF-2026-09-20-session94.md` part 5.
 2. **SIGBUS after a lost battle, `func_800862C0+0x59A` at guest `0x80086328`.**
    The faulting instruction is identified and the writer is not. The instruction
    is `lw $s6, 4($a1)`, where `$a1` is `+0x7C` of an effect object; the value

@@ -172,6 +172,15 @@ int main(int argc, char** argv) {
     // directory is read-only.
     ogre::crash_log::install(ogre::executable_directory());
 
+    // Read the user's OGRE_CAPTURE_PRESENT once, before the runtime creates its
+    // present thread. The console's `snap` command toggles the presented-frame
+    // capture through ogre_present_capture_path() and not through the
+    // environment: the UCRT's putenv copies the string it is given, so the old
+    // install-and-mangle entry stayed enabled on Windows and RT64 read a buffer
+    // destination as a texture on the first present (session 107). See the block
+    // comment in sdl_platform.cpp.
+    ogre::console::init_capture_env();
+
     // OGRE_SMOKE=1: prove that the packaged binary loads and reaches main, then
     // exit 0. `tools/smoke-dist.sh` runs this on the machine that built the
     // package, so a loader failure (a missing DLL beside the .exe) or a broken
@@ -181,6 +190,12 @@ int main(int argc, char** argv) {
     // does not change the exit code.
     if (getenv("OGRE_SMOKE") != nullptr) {
         fprintf(stderr, "[smoke] main reached\n");
+        // The capture must be off unless the player set the variable; a stale
+        // entry is what crashed the v0.4.0 Windows build on the first present.
+        // smoke-dist.sh asserts this line.
+        const char* capture_path = ogre::console::ogre_present_capture_path();
+        fprintf(stderr, "[smoke] capture path: %s\n",
+                capture_path != nullptr ? capture_path : "(unset)");
         if (ogre::init_sdl()) {
             fprintf(stderr, "[smoke] sdl ok\n");
             ogre::shutdown_sdl(ogre::g_platform);
@@ -225,12 +240,6 @@ int main(int argc, char** argv) {
     // OGRE_TAP_MS / OGRE_EXIT_AFTER_MS make a run self-driving and bounded (see
     // sdl_platform.hpp); both are off unless set.
     ogre::configure_automation(ogre::g_platform);
-
-    // Install the togglable OGRE_CAPTURE_PRESENT entry the console's `snap`
-    // command flips. This must run before the runtime creates the present
-    // thread: `putenv` is the only write to `environ`, and it cannot race a
-    // `getenv` in that thread. See the block comment in sdl_platform.cpp.
-    ogre::console::init_capture_env();
 
     // OGRE_PROFILE=1: sample every game thread's current recompiled function so
     // a "busy but not rendering" stall can be attributed to real work.
