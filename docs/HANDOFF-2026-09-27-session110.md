@@ -31,12 +31,18 @@ grab: it was SDL's own `SDL_QUIT` rule.
 2. **MAIN + EXIT GAME.** `ui::Tab::Start` is `Tab::Main`, `tab_label` returns
    `MAIN`, and `Panel::tab_enabled` enables every tab in overlay mode except
    MODS (the runtime loads mods before it boots). `RowKind::Start` is
-   `RowKind::StartGame` and a new `RowKind::ExitGame` is the MAIN tab's first
-   selectable row in both modes, so the overlay's panel opens with Exit Game
-   selected. `RowAction::QuitGame` replaces the unused `RowAction::CloseOverlay`;
-   the launcher stops its loop on it, and the overlay records a request that
-   `update_gfx` polls next to the window-close flag, so both exits share main.cpp's
-   dumps and `ultramodern::quit`.
+   `RowKind::StartGame` and a new `RowKind::ExitGame` is the MAIN tab's last row,
+   after Start Game and the ROM row, so a stray `SPACE` or `ENTER` reaches it only
+   when the player has deliberately moved to it. `RowAction::QuitGame` replaces
+   the unused `RowAction::CloseOverlay`; the launcher stops its loop on it, and
+   the overlay records a request that `update_gfx` polls next to the
+   window-close flag, so both exits share main.cpp's dumps and
+   `ultramodern::quit`.
+3. **ENTER on Exit Game** (developer follow-up; ENTER is "start the game"
+   everywhere else on the tab, so it started the game over the Exit Game row).
+   `Panel::selected_is_exit()` joins `selected_is_rom()`, and the launcher's
+   ENTER handler tests it before its play branch, so it quits. The overlay never
+   had the bug: ENTER there goes through the same `activate` path as SPACE.
 
 ## What the exit work cost, and the runtime defect under it
 
@@ -103,7 +109,9 @@ with no `error.log`:
 | `OGRE_OVERLAY=1 OGRE_OVERLAY_TAB=main OGRE_OVERLAY_KEYS="Down,Space"` | runs to `OGRE_EXIT_AFTER_MS`; Down moves to No ROM and never quits |
 | `OGRE_DUMP_RDRAM` on the early path | writes the full 8388608 bytes |
 | all five launcher tabs (`OGRE_LAUNCHER_TAB`) and all four overlay tabs (`OGRE_OVERLAY_TAB`) | capture and exit 0 |
-| launcher `MAIN` with **Down, Space** | quits without booting (`closed without a ROM`); **Space** on Start Game still boots |
+| launcher `MAIN` with **Down, Down, Return** | quits without booting (`closed without a ROM`) |
+| launcher `MAIN` with **Return** on Start Game | still boots (regression check) |
+| overlay `MAIN` with **Return** | `[overlay] EXIT GAME`, exit 0 |
 | `OGRE_SMOKE=1` | `[smoke] main reached`, `sdl ok` |
 
 `OGRE_WINDOW_CLOSE_AT_MS=<n>` is added for this test: it pushes one
@@ -117,8 +125,8 @@ Proofs refreshed (macOS, from the same build):
 `-launcher-settings.png`, `-overlay-main.png` (new), `-overlay-controls.png`,
 `-overlay-settings.png`, `-widescreen-launcher.png`, `-widescreen-overlay.png`.
 The overlay MAIN capture shows `[ MAIN ] [ MODS ] …`, `[ ] Start Game  ALREADY
-RUNNING` (inert and skipped by the selection), `[ ] Exit Game` selected with
-`Quit the game and close the window`, and `[ ] No ROM`.
+RUNNING` (inert and skipped by the selection), `[ ] No ROM` selected, and
+`[ ] Exit Game  Quit the game and close the window` last.
 
 ## Files changed
 

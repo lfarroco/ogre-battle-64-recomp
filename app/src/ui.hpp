@@ -155,6 +155,7 @@ public:
     void select_first();
     bool selectable(size_t index) const;
     bool selected_is_rom() const;
+    bool selected_is_exit() const;
     RowKind row_kind(size_t index) const;
     bool move(int delta);
 

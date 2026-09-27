@@ -1793,8 +1793,10 @@ the same rows. There are five tabs:
 
 ```
 MAIN         Start Game starts the game ([ ] and not selectable until a ROM is
-             loaded), Exit Game quits, and the ROM row opens the file picker; the
-             row reads [x] ROM loaded with the file name, or [ ] No ROM
+             loaded), then the ROM row, which reads [x] ROM loaded with the file
+             name or [ ] No ROM and opens the file picker, then Exit Game, which
+             quits. Exit Game is last on purpose: it is the one row a stray
+             SPACE or ENTER must not land on.
 MODS         one row per mod, then one row per visible option of that mod; a
              mod's short description sits in a second column
 CONTROLS     one row per N64 button with its keyboard key, its gamepad source and
@@ -1813,7 +1815,7 @@ SPACE            activate the selected row: Start Game plays, Exit Game quits, t
                  steps, the GAME SPEED row steps, a binding row arms a rebind
 LEFT / RIGHT     step the selected option's or setting's value
 ENTER            play, or open the ROM picker when no ROM is loaded or the ROM
-                 row is selected
+                 row is selected; on Exit Game it quits, the same as SPACE
 mouse            click a tab to switch, a row to activate it, a GAME SPEED radio
                  marker to set that speed, elsewhere to play
 ```

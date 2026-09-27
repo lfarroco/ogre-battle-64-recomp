@@ -527,6 +527,12 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
                     if (ready_rom.empty() || panel.selected_is_rom()) {
                         browse_and_accept();
                     }
+                    // ENTER on Exit Game is the same as SPACE on it. The test
+                    // comes before the play, because ENTER means "start the game"
+                    // everywhere else on the tab.
+                    else if (panel.selected_is_exit()) {
+                        run_action(ui::RowAction::QuitGame);
+                    }
                     else {
                         play();
                         if (running) {

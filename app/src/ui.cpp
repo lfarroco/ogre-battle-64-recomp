@@ -545,10 +545,13 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
     switch (tab) {
         case Tab::Main:
             // The ROM row lives here: with no ROM loaded it is the first
-            // selectable row, so the start screen can still pick one.
+            // selectable row, so the start screen can still pick one. EXIT GAME
+            // is last, so the row a stray SPACE or ENTER lands on is Start Game
+            // in the launcher and Exit Game in the overlay, whose Start Game row
+            // is not selectable.
             rows.push_back(Row{RowKind::StartGame, {}, 0, 0, -1});
-            rows.push_back(Row{RowKind::ExitGame, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Rom, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::ExitGame, {}, 0, 0, -1});
             break;
 
         case Tab::Mods:
@@ -624,6 +627,10 @@ bool Panel::selectable(size_t index) const {
 
 bool Panel::selected_is_rom() const {
     return selected_ < rows_.size() && rows_[selected_].kind == RowKind::Rom;
+}
+
+bool Panel::selected_is_exit() const {
+    return selected_ < rows_.size() && rows_[selected_].kind == RowKind::ExitGame;
 }
 
 Panel::RowKind Panel::row_kind(size_t index) const {
