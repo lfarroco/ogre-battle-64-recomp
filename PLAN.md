@@ -33,13 +33,16 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
 
 ## Browser port (WebAssembly)
 
-In addition to the native port, the project has a **WebAssembly / browser build**
-(`docs/WEB-PORT.md`): the recompiled game plus `N64ModernRuntime` under
-Emscripten, with a null renderer first and a WebGL2 renderer prototype. The
-native port is the primary target, and RT64 remains its renderer. See
-`docs/WEB-PORT.md`, `docs/WEB-PORT-REPORT.md` and
-`docs/WEB-PORT-DEPLOYMENT.md`. Those three documents were written 2026-08-29 and
-have not been updated since; the current state of the port is this file.
+The project also has a **WebAssembly / browser build**: the recompiled game plus
+`N64ModernRuntime` under Emscripten. It compiles and runs the game again
+(session 109). Its renderer is the WebGL2 prototype, which draws the title's
+sprite layer and mangles the title's 3D content and the menu screens, because it
+has no S2DEX2, no YUV16 and no RDRAM framebuffer indirection. The route for a
+browser renderer is recorded in `docs/DECISIONS.md`; the native port is the
+primary target and RT64 remains its renderer. `docs/WEB-PORT.md`,
+`docs/WEB-PORT-REPORT.md` and `docs/WEB-PORT-DEPLOYMENT.md` describe the
+2026-08-29 feasibility work and not the current state; the current state is this
+file and `docs/HANDOFF-2026-09-27-session109.md`.
 
 ## Status
 
@@ -179,10 +182,20 @@ holds the evidence.
    developer's decision is that it is low priority for a PC port. The device half
    (`osPfs*` and a flat 32 KiB `.mpk`) is implemented. See `docs/DECISIONS.md`
    (88b).
-8. **Web build.** Its audio is still silenced by default and still points at the
-   stub, and its renderer is a WebGL2 prototype. Re-pointing it at the working
-   audio microcode and choosing a browser renderer are deferred. See
-   `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md`.
+8. **Web build.** The wasm target compiles and runs again (session 109): two
+   defects had blocked it since 2026-09-16. `app/src/bank_overlays.cpp`
+   included the native-only `sdl_platform.hpp` for the live console, which is
+   now `#ifndef __EMSCRIPTEN__`; and `app/src/main_web.cpp` registered
+   `recomp::SaveType::None`, so the game's first SRAM DMA exited the runtime at
+   about 350 ms (`librecomp/src/pi.cpp`), which read as a boot freeze. It now
+   registers `Sram` like `app/src/main.cpp`. The title renders
+   (`docs/proofs/web-title.png`), 40 display lists are submitted with no bad
+   walk, and the audio microcode runs with the layer muted until `?audio`. The
+   renderer is still the WebGL2 prototype: no S2DEX2, no YUV16, no RDRAM
+   framebuffer indirection, so the opening and menu screens are wrong
+   (`docs/proofs/web-opening-broken.png`). The renderer route is decided in
+   `docs/DECISIONS.md`; the build is not in CI, which is why it stayed broken.
+   See `docs/HANDOFF-2026-09-27-session109.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`.** Fixed on main
    (session 108): `make dist`, `tools/release-build.sh`, the workflow's unpack
    step and `tools/smoke-dist.sh` all require an `.nrm`, and

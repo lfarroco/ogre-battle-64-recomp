@@ -11,7 +11,11 @@
 #include "ultramodern/ultramodern.hpp"
 
 #include "bank_overlays.hpp"
+// The live console is native-only (sdl_platform.cpp reads stdin and is not in
+// the Emscripten source list), so the browser build cannot call console::exec.
+#ifndef __EMSCRIPTEN__
 #include "sdl_platform.hpp"  // ogre::console::exec (OGRE_CONSOLE_ON_CMD)
+#endif
 
 namespace ogre {
 namespace {
@@ -527,7 +531,9 @@ void poll_scene() {
                     fprintf(stderr, "[scene] console trigger: scene 0x%04X step %u -> %s\n",
                             (unsigned)want_scene, (unsigned)step, cmd);
                     fflush(stderr);
+#ifndef __EMSCRIPTEN__
                     console::exec(cmd);
+#endif
                 }
             }
         }

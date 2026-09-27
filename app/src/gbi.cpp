@@ -499,64 +499,95 @@ std::string format_summary(const WorkloadStats& s) {
     char buf[4096];
     int n = 0;
 
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "tasks=%llu dls=%llu cmds=%llu unknown=%llu maxdepth=%u\n",
-                  static_cast<unsigned long long>(s.tasks),
-                  static_cast<unsigned long long>(s.dls_walked),
-                  static_cast<unsigned long long>(s.commands),
-                  static_cast<unsigned long long>(s.unknown_cmds), s.max_branch_depth);
+    // Every append goes through here because `snprintf` returns the length it
+    // *would* have written: `n` passes `sizeof(buf)` as soon as the format list
+    // grows, and then `buf + n` is out of bounds and `sizeof(buf) - n` wraps to
+    // a huge `size_t`, so the old `n += snprintf(buf + n, sizeof(buf) - n, ...)`
+    // wrote past the array and into the caller's frame (session 109: a two
+    // minute census reached 23 texture formats and truncated the block there).
+    // Once the buffer is full the remaining lines are dropped instead.
+    auto append = [&](const char* fmt, auto... args) {
+        if (n < 0) {
+            n = 0;
+        }
+        if (static_cast<size_t>(n) >= sizeof(buf)) {
+            return;
+        }
+        const int written = snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), fmt, args...);
+        if (written > 0) {
+            n += written;
+        }
+        const int limit = static_cast<int>(sizeof(buf)) - 1;
+        if (n > limit) {
+            n = limit;
+        }
+    };
 
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "geometry: vtx_calls=%llu vertices=%llu tri1=%llu tri2=%llu quad=%llu "
-                  "triangles=%llu line3d=%llu texrect=%llu texrect_flip=%llu fillrect=%llu\n",
-                  static_cast<unsigned long long>(s.vtx_calls),
-                  static_cast<unsigned long long>(s.vertices),
-                  static_cast<unsigned long long>(s.tri1),
-                  static_cast<unsigned long long>(s.tri2),
-                  static_cast<unsigned long long>(s.quad),
-                  static_cast<unsigned long long>(s.triangles),
-                  static_cast<unsigned long long>(s.line3d),
-                  static_cast<unsigned long long>(s.texrect),
-                  static_cast<unsigned long long>(s.texrect_flip),
-                  static_cast<unsigned long long>(s.fillrect));
+    append("tasks=%llu dls=%llu cmds=%llu unknown=%llu maxdepth=%u\n",
+           static_cast<unsigned long long>(s.tasks),
+           static_cast<unsigned long long>(s.dls_walked),
+           static_cast<unsigned long long>(s.commands),
+           static_cast<unsigned long long>(s.unknown_cmds), s.max_branch_depth);
 
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "textures: settimg=%llu (formats: ", static_cast<unsigned long long>(s.settimg));
-    for (const auto& [key, count] : s.timg_formats) {
-        const uint8_t fmt = static_cast<uint8_t>((key >> 20) & 0x7);
-        const uint8_t siz = static_cast<uint8_t>((key >> 18) & 0x3);
-        const uint16_t width = static_cast<uint16_t>(key & 0x3FF);
-        n += snprintf(buf + n, sizeof(buf) - n, "%s%s x%u=%llu ", fmt_name(fmt), siz_name(siz),
-                      static_cast<unsigned>(width), static_cast<unsigned long long>(count));
+    append("geometry: vtx_calls=%llu vertices=%llu tri1=%llu tri2=%llu quad=%llu "
+           "triangles=%llu line3d=%llu texrect=%llu texrect_flip=%llu fillrect=%llu\n",
+           static_cast<unsigned long long>(s.vtx_calls),
+           static_cast<unsigned long long>(s.vertices),
+           static_cast<unsigned long long>(s.tri1),
+           static_cast<unsigned long long>(s.tri2),
+           static_cast<unsigned long long>(s.quad),
+           static_cast<unsigned long long>(s.triangles),
+           static_cast<unsigned long long>(s.line3d),
+           static_cast<unsigned long long>(s.texrect),
+           static_cast<unsigned long long>(s.texrect_flip),
+           static_cast<unsigned long long>(s.fillrect));
+
+    // The lines with a fixed width come before the texture-format list. The
+    // list's length is data-dependent, and a long one pushed the combiner and
+    // state lines past the end of the buffer.
+    append("combiner: unique_configs=%zu\n", s.combiners.size());
+    append("othermode_h: %zu unique values; othermode_l: %zu unique values\n",
+           s.othermode_h.size(), s.othermode_l.size());
+    append("state: mtx=%llu popmtx=%llu geomode=%llu texture=%llu movemem=%llu moveword=%llu "
+           "setprimcolor=%llu setenvcolor=%llu setscissor=%llu setcimg=%llu setzimg=%llu\n",
+           static_cast<unsigned long long>(s.mtx),
+           static_cast<unsigned long long>(s.popmtx),
+           static_cast<unsigned long long>(s.geometrymode),
+           static_cast<unsigned long long>(s.texture_cmd),
+           static_cast<unsigned long long>(s.movemem),
+           static_cast<unsigned long long>(s.moveword),
+           static_cast<unsigned long long>(s.setprimcolor),
+           static_cast<unsigned long long>(s.setenvcolor),
+           static_cast<unsigned long long>(s.setscissor),
+           static_cast<unsigned long long>(s.setcimg),
+           static_cast<unsigned long long>(s.setzimg));
+
+    append("textures: settimg=%llu (formats: ", static_cast<unsigned long long>(s.settimg));
+    {
+        // A census over a whole session reaches two dozen formats; show the
+        // first ones and the count of the rest, so the block stays readable.
+        constexpr size_t kMaxFormatsShown = 16;
+        size_t shown = 0;
+        for (const auto& [key, count] : s.timg_formats) {
+            if (shown == kMaxFormatsShown) {
+                append("(+%zu more) ", s.timg_formats.size() - shown);
+                break;
+            }
+            const uint8_t fmt = static_cast<uint8_t>((key >> 20) & 0x7);
+            const uint8_t siz = static_cast<uint8_t>((key >> 18) & 0x3);
+            const uint16_t width = static_cast<uint16_t>(key & 0x3FF);
+            append("%s%s x%u=%llu ", fmt_name(fmt), siz_name(siz),
+                   static_cast<unsigned>(width), static_cast<unsigned long long>(count));
+            ++shown;
+        }
     }
-    n += snprintf(buf + n, sizeof(buf) - n, ") settile=%llu settilesize=%llu loadtile=%llu "
-                  "loadblock=%llu loadtlut=%llu\n",
-                  static_cast<unsigned long long>(s.settile),
-                  static_cast<unsigned long long>(s.settilesize),
-                  static_cast<unsigned long long>(s.loadtile),
-                  static_cast<unsigned long long>(s.loadblock),
-                  static_cast<unsigned long long>(s.loadtlut));
-
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "combiner: unique_configs=%zu\n",
-                  s.combiners.size());
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "othermode_h: %zu unique values; othermode_l: %zu unique values\n",
-                  s.othermode_h.size(), s.othermode_l.size());
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "state: mtx=%llu popmtx=%llu geomode=%llu texture=%llu movemem=%llu moveword=%llu "
-                  "setprimcolor=%llu setenvcolor=%llu setscissor=%llu setcimg=%llu setzimg=%llu\n",
-                  static_cast<unsigned long long>(s.mtx),
-                  static_cast<unsigned long long>(s.popmtx),
-                  static_cast<unsigned long long>(s.geometrymode),
-                  static_cast<unsigned long long>(s.texture_cmd),
-                  static_cast<unsigned long long>(s.movemem),
-                  static_cast<unsigned long long>(s.moveword),
-                  static_cast<unsigned long long>(s.setprimcolor),
-                  static_cast<unsigned long long>(s.setenvcolor),
-                  static_cast<unsigned long long>(s.setscissor),
-                  static_cast<unsigned long long>(s.setcimg),
-                  static_cast<unsigned long long>(s.setzimg));
+    append(") settile=%llu settilesize=%llu loadtile=%llu "
+           "loadblock=%llu loadtlut=%llu\n",
+           static_cast<unsigned long long>(s.settile),
+           static_cast<unsigned long long>(s.settilesize),
+           static_cast<unsigned long long>(s.loadtile),
+           static_cast<unsigned long long>(s.loadblock),
+           static_cast<unsigned long long>(s.loadtlut));
 
     return std::string(buf, static_cast<size_t>(std::max(n, 0)));
 }

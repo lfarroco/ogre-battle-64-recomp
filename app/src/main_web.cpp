@@ -61,7 +61,14 @@ void boot_runtime() {
         ogre::register_streamed_overlays();
         ogre::register_bank_overlays();
     };
-    entry.save_type = recomp::SaveType::None;
+    // OB64's save is a battery-backed SRAM (32 KiB). main.cpp documents the
+    // evidence (mupen64plus's database, func_8008A040's OSPiHandle and the
+    // boot accessors' 256-byte DMAs at 0x08000000). The web entry must register
+    // the same type: with SaveType::None the game's first SRAM DMA takes the
+    // "Attempted to use SRAM saving with other save type" branch in
+    // librecomp/src/pi.cpp and exits the runtime, which froze the browser build
+    // before the title (session 109).
+    entry.save_type = recomp::SaveType::Sram;
     entry.is_enabled = true;
     entry.has_compressed_code = false;
 

@@ -1,14 +1,18 @@
 # Ogre Battle 64 — WebAssembly / Browser Port Plan
 
 > Status: **feasibility milestones 1–5 achieved (2026-08-29)** (see `docs/WEB-PORT-REPORT.md` for the
-> implementation report of that date). This document is the plan; it is updated as
+> implementation report of that date), and **the build was repaired and runs the
+> game again on 2026-09-27 (session 109)**. Milestone 7's WebGL2 renderer
+> prototype is not the route to a browser build that plays the game; the route
+> is decided in `docs/DECISIONS.md`, and the current state is in `PLAN.md` and
+> `docs/HANDOFF-2026-09-27-session109.md`. This document is the plan; it is updated as
 > milestones land.
 >
-> **Not updated since 2026-08-29.** The native port moved on for ~70 further
-> sessions (streamed banks, audio, saves, the launcher and overlay, packaging and
-> releases), and session 97 moved every build config under `config/` and the
-> patches under `patches/`. Read the date on any path or status here as
-> 2026-08-29, and `PLAN.md` for the current state.
+> **Not updated since 2026-08-29** apart from the status note above. The native
+> port moved on for ~70 further sessions (streamed banks, audio, saves, the
+> launcher and overlay, packaging and releases), and session 97 moved every build
+> config under `config/` and the patches under `patches/`. Read the date on any
+> path or status here as 2026-08-29, and `PLAN.md` for the current state.
 
 ## Overview
 
