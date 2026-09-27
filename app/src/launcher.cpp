@@ -1,9 +1,9 @@
 // The app's start screen (see launcher.hpp).
 //
-// The screen's list is the shared tabbed Panel (ui.hpp): a START GAME tab that
-// also carries the ROM row, a MODS tab, a CONTROLS tab whose rows rebind the
-// pad, a SETTINGS tab and a DEBUG tab. The same Panel is what the in-game
-// overlay shows, so the two screens cannot drift apart.
+// The screen's list is the shared tabbed Panel (ui.hpp): a MAIN tab that also
+// carries the ROM row and EXIT GAME, a MODS tab, a CONTROLS tab whose rows
+// rebind the pad, a SETTINGS tab and a DEBUG tab. The same Panel is what the
+// in-game overlay shows, so the two screens cannot drift apart.
 
 #include "launcher.hpp"
 
@@ -29,7 +29,7 @@ namespace ogre {
 namespace {
 
 // The branding and the error lines. The old prompt line ("click to load your
-// ROM") is gone: the START GAME tab carries the ROM row, and that row's second
+// ROM") is gone: the MAIN tab carries the ROM row, and that row's second
 // column says how.
 constexpr const char* kTitle = "OGRE BATTLE 64: RECOMP";
 constexpr const char* kErrorTitle = "THAT IS NOT A USABLE ROM";
@@ -295,7 +295,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     bool running = true;
 
     // A ROM found before this screen opened is ready to start. Choosing another
-    // one replaces it; the game starts from the START GAME row.
+    // one replaces it; the game starts from the MAIN tab's Start Game row.
     std::filesystem::path ready_rom = context.ready_rom;
     ui::Panel panel(ui::Panel::Mode::Launcher, context.mod_game_id, context.ready_rom);
     PadList pads;
@@ -313,7 +313,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         }
     };
 
-    // A validated ROM becomes the one START GAME will boot. The screen stays up
+    // A validated ROM becomes the one Start Game will boot. The screen stays up
     // so the player sees it loaded and starts the game themselves.
     auto accept_rom_path = [&](const std::filesystem::path& path) {
         ready_rom = path;
@@ -354,9 +354,9 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         }
     };
 
-    // Space activates the selected row (START GAME plays, the ROM row opens the
-    // picker, a mod row toggles, an option row steps, a binding row arms the
-    // rebind capture); Left/Right only step an option.
+    // Space activates the selected row (Start Game plays, Exit Game leaves, the
+    // ROM row opens the picker, a mod row toggles, an option row steps, a
+    // binding row arms the rebind capture); Left/Right only step an option.
     auto run_action = [&](ui::RowAction action) {
         switch (action) {
             case ui::RowAction::BrowseRom:
@@ -364,6 +364,9 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
                 break;
             case ui::RowAction::Play:
                 play();
+                break;
+            case ui::RowAction::QuitGame:
+                running = false;
                 break;
             default:
                 break;
@@ -450,7 +453,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             std::fprintf(stderr, "[launcher] test drop: %s\n", test_drop);
             handle_dropped(std::filesystem::path(test_drop));
             // The test hook also starts the game, so a scripted run needs no
-            // input of its own. A real drop or picker stops at START GAME.
+            // input of its own. A real drop or picker stops at Start Game.
             play();
             continue;
         }

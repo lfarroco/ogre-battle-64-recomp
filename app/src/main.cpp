@@ -86,6 +86,12 @@ bool launcher_forced() {
 
 }  // namespace
 
+// Frames the game must have produced before an interactive exit goes through the
+// runtime's teardown. The counter is the game's own (`D_800AEFA4`, read by
+// overlay_frames_produced) and is 0 for the first several seconds of a boot, so
+// anything well past 0 means the frame pump and the renderer are both up.
+constexpr int kFirstFrameCount = 60;
+
 static void update_gfx(void*) {
     // OGRE_SCENE=<name|hex>: boot straight into a screen (see bank_overlays.cpp).
     // Polled here because this callback runs once per frame.
@@ -104,6 +110,17 @@ static void update_gfx(void*) {
     // The Esc overlay owns a window of its own; drawing it here keeps it on the
     // main thread, where SDL's Cocoa backend requires window calls to happen.
     ogre::overlay_render();
+    // The overlay's MAIN tab carries EXIT GAME. It records the request instead
+    // of ending the run itself, so this one exit path prints the dumps below and
+    // calls ultramodern::quit for both the close button and the panel. The
+    // predicate also holds the request until the boot has produced a frame,
+    // because an exit inside the runtime's own startup hangs or crashes its
+    // teardown; see ogre::overlay_quit_requested.
+    if (ogre::overlay_quit_requested()) {
+        fprintf(stderr, "[overlay] EXIT GAME\n");
+        fflush(stderr);
+        quit = true;
+    }
     if (quit) {
         // Closing the window is how an *interactive* run ends, so the dumps a
         // bounded run prints on its exit path have to print here too --
@@ -131,6 +148,21 @@ static void update_gfx(void*) {
                     fprintf(stderr, "[SDL] could not open %s for rdram dump\n", dump_path);
                 }
             }
+        }
+        // Ending the run before the game has produced frames must not go through
+        // the runtime's teardown. `ultramodern::quit` while the game thread is
+        // inside `ultramodern::preinit`, or while RT64 is still building its
+        // renderer, leaves `recomp::start` blocked in `game_thread.join` or
+        // throws out of the shutdown (both seen on macOS). Leave the process
+        // instead, exactly as the `OGRE_EXIT_AFTER_MS` path does
+        // (`sdl_platform.cpp`) for the same reason: the OS reclaims the image,
+        // and the dumps above hold what a diagnostic wants.
+        if (ogre::overlay_frames_produced() < kFirstFrameCount) {
+            fprintf(stderr, "[SDL] exiting before the game produced frames; "
+                            "skipping the runtime teardown\n");
+            fflush(nullptr);
+            ogre::crash_log::flush();
+            _Exit(EXIT_SUCCESS);
         }
         ultramodern::quit();
     }

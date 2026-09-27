@@ -24,6 +24,13 @@ constexpr int kTitleScale = 3;
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 
+// The game's frame counter (`D_800AEFA4`, written by `func_80072398` on the
+// frame-pump thread). It is 0 before the game produces its first frame and
+// climbs every frame after that, so it is the cheapest evidence that the boot
+// has reached steady state. `guest_word` reads it below.
+constexpr uint32_t kFrameCounterAddress = 0x800AEFA4;
+
+
 const SDL_Color kTitleColor{238, 238, 232, 255};
 const SDL_Color kWarmColor{198, 160, 92, 220};
 const SDL_Color kHintColor{122, 128, 138, 255};
@@ -63,6 +70,7 @@ struct OverlayState {
     std::vector<SDL_Scancode> keys;
     size_t key_next = 0;
     uint64_t keys_started_ms = 0;
+
 };
 
 OverlayState g_overlay;
@@ -86,6 +94,21 @@ int guest_byte(uint32_t address) {
         return -1;
     }
     return rdram[(address & 0x1FFFFFFFu) ^ 3u];
+}
+
+// One logical 32-bit word of the running game's RDRAM, or -1 while the runtime
+// has no image yet. Little-endian guest order, so byte `i` of the word is
+// `guest_byte(address + i)`.
+int guest_word(uint32_t address) {
+    uint32_t value = 0;
+    for (uint32_t i = 0; i < 4; i++) {
+        const int byte = guest_byte(address + i);
+        if (byte < 0) {
+            return -1;
+        }
+        value |= static_cast<uint32_t>(byte) << (8u * i);
+    }
+    return static_cast<int>(value);
 }
 
 // "Tab,Down,Space,p": SDL scancode names, comma separated, trimmed.
@@ -237,6 +260,18 @@ void hide() {
     std::fflush(stderr);
 }
 
+// The MAIN tab's EXIT GAME row. The panel cannot end the process itself, so it
+// reports `RowAction::QuitGame`, `overlay_handle_event` records it here, and
+// `overlay_render` hands it to `main.cpp`'s frame callback. That callback is the
+// one place that knows how a run ends (it prints the dumps and calls
+// `ultramodern::quit`), so EXIT GAME leaves through the same path as the game
+// window's close button instead of a second teardown.
+std::atomic<bool> g_quit_requested{false};
+
+void request_quit() {
+    g_quit_requested.store(true, std::memory_order_relaxed);
+}
+
 void draw() {
     if (!g_overlay.visible || g_overlay.renderer == nullptr) {
         return;
@@ -332,11 +367,14 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
     g_overlay.game_pad_count = 4;
     g_overlay.panel = std::make_unique<ui::Panel>(ui::Panel::Mode::Overlay, mod_game_id,
                                                   std::filesystem::path{});
-    // OGRE_OVERLAY_TAB=<controls|settings|debug>: open the panel on that tab, so
-    // a scripted run or a screenshot reaches it without input.
+    // OGRE_OVERLAY_TAB=<main|controls|settings|debug>: open the panel on that
+    // tab, so a scripted run or a screenshot reaches it without input.
     if (const char* tab = std::getenv("OGRE_OVERLAY_TAB")) {
         const std::string name = tab;
-        if (name == "settings" || name == "setting") {
+        if (name == "main" || name == "start") {
+            g_overlay.panel->set_tab(ui::Tab::Main);
+        }
+        else if (name == "settings" || name == "setting") {
             g_overlay.panel->set_tab(ui::Tab::Settings);
         }
         else if (name == "controls" || name == "controller") {
@@ -375,6 +413,11 @@ void overlay_shutdown() {
         g_overlay.renderer = nullptr;
     }
     if (g_overlay.window != nullptr) {
+        // The panel's window is destroyed here and not merely hidden. It is an
+        // SDL window like any other, and SDL synthesises SDL_QUIT from a
+        // window's close event only while that window is the last one in its
+        // window list, so leaving it alive keeps the game window from being the
+        // last one for the rest of the run.
         SDL_DestroyWindow(g_overlay.window);
         g_overlay.window = nullptr;
     }
@@ -395,6 +438,14 @@ void overlay_toggle() {
 
 bool overlay_visible() {
     return g_visible.load(std::memory_order_relaxed);
+}
+
+bool overlay_quit_requested() {
+    return g_quit_requested.load(std::memory_order_relaxed);
+}
+
+int overlay_frames_produced() {
+    return guest_word(kFrameCounterAddress);
 }
 
 void overlay_handle_event(const SDL_Event& event) {
@@ -457,7 +508,10 @@ void overlay_handle_event(const SDL_Event& event) {
                 const size_t index = g_overlay.panel->selected();
                 if (index < g_overlay.panel->row_count() &&
                     g_overlay.panel->selectable(index)) {
-                    g_overlay.panel->activate(index, 1);
+                    const ui::RowAction action = g_overlay.panel->activate(index, 1);
+                    if (action == ui::RowAction::QuitGame) {
+                        request_quit();
+                    }
                     if (g_overlay.panel->capturing()) {
                         g_overlay.capture_active = true;
                         g_overlay.capture_started_ms = SDL_GetTicks64();
@@ -503,7 +557,10 @@ void overlay_handle_event(const SDL_Event& event) {
                 if (index < g_overlay.panel->row_count() &&
                     g_overlay.panel->selectable(index)) {
                     g_overlay.panel->set_selected(index);
-                    g_overlay.panel->activate(index, 1);
+                    const ui::RowAction action = g_overlay.panel->activate(index, 1);
+                    if (action == ui::RowAction::QuitGame) {
+                        request_quit();
+                    }
                     if (g_overlay.panel->capturing()) {
                         g_overlay.capture_active = true;
                         g_overlay.capture_started_ms = SDL_GetTicks64();
@@ -540,6 +597,13 @@ void overlay_render() {
     }
 
     if (!g_overlay.visible) {
+        return;
+    }
+
+    // EXIT GAME asked to leave during this frame's events, and the caller acts
+    // on it right after this call. Drawing the panel over the frame the run
+    // ends on would be one wasted present.
+    if (g_quit_requested.load(std::memory_order_relaxed)) {
         return;
     }
 

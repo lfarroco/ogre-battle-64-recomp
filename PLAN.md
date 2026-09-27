@@ -75,10 +75,11 @@ Organize Screen, the credits, the ending and the attract loop.
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
   controls, GAME SPEED, WIDESCREEN, mods, `make dist` packages, GitHub releases.
-  The launcher and the overlay draw one `ui::Panel`: the tabs are START GAME
-  (which carries the ROM row), MODS, CONTROLS, SETTINGS and DEBUG, and the panel
-  reserves the CONTROLS tab's height so the header, the tab bar and the footer
-  keep one position on every tab (session 104). `mods/skip-boot-logos/` is the
+  The launcher and the overlay draw one `ui::Panel`: the tabs are MAIN (which
+  carries the ROM row and EXIT GAME), MODS, CONTROLS, SETTINGS and DEBUG, and the
+  panel reserves the CONTROLS tab's height so the header, the tab bar and the
+  footer keep one position on every tab (session 104; MAIN replaced START GAME in
+  session 110). `mods/skip-boot-logos/` is the
   mod reference; `mods/exp-overflow/` carries a level-up's leftover EXP over
   instead of letting the game zero it (session 103). The package carries them:
   `make dist` and `tools/smoke-dist.sh` require at least one `.nrm`, and the

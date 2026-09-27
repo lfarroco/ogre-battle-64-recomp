@@ -3,9 +3,11 @@
 // The launcher (launcher.cpp) and the Esc overlay (overlay.cpp) show the same
 // content in the same style, so the panel model, its rows, the tab bar and the
 // text rendering live here. A Panel is either in Launcher mode (every tab
-// active) or Overlay mode (only CONTROLS, SETTINGS and DEBUG are active; the
-// rest are shown disabled, because starting the game, loading a ROM and
-// toggling mods make no sense while the game is running).
+// active) or Overlay mode (CONTROLS, SETTINGS, DEBUG and MAIN are active; the
+// rest are shown disabled, because loading a ROM and toggling mods make no sense
+// while the game is running). MAIN is active in both modes because it carries
+// EXIT GAME: the overlay's way to end the game with the mouse or the keyboard,
+// which is what a window manager that offers no close button path needs.
 //
 // Rendering is the bitmap font (font.hpp) through an SDL_Renderer, into
 // supersampled TextLayer textures, exactly as the launcher drew before.
@@ -68,7 +70,7 @@ std::string truncate_to_width(const Font& font, const std::string& text, int sca
 
 // --- the tabbed panel ---------------------------------------------------------
 
-enum class Tab { Start, Mods, Controls, Settings, Debug, Count };
+enum class Tab { Main, Mods, Controls, Settings, Debug, Count };
 
 constexpr int kTabCount = static_cast<int>(Tab::Count);
 
@@ -83,11 +85,13 @@ enum class RowAction {
     None,
     BrowseRom,
     Play,
+    // The EXIT GAME row of the MAIN tab. The launcher stops its own loop on it;
+    // the overlay asks the runtime to quit.
+    QuitGame,
     ModToggled,
     OptionChanged,
     BindingChanged,
     SettingChanged,
-    CloseOverlay,
 };
 
 class Panel {
@@ -96,8 +100,9 @@ public:
 
     enum class RowKind {
         Section,
-        Start,
+        StartGame,
         Rom,
+        ExitGame,
         Mod,
         Option,
         Binding,
@@ -214,7 +219,7 @@ private:
     size_t first_selectable() const;
 
     Mode mode_;
-    Tab tab_ = Tab::Start;
+    Tab tab_ = Tab::Main;
     std::string game_id_;
     std::filesystem::path rom_;
     std::vector<recomp::mods::ModDetails> mods_;

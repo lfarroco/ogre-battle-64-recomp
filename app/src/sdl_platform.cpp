@@ -658,6 +658,28 @@ void pump_sdl_events(Platform& platform, bool* quit) {
     // multi-megabyte dump (see the console block in this file).
     console::tick();
 
+    // OGRE_WINDOW_CLOSE_AT_MS=<n>: push one SDL_WINDOWEVENT_CLOSE for the game
+    // window `n` ms after the platform was configured. Development aid for the
+    // window's close path: a real close button cannot be synthesized, and the
+    // bug this exercises (SDL synthesises SDL_QUIT only for the *last* window,
+    // and the Esc overlay is a second one) needs the overlay to have been shown
+    // at least once, which `OGRE_OVERLAY_AT_MS` + `OGRE_OVERLAY_KEYS=Escape`
+    // arrange. No effect unless set.
+    const uint32_t close_at_ms = env_millis("OGRE_WINDOW_CLOSE_AT_MS");
+    if (close_at_ms != 0 && platform_millis(platform) >= close_at_ms) {
+        static bool close_sent = false;
+        if (!close_sent) {
+            close_sent = true;
+            SDL_Event synthetic{};
+            synthetic.type = SDL_WINDOWEVENT;
+            synthetic.window.event = SDL_WINDOWEVENT_CLOSE;
+            synthetic.window.windowID = SDL_GetWindowID(platform.window);
+            fprintf(stderr, "[SDL] OGRE_WINDOW_CLOSE_AT_MS: pushing a close event for window %u\n",
+                    static_cast<unsigned>(synthetic.window.windowID));
+            SDL_PushEvent(&synthetic);
+        }
+    }
+
     // Bounded run: OGRE_EXIT_AFTER_MS ends the process from the main thread.
     if (platform.exit_after_ms != 0 && platform_millis(platform) >= platform.exit_after_ms) {
         const uint32_t budget = platform.exit_after_ms;
@@ -738,37 +760,48 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // The in-game overlay sees every event first: it owns Escape (open and
         // close) and, while it is up, the keyboard and mouse.
         ogre::overlay_handle_event(event);
-        switch (event.type) {
-            case SDL_QUIT:
-                *quit = true;
-                break;
-            case SDL_CONTROLLERDEVICEADDED: {
-                SDL_JoystickID joy_id = event.cdevice.which;
-                SDL_GameController* controller = SDL_GameControllerOpen(joy_id);
-                if (controller != nullptr) {
-                    // Assign to the first free N64 slot (slot 0 is keyboard-first).
-                    for (int slot = 1; slot < 4; slot++) {
-                        if (platform.controllers[slot] == nullptr) {
-                            platform.controllers[slot] = controller;
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-            case SDL_CONTROLLERDEVICEREMOVED: {
-                SDL_JoystickID joy_id = event.cdevice.which;
-                for (auto& controller : platform.controllers) {
-                    if (controller != nullptr && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)) == joy_id) {
-                        SDL_GameControllerClose(controller);
-                        controller = nullptr;
+
+        // The game window's close button is the quit path, and SDL_QUIT is not
+        // one of the events it arrives as. SDL synthesises SDL_QUIT from a
+        // window's CLOSE event only when that window is the last one in its
+        // global window list (SDL_windowevents.c), and the Esc overlay is a
+        // second SDL window that outlives its own visibility: it is hidden and
+        // shown again, not destroyed. So after the overlay has been on screen
+        // once, clicking the game window's close button produced only
+        // SDL_WINDOWEVENT_CLOSE and the app kept running. Match the game window
+        // by id and quit on its own close event; a close request for the overlay
+        // window is ignored, because dismissing the panel is what Escape does.
+        if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE &&
+            platform.window != nullptr &&
+            event.window.windowID == SDL_GetWindowID(platform.window)) {
+            fprintf(stderr, "[SDL] game window close requested\n");
+            *quit = true;
+        }
+        else if (event.type == SDL_QUIT) {
+            *quit = true;
+        }
+        else if (event.type == SDL_CONTROLLERDEVICEADDED) {
+            SDL_JoystickID joy_id = event.cdevice.which;
+            SDL_GameController* controller = SDL_GameControllerOpen(joy_id);
+            if (controller != nullptr) {
+                // Assign to the first free N64 slot (slot 0 is keyboard-first).
+                for (int slot = 1; slot < 4; slot++) {
+                    if (platform.controllers[slot] == nullptr) {
+                        platform.controllers[slot] = controller;
                         break;
                     }
                 }
-                break;
             }
-            default:
-                break;
+        }
+        else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
+            SDL_JoystickID joy_id = event.cdevice.which;
+            for (auto& controller : platform.controllers) {
+                if (controller != nullptr && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)) == joy_id) {
+                    SDL_GameControllerClose(controller);
+                    controller = nullptr;
+                    break;
+                }
+            }
         }
     }
 }

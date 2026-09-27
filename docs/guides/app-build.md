@@ -125,8 +125,8 @@ pthreads).
 ```
 
 The app starts on its own **start screen** when it has no ROM to boot: the
-`OGRE BATTLE 64: RECOMP` title over a tabbed panel (**START GAME**, **MODS**,
-**CONTROLS**, **SETTINGS**, **DEBUG**). The START GAME tab carries the ROM row,
+`OGRE BATTLE 64: RECOMP` title over a tabbed panel (**MAIN**, **MODS**,
+**CONTROLS**, **SETTINGS**, **DEBUG**). The MAIN tab carries the ROM row,
 which reads `[ ] No ROM` and `PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN A
 WINDOW`. With no ROM loaded that row is the selected one, so `SPACE` (or a click)
 opens a native file picker; a ROM can also be dropped onto the window. A ROM
@@ -534,14 +534,15 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_ROM=<path>` | boot this ROM without passing it as an argument (validated and stored like an argument; the start screen is skipped) |
 | `OGRE_LAUNCHER=1` | force the start screen even when a ROM is available (testing the first-launch experience) |
 | `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
-| `OGRE_LAUNCHER_TAB=<start\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
+| `OGRE_LAUNCHER_TAB=<main\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
 | `OGRE_LAUNCHER_KEYS=<name>,…` | push one synthetic keydown per 150 ms through the start screen's real key handler. Names are SDL scancode names (`Tab`, `Down`, `Space`, `p`, `Return`), so `Tab,Tab,Tab,Space,p` opens CONTROLS, arms the A row's rebind and binds `P` |
 | `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS`) |
 | `OGRE_OVERLAY=1` | open the in-game overlay at startup |
 | `OGRE_OVERLAY_AT_MS=<n>` | push one synthetic `ESC` down `n` ms after the overlay is initialised, so the real open path runs without a human |
-| `OGRE_OVERLAY_TAB=<controls\|settings\|debug>` | open the overlay's panel on that tab |
-| `OGRE_OVERLAY_KEYS=<name>,…` | push one synthetic keydown per 150 ms while the overlay is visible (same names as `OGRE_LAUNCHER_KEYS`) |
+| `OGRE_OVERLAY_TAB=<main\|controls\|settings\|debug>` | open the overlay's panel on that tab (`start` is accepted as an alias for `main`, which carries EXIT GAME) |
+| `OGRE_OVERLAY_KEYS=<name>,…` | push one synthetic keydown per 150 ms while the overlay is visible (same names as `OGRE_LAUNCHER_KEYS`). `main` + `Space` activates EXIT GAME |
 | `OGRE_OVERLAY_OPACITY=<0.2..1.0>` | the overlay window's opacity (default 0.90) |
+| `OGRE_WINDOW_CLOSE_AT_MS=<n>` | push one `SDL_WINDOWEVENT_CLOSE` for the game window `n` ms after the platform was configured, so the window's close path can be exercised without a human clicking the button. Pair it with `OGRE_OVERLAY_AT_MS` and `OGRE_OVERLAY_KEYS="Escape"` to have the overlay's second SDL window open and close first, which is the state the close button used to stop working in |
 | `OGRE_CAPTURE_OVERLAY=<path>` | write the overlay's renderer as a PPM once, after its first frame. `OGRE_OVERLAY_SHOT_MS=<n>` delays it, so the capture can show what `OGRE_OVERLAY_KEYS` changed |
 | `OGRE_SAVE=<name\|path>` | start the run from that save as the cartridge battery (session 78). A bare name is looked up as the path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`, so `OGRE_SAVE=prologue` finds `assets/saves/prologue.n64`. Accepts the port's 32 KiB image, an emulator wrapper of it (in either byte order, at any offset), a **DexDrive `.N64` Controller Pak dump** — converted through its notes' battery slots, checksums reseeded — or a bare pak. The result is written to `<config>/saves/<game id>.bin`, never back into the source |
 | `OGRE_SAVE_RESET=1` | re-import even when the battery in the config dir is newer than the source. Without it a run **keeps** that battery, so progress the game wrote back survives a re-run, and swapping a save file in re-imports it (its mtime is newer) |
@@ -1677,10 +1678,21 @@ rows, in the launcher and in the `ESC` overlay).
 
 `ESC` during play opens a borderless, always-on-top SDL window placed over the
 game window (`app/src/overlay.cpp`). It draws the same `ui::Panel` with the same
-bitmap font, so the two screens look identical; the tab bar shows START GAME and
-MODS greyed and only CONTROLS, SETTINGS and DEBUG active, because a running game
-cannot start, load a ROM or toggle a mod. `ESC` closes it and returns the keyboard
-to the game.
+bitmap font, so the two screens look identical; the tab bar shows MODS greyed and
+MAIN, CONTROLS, SETTINGS and DEBUG active. MAIN stays active because it carries
+the EXIT GAME row, which is the overlay's own way to end the run; MODS is the one
+tab a running game cannot use, because the runtime loads mods before it boots.
+`ESC` closes it and returns the keyboard to the game.
+
+EXIT GAME records a request and `update_gfx` (`app/src/main.cpp`) polls it next
+to the window-close flag, so both exit paths share one teardown, its dumps and
+`ultramodern::quit`. Both are checked against the game's own frame counter
+(`D_800AEFA4`, read by `overlay_frames_produced`): an exit before the game has
+produced frames leaves the process with `_Exit(0)` instead of running the
+runtime's teardown, because `ultramodern::quit` while the game thread is inside
+`ultramodern::preinit`, or while RT64 is still building its renderer, leaves
+`recomp::start` blocked in `game_thread.join` or throws out of the shutdown. That
+is the same reason the `OGRE_EXIT_AFTER_MS` path leaves through `_Exit`.
 
 While it is open, `get_input` reports an idle controller (`buttons=0`, stick 0),
 so the game's own menus do not see the keys used to navigate the panel. The game
@@ -1693,11 +1705,20 @@ per-pixel alpha for a normal window. It is not covered on macOS fullscreen: a
 fullscreen window lives in its own Space, which another window cannot overlay.
 No RT64 change was needed.
 
+The overlay's window is a second SDL window for the whole run, which breaks the
+game window's close button unless the app handles the close event itself. SDL
+synthesises `SDL_QUIT` from a window's `SDL_WINDOWEVENT_CLOSE` only while that
+window is the last one in its global window list (`SDL_windowevents.c`), and the
+overlay is hidden and shown again rather than destroyed, so it stays in that list.
+`pump_sdl_events` (`app/src/sdl_platform.cpp`) therefore quits on a
+`SDL_WINDOWEVENT_CLOSE` whose `windowID` is the game window's, and ignores a close
+request for the overlay window, where `ESC` is the dismiss.
+
 ### Verifying it without a human
 
 ```bash
 # every launcher tab, as a PPM
-for tab in start mods controls settings debug; do
+for tab in main mods controls settings debug; do
   OGRE_PREF_DIR=/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=$tab \
     OGRE_LAUNCHER_SHOT=/tmp/ui-$tab.ppm ./build-app/ogrebattle64
 done
@@ -1718,6 +1739,18 @@ OGRE_PREF_DIR=/tmp/gs OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=2500 \
   OGRE_CAPTURE_OVERLAY=/tmp/gs.ppm OGRE_OVERLAY_SHOT_MS=1200 \
   OGRE_EXIT_AFTER_MS=7000 ./build-app/ogrebattle64
 grep '^game_speed' /tmp/gs/settings.cfg     # game_speed = 4
+
+# the overlay's EXIT GAME (MAIN is the tab the panel opens on with OGRE_OVERLAY)
+OGRE_PREF_DIR=/tmp/ex OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY=1 \
+  OGRE_OVERLAY_TAB=main OGRE_OVERLAY_KEYS="Space" \
+  OGRE_EXIT_AFTER_MS=60000 ./build-dist/ogrebattle64
+# must print "[overlay] EXIT GAME" and exit 0 with no error.log
+
+# the game window's close button, after the overlay has been opened and closed
+OGRE_PREF_DIR=/tmp/cl OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY=1 \
+  OGRE_OVERLAY_KEYS="Escape" OGRE_WINDOW_CLOSE_AT_MS=9000 \
+  OGRE_EXIT_AFTER_MS=60000 ./build-dist/ogrebattle64
+# must print "[SDL] game window close requested" and exit 0 with no error.log
 ```
 
 Convert a PPM with `sips -s format png <in> --out <out>` on macOS.
@@ -1755,29 +1788,29 @@ is the shared tabbed `ui::Panel` (`app/src/ui.cpp`), so the in-game overlay show
 the same rows. There are five tabs:
 
 ```
-[ START GAME ] [ ROM ] [ MODS ] [ CONTROLS ] [ SETTINGS ]
+[ MAIN ] [ MODS ] [ CONTROLS ] [ SETTINGS ] [ DEBUG ]
 ```
 
 ```
-START GAME   [x] Start Game starts the game; [ ] until a ROM is loaded, and then
-             the row cannot be selected
-ROM          [x] Loaded! and the ROM's file name, or [ ] No ROM; the row opens
-             the file picker
+MAIN         Start Game starts the game ([ ] and not selectable until a ROM is
+             loaded), Exit Game quits, and the ROM row opens the file picker; the
+             row reads [x] ROM loaded with the file name, or [ ] No ROM
 MODS         one row per mod, then one row per visible option of that mod; a
              mod's short description sits in a second column
 CONTROLS     one row per N64 button with its keyboard key, its gamepad source and
              the field-map action; see "Controller bindings and the in-game
              overlay"
 SETTINGS     GAME SPEED, a radio group; see "Game speed (the SETTINGS tab)"
+DEBUG        the live Chaos Frame readout
 ```
 
 ```
 TAB / SHIFT+TAB  switch tab
-UP / DOWN        select a row (note rows, and START GAME before a ROM is loaded,
-                 are skipped)
-SPACE            activate the selected row: START GAME plays, the ROM row opens
-                 the file picker, a mod row toggles, an option row steps, the
-                 GAME SPEED row steps, a binding row arms a rebind
+UP / DOWN        select a row (section headings, and Start Game before a ROM is
+                 loaded, are skipped)
+SPACE            activate the selected row: Start Game plays, Exit Game quits, the
+                 ROM row opens the file picker, a mod row toggles, an option row
+                 steps, the GAME SPEED row steps, a binding row arms a rebind
 LEFT / RIGHT     step the selected option's or setting's value
 ENTER            play, or open the ROM picker when no ROM is loaded or the ROM
                  row is selected
@@ -1786,7 +1819,7 @@ mouse            click a tab to switch, a row to activate it, a GAME SPEED radio
 ```
 
 Choosing a ROM — by picker or by dropping one on the window — **does not start
-the game**. The ROM row shows `[x] Loaded!` with the file name, START GAME
+the game**. The ROM row shows `[x] ROM loaded` with the file name, Start Game
 becomes selectable, and the selection moves to it; ENTER or SPACE then plays.
 That is what makes START GAME meaningful on the first run, and the ROM row is
 what makes the whole screen usable from the keyboard alone.

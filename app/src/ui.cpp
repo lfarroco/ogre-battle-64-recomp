@@ -465,18 +465,20 @@ void Panel::set_rom(std::filesystem::path rom) {
 }
 
 bool Panel::tab_enabled(Tab tab) const {
-    // The overlay shows the same tab bar, but only CONTROLS, SETTINGS and DEBUG
-    // can be used while the game is running.
+    // The overlay shows the same tab bar. MODS is the only one that cannot be
+    // used while the game is running: its rows toggle mods, and the runtime
+    // loads mods before it boots. MAIN stays active because EXIT GAME lives
+    // there, so closing the panel is not the only way out of the game.
     if (mode_ == Mode::Overlay) {
-        return tab == Tab::Controls || tab == Tab::Settings || tab == Tab::Debug;
+        return tab != Tab::Mods;
     }
     return true;
 }
 
 std::string Panel::tab_label(Tab tab) const {
     switch (tab) {
-        case Tab::Start:
-            return "START GAME";
+        case Tab::Main:
+            return "MAIN";
         case Tab::Mods:
             return "MODS";
         case Tab::Controls:
@@ -541,10 +543,11 @@ void Panel::rebuild_rows() {
 std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
     std::vector<Row> rows;
     switch (tab) {
-        case Tab::Start:
+        case Tab::Main:
             // The ROM row lives here: with no ROM loaded it is the first
             // selectable row, so the start screen can still pick one.
-            rows.push_back(Row{RowKind::Start, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::StartGame, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::ExitGame, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Rom, {}, 0, 0, -1});
             break;
 
@@ -611,8 +614,10 @@ bool Panel::selectable(size_t index) const {
     if (row.kind == RowKind::Section) {
         return false;
     }
-    if (row.kind == RowKind::Start) {
-        return !rom_.empty();
+    if (row.kind == RowKind::StartGame) {
+        // The overlay's MAIN tab cannot start a game that is already running, so
+        // its Start Game row is inert there and the selection skips it.
+        return mode_ != Mode::Overlay && !rom_.empty();
     }
     return true;
 }
@@ -662,8 +667,10 @@ std::string Panel::left_text(size_t index) const {
     switch (row.kind) {
         case RowKind::Section:
             return row.title;
-        case RowKind::Start:
+        case RowKind::StartGame:
             return rom_.empty() ? "[ ] Start Game" : "[x] Start Game";
+        case RowKind::ExitGame:
+            return "[ ] Exit Game";
         case RowKind::Rom:
             return rom_.empty() ? "[ ] No ROM" : "[x] ROM loaded";
         case RowKind::Mod: {
@@ -712,9 +719,15 @@ std::string Panel::right_text(size_t index) const {
 
 std::string Panel::right_text_for(const Row& row) const {
     switch (row.kind) {
-        case RowKind::Start:
-            return rom_.empty() ? std::string("CHOOSE A ROM FIRST")
-                                : std::string("Press ENTER or SPACE to start");
+        case RowKind::StartGame:
+            return mode_ == Mode::Overlay
+                       ? std::string("ALREADY RUNNING")
+                       : (rom_.empty() ? std::string("CHOOSE A ROM FIRST")
+                                       : std::string("Press ENTER or SPACE to start"));
+        case RowKind::ExitGame:
+            return mode_ == Mode::Overlay
+                       ? std::string("Quit the game and close the window")
+                       : std::string("Quit without starting a game");
         case RowKind::Rom:
             return rom_.empty() ? std::string("PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN A WINDOW")
                                 : rom_.filename().string();
@@ -758,8 +771,11 @@ RowAction Panel::activate(size_t index, int direction) {
         case RowKind::Section:
             return RowAction::None;
 
-        case RowKind::Start:
+        case RowKind::StartGame:
             return mode_ == Mode::Overlay ? RowAction::None : RowAction::Play;
+
+        case RowKind::ExitGame:
+            return RowAction::QuitGame;
 
         case RowKind::Rom:
             return mode_ == Mode::Overlay ? RowAction::None : RowAction::BrowseRom;

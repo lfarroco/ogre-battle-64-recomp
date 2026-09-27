@@ -44,6 +44,21 @@ void overlay_toggle();
 // a plain atomic flag.
 bool overlay_visible();
 
+// True once the MAIN tab's EXIT GAME row has been activated. `update_gfx` polls
+// it next to the window-close flag, so the two exit paths share one teardown.
+bool overlay_quit_requested();
+
+// How many frames the game has produced this run, from its own frame counter
+// `D_800AEFA4` (`func_80072398`), or -1 while the runtime has no image (which
+// includes the whole time before the renderer exists). 0 during the first
+// seconds of a boot. `update_gfx` uses it to tell an exit that may run the
+// runtime's teardown from one that must leave the process instead: an exit
+// before the game produces frames leaves `recomp::start` blocked in
+// `game_thread.join` or throws out of the runtime's shutdown (both seen on
+// macOS), because the game thread is still inside `ultramodern::preinit` or RT64
+// is still building its renderer.
+int overlay_frames_produced();
+
 // Draws one frame of the overlay (main thread, from update_gfx).
 void overlay_render();
 
