@@ -30,9 +30,12 @@
 # The archive for path 2 is produced on a machine with the ROM by
 # `tools/data-bundle.sh`; docs/guides/app-build.md -> "Releases (GitHub Actions)"
 # documents the contract, and docs/HANDOFF-2026-09-19-session89.md the reason.
+# It also carries the packaged example mods (`build/mods/*.nrm`), because the
+# package must contain them and a hosted runner has no MIPS cross toolchain to
+# build them with.
 #
-# Either way `tools/release-build.sh` checks that the generated code is present
-# and tells you exactly what is missing.
+# Either way `tools/release-build.sh` checks that the generated code and the
+# example mods are present, and tells you exactly what is missing.
 name: Release
 
 on:
@@ -185,9 +188,16 @@ jobs:
           done
           banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
           [ "$banks" -gt 0 ] || { echo "::error::Bank*Funcs/ is missing from files.tar.gz"; exit 1; }
+          # The example mods are part of the package (`make dist` requires them),
+          # and the runner cannot build them: there is no ROM and no MIPS cross
+          # toolchain here. They come from the bundle. v0.4.0 shipped an empty
+          # mods/ directory because nothing checked (session 108).
+          mods=$( (ls build/mods/*.nrm 2>/dev/null || true) | wc -l | tr -d ' ')
+          [ "$mods" -gt 0 ] || { echo "::error::build/mods/*.nrm is missing from files.tar.gz; run 'make example-mods' before tools/data-bundle.sh"; exit 1; }
           echo "RecompiledFuncs: $(find RecompiledFuncs -type f | wc -l | tr -d ' ') files"
           echo "Bank units:      $banks"
           echo "RspFuncs:        $(find RspFuncs -type f | wc -l | tr -d ' ') files"
+          echo "Example mods:    $mods .nrm"
           if [ -f ogre-data.txt ]; then
             cat ogre-data.txt
             recorded=$(sed -n 's/^public commit: //p' ogre-data.txt)

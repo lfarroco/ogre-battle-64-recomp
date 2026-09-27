@@ -8,7 +8,10 @@
 #
 # Three checks:
 #
-#   1. the app binary and its companion files exist;
+#   1. the app binary, its companion files and the packaged example mods exist;
+#      the mods are part of the package (`packaging/README-dist.txt` lists them)
+#      and an empty `mods/` directory passed every other check, which is how
+#      v0.4.0 shipped without them (session 108);
 #   2. the package is self-contained. Windows: every DLL the shipped binaries
 #      import is either shipped beside them or a Windows system DLL
 #      (tools/pe_imports.py). This is the check that finds a missing runtime DLL
@@ -51,6 +54,13 @@ case "$kind" in
 esac
 [ -f "$app" ] || fail "the app binary is missing ($app)"
 [ -f "$dist/README.txt" ] || fail "README.txt is missing from the package"
+
+# The package must carry the example mods the README lists. `make dist` requires
+# them, and this is the check that fails on a package built before that rule:
+# v0.4.0 shipped an empty mods/ directory.
+mods=$( (ls "$dist"/mods/*.nrm 2>/dev/null || true) | wc -l | tr -d ' ')
+[ "$mods" -gt 0 ] || fail "the package carries no mods/*.nrm (the README lists the example mods)"
+echo "smoke-dist: the package carries $mods example mod(s)"
 
 # --- 2. is the package self-contained? --------------------------------------
 if [ "$kind" = windows ]; then

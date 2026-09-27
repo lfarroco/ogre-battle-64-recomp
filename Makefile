@@ -243,7 +243,8 @@ recompcov:
 #   make example-mods -> build/mods/<name>.nrm
 #
 # `tools/build-example-mods.sh` needs a MIPS cross gcc (or Docker); see its
-# header. `make dist` ships whatever is already in build/mods/.
+# header. `make dist` requires at least one `build/mods/*.nrm` and fails without
+# one; it does not build them itself.
 # ---------------------------------------------------------------------------
 .PHONY: mod-syms
 mod-syms: $(ELF)
@@ -549,8 +550,22 @@ app:
 	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) $(CMAKE_ARGS) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
 	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 --config Release -j
 
+# The package must carry the example mods the README lists. `make dist` cannot
+# build them itself: `make example-mods` needs the linked ELF and a MIPS cross
+# compiler or Docker, and the hosted release runner has neither. The mods arrive
+# in the private data bundle (`tools/data-bundle.sh`) and live in build/mods/.
+# This target fails the package rather than shipping an empty mods/ directory
+# (v0.4.0 shipped one; session 108).
+.PHONY: dist-mods-check
+dist-mods-check:
+	@ls build/mods/*.nrm >/dev/null 2>&1 || { \
+	  echo "make dist: no example mods in build/mods/."; \
+	  echo "  The package must carry them, so run 'make example-mods' first"; \
+	  echo "  (it needs a MIPS cross gcc or docker; see docs/guides/app-build.md)."; \
+	  exit 1; }
+
 .PHONY: dist
-dist: app
+dist: dist-mods-check app
 	rm -rf "$(DIST_DIR)"
 	mkdir -p "$(DIST_DIR)"
 	@test -n "$(EXE_BUILT)" || { echo "no $(EXE_NAME) under $(APP_BUILD_DIR) after the build"; exit 1; }
@@ -636,16 +651,13 @@ dist: app
 	  ldd "$(DIST_BIN_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
 	fi
 	cp "$(CURDIR)/packaging/README-dist.txt" "$(DIST_DIR)/README.txt"
-	# Example mods. `make example-mods` builds them (it needs a MIPS cross
-	# compiler); this target only ships what is already there, so a package
-	# built without that toolchain still succeeds and says what is missing.
+	# Example mods are part of the package: the README lists them and the
+	# client's MODS tab reads them. `dist-mods-check` (a prerequisite of this
+	# target) has already failed if build/mods holds none, so the copy cannot
+	# leave an empty mods/ directory behind.
 	@mkdir -p "$(DIST_DIR)/mods" "$(DIST_DIR)/mod_config"
-	@if ls build/mods/*.nrm >/dev/null 2>&1; then \
-	  cp build/mods/*.nrm "$(DIST_DIR)/mods/"; \
-	  echo "==> bundled example mods:"; ls -1 "$(DIST_DIR)/mods"; \
-	else \
-	  echo "    no example mods in build/mods (run 'make example-mods' first)"; \
-	fi
+	@cp build/mods/*.nrm "$(DIST_DIR)/mods/"
+	@echo "==> bundled example mods:"; ls -1 "$(DIST_DIR)/mods"
 	@echo "==> $(DIST_DIR)"
 	@ls -lh "$(DIST_DIR)"
 
@@ -676,4 +688,4 @@ dist-tar: dist
 smoke:
 	tools/smoke-dist.sh "$(DIST_DIR)"
 
-.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check app dist dist-zip dist-tar sdl2-static smoke
+.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check app dist dist-mods-check dist-zip dist-tar sdl2-static smoke

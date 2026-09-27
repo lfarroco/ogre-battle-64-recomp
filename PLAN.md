@@ -77,7 +77,9 @@ Organize Screen, the credits, the ending and the attract loop.
   reserves the CONTROLS tab's height so the header, the tab bar and the footer
   keep one position on every tab (session 104). `mods/skip-boot-logos/` is the
   mod reference; `mods/exp-overflow/` carries a level-up's leftover EXP over
-  instead of letting the game zero it (session 103).
+  instead of letting the game zero it (session 103). The package carries them:
+  `make dist` and `tools/smoke-dist.sh` require at least one `.nrm`, and the
+  hosted release runners get them from the private data bundle (session 108).
   WIDESCREEN is a toggle (`off` / `on`): `on` turns RT64's Expand aspect ratio
   on only while scene `0x03` runs, so the mission field is hor+ 16:9 and the 4:3
   2D screens are untouched (sessions 102, 105). The window shape follows the
@@ -181,6 +183,13 @@ holds the evidence.
    stub, and its renderer is a WebGL2 prototype. Re-pointing it at the working
    audio microcode and choosing a browser renderer are deferred. See
    `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md`.
+9. **The published v0.4.0 archives ship an empty `mods/`.** Fixed on main
+   (session 108): `make dist`, `tools/release-build.sh`, the workflow's unpack
+   step and `tools/smoke-dist.sh` all require an `.nrm`, and
+   `tools/data-bundle.sh` packs `build/mods/*.nrm`. The private data
+   repository's `files.tar.gz` predates the rule and must be regenerated after
+   this change is committed, then a tag published. See
+   `docs/HANDOFF-2026-09-27-session108.md`.
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off

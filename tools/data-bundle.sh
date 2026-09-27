@@ -9,11 +9,15 @@
 # docs/guides/app-build.md -> "Releases (GitHub Actions)".
 #
 #     make && make recomp && make bank-recomp && make rsp-recomp
+#     make example-mods
 #     tools/data-bundle.sh                        # -> dist/ogre-data/files.tar.gz
 #     cp dist/ogre-data/files.tar.gz /path/to/<private-repo>/
 #
 # The archive holds the paths the app build consumes, at the archive root, plus
-# `ogre-data.txt`, which records the public commit the code was generated from.
+# the packaged example mods the distribution step copies
+# (`build/mods/*.nrm`), plus `ogre-data.txt`, which records the public commit the
+# code was generated from. `make dist` requires the mods, so a bundle without
+# them makes the release fail.
 # `tools/data-bundle.sh [output]` writes somewhere else.
 set -euo pipefail
 
@@ -28,20 +32,26 @@ esac
 
 # `tools/release-build.sh` checks the first three of these before it builds;
 # `Bank*Funcs/` is globbed by app/CMakeLists.txt and `app/src/bank_funcs.inc` is
-# included by the app's overlay registration.
+# included by the app's overlay registration. `build/mods/*.nrm` is what
+# `make dist` copies into the package's `mods/` directory; the release runner
+# cannot build the mods (no MIPS cross toolchain and no ROM), so the bundle is
+# where they come from.
 missing=""
 [ -d RecompiledFuncs ]        || missing="$missing RecompiledFuncs/"
 [ -d RspFuncs ]               || missing="$missing RspFuncs/"
 [ -f app/src/bank_funcs.inc ] || missing="$missing app/src/bank_funcs.inc"
 banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
 [ "$banks" -gt 0 ]            || missing="$missing Bank*Funcs/"
+mods=$( (ls build/mods/*.nrm 2>/dev/null || true) | wc -l | tr -d ' ')
+[ "$mods" -gt 0 ]             || missing="$missing build/mods/*.nrm"
 if [ -n "$missing" ]; then
     cat >&2 <<EOF
-data-bundle.sh: the recompiled game code is missing:$missing
+data-bundle.sh: required inputs are missing:$missing
 
 Generate it first, on a machine that has the ROM:
 
     make && make recomp && make bank-recomp && make rsp-recomp
+    make example-mods
 
 See docs/guides/app-build.md. Nothing was written.
 EOF
@@ -73,7 +83,7 @@ mkdir -p "$(dirname -- "$out")"
 # the excludes cover a bundle produced by other means.
 COPYFILE_DISABLE=1 tar czf "$out" \
     --exclude '._*' --exclude '*/._*' --exclude '.DS_Store' --exclude '*/.DS_Store' \
-    ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc
+    ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc build/mods/*.nrm
 
 # `shasum` is on macOS, `sha256sum` on Linux; one of them exists.
 sha=$( (shasum -a 256 "$out" 2>/dev/null || sha256sum "$out") | awk '{print $1}')
@@ -84,6 +94,7 @@ echo "    entries:         $(tar tzf "$out" | wc -l | tr -d ' ')"
 echo "    RecompiledFuncs: $(find RecompiledFuncs -type f | wc -l | tr -d ' ') files"
 echo "    Bank units:      $banks"
 echo "    RspFuncs:        $(find RspFuncs -type f | wc -l | tr -d ' ') files"
+echo "    Example mods:    $mods .nrm"
 echo "    sha256: $sha"
 cat "$meta" | sed 's/^/    /'
 echo

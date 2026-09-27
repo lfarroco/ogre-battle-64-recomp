@@ -11,10 +11,11 @@
 # Output: dist/ogre-battle-64-recomp/ plus dist/ogre-battle-64-recomp-<os>.tar.gz
 # and/or .zip.
 #
-# It refuses to run when the generated game code is missing, because on a fresh
-# clone it always is: RecompiledFuncs/, Bank*Funcs/, RspFuncs/ and
-# app/src/bank_funcs.inc are gitignored and are produced by a recompilation that
-# needs a ROM. See docs/guides/app-build.md.
+# It refuses to run when the generated game code or the example mods are
+# missing, because on a fresh clone they always are: RecompiledFuncs/,
+# Bank*Funcs/, RspFuncs/ and app/src/bank_funcs.inc are gitignored and are
+# produced by a recompilation that needs a ROM, and build/mods/*.nrm is
+# `make example-mods` output. See docs/guides/app-build.md.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -47,6 +48,27 @@ this script cannot build without it. On a machine that has your ROM:
     make && make recomp && make bank-recomp
 
 Then run this script again. See docs/guides/app-build.md.
+EOF
+    exit 1
+fi
+
+# --- the example mods must be present ----------------------------------------
+# The package's mods/ directory is filled from build/mods/*.nrm, and the README
+# lists them as part of the package. `make dist` requires at least one, so fail
+# here rather than at the end of the app build. On a hosted runner they arrive in
+# files.tar.gz from tools/data-bundle.sh; on a developer's machine from
+# `make example-mods`.
+if ! ls build/mods/*.nrm >/dev/null 2>&1; then
+    cat >&2 <<EOF
+release-build.sh: no example mods in build/mods/.
+
+The package must carry them, so they are a release input:
+
+    make example-mods
+
+A GitHub-hosted runner gets them from files.tar.gz, which tools/data-bundle.sh
+writes; regenerate and commit that bundle. See docs/guides/app-build.md ->
+"Releases (GitHub Actions)".
 EOF
     exit 1
 fi

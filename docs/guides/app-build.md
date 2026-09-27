@@ -420,13 +420,23 @@ matrix run on hosted runners with no ROM present.
 
    ```sh
    make && make recomp && make bank-recomp && make rsp-recomp
+   make example-mods
    tools/data-bundle.sh                 # -> dist/ogre-data/files.tar.gz
    ```
 
    The archive holds `RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/` and
-   `app/src/bank_funcs.inc` at its root, plus `ogre-data.txt` recording the
-   public commit it was generated from. It refuses to run when any of them is
-   missing.
+   `app/src/bank_funcs.inc` at its root, the packaged example mods
+   (`build/mods/*.nrm`), plus `ogre-data.txt` recording the public commit it was
+   generated from. It refuses to run when any of them is missing.
+
+   The mods are in the archive because a release runner cannot build them: it has
+   no ROM and no `mips-linux-gnu-gcc`, and the macOS image has no Linux container
+   runtime for `tools/build-example-mods.sh`'s Docker fallback. `make dist`
+   requires at least one `.nrm` and fails without one,
+   `tools/release-build.sh` checks for them before the app build, the workflow's
+   unpack step fails a bundle that carries none, and `tools/smoke-dist.sh` fails
+   a package whose `mods/` directory is empty. v0.4.0 shipped an empty `mods/`
+   because the bundle omitted them and `make dist` only warned (session 108).
 
 2. Commit `files.tar.gz` to the private repository.
 
@@ -1819,8 +1829,13 @@ for the same reason `RecompiledFuncs/` is: they need the ROM.
 `tools/build-example-mods.sh` compiles each mod's `src/*.c` to big-endian MIPS
 and runs `RecompModTool` on the result. Apple's clang has no MIPS target, so the
 script uses a `mips-linux-gnu-gcc` when one is on `PATH` and otherwise runs
-`gcc-mips-linux-gnu` in a `debian:bookworm-slim` container. `make dist` ships
-whatever is already in `build/mods/`; it does not build mods.
+`gcc-mips-linux-gnu` in a `debian:bookworm-slim` container.
+
+`make dist` requires at least one `.nrm` in `build/mods/` and fails with the
+`make example-mods` instruction when there is none; it does not build mods
+itself. A package built from a release bundle gets them from `files.tar.gz`
+(see "Releases (GitHub Actions)"), and `tools/smoke-dist.sh` fails a package
+whose `mods/` directory carries no `.nrm`.
 
 ### What a hook can reach
 

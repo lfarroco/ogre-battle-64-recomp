@@ -133,12 +133,13 @@ MODS
 ----
 
 The `mods/` folder holds the mods the client loads. A fresh copy of this
-package carries one example mod:
+package carries the example mods:
 
     mods/skip-boot-logos.nrm    Skip Boot Logos (boots straight to the title)
+    mods/exp-overflow.nrm       EXP Overflow (keeps a level-up's leftover EXP)
 
-It ships **off**, so the game plays exactly as it did on the console until you
-turn it on: open the **MODS** tab, select its row and press SPACE. The setting
+They ship **off**, so the game plays exactly as it did on the console until you
+turn one on: open the **MODS** tab, select its row and press SPACE. The setting
 is remembered.
 
 Every `.nrm` in `mods/` is opened at startup and listed on the start screen's
