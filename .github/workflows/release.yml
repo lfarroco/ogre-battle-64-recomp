@@ -201,8 +201,21 @@ jobs:
           if [ -f ogre-data.txt ]; then
             cat ogre-data.txt
             recorded=$(sed -n 's/^public commit: //p' ogre-data.txt)
-            if [ "$GITHUB_REF_TYPE" = "tag" ] && [ -n "$recorded" ] && [ "$recorded" != "$GITHUB_SHA" ]; then
-              echo "::warning::the generated code was bundled at $recorded, but this release builds $GITHUB_SHA"
+            if [ -n "$recorded" ] && [ "$recorded" != "$GITHUB_SHA" ]; then
+              # A bundle generated before the commit being built is the state
+              # every hosted job starts in, and nothing here can tell whether
+              # that matters: the runner has no ROM, so it cannot recompile and
+              # compare. Refuse the mismatch instead of warning about it. The
+              # public repository's checkout is `fetch-depth: 0`, so the bundle's
+              # commit is present and git can say how far behind this build is.
+              echo "::error::files.tar.gz records public commit $recorded, and this release builds $GITHUB_SHA."
+              if git cat-file -e "$recorded^{commit}" 2>/dev/null; then
+                behind=$(git rev-list --count "$recorded..$GITHUB_SHA")
+                echo "::error::this build is $behind commit(s) newer, so the bundle's generated code may predate it."
+              fi
+              echo "::error::Regenerate the bundle and commit it to the private data repository, then re-run this job:"
+              echo "::error::    make recomp && make bank-recomp && make rsp-recomp && make example-mods && tools/data-bundle.sh"
+              exit 1
             fi
           fi
 

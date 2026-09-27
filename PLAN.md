@@ -197,13 +197,23 @@ holds the evidence.
    (`docs/proofs/web-opening-broken.png`). The renderer route is decided in
    `docs/DECISIONS.md`; the build is not in CI, which is why it stayed broken.
    See `docs/HANDOFF-2026-09-27-session109.md`.
-9. **The published v0.4.0 archives ship an empty `mods/`.** Fixed on main
-   (session 108): `make dist`, `tools/release-build.sh`, the workflow's unpack
-   step and `tools/smoke-dist.sh` all require an `.nrm`, and
-   `tools/data-bundle.sh` packs `build/mods/*.nrm`. The private data
-   repository's `files.tar.gz` predates the rule and must be regenerated after
-   this change is committed, then a tag published. See
-   `docs/HANDOFF-2026-09-27-session108.md`.
+9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
+   feeds the release did not carry one.** Fixed on main (session 108):
+   `make dist`, `tools/release-build.sh`, the workflow's unpack step and
+   `tools/smoke-dist.sh` all require an `.nrm`, and `tools/data-bundle.sh` packs
+   `build/mods/*.nrm`. Session 111 regenerated the private data repository's
+   `files.tar.gz` — it still predated the rule, so every hosted job failed at the
+   unpack step with `build/mods/*.nrm is missing from files.tar.gz` — and made
+   the unpack step fail when the bundle's recorded commit differs from the commit
+   being built, where it used to warn. A clean `make recomp` and `make bank-recomp`
+   reproduced the tree's generated code byte for byte, so the new bundle changes
+   only the mods and the recorded commit. The re-run (`36349726660`) completed
+   success on all three platforms and its Release job produced **`v0.5.0` as a
+   draft**, whose Linux and macOS archives both contain
+   `mods/exp-overflow.nrm` and `mods/skip-boot-logos.nrm`. Publishing that draft
+   is what makes the fixed packages available; the published `v0.4.0` assets still
+   have the empty `mods/`.
+   See `docs/HANDOFF-2026-09-27-session111.md`.
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off

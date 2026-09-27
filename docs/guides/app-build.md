@@ -438,6 +438,12 @@ matrix run on hosted runners with no ROM present.
    a package whose `mods/` directory is empty. v0.4.0 shipped an empty `mods/`
    because the bundle omitted them and `make dist` only warned (session 108).
 
+   The unpack step also fails when the bundle's recorded commit differs from the
+   commit being built. The runner cannot recompile, so it cannot test whether an
+   older bundle still matches; it prints how many commits newer the build is and
+   the regeneration command. Regenerating is part of preparing a release, not an
+   optional refresh.
+
 2. Commit `files.tar.gz` to the private repository.
 
 3. In this repository's settings, set the **Actions variable** `OGRE_DATA_REPO`
@@ -449,8 +455,12 @@ matrix run on hosted runners with no ROM present.
    is its only reference.
 
 The archive is a snapshot of the recompiler's output, so regenerate it whenever
-a change alters the generated code. The workflow warns when the archive's
-recorded commit differs from the commit being released. Hosting the generated C
+a change alters the generated code or anything under `mods/`. Regenerate it as
+part of preparing a release: the workflow fails the job when the archive's
+recorded commit differs from the commit being built, because nothing on the
+runner can tell whether that bundle still describes this source tree. The stale
+bundle left by session 108 failed three hosted jobs at the unpack step with
+`build/mods/*.nrm is missing from files.tar.gz`. Hosting the generated C
 in a private repository keeps it out of this repository and out of the release
 archives; it does not change what the published binary contains.
 
