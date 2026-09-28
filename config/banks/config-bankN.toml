@@ -52,7 +52,22 @@ functions_per_output_file = 100
 # 8 ms display-list period to 80-183 ms for ~2.6 s (t=57304..59921 ms;
 # T=59000 puts t4 in 0x801D0B78 at 93%), and recovered when the list shortened.
 # The raw ROM bytes at 0x5443FFEE/0x26730001 match bankN.elf.
-yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08]
+#
+# The fourth misfire is func_ovlN_80208E84 (record 9, 0x80208E84), the big
+# unit/roster builder the mission's unit list runs. Its inner loop at
+# 0x8020A814..0x8020A910 walks up to five 1-byte records and keeps the maximum
+# of the byte it loads from each. The bound is not a game count: 0x8020A80C
+# sets `a3 = a1 + 5`, and the loop advances `a1` by one and exits on
+# `a1 < a3`. The invariant-base load the heuristic keys on is `lbu $v0, 4($s6)`
+# at 0x8020A820, the unit's flags byte; the body never writes $s6. 0x8020A910 is
+# the loop's backward branch. A five-entry scan takes that back edge four times,
+# so it paid four blocking waits of about one VI retrace each. With the unit
+# list open the frame-pump thread (t4) sat in that function and the developer's
+# scene_5_suspend.bin save fell from 60-110 display lists/s to 12-13/s, a median
+# 79 ms gap. A host stack sample (`sample <pid>`) put 1608 of 1670 samples of t4
+# in `yield_self` under func_ovlN_80208E84. The raw ROM word at 0x8020A910 is
+# 0x1440FFC0 (`bnez $v0, 0x8020A814`), delay slot 0x00000000.
+yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08, 0x8020A910]
 
 # Splat is given each record's own code/data boundary (see config/banks/config-bankN.yaml).
 # Extend any piece it still caps in the middle of a call-and-continue emission

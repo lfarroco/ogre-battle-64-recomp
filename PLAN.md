@@ -92,12 +92,17 @@ Organize Screen, the credits, the ending and the attract loop.
   (`off` / `on`) and VOLUME a 0..100 slider; the audio callback scales every
   queued buffer by the gain and queues silence rather than nothing at `off`, so
   the runtime's queue-depth pacing is unchanged (session 106).
-- **Performance** — three misclassified work loops in bank unit N carried a
+- **Performance** — four misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
-  (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`; sessions 80, 90, 98). A slow screen
-  is measured with `OGRE_PROFILE=1 OGRE_DL_TRACE=1 OGRE_SCENE_LOG=1`: read the
-  frame-pump thread `t4`'s `[prof]` line, then list the branch it names.
+  (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`; sessions 80, 90, 98,
+  112). A slow screen is measured with `OGRE_PROFILE=1 OGRE_DL_TRACE=1
+  OGRE_SCENE_LOG=1` for its display-list series and its `t4` `[prof]` line, but
+  the profiler reports the most recently entered function and can name an
+  entry-heavy function rather than the one holding the thread. Take a host stack
+  sample (`sample <pid> 4 -file …`) during the slow state as well; that named
+  `func_ovlN_80208E84` in session 112 after the profiler named two wrong
+  addresses.
 - **Debug console** — the live console's `snap [prefix] [ms]` writes the whole
   8 MiB RDRAM image with the game threads parked and, for `ms`, RT64's
   presented-frame capture for the same screen, so a player-reported defect can be
