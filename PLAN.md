@@ -92,6 +92,14 @@ Organize Screen, the credits, the ending and the attract loop.
   (`off` / `on`) and VOLUME a 0..100 slider; the audio callback scales every
   queued buffer by the gain and queues silence rather than nothing at `off`, so
   the runtime's queue-depth pacing is unchanged (session 106).
+- **HD backgrounds (experiment)** — `mods/backgrounds/` is a pack of PNGs that
+  replaces the dialogue/cutscene backdrops. The app writes the pack's image over
+  the pixels the njpeg readback copies, split to match the game's four-chunk
+  496x384 backdrop canvas, so one PNG fills the whole backdrop. The first
+  mapping is scene `0x0D` step 2 (the New Game cathedral). It is a reskin at the
+  game's resolution, and not an HD texture replacement. See
+  `docs/guides/hd-backgrounds.md` and
+  `docs/HANDOFF-2026-09-27-session113.md`.
 - **Performance** — four misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
@@ -219,6 +227,16 @@ holds the evidence.
    is what makes the fixed packages available; the published `v0.4.0` assets still
    have the empty `mods/`.
    See `docs/HANDOFF-2026-09-27-session111.md`.
+10. **HD backgrounds: true HD needs the renderer.** `mods/backgrounds/` reskins
+    the backdrop at the game's own 320x240 (box-filtered to the 496x384 canvas),
+    so its detail is capped by the original. Sampling a larger texture needs
+    RT64 texture replacement, keyed by the drawn texture's hash. RT64 already has
+    the machinery (`TextureCache::loadReplacementDirectory`, keyed by a TMEM
+    hash) and `upscale2D = ScaledOnly`, but the port does not load a replacement
+    directory and the hash for one backdrop has to be recorded from a run. The
+    four-chunk layout the current feature uses is hardcoded to the cathedral
+    asset's chunk sizes; a pack image for a backdrop with a different layout is
+    left alone (`no canvas rect`). See `docs/guides/hd-backgrounds.md`.
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off

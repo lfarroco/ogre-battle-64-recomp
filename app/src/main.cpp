@@ -37,6 +37,7 @@
 
 #include "game.hpp"
 #include "crash_log.hpp"
+#include "hd_backgrounds.hpp"
 #include "launcher.hpp"
 #include "input_map.hpp"
 #include "overlay.hpp"
@@ -307,6 +308,10 @@ int main(int argc, char** argv) {
     // The player's game speed (`settings.cfg`) is applied to the runtime here,
     // before the game starts; `OGRE_SPEED` overrides it for a developer run.
     ogre::load_settings(pref_dir);
+    // The HD-background pack (`mods/backgrounds/`) is read here, before the
+    // game boots, and is a no-op when no pack is installed. The generated
+    // njpeg readback calls `ogre_hd_background()` for every pass it copies.
+    ogre::hd_backgrounds_init(pref_dir);
     fprintf(stderr, "[boot] config path ok: %s\n", pref_dir.string().c_str());
 
     // --- game registration ----------------------------------------------------

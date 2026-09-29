@@ -355,6 +355,11 @@ bank-recomp: bank
 	@# in; the game's own pointer can be left at the framebuffer table's
 	@# placeholder entry. Regenerated above, so re-apply here (session 48).
 	python3 tools/njpeg_readback.py
+	@# The HD-background pack needs a call at the end of the same readback pass,
+	@# after the copied pixels reach their destination buffer. Bank units are
+	@# outside the mod hook map, so the app hooks in from the generated unit
+	@# instead (`app/src/hd_backgrounds.cpp`; a no-op with no pack installed).
+	python3 tools/hd_backgrounds.py
 	@# Assert the invariant session 45's wall broke: a unit must never define a
 	@# RAM range another bank can own *and* call into it from another record (the
 	@# call would be bound at build time to the wrong bank's layout). See

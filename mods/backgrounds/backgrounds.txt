@@ -1,0 +1,22 @@
+# HD backgrounds pack for Ogre Battle 64: Recomp.
+#
+# One line per background, whitespace separated:
+#
+#     <id>   <name>        <scene>  <step>
+#
+# id     names the image file in this folder: <id>.png (or <name>.png).
+# name   a label for the background; it is printed in the port's log.
+# scene  the scene id that draws the background, in hex (see docs/scenes.md).
+# step   the scripted step number that selects it (`D_8018F1C0`).
+#
+# The port replaces the background image the game assembles for that (scene,
+# step) pair with the PNG, scaled to the game's own 320x240 backdrop. See
+# `docs/guides/hd-backgrounds.md`.
+#
+# Scene 0x0D is the dialogue/cutscene scene of the New Game opening. Step 2 is
+# the cathedral (Archbishop Odiron). The opening's steps 1..19 are decoded in
+# docs/HANDOFF-2026-09-15-session44.md.
+#
+# Lines that start with '#' and blank lines are ignored.
+
+01  cathedral  0x0D  2

@@ -280,6 +280,7 @@ if (EMSCRIPTEN)
         src/bank_overlays.cpp
         src/gbi.cpp
         src/save_import.cpp
+        src/hd_backgrounds.cpp
     )
 else()
     set(OGRE_APP_SOURCES
@@ -299,6 +300,7 @@ else()
         src/ui.cpp
         src/launcher.cpp
         src/overlay.cpp
+        src/hd_backgrounds.cpp
     )
 endif()
 
@@ -390,6 +392,9 @@ target_include_directories(ogrebattle64 PRIVATE
     ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
     ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
     ${OGRE_TOOLS}/N64ModernRuntime/thirdparty
+    # stb_image, for the HD-background pack's PNG decode
+    # (src/hd_backgrounds.cpp). Present for every build flavor, RT64 or not.
+    ${OGRE_TOOLS}/RT64/src/contrib
 )
 
 if (OGRE_USE_RT64)
