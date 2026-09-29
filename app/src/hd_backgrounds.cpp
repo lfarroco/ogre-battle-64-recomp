@@ -273,6 +273,15 @@ void hd_backgrounds_init(const std::filesystem::path& pref_dir) {
 
 }  // namespace ogre
 
+bool ogre::hd_backgrounds_covers_scene(uint16_t scene) {
+    for (const Entry& e : g_pack.entries) {
+        if (e.scene == scene) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Called by the generated njpeg readback (tools/hd_backgrounds.py) at the end of
 // each pass's row copy.
 extern "C" void ogre_hd_background(uint8_t* rdram) {

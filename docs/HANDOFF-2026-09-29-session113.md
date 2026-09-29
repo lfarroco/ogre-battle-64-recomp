@@ -155,12 +155,38 @@ Changed:
   RT64 contrib include directory for `stb/stb_image.h`.
 * `app/src/main.cpp` — `ogre::hd_backgrounds_init(pref_dir)` after
   `load_settings`.
+* `app/src/widescreen.hpp`, `app/src/widescreen.cpp` — the expand scene set
+  (`expand_scenes`/`scene_expands`), the `OGRE_WS_SCENES` override, and
+  `hd_backgrounds_covers_scene`.
 * `PLAN.md`, `docs/DECISIONS.md`, `docs/STATUS-LOG.md`, `docs/README.md`.
 
 Generated (gitignored): `BankEFuncs/funcs_0.c` carries both code-generation
 fixes.
 
-## 6. Open
+## 6. Widescreen fill
+
+With WIDESCREEN on, the window is 16:9 and scene `0x0D` is pillarboxed, because
+the port's toggle only turns RT64's `Expand` on for the mission
+(`app/src/widescreen.cpp`). A captured frame (`/tmp/ws-1400.png`, 1271x715)
+shows the 4:3 cathedral image in the middle with black bars at the sides.
+
+`scene_expands()` now also returns true for a scene the HD-background pack
+covers (`hd_backgrounds_covers_scene`), so with the pack loaded and WIDESCREEN
+on, scene `0x0D` expands: the log prints
+`[widescreen] aspect ratio expand (scene 0x000D, mode ON)` and the backdrop fills
+the whole width (`/tmp/ws3-last.png`). The wider view reveals more of the canvas
+rather than stretching it: the stained glass spans about 66 % of a 4:3 frame and
+47 % of the expanded frame, with the pillars and candle sconces visible at the
+sides, and the dialogue text spans about 57 % of the 4:3 width against 43 % of
+the 16:9 width, so the dialogue box, portrait and text keep their own size.
+
+`OGRE_WS_SCENES=<hex>[,<hex>...]` replaces the default expand set (the mission
+`0x03`) for a developer run; the pack always contributes its scenes. With
+WIDESCREEN off the aspect stays `Original` and the image is unchanged. The
+game's own vertical letterbox at the top and bottom of the dialogue screen is
+part of the scene and is not filled.
+
+## 7. Open
 
 * **True HD is not implemented.** The pack image is downscaled to the game's
   canvas, so this is a reskin. A larger texture needs RT64 texture replacement,

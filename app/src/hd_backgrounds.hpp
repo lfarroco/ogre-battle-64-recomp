@@ -40,4 +40,9 @@ namespace ogre {
 // startup from `main.cpp`; a missing pack is not an error.
 void hd_backgrounds_init(const std::filesystem::path& pref_dir);
 
+// Whether the pack has an entry for a scene. The widescreen toggle uses this to
+// expand the scenes whose backdrop comes from the pack, so the replacement fills
+// the wide window instead of being pillarboxed (`widescreen.cpp`).
+bool hd_backgrounds_covers_scene(uint16_t scene);
+
 }  // namespace ogre

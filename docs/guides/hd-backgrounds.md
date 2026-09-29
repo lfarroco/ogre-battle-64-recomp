@@ -71,6 +71,32 @@ the result, but no detail beyond the game's 320x240 backdrop survives. True HD
 needs the renderer to sample a larger texture (RT64 texture replacement), which
 this feature does not do.
 
+## Widescreen
+
+With WIDESCREEN on, the window is 16:9 and a scene the toggle does not expand is
+pillarboxed: the 4:3 game image sits in the middle with black bars at the sides.
+A scene that the pack covers is added to the Expand set, so its backdrop fills
+the whole width, showing more of the canvas at the sides. The dialogue box, the
+portrait and the text keep their own size and position in the wider view.
+
+The scene list is `expand_scenes()` in `app/src/widescreen.cpp`: the mission
+(`0x03`) by default, plus every scene in `backgrounds.txt`. `OGRE_WS_SCENES`
+replaces the default set for a developer run:
+
+```sh
+OGRE_LAUNCHER_KEYS=space OGRE_WIDESCREEN=on OGRE_WS_SCENES=0x03,0x0D \
+  OGRE_SPEED=8 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 \
+  OGRE_CAPTURE_PRESENT=/tmp/ws OGRE_CAPTURE_EVERY=100 OGRE_EXIT_AFTER_MS=25000 \
+  ./build-app/ogrebattle64 assets/ogre64.z64
+```
+
+`widescreen.cpp` logs `[widescreen] aspect ratio expand (scene 0x000D, mode ON)`
+when the pack's scene expands. With WIDESCREEN off the aspect stays `Original`
+and the image is unchanged.
+
+The game's own vertical letterbox (black at the top and bottom of the dialogue
+screen) is part of the scene and is not filled.
+
 ## How it works
 
 1. The game decodes each `njpeg` sub-image with the RSP and draws it into a game

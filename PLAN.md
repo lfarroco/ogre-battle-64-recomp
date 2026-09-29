@@ -96,10 +96,12 @@ Organize Screen, the credits, the ending and the attract loop.
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over
   the pixels the njpeg readback copies, split to match the game's four-chunk
   496x384 backdrop canvas, so one PNG fills the whole backdrop. The first
-  mapping is scene `0x0D` step 2 (the New Game cathedral). It is a reskin at the
-  game's resolution, and not an HD texture replacement. See
-  `docs/guides/hd-backgrounds.md` and
-  `docs/HANDOFF-2026-09-27-session113.md`.
+  mapping is scene `0x0D` step 2 (the New Game cathedral). With WIDESCREEN on, a
+  scene the pack covers is added to the RT64 Expand set, so the backdrop fills
+  the 16:9 window and reveals more of the canvas at the sides while the dialogue
+  box and text keep their size. It is a reskin at the game's resolution, and not
+  an HD texture replacement. See `docs/guides/hd-backgrounds.md` and
+  `docs/HANDOFF-2026-09-29-session113.md`.
 - **Performance** — four misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
