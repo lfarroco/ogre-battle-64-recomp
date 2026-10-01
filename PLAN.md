@@ -107,7 +107,7 @@ Organize Screen, the credits, the ending and the attract loop.
   draws over; the output lives in the gitignored `mods/backgrounds/reference/`.
   It is a reskin at the game's resolution, and not an HD texture replacement.
   See `docs/guides/hd-backgrounds.md` and
-  `docs/HANDOFF-2026-09-29-session113.md`.
+  `docs/HANDOFF-2026-09-29-session114.md`.
 - **Performance** — four misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`

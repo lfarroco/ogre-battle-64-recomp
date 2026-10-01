@@ -1,6 +1,7 @@
-# Session 113 — HD backgrounds: a PNG pack replaces a dialogue/cutscene backdrop
+# Session 114 — HD backgrounds: a PNG pack replaces a dialogue/cutscene backdrop
 
-Date: 2026-09-29. Follows session 112.
+Date: 2026-09-29. Follows session 112. (Session 113 is another session, merged
+before this one; this work was numbered 114 to keep the handoffs unique.)
 
 ## Goal
 
