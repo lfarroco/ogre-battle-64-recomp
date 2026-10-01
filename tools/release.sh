@@ -201,7 +201,20 @@ fi
 # --- commit and push the bundle ---------------------------------------------
 step "[4/4] committing the bundle to $data_repo"
 cp "$bundle_out" "$tmp/data/files.tar.gz"
-git -C "$tmp/data" add files.tar.gz
+# The README carried "The workflow warns when a tagged release builds a commit
+# other than the one ogre-data.txt records", which the unpack step has failed
+# on since session 111. Correct a copy that still says it. A README that does
+# not match is left alone, so this is a no-op once it is fixed.
+if [ -f "$tmp/data/README.md" ] \
+   && grep -q '^The workflow warns when a tagged release' "$tmp/data/README.md"; then
+    sed -i.bak 's/^The workflow warns when a tagged release.*/The workflow fails when a tagged release builds a commit other than the one/' \
+        "$tmp/data/README.md"
+    sed -i.bak 's/^`ogre-data.txt` records\.$/`ogre-data.txt` records, and prints how many commits newer the build is./' \
+        "$tmp/data/README.md"
+    rm -f "$tmp/data/README.md.bak"
+    echo "    corrected the README's claim that the workflow warns"
+fi
+git -C "$tmp/data" add files.tar.gz README.md
 if git -C "$tmp/data" diff --cached --quiet; then
     echo "    the private repository already holds this bundle; nothing to commit"
 else

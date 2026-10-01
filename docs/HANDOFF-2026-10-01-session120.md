@@ -33,6 +33,11 @@ workflow's unpack step fails when that differs from the commit being built
 (session 111). `make release-check` is the same script with `NO_PUSH=1`:
 regenerate, pack, report, change nothing outside the tree.
 
+It also corrects one stale sentence in the private repository's README, which
+said the workflow *warns* on a commit mismatch where the unpack step has failed
+on it since session 111. `grep -q` gates the edit, so a README that no longer
+says it is left alone.
+
 `tools/release.sh` derives the private repository slug from the Actions variable
 `OGRE_DATA_REPO` (`gh variable list`), defaults the version to the newest tag with
 its last field bumped, and takes `DATA_REPO`, `REGEN=0`, `DRAFT`, `NO_WAIT=1`
@@ -77,6 +82,11 @@ part of preparing the release rather than a refresh that can be skipped.
 - The tree-clean refusal fired on the uncommitted `Makefile` and workflow edits
   before regeneration, and the post-regeneration check caught a stale function
   name during the dry run, which was fixed.
+- The stale-bundle report was exercised with a clean, pushed tree and a bundle
+  whose `ogre-data.txt` named `c7bd999`: it printed `the existing bundle was
+  generated at c7bd999, 11 commit(s) behind 318e2d6…, and is replaced`.
+- The README correction was run against the private repository's own
+  `README.md` copy and produced the intended two lines.
 - The bundle was compared with the private repository's copy: 5 differing
   entries (`ogre-data.txt`, `BankEFuncs/funcs_0.c`, `BankNFuncs/funcs_2.c`, both
   `.nrm`). The two `.nrm` files are the same size and differ only in their ZIP
