@@ -15,12 +15,32 @@ Create a `make release` command that does that and starts a new GitHub release.
 
 ## Result
 
+**Landed, and the release exists.** `make release VERSION=v0.6.0` produced the
+draft release `v0.6.0` on `lfarroco/ogre-battle-64-recomp` with one archive per
+platform (`ogre-battle-64-recomp-{macos-arm64.tar.gz,linux-x86_64.tar.gz,windows-x86_64.zip}`),
+from run `36887888439`, whose five jobs all succeeded. The bundles the workflow
+unpacked for it do carry the fixes the old one did not: the private
+repository's `files.tar.gz` records `public commit: 1ae9ba9`, it holds
+`ogre_hd_background` in `BankEFuncs/funcs_0.c`, and `BankNFuncs/funcs_2.c` has no
+`yield_self` at `0x80204C48`, which is session 115's menu-slowdown fix. Both
+published archives carry `mods/exp-overflow.nrm`, `mods/skip-boot-logos.nrm` and
+`README.txt`.
+
+**One property of the draft to know before publishing it.** The run's Release job
+ran `gh release create v0.6.0 … --draft`, and GitHub did not create the `v0.6.0`
+git ref: `git ls-remote origin refs/tags/v0.6.0` is empty and
+`GET /git/ref/tags/v0.6.0` is 404, while the release itself has
+`"tag_name": "v0.6.0"`. Publishing the draft will create that tag then, on
+whatever the target resolves to, so `make release` is the supported path only
+while the built commit is still the branch tip. That is the workflow's
+pre-existing behaviour for a dispatched draft (`v0.5.0` came the same way), not
+something this session changed.
+
 `make release VERSION=vX.Y.Z` (`tools/release.sh`) regenerates the game code and
 the example mods, packs `files.tar.gz`, proves the packed code is the tree's
 code, commits and pushes it to the private data repository, dispatches the
 Release workflow with `draft=true` and waits for the three platform builds. The
-tag is created by the workflow's `gh release create` on the commit the run built.
-The developer chose the version (`v0.6.0`) and a draft.
+developer chose the version (`v0.6.0`) and a draft.
 
 The script refuses, before it writes anything:
 
