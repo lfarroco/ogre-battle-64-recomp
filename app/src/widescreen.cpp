@@ -42,16 +42,22 @@ namespace {
 
 // Scene `0x03` is the mission: the 3D field with the party, its intro, and the
 // battles inside it. Descriptor `0x8018F350`; see docs/scenes.md. It is the
-// scene the developer asked widescreen for, and the default scene the toggle
-// turns Expand on for.
+// scene the developer asked widescreen for.
 constexpr uint16_t kMissionScene = 0x0003;
 
-// The scenes Expand is used for. `OGRE_WS_SCENES=<hex>[,<hex>...]` replaces the
-// default set for a developer run, so a scene that now has an HD backdrop can
-// be tried without a rebuild. The set is parsed once.
+// Scene `0x0D` is the New Game dialogue/cutscene scene. Its backdrop is a
+// 496x384 canvas and the 4:3 view crops it, so Expand reveals the sides of the
+// game's own art (verified with the HD-background pack off: the wide capture
+// shows statues and columns the 4:3 capture does not). It expands whether or not
+// the pack is installed.
+constexpr uint16_t kDialogueScene = 0x000D;
+
+// The scenes Expand is used for by default. `OGRE_WS_SCENES=<hex>[,<hex>...]`
+// replaces the set for a developer run. The set is parsed once. A scene the
+// HD-background pack covers is added by `scene_expands` on top of this.
 const std::vector<uint16_t>& expand_scenes() {
     static const std::vector<uint16_t> scenes = [] {
-        std::vector<uint16_t> out{kMissionScene};
+        std::vector<uint16_t> out{kMissionScene, kDialogueScene};
         const char* spec = std::getenv("OGRE_WS_SCENES");
         if (spec == nullptr || spec[0] == '\0') {
             return out;
@@ -79,9 +85,8 @@ const std::vector<uint16_t>& expand_scenes() {
 }
 
 bool scene_expands(uint16_t scene) {
-    // A scene with an HD backdrop from the pack expands too, so the replacement
-    // fills the wide window instead of being pillarboxed. Expand leaves the 2D
-    // dialogue box and text at their own size and position in the wider view.
+    // A scene the pack covers expands too, so the replacement fills the wide
+    // window instead of being pillarboxed.
     if (hd_backgrounds_covers_scene(scene)) {
         return true;
     }

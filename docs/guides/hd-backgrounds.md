@@ -37,12 +37,64 @@ reported and skipped, and a pack with no loadable entry is a no-op.
 The port looks for a pack in this order and uses the first folder that contains
 a `backgrounds.txt`:
 
-1. `$OGRE_BG_DIR`
+1. `$OGRE_BG_DIR` — when set, this is the **only** folder searched
 2. `<config>/mods/backgrounds` (`<config>` is the executable's folder by
    default; see `docs/guides/app-build.md` → "Config directory")
 3. `<config>/../mods/backgrounds` — this is the repository's own `mods/` when
    the app runs from `build-app/`
 4. `<working directory>/mods/backgrounds`
+
+### Running with and without the pack
+
+The pack is loaded automatically when a `backgrounds.txt` is found. To compare a
+run against the vanilla art:
+
+```sh
+# with the pack (default, when mods/backgrounds/ exists)
+./build-app/ogrebattle64 assets/ogre64.z64
+
+# without it, for one run
+OGRE_BG=0 ./build-app/ogrebattle64 assets/ogre64.z64          # 0, off, false or no
+
+# without it, by pointing the pack folder somewhere empty
+OGRE_BG_DIR=/tmp/no-backgrounds ./build-app/ogrebattle64 assets/ogre64.z64
+
+# a different pack folder than the default search
+OGRE_BG_DIR=/path/to/another-pack ./build-app/ogrebattle64 assets/ogre64.z64
+```
+
+`OGRE_BG=0` logs `[hdbg] pack disabled (OGRE_BG=0)`; an empty `OGRE_BG_DIR` logs
+`[hdbg] no backgrounds.txt found (looked in 1 place(s))`. With the pack off, the
+game's own `njpeg` backdrop is drawn unchanged and `OGRE_BG_LOG` prints no
+`[hdbg] pass` lines. WIDESCREEN is unaffected: scene `0x0D` is in the Expand set
+whether or not the pack is installed, and the game's own 496x384 backdrop has
+content that the 4:3 view crops, so the wide view reveals it.
+
+## Extracting the original (the reference to draw over)
+
+`tools/backgrounds.py` produces the game's own backdrop as a PNG at the canvas
+size, for an artist to draw the replacement over:
+
+```sh
+make bg-extract                              # mapping 01, the cathedral
+make bg-extract BG_ID=02                     # another mapping
+tools/backgrounds.py extract 01 --step 6     # another step of scene 0x0D
+tools/backgrounds.py extract --all           # a plain boot; keep every dump
+tools/backgrounds.py extract 01 --from /tmp/dump   # file an existing dump
+```
+
+The tool runs the app with `OGRE_BG_DUMP=<dir>`, which writes one
+`original-step<NNNN>.png` per assembly, before the pack replaces anything, and
+files it as `mods/backgrounds/reference/<id>-<name>-original.png`. That
+directory is gitignored: it is extracted art and the repository never commits
+it. The port ignores the subdirectory when it loads the pack, so a reference
+cannot be mistaken for a replacement.
+
+The dump is a live capture of the readback, not an offline ROM decode: the four
+`njpeg` sub-images are Huffman-coded and only the game's RSP microcode decodes
+them. It runs on every pass the readback copies, so one run through the opening
+writes the reference for every backdrop it assembles; a later background needs
+only a mapping line and a run that reaches it.
 
 ## What the image should be
 
@@ -60,10 +112,22 @@ chunk headers hold `(-229,-235)`, `(90,-235)`, `(-229,4)` and `(90,4)` with thos
 sizes, which is the same tiling with the canvas origin at `(-229,-235)`).
 
 Author the PNG as the whole backdrop. The port box-filters it to 496x384,
-splits it by those rects, and writes each part over the pass's pixels. A 4:3
-image (for example 1280x960) maps back to the game's 4:3 screen without
-distortion, because the game's own canvas-to-screen scales are the transpose of
-the 496x384-to-320x240 scales.
+splits it by those rects, and writes each part over the pass's pixels. Author the
+plain image at the canvas aspect (496x384, or a multiple such as 1984x1536) so
+the port maps it without a second scaling; `tools/backgrounds.py` extracts
+exactly this canvas as the reference to draw over.
+
+A file named `<id>-wide.png` (or `<name>-wide.png`) beside the plain image is
+the **widescreen variant**, used when the WIDESCREEN setting is on. Author it in
+the widescreen aspect (16:9, for example 1920x1080). The port does not stretch
+it to the canvas: it scales it uniformly to the canvas width and anchors the
+result to the canvas bottom, so circles stay round. (A 16:9 source stretched to
+the 496x384 canvas instead displays 29 % narrow: a circle drawn 1:1 measured
+0.71 aspect against 0.96 for a canvas-aspect source.) The rows above the image
+repeat its first row, but the draw shows the lower part of the canvas, so those
+rows are off-screen in practice. `mods/backgrounds/01-wide.png` is the example;
+its round rose window is also the aspect check. Without the variant, the plain
+image is used in both modes.
 
 The replacement is at the game's resolution. RT64 renders 2D at
 `upscale2D = ScaledOnly`, so the port's internal resolution setting still scales
@@ -75,12 +139,14 @@ this feature does not do.
 
 With WIDESCREEN on, the window is 16:9 and a scene the toggle does not expand is
 pillarboxed: the 4:3 game image sits in the middle with black bars at the sides.
-A scene that the pack covers is added to the Expand set, so its backdrop fills
-the whole width, showing more of the canvas at the sides. The dialogue box, the
-portrait and the text keep their own size and position in the wider view.
+The mission (`0x03`) and the dialogue/cutscene scene (`0x0D`) expand, so the
+backdrop fills the whole width with more of the canvas at the sides. Scene `0x0D`
+does this **with or without the pack**: the game's own backdrop already has
+content that the 4:3 view crops. The dialogue box, the portrait and the text keep
+their own size and position in the wider view.
 
-The scene list is `expand_scenes()` in `app/src/widescreen.cpp`: the mission
-(`0x03`) by default, plus every scene in `backgrounds.txt`. `OGRE_WS_SCENES`
+The scene list is `expand_scenes()` in `app/src/widescreen.cpp`: `0x03` and
+`0x0D` by default, plus every scene in `backgrounds.txt`. `OGRE_WS_SCENES`
 replaces the default set for a developer run:
 
 ```sh
@@ -91,8 +157,14 @@ OGRE_LAUNCHER_KEYS=space OGRE_WIDESCREEN=on OGRE_WS_SCENES=0x03,0x0D \
 ```
 
 `widescreen.cpp` logs `[widescreen] aspect ratio expand (scene 0x000D, mode ON)`
-when the pack's scene expands. With WIDESCREEN off the aspect stays `Original`
-and the image is unchanged.
+when scene `0x0D` expands. With WIDESCREEN off the aspect stays `Original` and
+the image is unchanged.
+
+The image the pack writes is chosen by the setting, not by the live aspect: the
+backdrop is assembled one scene early, in the `0x02` loader, where the aspect is
+still `Original`. With WIDESCREEN on and a `<id>-wide.png` present, the wide
+image is used; otherwise the plain image is. The log tells them apart:
+`applied 'cathedral' (01 wide) ...` against `applied 'cathedral' (01) ...`.
 
 The game's own vertical letterbox (black at the top and bottom of the dialogue
 screen) is part of the scene and is not filled.

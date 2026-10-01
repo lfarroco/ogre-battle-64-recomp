@@ -140,13 +140,16 @@ they were restored afterwards.
 New:
 
 * `mods/backgrounds/backgrounds.txt` — the mapping.
-* `mods/backgrounds/01.png` — the generated placeholder.
-* `mods/backgrounds/make-example.py` — writes `01.png`.
+* `mods/backgrounds/01.png` — the generated plain placeholder.
+* `mods/backgrounds/01-wide.png` — the generated widescreen placeholder.
+* `mods/backgrounds/make-example.py` — writes both, in canvas space.
 * `app/src/hd_backgrounds.hpp`, `app/src/hd_backgrounds.cpp` — pack load, PNG
   decode (stb_image with `STB_IMAGE_STATIC`), box filter, RGBA5551, the injected
   hook, and the debug/log modes.
 * `tools/hd_backgrounds.py` — the generated-code insertion, with `--revert`.
+* `tools/backgrounds.py` — the reference extractor (`extract`/`list`).
 * `docs/guides/hd-backgrounds.md`.
+* `.gitignore` — `mods/backgrounds/reference/` (extracted art).
 
 Changed:
 
@@ -158,7 +161,9 @@ Changed:
 * `app/src/widescreen.hpp`, `app/src/widescreen.cpp` — the expand scene set
   (`expand_scenes`/`scene_expands`), the `OGRE_WS_SCENES` override, and
   `hd_backgrounds_covers_scene`.
-* `PLAN.md`, `docs/DECISIONS.md`, `docs/STATUS-LOG.md`, `docs/README.md`.
+* `Makefile` — `bg-extract`.
+* `PLAN.md`, `docs/DECISIONS.md`, `docs/STATUS-LOG.md`, `docs/README.md`,
+  `.gitignore`.
 
 Generated (gitignored): `BankEFuncs/funcs_0.c` carries both code-generation
 fixes.
@@ -186,7 +191,74 @@ WIDESCREEN off the aspect stays `Original` and the image is unchanged. The
 game's own vertical letterbox at the top and bottom of the dialogue screen is
 part of the scene and is not filled.
 
-## 7. Open
+**A `<id>-wide.png` beside a plain image is the widescreen variant**, authored at
+16:9 and used when WIDESCREEN is on. Two measurements decided the mapping. A
+1:1 calibration square in a `1920x1080` source, stretched to the 496x384 canvas,
+displayed at 0.71 aspect (narrow) in the wide view, while a canvas-aspect source
+displayed at 0.96: the canvas-to-screen draw is ~uniform, so stretching a 16:9
+source to the canvas squeezes it. The port therefore maps the wide image
+**preserving its aspect** (`to_canvas_fit` in `app/src/hd_backgrounds.cpp`):
+scale to the canvas width, anchor to the canvas bottom, and repeat the first row
+into the rows above (the draw shows the lower part of the canvas). A 16:9 source
+becomes 496x279, and its round rose window measures round on screen. The plain
+image keeps the stretch-to-canvas mapping. The selection reads
+`widescreen_mode()` and not the live `ar_option`, because the readback runs in
+the `0x02` loader where the aspect is still `Original`. `mods/backgrounds/01.png`
+is the 4:3 arch (unchanged) and `01-wide.png` is a rose window between two
+towers at `1920x1080`. The log names the variant:
+`applied 'cathedral' (01 wide)` with WIDESCREEN on, `applied 'cathedral' (01)`
+with it off.
+
+**Running with and without the pack.** `hd_backgrounds_init` reads `OGRE_BG`:
+`0`, `off`, `false` or `no` skips the pack for one run and logs
+`[hdbg] pack disabled (OGRE_BG=0)`. `OGRE_BG_DIR`, when set, is now the *only*
+folder searched instead of the first of four, so pointing it at an empty folder
+(`OGRE_BG_DIR=/tmp/nobg`) also runs vanilla and logs
+`[hdbg] no backgrounds.txt found (looked in 1 place(s))`; pointing it at another
+folder selects that pack. All three cases were run and their `[hdbg]` lines
+checked.
+
+**Widescreen with the pack off.** The developer asked for the backdrop to expand
+in widescreen even without custom art, which corrects session 102's note that the
+large 2D backgrounds have no side data. A 4:3/wide capture pair with
+`OGRE_BG=0 OGRE_WIDESCREEN=on` shows the wide view revealing statues and columns
+at the edges that the 4:3 view crops (`/tmp/van-off-600.png` against
+`/tmp/van-on-600.png`). `expand_scenes()` in `app/src/widescreen.cpp` therefore
+defaults to the mission `0x03` **and the dialogue/cutscene scene `0x0D`**, so
+`[widescreen] aspect ratio expand (scene 0x000D, mode ON)` fires with or without
+the pack; a scene the pack covers is still added on top, and `OGRE_WS_SCENES`
+still replaces the default set. `hd_backgrounds_covers_scene` no longer gates
+`0x0D`.
+
+## 7. Reference extraction
+
+To draw the replacement, the artist needs the game's own backdrop. It is written
+by the port: with `OGRE_BG_DUMP=<dir>` set, `ogre_hd_background` assembles the
+four sub-images into the 496x384 canvas and writes `original-step<NNNN>.png` per
+assembly, before the pack replaces anything, so the switch works with no pack
+installed. `tools/backgrounds.py` drives a run from `backgrounds.txt` and files
+the result:
+
+```
+backgrounds.py list
+backgrounds.py extract 01
+backgrounds.py extract 01 --step 6
+backgrounds.py extract --all
+backgrounds.py extract 01 --from /tmp/dump
+```
+
+`make bg-extract` (`BG_ID=01` by default) is the same command. The output is
+`mods/backgrounds/reference/<id>-<name>-original.png`, and the directory is
+gitignored because it is extracted art. A run of `backgrounds.py extract 01`
+wrote `01-cathedral-original.png` (496x384, the throne-room backdrop), which is
+the reference for the placeholder.
+
+The dump is a live capture of the readback, not an offline ROM decode: the four
+sub-images are Huffman-coded `njpeg` and only the game's RSP microcode decodes
+them. One run through the opening writes the reference for every backdrop it
+assembles, so a later background needs a mapping line and a run that reaches it.
+
+## 8. Open
 
 * **True HD is not implemented.** The pack image is downscaled to the game's
   canvas, so this is a reskin. A larger texture needs RT64 texture replacement,

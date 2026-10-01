@@ -3,11 +3,18 @@
 #include "hd_backgrounds.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#if !defined(__EMSCRIPTEN__)
+// `widescreen_mode()` selects the `-wide` image. The browser build has no
+// settings screen and no widescreen mode, so it always uses the plain image.
+#include "settings.hpp"
+#endif
 
 // A single-header decoder. RT64 compiles its own copy of stb_image into the
 // renderer, so this one is `static` to keep the two from colliding at link
@@ -16,6 +23,21 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
 #include "stb/stb_image.h"
+
+// The reference extractor's PNG writer (`OGRE_BG_DUMP`). Its HDR path calls
+// `sprintf`, which Clang marks deprecated; the header is vendored and that path
+// is unused here, so silence the one warning rather than carry it in every
+// build's log.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include "stb/stb_image_write.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 namespace {
 
@@ -63,7 +85,8 @@ struct Entry {
     std::string name;
     uint16_t scene = 0;
     uint16_t step = 0;
-    std::vector<uint16_t> pixels;  // kCanvasW x kCanvasH, guest-order RGBA5551
+    std::vector<uint16_t> pixels;       // kCanvasW x kCanvasH, guest-order RGBA5551
+    std::vector<uint16_t> pixels_wide;  // the `-wide` sibling, if the pack has one
 };
 
 struct Pack {
@@ -76,19 +99,16 @@ Pack g_pack;
 
 int to_5bit(uint32_t c) { return int((c * 31u + 127u) / 255u); }
 
-// Box filter the source to the backdrop canvas and convert to big-endian
-// RGBA5551.
-std::vector<uint16_t> to_canvas(const uint8_t* rgba, int sw, int sh) {
-    constexpr int kW = kCanvasW;
-    constexpr int kH = kCanvasH;
-    std::vector<uint16_t> out(size_t(kW) * kH);
-    for (int dy = 0; dy < kH; ++dy) {
-        const int y0 = dy * sh / kH;
-        const int y1 = std::max(y0 + 1, (dy + 1) * sh / kH);
-        for (int dx = 0; dx < kW; ++dx) {
-            const int x0 = dx * sw / kW;
-            const int x1 = std::max(x0 + 1, (dx + 1) * sw / kW);
-            uint32_t r = 0, g = 0, b = 0, a = 0, n = 0;
+// Box filter the source to `dw` x `dh` and convert to big-endian RGBA5551.
+std::vector<uint16_t> resample(const uint8_t* rgba, int sw, int sh, int dw, int dh) {
+    std::vector<uint16_t> out(size_t(dw) * dh);
+    for (int dy = 0; dy < dh; ++dy) {
+        const int y0 = dy * sh / dh;
+        const int y1 = std::max(y0 + 1, (dy + 1) * sh / dh);
+        for (int dx = 0; dx < dw; ++dx) {
+            const int x0 = dx * sw / dw;
+            const int x1 = std::max(x0 + 1, (dx + 1) * sw / dw);
+            uint32_t r = 0, g = 0, b = 0, n = 0;
             for (int sy = y0; sy < y1; ++sy) {
                 const uint8_t* row = rgba + size_t(sy) * sw * 4;
                 for (int sx = x0; sx < x1; ++sx) {
@@ -96,29 +116,63 @@ std::vector<uint16_t> to_canvas(const uint8_t* rgba, int sw, int sh) {
                     r += p[0];
                     g += p[1];
                     b += p[2];
-                    a += p[3];
                     ++n;
                 }
             }
             const uint32_t rr = to_5bit(r / n);
             const uint32_t gg = to_5bit(g / n);
             const uint32_t bb = to_5bit(b / n);
-            out[size_t(dy) * kW + dx] =
+            out[size_t(dy) * dw + dx] =
                 uint16_t((rr << 11) | (gg << 6) | (bb << 1) | 1u);  // opaque
         }
     }
     return out;
 }
 
-bool load_entry_image(Entry& e) {
-    std::filesystem::path png = g_pack.dir / (e.id + ".png");
+// Box filter the source to the backdrop canvas and convert to big-endian
+// RGBA5551. This stretches the source to the canvas shape, which is what the
+// plain image wants: the game's own canvas is the shape the draw expects.
+std::vector<uint16_t> to_canvas(const uint8_t* rgba, int sw, int sh) {
+    return resample(rgba, sw, sh, kCanvasW, kCanvasH);
+}
+
+// Fit the source into the canvas **preserving its aspect ratio**, for the
+// widescreen variant. A 16:9 image is wider than the canvas, so it fills the
+// canvas width and its height is 496*9/16 = 279 rows, anchored to the canvas
+// bottom (the lower part of the canvas is what the draw shows); the rows above
+// repeat its first row. Stretching a 16:9 source to the 496x384 canvas instead
+// displays it 29 % narrow (measured: a circle drawn 1:1 in a 1920x1080 source
+// showed at 0.71 aspect, against 0.96 for a canvas-aspect source).
+std::vector<uint16_t> to_canvas_fit(const uint8_t* rgba, int sw, int sh) {
+    std::vector<uint16_t> canvas(size_t(kCanvasW) * kCanvasH);
+    if (sw <= 0 || sh <= 0) {
+        return canvas;
+    }
+    int dw = kCanvasW;
+    int dh = std::max(1, int(std::lround(double(kCanvasW) * sh / sw)));
+    if (dh > kCanvasH) {
+        dh = kCanvasH;
+        dw = std::max(1, int(std::lround(double(kCanvasH) * sw / sh)));
+    }
+    const std::vector<uint16_t> img = resample(rgba, sw, sh, dw, dh);
+    const int x0 = (kCanvasW - dw) / 2;
+    const int y0 = kCanvasH - dh;  // bottom-anchored
+    for (int y = 0; y < kCanvasH; ++y) {
+        const int iy = std::min(std::max(y - y0, 0), dh - 1);
+        for (int x = 0; x < kCanvasW; ++x) {
+            const int ix = std::min(std::max(x - x0, 0), dw - 1);
+            canvas[size_t(y) * kCanvasW + x] = img[size_t(iy) * dw + ix];
+        }
+    }
+    return canvas;
+}
+
+// Load one image file into the canvas form, or leave `out` empty. `fit` picks
+// the aspect-preserving mapping used for the widescreen variant.
+bool load_canvas(const std::filesystem::path& png, const char* what, bool fit,
+                 std::vector<uint16_t>& out) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(png, ec)) {
-        png = g_pack.dir / (e.name + ".png");
-    }
-    if (!std::filesystem::is_regular_file(png, ec)) {
-        std::fprintf(stderr, "[hdbg] %s: no %s.png or %s.png\n", e.id.c_str(),
-                     e.id.c_str(), e.name.c_str());
         return false;
     }
     int w = 0, h = 0, comp = 0;
@@ -128,11 +182,42 @@ bool load_entry_image(Entry& e) {
                      stbi_failure_reason());
         return false;
     }
-    e.pixels = to_canvas(data, w, h);
+    out = fit ? to_canvas_fit(data, w, h) : to_canvas(data, w, h);
     stbi_image_free(data);
-    std::fprintf(stderr, "[hdbg] %-10s %-12s scene=0x%02X step=%-3u <- %s (%dx%d -> %dx%d)\n",
-                 e.id.c_str(), e.name.c_str(), e.scene, e.step,
-                 png.filename().string().c_str(), w, h, kCanvasW, kCanvasH);
+    std::fprintf(stderr, "[hdbg]   %-13s <- %s (%dx%d -> %s)\n", what,
+                 png.filename().string().c_str(), w, h,
+                 fit ? "canvas, aspect kept" : "canvas");
+    return true;
+}
+
+// An entry's image is `<id>.png` (or `<name>.png`), stretched to the canvas. A
+// `<id>-wide.png` (or `<name>-wide.png`) beside it is the widescreen variant,
+// used when the WIDESCREEN toggle is on. The wide image keeps its own aspect
+// ratio (a 16:9 source fills the canvas width and is anchored to the bottom), so
+// a widescreen-aspect source is not squeezed to the canvas's 496x384 shape. See
+// `mods/backgrounds/make-example.py` for the placeholder pair.
+bool load_entry_image(Entry& e) {
+    const std::vector<std::string> stems{e.id, e.name};
+    bool any = false;
+    for (const std::string& stem : stems) {
+        if (e.pixels.empty() &&
+            load_canvas(g_pack.dir / (stem + ".png"), stem.c_str(), false, e.pixels)) {
+            any = true;
+        }
+        if (e.pixels_wide.empty() &&
+            load_canvas(g_pack.dir / (stem + "-wide.png"), (stem + "-wide").c_str(), true,
+                        e.pixels_wide)) {
+            any = true;
+        }
+    }
+    if (!any) {
+        std::fprintf(stderr, "[hdbg] %s: no %s.png or %s.png\n", e.id.c_str(),
+                     e.id.c_str(), e.name.c_str());
+        return false;
+    }
+    std::fprintf(stderr, "[hdbg] %-10s %-12s scene=0x%02X step=%-3u%s\n", e.id.c_str(),
+                 e.name.c_str(), e.scene, e.step,
+                 e.pixels_wide.empty() ? "" : " (+ -wide)");
     return true;
 }
 
@@ -221,6 +306,78 @@ bool chunk_rect(uint32_t w, uint32_t h, int& x, int& y) {
     return true;
 }
 
+// The pass's index in the four-chunk tiling, for the dump's completion mask.
+int chunk_index(uint32_t w, uint32_t h) {
+    if (w == 320 && h == 240) {
+        return 0;
+    }
+    if (w == 176 && h == 240) {
+        return 1;
+    }
+    if (w == 320 && h == 144) {
+        return 2;
+    }
+    if (w == 176 && h == 144) {
+        return 3;
+    }
+    return -1;
+}
+
+// --- Original-backdrop dump (`OGRE_BG_DUMP=<dir>`) ---------------------------
+// The reference an artist draws a replacement from: the game's own four
+// sub-images assembled into the 496x384 canvas, written as one PNG per
+// assembly. It runs on every pass the readback copies, before the pack touches
+// the pixels, so one run dumps every backdrop it assembles and the same switch
+// covers later backgrounds. See `tools/backgrounds.py`.
+struct Dump {
+    bool enabled = false;
+    std::filesystem::path dir;
+    uint16_t step = 0xFFFF;
+    unsigned have = 0;
+    std::vector<uint16_t> canvas;
+};
+
+Dump g_dump;
+
+void dump_write_png() {
+    std::vector<uint8_t> rgba(size_t(kCanvasW) * kCanvasH * 4);
+    for (size_t i = 0; i < g_dump.canvas.size(); ++i) {
+        const uint32_t v = g_dump.canvas[i];
+        rgba[i * 4 + 0] = uint8_t(((v >> 11) & 31) * 255 / 31);
+        rgba[i * 4 + 1] = uint8_t(((v >> 6) & 31) * 255 / 31);
+        rgba[i * 4 + 2] = uint8_t(((v >> 1) & 31) * 255 / 31);
+        rgba[i * 4 + 3] = 255;
+    }
+    char name[64];
+    std::snprintf(name, sizeof(name), "original-step%04u.png", (unsigned)g_dump.step);
+    const std::filesystem::path out = g_dump.dir / name;
+    const int ok = stbi_write_png(out.string().c_str(), kCanvasW, kCanvasH, 4, rgba.data(),
+                                  kCanvasW * 4);
+    std::fprintf(stderr, "[hdbg] dump %s%s\n", out.string().c_str(), ok ? "" : " (failed)");
+}
+
+void dump_pass(const uint8_t* rdram, uint32_t base, uint32_t w, uint32_t h, int cx, int cy,
+               uint16_t step) {
+    if (!g_dump.enabled) {
+        return;
+    }
+    if (step != g_dump.step || g_dump.canvas.empty()) {
+        g_dump.step = step;
+        g_dump.have = 0;
+        g_dump.canvas.assign(size_t(kCanvasW) * kCanvasH, 0);
+    }
+    for (uint32_t row = 0; row < h; ++row) {
+        for (uint32_t col = 0; col < w; ++col) {
+            g_dump.canvas[size_t(cy + row) * kCanvasW + cx + col] =
+                load_u16(rdram, base + (row * w + col) * 2);
+        }
+    }
+    g_dump.have |= 1u << chunk_index(w, h);
+    if (g_dump.have == 0xF) {
+        dump_write_png();
+    }
+}
+
 // Debug: paint each readback pass a distinct colour, so `OGRE_BG_DEBUG=1` plus a
 // screen capture reads the four-pass composition off the screen.
 bool debug_fill(uint8_t* rdram, uint32_t base, uint32_t w, uint32_t h) {
@@ -249,18 +406,53 @@ bool debug_fill(uint8_t* rdram, uint32_t base, uint32_t w, uint32_t h) {
 }  // namespace
 
 namespace ogre {
+namespace {
+
+// `OGRE_BG=0` (or `off` / `false`) turns the pack off for one run. `OGRE_BG_DIR`
+// names the pack folder and, when set, is the only folder searched, so pointing
+// it at an empty directory is the other way to run without a pack.
+bool pack_disabled() {
+    const char* value = std::getenv("OGRE_BG");
+    if (value == nullptr) {
+        return false;
+    }
+    return std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
+           std::strcmp(value, "false") == 0 || std::strcmp(value, "no") == 0;
+}
+
+}  // namespace
 
 void hd_backgrounds_init(const std::filesystem::path& pref_dir) {
+    // The dump is independent of the pack: it writes the game's own backdrop, so
+    // it works with no `mods/backgrounds/` at all (`tools/backgrounds.py`).
+    if (const char* dump = std::getenv("OGRE_BG_DUMP"); dump != nullptr && dump[0] != '\0') {
+        std::error_code ec;
+        g_dump.dir = dump;
+        std::filesystem::create_directories(g_dump.dir, ec);
+        g_dump.enabled = !ec;
+        std::fprintf(stderr, "[hdbg] dump %s\n",
+                     g_dump.enabled ? g_dump.dir.string().c_str() : "(directory failed)");
+    }
+
+    if (pack_disabled()) {
+        std::fprintf(stderr, "[hdbg] pack disabled (OGRE_BG=%s)\n", std::getenv("OGRE_BG"));
+        return;
+    }
+
     std::vector<std::filesystem::path> candidates;
     if (const char* env = std::getenv("OGRE_BG_DIR"); env != nullptr && env[0] != '\0') {
+        // An explicit folder is the only candidate, so `OGRE_BG_DIR` can both
+        // choose a pack and (pointed at an empty folder) disable the default one.
         candidates.emplace_back(env);
     }
-    candidates.push_back(pref_dir / "mods" / "backgrounds");
-    candidates.push_back(pref_dir.parent_path() / "mods" / "backgrounds");
-    std::error_code ec;
-    const std::filesystem::path cwd = std::filesystem::current_path(ec);
-    if (!ec) {
-        candidates.push_back(cwd / "mods" / "backgrounds");
+    else {
+        candidates.push_back(pref_dir / "mods" / "backgrounds");
+        candidates.push_back(pref_dir.parent_path() / "mods" / "backgrounds");
+        std::error_code ec;
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        if (!ec) {
+            candidates.push_back(cwd / "mods" / "backgrounds");
+        }
     }
     for (const std::filesystem::path& dir : candidates) {
         if (load_pack(dir)) {
@@ -285,7 +477,7 @@ bool ogre::hd_backgrounds_covers_scene(uint16_t scene) {
 // Called by the generated njpeg readback (tools/hd_backgrounds.py) at the end of
 // each pass's row copy.
 extern "C" void ogre_hd_background(uint8_t* rdram) {
-    if (!g_pack.loaded) {
+    if (!g_pack.loaded && !g_dump.enabled) {
         return;
     }
 
@@ -313,6 +505,18 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
     // pixels start there.
     const uint32_t base = dest + (single_image ? 8u : 0u);
 
+    // The reference dump reads the game's own pixels here, before the pack
+    // replaces them.
+    int cx = 0, cy = 0;
+    const bool known_chunk = chunk_rect(w, h, cx, cy);
+    if (known_chunk) {
+        dump_pass(rdram, base, w, h, cx, cy, step);
+    }
+
+    if (!g_pack.loaded) {
+        return;
+    }
+
     if (std::getenv("OGRE_BG_DEBUG") != nullptr) {
         if (debug_fill(rdram, base, w, h)) {
             std::fprintf(stderr, "[hdbg] debug pass dest=0x%08X %ux%u step=%u\n", dest, w, h,
@@ -320,6 +524,15 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
         }
         return;
     }
+
+    // The widescreen mode selects the `-wide` image when the pack has one. The
+    // readback runs one scene early (the `0x02` loader), so the live aspect is
+    // still 4:3 there and the setting, not the current `ar_option`, is the
+    // signal.
+    bool wide = false;
+#if !defined(__EMSCRIPTEN__)
+    wide = ogre::widescreen_mode() != ogre::WidescreenMode::Off;
+#endif
 
     const Entry* match = find_entry(scene, next_scene, step);
     if (std::getenv("OGRE_BG_LOG") != nullptr) {
@@ -332,8 +545,7 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
         return;
     }
 
-    int cx = 0, cy = 0;
-    if (!chunk_rect(w, h, cx, cy)) {
+    if (!known_chunk) {
         std::fprintf(stderr, "[hdbg] %s: no canvas rect for a %ux%u pass\n",
                      match->name.c_str(), w, h);
         return;
@@ -344,14 +556,18 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
                      match->name.c_str(), base);
         return;
     }
+    const bool use_wide = wide && !match->pixels_wide.empty();
+    const std::vector<uint16_t>& art = use_wide ? match->pixels_wide : match->pixels;
     // Copy this pass's sub-rectangle out of the canvas.
     for (uint32_t row = 0; row < h; ++row) {
-        const uint16_t* src = &match->pixels[size_t(cy + row) * kCanvasW + cx];
+        const uint16_t* src = &art[size_t(cy + row) * kCanvasW + cx];
         uint32_t addr = base + row * w * 2;
         for (uint32_t col = 0; col < w; ++col, addr += 2) {
             store_u16(rdram, addr, src[col]);
         }
     }
-    std::fprintf(stderr, "[hdbg] applied '%s' (%s) step=%u chunk (%d,%d) %ux%u to 0x%08X\n",
-                 match->name.c_str(), match->id.c_str(), step, cx, cy, w, h, base);
+    std::fprintf(stderr,
+                 "[hdbg] applied '%s' (%s%s) step=%u chunk (%d,%d) %ux%u to 0x%08X\n",
+                 match->name.c_str(), match->id.c_str(), use_wide ? " wide" : "", step, cx, cy,
+                 w, h, base);
 }

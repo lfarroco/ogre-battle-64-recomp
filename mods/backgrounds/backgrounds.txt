@@ -10,13 +10,19 @@
 # step   the scripted step number that selects it (`D_8018F1C0`).
 #
 # The port replaces the background image the game assembles for that (scene,
-# step) pair with the PNG, scaled to the game's own 320x240 backdrop. See
-# `docs/guides/hd-backgrounds.md`.
+# step) pair with the PNG. See `docs/guides/hd-backgrounds.md`.
+#
+# A file named `<id>-wide.png` (or `<name>-wide.png`) beside the plain one is
+# the widescreen variant: it is used when the WIDESCREEN setting is on. Author
+# it in the widescreen aspect (16:9); the port scales it to the canvas width
+# without stretching it, so circles stay round. It is optional: without it the
+# plain image is used in both modes.
 #
 # Scene 0x0D is the dialogue/cutscene scene of the New Game opening. Step 2 is
 # the cathedral (Archbishop Odiron). The opening's steps 1..19 are decoded in
 # docs/HANDOFF-2026-09-15-session44.md.
 #
 # Lines that start with '#' and blank lines are ignored.
-
-01  cathedral  0x0D  2
+#
+# id  name       scene step
+01    cathedral  0x0D  2

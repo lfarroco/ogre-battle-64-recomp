@@ -1,5 +1,8 @@
 # ROM and derived assets (never commit copyrighted material)
 assets/
+# Extracted backdrop references (tools/backgrounds.py writes the game's own
+# images here so HD replacements can be drawn over them).
+mods/backgrounds/reference/
 
 # Generated artifacts
 build/

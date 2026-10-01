@@ -96,11 +96,17 @@ Organize Screen, the credits, the ending and the attract loop.
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over
   the pixels the njpeg readback copies, split to match the game's four-chunk
   496x384 backdrop canvas, so one PNG fills the whole backdrop. The first
-  mapping is scene `0x0D` step 2 (the New Game cathedral). With WIDESCREEN on, a
-  scene the pack covers is added to the RT64 Expand set, so the backdrop fills
-  the 16:9 window and reveals more of the canvas at the sides while the dialogue
-  box and text keep their size. It is a reskin at the game's resolution, and not
-  an HD texture replacement. See `docs/guides/hd-backgrounds.md` and
+  mapping is scene `0x0D` step 2 (the New Game cathedral), with a plain
+  `01.png` and a widescreen `01-wide.png`. With WIDESCREEN on, scene `0x0D`
+  expands whether or not the pack is installed (its own 496x384 backdrop has
+  content the 4:3 view crops), and a scene the pack covers is added to the RT64
+  Expand set, so the backdrop fills the 16:9 window and reveals more of the
+  canvas at the sides while the dialogue box and text keep their size.
+  `OGRE_BG=0` runs without the pack. `tools/backgrounds.py` (and `make
+  bg-extract`) extracts the game's own backdrop as the reference an artist
+  draws over; the output lives in the gitignored `mods/backgrounds/reference/`.
+  It is a reskin at the game's resolution, and not an HD texture replacement.
+  See `docs/guides/hd-backgrounds.md` and
   `docs/HANDOFF-2026-09-29-session113.md`.
 - **Performance** — four misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed

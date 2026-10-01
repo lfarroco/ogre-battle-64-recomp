@@ -11,9 +11,11 @@ namespace ogre {
 //
 // The setting (`settings.hpp`) is a toggle, not an aspect ratio: RT64 has one
 // Expand mode, and this decides when it is on. `Off` is always 4:3, and `On` is
-// Expand while the dispatcher runs a scene in the expand set (the mission
-// `0x03`, plus every scene the HD-background pack covers) and 4:3 elsewhere, in
-// a window that stays 16:9 either way.
+// Expand while the dispatcher runs a scene in the expand set (the mission `0x03`
+// and the dialogue/cutscene scene `0x0D`, plus every scene the HD-background
+// pack covers) and 4:3 elsewhere, in a window that stays 16:9 either way.
+// Scene `0x0D` expands with or without the pack: its own 496x384 backdrop has
+// content the 4:3 view crops, so the wider view reveals it.
 //
 // Called once per frame from the app's `update_gfx` callback, because the
 // scene can change on any frame. The function reads the live

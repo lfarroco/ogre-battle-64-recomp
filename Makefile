@@ -257,6 +257,22 @@ example-mods: mod-syms
 	tools/build-example-mods.sh
 
 # ---------------------------------------------------------------------------
+# Backdrop references for HD backgrounds.
+#
+# `tools/backgrounds.py` runs the app with `OGRE_BG_DUMP`, which writes the
+# game's own dialogue/cutscene backdrop (the four njpeg sub-images assembled
+# into the 496x384 canvas) as a PNG, and files it under
+# `mods/backgrounds/reference/`. That directory is gitignored: it is extracted
+# art. Needs a built app and the ROM.
+#
+#   make bg-extract              # id 01 (the cathedral), from backgrounds.txt
+#   make bg-extract BG_ID=02     # another mapping
+# ---------------------------------------------------------------------------
+.PHONY: bg-extract
+bg-extract:
+	python3 tools/backgrounds.py extract $(or $(BG_ID),01)
+
+# ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C
 # also uses (see config/banks/config-bankA.yaml / config/banks/config-bankC.yaml). Kept separate because
