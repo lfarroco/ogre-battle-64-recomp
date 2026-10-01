@@ -91,7 +91,11 @@ Organize Screen, the credits, the ending and the attract loop.
   16:9 with the 4:3 scenes pillarboxed inside. SOUNDS is a radio group
   (`off` / `on`) and VOLUME a 0..100 slider; the audio callback scales every
   queued buffer by the gain and queues silence rather than nothing at `off`, so
-  the runtime's queue-depth pacing is unchanged (session 106).
+  the runtime's queue-depth pacing is unchanged (session 106). A connected pad
+  fills `Platform::controllers[0]`, the N64 controller the game reads, with the
+  keyboard OR'd into the same slot; pads used to fill slots 1..3, so a pad was
+  visible in the launcher and the overlay and invisible in game (session 118,
+  issue #13).
 - **HD backgrounds (experiment)** — `mods/backgrounds/` is a pack of PNGs that
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over
   the pixels the njpeg readback copies, split to match the game's four-chunk
@@ -295,6 +299,13 @@ holds the evidence.
     (c) the audio auto-response on `0x800C49E8` is a behaviour shim, not a log:
     firing the real `OS_EVENT_AI` when a buffer drains lets it be deleted.
     See `docs/HANDOFF-2026-10-01-session117.md` for the full list.
+13. **The browser build assigns gamepads to N64 controllers 2-4.** The native
+    fix for issue #13 landed in `app/src/sdl_platform.cpp` (the first pad takes
+    slot 0), but `app/web/web.js` still places gamepads in slots 1..3 with the
+    keyboard alone in slot 0, and `app/src/web_platform.cpp` documents the same
+    model. A browser gamepad therefore cannot reach N64 controller 1 either
+    (`docs/HANDOFF-2026-10-01-session118.md`). The change is to OR the first
+    pad's state into slot 0; it needs a wasm build and a browser run to verify.
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off

@@ -632,9 +632,14 @@ void pump_sdl_events(Platform& platform, bool* quit) {
                 if (controller == nullptr) {
                     continue;
                 }
-                // Slot 0 is keyboard-first, so a pad fills slots 1..3.
+                // A pad fills the first free slot, starting at 0. Slot 0 is N64
+                // controller 1, the only controller this game reads, and the
+                // keyboard is OR'd into it by get_input(), so a pad and the
+                // keyboard both drive it. A pad that never reaches slot 0 is
+                // invisible in game (issue #13: SDL opened the pad in slot 1,
+                // the overlay saw it and the game did not).
                 bool placed = false;
-                for (int slot = 1; slot < 4; slot++) {
+                for (int slot = 0; slot < 4; slot++) {
                     if (platform.controllers[slot] == nullptr) {
                         platform.controllers[slot] = controller;
                         placed = true;
@@ -645,9 +650,14 @@ void pump_sdl_events(Platform& platform, bool* quit) {
                     SDL_GameControllerClose(controller);
                 }
             }
-            if (platform.controllers[1] != nullptr) {
-                fprintf(stderr, "[input] controller 2: %s\n",
-                        SDL_GameControllerName(platform.controllers[1]));
+            // One line per filled slot: which N64 controller each pad drives.
+            // The old log printed only slot 1, so a pad in slot 0 was reported
+            // as "controller 1" by silence.
+            for (int slot = 0; slot < 4; slot++) {
+                if (platform.controllers[slot] != nullptr) {
+                    fprintf(stderr, "[input] controller %d: %s\n", slot + 1,
+                            SDL_GameControllerName(platform.controllers[slot]));
+                }
             }
         }
     }
@@ -782,14 +792,36 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         }
         else if (event.type == SDL_CONTROLLERDEVICEADDED) {
             SDL_JoystickID joy_id = event.cdevice.which;
+            // SDL queues an ADDED event for every pad that was already connected
+            // at init, which the enumeration above has already opened. Opening
+            // the same pad again would report it as a second N64 controller.
+            const SDL_JoystickID instance_id = SDL_JoystickGetDeviceInstanceID(joy_id);
+            bool already_open = false;
+            for (SDL_GameController* slot : platform.controllers) {
+                if (slot != nullptr &&
+                    SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(slot)) == instance_id) {
+                    already_open = true;
+                    break;
+                }
+            }
+            if (already_open) {
+                continue;
+            }
             SDL_GameController* controller = SDL_GameControllerOpen(joy_id);
             if (controller != nullptr) {
-                // Assign to the first free N64 slot (slot 0 is keyboard-first).
-                for (int slot = 1; slot < 4; slot++) {
+                // First free N64 slot, starting at 0 (see the enumerate block
+                // above). Close the handle when all four slots are taken, so a
+                // fifth pad does not leak an open controller.
+                bool placed = false;
+                for (int slot = 0; slot < 4; slot++) {
                     if (platform.controllers[slot] == nullptr) {
                         platform.controllers[slot] = controller;
+                        placed = true;
                         break;
                     }
+                }
+                if (!placed) {
+                    SDL_GameControllerClose(controller);
                 }
             }
         }

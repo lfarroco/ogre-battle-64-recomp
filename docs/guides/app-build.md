@@ -1613,6 +1613,18 @@ The file is line-oriented (`<n64 tag>.<key|pad> = <value>`); `-` and `none` are
 unbound, and a missing file leaves the defaults. Key names are SDL's
 (`SDL_GetScancodeName`), so the file is readable and survives SDL updates.
 
+### Which N64 controller a pad drives
+
+The game reads N64 controller 1 only, so the first connected pad fills
+`Platform::controllers[0]` and the keyboard is OR'd into the same slot: both
+drive player 1 at the same time. A second pad fills slot 1 (N64 controller 2) and
+so on, and this game never polls those. Before session 118 a pad filled slots
+1..3, so it worked in the launcher and the overlay and did nothing in game
+(issue #13). SDL queues an `SDL_CONTROLLERDEVICEADDED` event for every pad that
+was already connected at startup, so the app enumerates the connected set once
+and skips an ADDED event for a device it already holds; the enumeration prints
+one `[input] controller <n>: <name>` line per filled slot.
+
 ### The CONTROLS tab
 
 ```
