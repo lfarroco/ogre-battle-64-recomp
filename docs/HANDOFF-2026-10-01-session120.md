@@ -104,9 +104,11 @@ only the check's view of the tree is wrong.
 The third line is a second defect in the same function. `plume_vulkan.cpp` is in
 `tools/rt64-plume-sdl.patch`, which the hosted path applies to the plume tree as
 well, and not in `patches/rt64-plume-ob64.patch`, which was the only patch file
-`check` compared that tree against. Reproduced with `git -C tools/RT64 worktree
-add debug/pcheck-rt64 4337374`, `git submodule update --init --recursive`, and the
-workflow's three `git apply --ignore-whitespace` commands.
+`check` compared that tree against. The sdl patch cannot be content-checked here:
+it targets plume's own pristine `plume_vulkan.cpp`, and this tree's post-image
+for that file is deliberately not what the patch produces. It is therefore
+counted for coverage and not compared, which is what stops the plume tree
+reporting the file as "changed in the tree and in no patch".
 
 Both are fixed in `tools/patchcheck.py`:
 
@@ -116,15 +118,24 @@ Both are fixed in `tools/patchcheck.py`:
   `/dev/null` with `git diff --no-index`, which produces the "new file mode"
   block a patch carries. Diffing against the empty tree instead does not report
   an untracked path.
-- The check now groups the targets by tree and covers each tree's changes with
-  the union of every patch that targets it, so a path only a sibling patch
-  carries is not a missing hunk. `tools/rt64-plume-sdl.patch` is in `TARGETS` as
-  the plume tree's second patch rather than being special-cased by name.
+- The check groups the targets by tree and covers each tree's changes with the
+  union of every patch that targets it, so a path only a sibling patch carries is
+  not a missing hunk. `COVERAGE_ONLY` holds the patches that are applied on the
+  hosted path but have no post-image here; `tools/rt64-plume-sdl.patch` is its
+  only entry.
 
 Still checked, on the patched pristine trees: a covered file whose content
 drifts (`librecomp/src/heap.cpp: the tree's diff differs from the patch`), an
 untracked new file no patch carries, and a tree change no patch carries.
 `--fix` still refuses a tree that more than one patch targets.
+
+Verified against the hosted path itself, not only the developer's tree: worktrees
+at the pinned commits (`589bbf0`, `4337374`), the workflow's five `git apply`
+commands, then this script — that is what run `36886502987` did with the same
+file, and it passed where `36884300969` had failed. The first attempt at this fix
+shipped the union rule without listing the sdl patch, and the Windows job of run
+`36886502987` failed on `plume_vulkan.cpp` alone; the replay above is what caught
+it.
 
 ### Verified
 

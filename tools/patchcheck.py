@@ -58,6 +58,17 @@ TARGETS = [
     ("tools/RT64/src/contrib/plume", "patches/rt64-plume-ob64.patch"),
 ]
 
+# Patches the hosted path applies that have no post-image in this tree, so their
+# content cannot be checked here. They still count as covering the paths they
+# carry: `tools/rt64-plume-sdl.patch` edits `plume_vulkan.cpp`, which no tracked
+# patch carries, and without this the plume tree would report that file as
+# "changed in the tree and in no patch". It targets plume's own pristine
+# `plume_vulkan.cpp`, so the file's post-image in this tree is deliberately not
+# what the patch produces.
+COVERAGE_ONLY = [
+    ("tools/RT64/src/contrib/plume", "tools/rt64-plume-sdl.patch"),
+]
+
 
 def git(repo: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(repo), *args],
@@ -180,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     # Group by tree first: the coverage question ("is this tree change in some
     # patch?") is about the tree, while the content question is per patch.
     per_tree: dict[str, list[tuple[str, Path]]] = {}
+    coverage_only: dict[str, list[str]] = {}
     failed = False
     for repo_rel, patch_rel in TARGETS:
         repo = ROOT / repo_rel
@@ -188,14 +200,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skip  {patch_rel}: {repo_rel} is not checked out")
             continue
         per_tree.setdefault(repo_rel, []).append((patch_rel, patch_path))
+    for repo_rel, patch_rel in COVERAGE_ONLY:
+        patch_path = ROOT / patch_rel
+        if patch_path.is_file():
+            coverage_only.setdefault(repo_rel, []).append(patch_rel)
 
     for repo_rel, patches in per_tree.items():
         repo = ROOT / repo_rel
         blocks = split_patch(tree_changes(repo, args.verbose))
         covered: set[str] = set()
         texts = {patch_rel: patch_path.read_text() for patch_rel, patch_path in patches}
+        for rel in coverage_only.get(repo_rel, []):
+            texts[rel] = (ROOT / rel).read_text()
         for text in texts.values():
             covered |= set(split_patch(text))
+        for rel in coverage_only.get(repo_rel, []):
+            print(f"skip  {rel}: no post-image in {repo_rel}; counted as coverage")
 
         for patch_rel, patch_path in patches:
             problems = check_one(repo_rel, split_patch(texts[patch_rel]), covered,
