@@ -139,15 +139,23 @@ Organize Screen, the credits, the ending and the attract loop.
   8 MiB RDRAM image with the game threads parked and, for `ms`, RT64's
   presented-frame capture for the same screen, so a player-reported defect can be
   read offline without a bounded run (`docs/guides/app-build.md`, session 101).
-- **Windows** — v0.4.0's access violation on the first present is root-caused and
-  fixed on main: the presented-frame capture was left enabled by
+- **Windows** — v0.4.0's access violation on the first present is fixed, released
+  and confirmed by a Windows run. The presented-frame capture was left enabled by
   `init_capture_env`'s `putenv` name-mangling (the UCRT copies the string), and
   RT64's readback handed the D3D12 backend a null texture. The capture path is
   now app-owned and the D3D12 copy skips sample positions for a buffer
-  destination (session 107). **Those two changes were not in any release**: the
-  hosted runner builds the third-party trees from `patches/`, and both RT64
-  patches had drifted from them (session 117). The patches are regenerated and
-  `make patch-check` now fails when a patch stops describing its tree.
+  destination (session 107). The released Windows package of 2026-09-28 carries
+  the fix: session 113 measured it opening its window on the developer's GeForce
+  940MX / Intel HD 620 laptop with `d3d12.dll` and `D3D12Core.dll` loaded and no
+  `vulkan-1.dll`, exit 0 and no new `error.log`. Players on v0.4.0 need the newer
+  package. **Those two changes were not in any release**: the hosted runner
+  builds the third-party trees from `patches/`, and both RT64 patches had drifted
+  from them (session 117). The patches are regenerated and `make patch-check` now
+  fails when a patch stops describing its tree. The captured `stdout`/`stderr`
+  sections are empty in an Explorer launch because the process starts with NULL
+  standard handles, and in that state the capture records nothing at all
+  (session 119). A player's report therefore carries no log, and
+  `ogrebattle64.exe > run.log 2>&1` from a shell discards the redirect as well.
 - **Release parity** — a GitHub-hosted release builds three different sources: the
   public repository, the private generated-code bundle (`ogre-data/files.tar.gz`,
   which has a commit-drift check), and the `patches/` applied to pristine
@@ -174,29 +182,36 @@ run produces is evidence about the port until the five checks in
 Ordered by how much each item blocks a player. Each item names the handoff that
 holds the evidence.
 
-1. **Windows access violation when the game starts (`0xC0000005`).** Split by
-   session 107:
-   (a) **v0.4.0 crashes on the first present on Windows, and it is fixed on
-   main.** The report's `fault instruction` (`ogrebattle64.exe+0x10001AE`) is
-   `plume::d3d12::D3D12CommandList::setSamplePositions` with a null `texture`
-   argument, called from `copyTextureRegion` with a `PlacedFootprint` (buffer)
-   destination. The only such call is the port's presented-frame readback, and it
-   ran because `init_capture_env` hid `OGRE_CAPTURE_PRESENT` by rewriting the
-   first byte of a `putenv`'d name, which the UCRT's copying `_putenv` ignores.
+1. **Windows access violation when the game starts (`0xC0000005`). Closed, and
+   verified on Windows (session 113).** Session 107 root-caused v0.4.0's fault at
+   `ogrebattle64.exe+0x10001AE`: `plume::d3d12::D3D12CommandList::setSamplePositions`
+   with a null `texture`, called from `copyTextureRegion` with a `PlacedFootprint`
+   (buffer) destination, which is the port's own presented-frame readback. The
+   readback ran because `init_capture_env` hid `OGRE_CAPTURE_PRESENT` by rewriting
+   the first byte of a `putenv`'d name, which the UCRT's copying `_putenv` ignores.
    `snap` now toggles an app-owned path through `ogre_present_capture_path()`,
    the D3D12 path skips sample positions for a non-texture destination, and
-   `tools/smoke-dist.sh` fails a package whose capture is on. Verified on macOS
-   only; players on v0.4.0 need a release. See
-   `docs/HANDOFF-2026-09-27-session107.md`.
-   (b) **The developer's Windows laptop fails on every release, v0.3.0
-   included**, which has no capture code, so that is a different crash. The
-   console build printed RT64's `Falling back to Vulkan due to device
-   workaround.` just before it; the fallback destroys the D3D12 device and builds
-   a Vulkan interface on the same window.
-   `OGRE_GRAPHICS_API=<auto|d3d12|vulkan|metal>` lets a player pin the backend.
-   Every Windows report so far has had empty captured `stdout`/`stderr` sections,
-   so the device, the driver version and whether the fallback ran have never been
-   visible; that capture is itself open. See
+   `tools/smoke-dist.sh` fails a package whose capture is on. The released Windows
+   package of 2026-09-28 contains the fix and not the defect (the pre-fix
+   `OGRE_CAPTURE_PRESENT=` string is absent, session 107's `capture path:` strings
+   are present), and a bounded run on the laptop that produced the report
+   initializes D3D12 (`d3d12.dll`, `D3D12Core.dll`, no `vulkan-1.dll`), opens its
+   window, exits 0 and writes no `error.log`. Part (b), the failure on releases
+   older than the capture code, no longer reproduces: RT64's
+   `Falling back to Vulkan due to device workaround.` did not run, because the
+   adapters report Intel `31.0.101.2140` and NVIDIA `32.0.15.8266` (582.66),
+   both above session 94e's thresholds. The captured `stdout`/`stderr` sections
+   are empty in an Explorer launch, and that is now root-caused: the process
+   starts with NULL standard handles, and in that state the capture records
+   nothing — a six-second boot puts 101 `stdout` and 53 `stderr` lines into the
+   report with valid handles and 0 lines with NULL handles, so the device, the
+   driver version and the fallback are still not visible in a player's report.
+   The proposed fix is to give fds 1/2 a real destination before
+   `crash_log::install`, and to stop the `AttachConsole` branch from freopening
+   `CONOUT$` over an inherited redirection. See
+   `docs/HANDOFF-2026-09-30-session119.md`,
+   `docs/HANDOFF-2026-09-30-session113.md`,
+   `docs/HANDOFF-2026-09-27-session107.md` and
    `docs/HANDOFF-2026-09-20-session94.md` part 5.
 2. **SIGBUS after a lost battle, `func_800862C0+0x59A` at guest `0x80086328`.**
    The faulting instruction is identified and the writer is not. The instruction
@@ -263,9 +278,9 @@ holds the evidence.
    only the mods and the recorded commit. The re-run (`36349726660`) completed
    success on all three platforms and its Release job produced **`v0.5.0` as a
    draft**, whose Linux and macOS archives both contain
-   `mods/exp-overflow.nrm` and `mods/skip-boot-logos.nrm`. Publishing that draft
-   is what makes the fixed packages available; the published `v0.4.0` assets still
-   have the empty `mods/`.
+   `mods/exp-overflow.nrm` and `mods/skip-boot-logos.nrm`. That release is
+   published: session 113's download carries both mods and the session-107 fix.
+   The published `v0.4.0` assets still have the empty `mods/`.
    See `docs/HANDOFF-2026-09-27-session111.md`.
 10. **HD backgrounds: true HD needs the renderer.** `mods/backgrounds/` reskins
     the backdrop at the game's own 320x240 (box-filtered to the 496x384 canvas),
