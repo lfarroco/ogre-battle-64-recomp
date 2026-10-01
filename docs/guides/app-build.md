@@ -440,10 +440,20 @@ when that differs from the commit being built.
 regenerates, packs and reports the bundle, the commit it would push and the run
 it would start, and changes nothing outside this tree.
 
+The generated code is a function of the ROM and `config/`, so a commit that
+changes only tooling or documentation leaves the bundle byte-identical. The
+script compares the packed code with the tree (the workflow cannot: it has no
+ROM) and, when they agree, repacks the archive with the commit being released,
+because the workflow refuses a bundle whose recorded commit differs from the
+build's.
+
 ```sh
 VERSION=v0.6.0          # required only to override; default: newest tag + 1
 DATA_REPO=OWNER/REPO    # default: the OGRE_DATA_REPO Actions variable
 REGEN=0                 # use the generated code already in the tree
+SKIP_BUNDLE=1           # reuse dist/ogre-data/files.tar.gz; for a retry after
+                        # the workflow failed. The code comparison still runs
+                        # and the bundle is re-recorded if it is identical
 DRAFT=false             # publish instead of drafting
 NO_WAIT=1               # do not wait for the run
 make release

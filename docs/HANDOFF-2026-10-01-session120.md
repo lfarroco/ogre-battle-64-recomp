@@ -167,6 +167,15 @@ it.
   the retry reuses the bundle already committed to the private repository
   (`b89d7ba`, `generated code at 2ef54ec, with the example mods`) instead of
   regenerating it; its drift check still runs.
+- That reuse exposed a second fragility, now fixed: the script refused a bundle
+  whose recorded commit differed, so a commit that changes only tooling or
+  documentation — which leaves the generated code byte-identical — invalidated a
+  correct bundle, and the workflow refuses on the recorded commit alone because
+  the runner has no ROM with which to check the code. The script now compares the
+  packed code with the tree first and, when it is identical, repacks the archive
+  with the commit being released: `the code is identical, but the bundle records
+  c31554f; repacking with 1ae9ba9…`, 190 entries preserved. The release of
+  `1ae9ba9` used it and recorded `e79d98c` in the private repository.
 
 ### Open
 
