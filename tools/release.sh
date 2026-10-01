@@ -27,6 +27,8 @@
 #   DATA_REPO            private repository slug (default: the Actions variable
 #                        OGRE_DATA_REPO, see `gh variable list`)
 #   REGEN=0              skip the regeneration in step 1
+#   SKIP_BUNDLE=1        reuse dist/ogre-data/files.tar.gz (a retry after the
+#                        workflow failed; the drift check still runs)
 #   NO_PUSH=1            stop after packing; do not push or dispatch
 #   NO_WAIT=1            do not wait for the workflow run
 #   DRAFT=false          create a published release instead of a draft
@@ -45,6 +47,7 @@ die()  { printf '\033[31mrelease: %s\033[0m\n' "$*" >&2; exit 1; }
 
 version=${VERSION:-${1:-}}
 regen=${REGEN:-1}
+skip_bundle=${SKIP_BUNDLE:-0}
 no_push=${NO_PUSH:-0}
 no_wait=${NO_WAIT:-0}
 draft=${DRAFT:-true}
@@ -126,15 +129,15 @@ else
     git -C "$tmp/data" log --oneline -1
 fi
 
-# --- regenerate -------------------------------------------------------------
-# The bundle is generated code, so regenerate it rather than trusting what is
-# in the tree: N64Recomp is deterministic, so an up-to-date tree reproduces
-# what is already there, and a tree holding code from an earlier commit is
-# corrected. The order is `make regenerate`'s and load-bearing: `make recomp`
-# dispatches the cross-bank calls against the records that `make bank-recomp`
-# writes into app/src/bank_funcs.inc, and it refuses to run without them.
-# REGEN=0 skips all of this and trusts the tree.
-if [ "$regen" = 1 ]; then
+# --- regenerate and pack ----------------------------------------------------
+# SKIP_BUNDLE=1 reuses the bundle already in dist/ogre-data. It is for a retry
+# after the *workflow* failed: the bundle is committed, so regenerating it costs
+# minutes and cannot change the outcome. The drift check below still runs, so a
+# bundle that is not this commit's code is still refused.
+if [ "$skip_bundle" = 1 ]; then
+    [ -f "$bundle_out" ] || die "SKIP_BUNDLE=1 but $bundle_out does not exist"
+    step "[2/4] SKIP_BUNDLE=1: reusing dist/ogre-data/files.tar.gz"
+elif [ "$regen" = 1 ]; then
     step "[2/4] regenerating the game code and the example mods"
     make bank-recomp
     make recomp
@@ -149,31 +152,33 @@ else
     warn "REGEN=0: using the generated code already in this tree"
 fi
 
-# --- pack -------------------------------------------------------------------
-step "[3/4] packing the data bundle"
-# Report the drift before packing, because this is where the release gains the
-# work committed after the previous bundle: the bundle records the commit it was
-# generated from, and only the commit check makes the workflow refuse one that
-# no longer describes the tree. A bundle is correct for its own commit, so a
-# stale one is not detectable by comparison alone.
-if [ -f "$bundle_out" ]; then
-    previous=$(tar xzOf "$bundle_out" ogre-data.txt 2>/dev/null \
-        | sed -n 's/^public commit: //p' || true)
-    if [ -n "$previous" ] && [ "$previous" != "$commit" ]; then
-        if git cat-file -e "$previous^{commit}" 2>/dev/null; then
-            warn "the existing bundle was generated at ${previous:0:7}, $(git rev-list --count "$previous..$commit") commit(s) behind $commit, and is replaced"
-        else
-            warn "the existing bundle was generated at ${previous:0:7}, which is not in this checkout, and is replaced"
+if [ "$skip_bundle" != 1 ]; then
+    step "[3/4] packing the data bundle"
+    # Report the drift before packing, because this is where the release gains
+    # the work committed after the previous bundle: the bundle records the commit
+    # it was generated from, and only the commit check makes the workflow refuse
+    # one that no longer describes the tree. A bundle is correct for its own
+    # commit, so a stale one is not detectable by comparison alone.
+    if [ -f "$bundle_out" ]; then
+        previous=$(tar xzOf "$bundle_out" ogre-data.txt 2>/dev/null \
+            | sed -n 's/^public commit: //p' || true)
+        if [ -n "$previous" ] && [ "$previous" != "$commit" ]; then
+            if git cat-file -e "$previous^{commit}" 2>/dev/null; then
+                warn "the existing bundle was generated at ${previous:0:7}, $(git rev-list --count "$previous..$commit") commit(s) behind $commit, and is replaced"
+            else
+                warn "the existing bundle was generated at ${previous:0:7}, which is not in this checkout, and is replaced"
+            fi
         fi
     fi
+    tools/data-bundle.sh
 fi
-tools/data-bundle.sh
 
 # The bundle carries code generated from the ROM at whatever state this tree
 # was in when it was last regenerated. Nothing in the bundle records that, and
 # the workflow can only compare commits, so prove the two agree: unpack it and
 # compare every file it holds against the tree. This is what catches a release
-# prepared without `make recomp` after a change to the ROM-derived inputs.
+# prepared without `make recomp` after a change to the ROM-derived inputs, and
+# it is why SKIP_BUNDLE still checks.
 echo "==> checking that the bundle is this tree's generated code"
 tar xzf "$bundle_out" -C "$tmp" ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc
 recorded=$(sed -n 's/^public commit: //p' "$tmp/ogre-data.txt")
@@ -185,7 +190,8 @@ drift=$(diff -rq "$tmp/RecompiledFuncs" RecompiledFuncs; \
 if [ -n "$drift" ]; then
     printf '%s\n' "$drift" >&2
     die "the bundle does not match the tree (above). It was packed from code
-       generated before the current inputs; re-run without REGEN=0."
+       generated before the current inputs; re-run without REGEN=0 or
+       SKIP_BUNDLE=1."
 fi
 echo "    identical: RecompiledFuncs/ Bank*Funcs/ RspFuncs/ app/src/bank_funcs.inc"
 

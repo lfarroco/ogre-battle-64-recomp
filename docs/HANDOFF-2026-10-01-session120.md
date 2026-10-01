@@ -67,6 +67,65 @@ workflow compares the two. Nothing regenerates it on its own, and the release
 must be built from a commit whose code the bundle holds, so the regeneration is
 part of preparing the release rather than a refresh that can be skipped.
 
+### The first run failed on an unrelated pre-existing defect, which is fixed
+
+The dispatched run `36884300969` unpacked the bundle successfully — the reported
+failure is gone — and then failed on macOS at
+
+```
+FAIL  patches/n64modernruntime-ob64.patch does not describe tools/N64ModernRuntime
+        ultramodern/src/function_trace.cpp: in the patch, and the tree does not change it
+FAIL  patches/n64modernruntime-n64recomp.patch does not describe tools/N64ModernRuntime/N64Recomp
+        LiveRecomp/live_generator_wasm.cpp: in the patch, and the tree does not change it
+FAIL  patches/rt64-plume-ob64.patch does not describe tools/RT64/src/contrib/plume
+        plume_vulkan.cpp: changed in the tree and in no patch, so it ships nowhere
+```
+
+`tools/patchcheck.py` passed on this machine and failed on the hosted runner,
+and the cause is the same in all three lines: **the check could not see a file
+that a patch creates.** `patches/n64modernruntime-ob64.patch` creates
+`ultramodern/src/function_trace.cpp` (`new file mode 100644`, 925 lines) and
+`patches/n64modernruntime-n64recomp.patch` creates
+`LiveRecomp/live_generator_wasm.cpp`. The runner's "Prepare third-party trees"
+step applies those two patches with a plain `git apply` and never stages them,
+so the new files sit untracked in the tree, and `git diff HEAD` does not report
+untracked files. `check` therefore saw no block for them and printed "in the
+patch, and the tree does not change it". On this machine the files are in the
+index, which is why the same check passes here.
+
+Reproduced at the pinned commits: `git -C tools/N64ModernRuntime worktree add
+debug/pcheck-rt 589bbf0`, `git apply --ignore-whitespace ../../patches/n64modernruntime-ob64.patch`
+there, then `ls-files --others --exclude-standard` lists
+`ultramodern/src/function_trace.cpp` and
+`git hash-object` on it is `786872e2de96a25c7cef3e63c6f313f404311996`, the blob
+the patch's `index 0000000..786872e` line names. The file's content is correct;
+only the check's view of the tree is wrong.
+
+The third line is a second defect in the same function. `plume_vulkan.cpp` is in
+`tools/rt64-plume-sdl.patch`, which the hosted path applies to the plume tree as
+well, and not in `patches/rt64-plume-ob64.patch`, which was the only patch file
+`check` compared that tree against. Reproduced with `git -C tools/RT64 worktree
+add debug/pcheck-rt64 4337374`, `git submodule update --init --recursive`, and the
+workflow's three `git apply --ignore-whitespace` commands.
+
+Both are fixed in `tools/patchcheck.py`:
+
+- `tree_changes()` is `git diff HEAD` plus an untracked-file pass. The untracked
+  pass asks `git ls-files --others --exclude-standard`, which respects the
+  repositories' own `.gitignore` files, and diffs each remaining file against
+  `/dev/null` with `git diff --no-index`, which produces the "new file mode"
+  block a patch carries. Diffing against the empty tree instead does not report
+  an untracked path.
+- The check now groups the targets by tree and covers each tree's changes with
+  the union of every patch that targets it, so a path only a sibling patch
+  carries is not a missing hunk. `tools/rt64-plume-sdl.patch` is in `TARGETS` as
+  the plume tree's second patch rather than being special-cased by name.
+
+Still checked, on the patched pristine trees: a covered file whose content
+drifts (`librecomp/src/heap.cpp: the tree's diff differs from the patch`), an
+untracked new file no patch carries, and a tree change no patch carries.
+`--fix` still refuses a tree that more than one patch targets.
+
 ### Verified
 
 - `make release-check VERSION=v0.6.0` ran the whole path on this machine: `make
@@ -91,6 +150,12 @@ part of preparing the release rather than a refresh that can be skipped.
   entries (`ogre-data.txt`, `BankEFuncs/funcs_0.c`, `BankNFuncs/funcs_2.c`, both
   `.nrm`). The two `.nrm` files are the same size and differ only in their ZIP
   member timestamps.
+- The first dispatched run (`36884300969`) cleared the unpack step that the
+  developer reported and failed later at `tools/patchcheck.py`; that defect is
+  fixed and verified as above. `SKIP_BUNDLE=1` was added to `tools/release.sh` so
+  the retry reuses the bundle already committed to the private repository
+  (`b89d7ba`, `generated code at 2ef54ec, with the example mods`) instead of
+  regenerating it; its drift check still runs.
 
 ### Open
 
@@ -108,7 +173,11 @@ part of preparing the release rather than a refresh that can be skipped.
 - `.github/workflows/release.yml` — the `draft` input defaults to `true`.
 - `docs/guides/app-build.md` — the release section documents `make release`,
   `make release-check` and the overrides.
+- `tools/patchcheck.py` — see new files and a second patch for one tree.
 - `PLAN.md`, `docs/STATUS-LOG.md`, `docs/DECISIONS.md`, this file.
 
 No probe was added. Generated code was regenerated, not edited, and the
-regeneration reproduced the tree byte for byte.
+regeneration reproduced the tree byte for byte. The two test worktrees
+(`debug/pcheck-rt`, `debug/pcheck-rt64`) were removed; `git -C tools/RT64
+worktree list` and `git -C tools/N64ModernRuntime worktree list` show only their
+main trees.

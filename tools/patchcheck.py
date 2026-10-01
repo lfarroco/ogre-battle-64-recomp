@@ -26,9 +26,12 @@ pristine checkout of `HEAD` reproduces the tree for that file byte for byte. A
 second pass requires every non-gitlink file the tree changes to be covered by
 some patch, which catches a tree change that no patch carries at all.
 
-`tools/rt64-plume-sdl.patch` is deliberately not checked: it targets an older
-SDL2 in a `plume_vulkan.cpp` the tree no longer patches, is applied only on the
-hosted path, and has no post-image in the tree.
+Two patch files can target one tree with disjoint file sets, and the hosted path
+applies all of them. A path that only the other patch carries is therefore not a
+missing hunk: the check compares each tree's changes against the union of every
+patch that targets it. `tools/rt64-plume-sdl.patch` is the case: it edits
+`plume_vulkan.cpp`, which the tracked `patches/rt64-plume-ob64.patch` does not
+carry, is applied only on the hosted path, and has no post-image in the tree.
 
 Usage:
     tools/patchcheck.py              # check everything, exit 1 on drift
@@ -39,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -108,11 +112,48 @@ def tree_diff(repo: Path, verbose: bool = False) -> str:
     return git(repo, *args)
 
 
-def check(repo_rel: str, patch_rel: str, verbose: bool) -> list[str]:
-    repo = ROOT / repo_rel
-    blocks = split_patch(tree_diff(repo, verbose))
-    patched = split_patch((ROOT / patch_rel).read_text())
+def untracked_diff(repo: Path) -> str:
+    """Diff blocks for untracked, non-ignored files, as new files.
 
+    A patch that creates a file leaves that file untracked when it is applied to
+    a pristine checkout, and `git diff HEAD` does not show untracked files. The
+    hosted runner applies the patches and then runs this check, so without this
+    every patch that adds a file reads as "the tree does not change it" there
+    while passing on a developer's tree, where the file was committed or staged.
+
+    `git diff <empty tree>` does not report an untracked path, so each file is
+    diffed against /dev/null with `--no-index`, which produces the same
+    "new file mode" block the patch carries.
+    """
+    listed = git(repo, "ls-files", "--others", "--exclude-standard")
+    blocks: list[str] = []
+    for rel in listed.splitlines():
+        if not rel or not (repo / rel).is_file():
+            continue
+        result = subprocess.run(
+            ["git", "-C", str(repo), "--no-pager", "diff", "--no-index",
+             "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
+             os.devnull, rel],
+            capture_output=True, text=True)
+        # `--no-index` exits 1 when the two inputs differ, the expected case.
+        if result.returncode not in (0, 1):
+            raise RuntimeError(f"git diff --no-index {rel}: {result.stderr.strip()}")
+        blocks.append(result.stdout)
+    return "".join(blocks)
+
+
+def tree_changes(repo: Path, verbose: bool = False) -> str:
+    return tree_diff(repo, verbose) + untracked_diff(repo)
+
+
+def check_one(repo_rel: str, patched: dict[str, str], covered: set[str],
+              blocks: dict[str, str], verbose: bool) -> list[str]:
+    """Compare one patch's blocks with the tree's diff.
+
+    `covered` is every path any patch targeting this tree carries. A path the
+    tree changes and only *another* patch carries is not a problem: the hosted
+    path applies that patch too.
+    """
     problems: list[str] = []
     for path, block in patched.items():
         if path not in blocks:
@@ -122,7 +163,7 @@ def check(repo_rel: str, patch_rel: str, verbose: bool) -> list[str]:
         elif verbose:
             print(f"      ok       {path}")
     for path in blocks:
-        if path not in patched:
+        if path not in covered:
             problems.append(f"{path}: changed in the tree and in no patch, so it ships nowhere")
     return problems
 
@@ -136,7 +177,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="rewrite each stale patch from its tree (git diff HEAD)")
     args = ap.parse_args(argv)
 
-    seen: dict[str, int] = {}
+    # Group by tree first: the coverage question ("is this tree change in some
+    # patch?") is about the tree, while the content question is per patch.
+    per_tree: dict[str, list[tuple[str, Path]]] = {}
     failed = False
     for repo_rel, patch_rel in TARGETS:
         repo = ROOT / repo_rel
@@ -144,24 +187,37 @@ def main(argv: list[str] | None = None) -> int:
         if not patch_path.is_file() or not (repo / ".git").exists():
             print(f"skip  {patch_rel}: {repo_rel} is not checked out")
             continue
-        seen[repo_rel] = seen.get(repo_rel, 0) + 1
-        problems = check(repo_rel, patch_rel, args.verbose)
-        if not problems:
-            print(f"ok    {patch_rel} describes {repo_rel}")
-            continue
-        failed = True
-        print(f"FAIL  {patch_rel} does not describe {repo_rel}")
-        for problem in problems:
-            print(f"        {problem}")
-        if args.fix:
-            if seen[repo_rel] > 1:
-                print("        more than one patch targets this tree; not rewriting")
-            else:
-                regenerated = tree_diff(repo)
-                patch_path.write_text(regenerated)
-                print(f"        rewritten from {repo_rel}: "
-                      f"{len(regenerated.splitlines())} lines, "
-                      f"{len(split_patch(regenerated))} file(s)")
+        per_tree.setdefault(repo_rel, []).append((patch_rel, patch_path))
+
+    for repo_rel, patches in per_tree.items():
+        repo = ROOT / repo_rel
+        blocks = split_patch(tree_changes(repo, args.verbose))
+        covered: set[str] = set()
+        texts = {patch_rel: patch_path.read_text() for patch_rel, patch_path in patches}
+        for text in texts.values():
+            covered |= set(split_patch(text))
+
+        for patch_rel, patch_path in patches:
+            problems = check_one(repo_rel, split_patch(texts[patch_rel]), covered,
+                                 blocks, args.verbose)
+            if not problems:
+                print(f"ok    {patch_rel} describes {repo_rel}")
+                continue
+            failed = True
+            print(f"FAIL  {patch_rel} does not describe {repo_rel}")
+            for problem in problems:
+                print(f"        {problem}")
+            if args.fix:
+                if len(patches) > 1:
+                    # One tree, several patches: writing the whole tree diff
+                    # into one of them would duplicate the other's hunks.
+                    print("        more than one patch targets this tree; not rewriting")
+                else:
+                    regenerated = tree_changes(repo)
+                    patch_path.write_text(regenerated)
+                    print(f"        rewritten from {repo_rel}: "
+                          f"{len(regenerated.splitlines())} lines, "
+                          f"{len(split_patch(regenerated))} file(s)")
 
     if failed:
         print("\nThe hosted release builds from these patch files, applied to a pristine\n"
