@@ -170,8 +170,11 @@ wrong half of a function. Check these first.
     instruction, whether a bank unit links it; plus `--verify`, `--coverage` and
     `--entries`. Offline, ~10 s, no run needed.
 - **For "what is in RAM at the moment X happens", use the live console, and not a
-  bounded run's exit dump.** An exit dump is always too late (session 56). Start
-  the game and write commands into the watched file
+  bounded run's exit dump.** An exit dump is always too late (session 56). The
+  console is off unless the run asks for it, because a command writes guest RAM:
+  set `OGRE_LIVE_CONSOLE=1` (or name the trigger's own variable —
+  `OGRE_CONSOLE_FILE`, `OGRE_CONSOLE_AT_MS`, `OGRE_KEY_<n>`), start the game and
+  write commands into the watched file
   (`printf 'c\nr <addr> <n>\ndump /tmp/at-now.bin\n' > /tmp/ogre-console.txt`),
   then read the `[console]` lines from the run's stdout. Keys `1`..`9` work with
   `OGRE_KEY_<n>` bound. Commands: `r`/`rh`/`rb`/`rk`, `d`, `f`, `fb`, `s`, `k`

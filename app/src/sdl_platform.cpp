@@ -988,9 +988,39 @@ static uint16_t gamecontroller_buttons(SDL_GameController* controller) {
 // update_gfx), not from the game thread: writing a multi-megabyte dump while
 // the game thread is inside a recompiled function would race its own reads,
 // and the main thread already owns the SDL event pump.
+//
+// The console is a development tool, so it ships **disabled**: with no variable
+// set, `tick()` reads no file, reads no keyboard and prints nothing. `OGRE_LIVE_CONSOLE=1`
+// turns on both triggers, and either trigger can also be turned on on its own by
+// naming its own variable, because naming one is an explicit request for it:
+// `OGRE_CONSOLE_FILE` (or `OGRE_CONSOLE_AT_MS`) for the watched file, and any
+// `OGRE_KEY_<n>` for the number keys. Before session 117 a stock run polled
+// `/tmp/ogre-console.txt` on every tick and executed whatever it found there,
+// including `w` (a guest-RAM write) and `load` (a checkpoint restore), so the
+// recipes written before then need `OGRE_LIVE_CONSOLE=1`. `OGRE_CONSOLE_ON_CMD`
+// / `_SCENE` / `_STEP` call `exec()` directly and are unaffected.
 namespace console {
 
 constexpr uint32_t kConsoleMaxTokens = 12;
+
+namespace {
+
+bool env_set(const char* name) {
+    const char* value = getenv(name);
+    return value != nullptr && value[0] != '\0';
+}
+
+// `0`, `off`, `false` and `no` are off, matching OGRE_BG's spelling.
+bool env_truthy(const char* name) {
+    const char* value = getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return strcmp(value, "0") != 0 && strcmp(value, "off") != 0 &&
+           strcmp(value, "false") != 0 && strcmp(value, "no") != 0;
+}
+
+}  // namespace
 
 std::string trim_copy(const std::string& s) {
     size_t b = 0, e = s.size();
@@ -1674,18 +1704,54 @@ void exec(const std::string& line) {
     console_exec(line);
 }
 
+// Is the watched-file trigger on? Any of its own variables names it, or
+// `OGRE_LIVE_CONSOLE` turns on both triggers.
+static bool file_trigger_enabled() {
+    static const bool enabled = env_truthy("OGRE_LIVE_CONSOLE") ||
+                                env_set("OGRE_CONSOLE_FILE") ||
+                                env_set("OGRE_CONSOLE_AT_MS");
+    return enabled;
+}
+
+// Is the number-key trigger on? A non-empty `OGRE_KEY_<n>` names it, or
+// `OGRE_LIVE_CONSOLE`. The check is cached, so a stock run does not even read
+// the keyboard.
+static bool key_trigger_enabled() {
+    static const bool enabled = [] {
+        if (env_truthy("OGRE_LIVE_CONSOLE")) {
+            return true;
+        }
+        for (int d = 1; d <= 9; d++) {
+            char name[32];
+            snprintf(name, sizeof(name), "OGRE_KEY_%d", d);
+            if (env_set(name)) {
+                return true;
+            }
+        }
+        return false;
+    }();
+    return enabled;
+}
+
 // Poll the watched command file and the number-key triggers. Returns true when
 // a command ran, so the caller can skip other edge handling for that frame.
 bool tick() {
-    bool ran = false;
-
-    // 0. `snap`'s presented-frame capture runs for a short wall-clock window so a
-    //    present lands inside it, then goes off again. This runs before the file
-    //    and key triggers so a `snap` in the same frame still counts. The clock is
-    //    SDL's, so `OGRE_SPEED` does not stretch the window.
+    // `snap`'s presented-frame capture runs for a short wall-clock window so a
+    // present lands inside it, then goes off again. This runs before the
+    // trigger checks so a `snap` in the same frame still counts, and it runs
+    // even with the console off because `OGRE_CONSOLE_ON_CMD` can execute one.
+    // The clock is SDL's, so `OGRE_SPEED` does not stretch the window.
     if (g_capture_enabled && SDL_GetTicks64() >= g_capture_until_ms) {
         capture_enable(false);
     }
+
+    const bool file_trigger = file_trigger_enabled();
+    const bool key_trigger = key_trigger_enabled();
+    if (!file_trigger && !key_trigger) {
+        return false;
+    }
+
+    bool ran = false;
 
     // 1. The watched file. Written by an external tool (an agent can create it
     //    mid-run), read wholesale, then removed so it fires exactly once.
@@ -1693,7 +1759,7 @@ bool tick() {
     //    elapsed: a scripted run can leave the file in place at launch (no
     //    background writer, no race with the harness) and the command still lands
     //    on a chosen frame.
-    {
+    if (file_trigger) {
         static const char* path = getenv("OGRE_CONSOLE_FILE") ? getenv("OGRE_CONSOLE_FILE")
                                                               : "/tmp/ogre-console.txt";
         static const uint64_t boot_ticks = SDL_GetTicks64();
@@ -1727,7 +1793,7 @@ bool tick() {
     }
 
     // 2. `1`..`9` -> OGRE_KEY_<n>. Edge-triggered so a held key runs once.
-    {
+    if (key_trigger) {
         static bool was_down[10] = {};
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         for (int d = 1; d <= 9; d++) {

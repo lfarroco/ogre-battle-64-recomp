@@ -1,3 +1,23 @@
+diff --git a/plume_d3d12.cpp b/plume_d3d12.cpp
+index 2cdcf18..4d5da7f 100644
+--- a/plume_d3d12.cpp
++++ b/plume_d3d12.cpp
+@@ -2312,7 +2312,14 @@ namespace plume {
+ 
+         const D3D12_TEXTURE_COPY_LOCATION copyDstLocation = toD3D12(dstLocation);
+         const D3D12_TEXTURE_COPY_LOCATION copySrcLocation = toD3D12(srcLocation);
+-        setSamplePositions(dstLocation.texture);
++        // A placed-footprint destination is a buffer, so it carries no texture and no
++        // sample positions. Reading `dstLocation.texture` here without checking faulted
++        // in release builds, where `setSamplePositions`'s own assert is compiled out
++        // (OGRE: the presented-frame readback passed a footprint destination and the
++        // D3D12 backend read address 0x6C on the first present).
++        if (dstLocation.texture != nullptr) {
++            setSamplePositions(dstLocation.texture);
++        }
+         d3d->CopyTextureRegion(&copyDstLocation, dstX, dstY, dstZ, &copySrcLocation, (srcBox != nullptr) ? &copyBox : nullptr);
+         resetSamplePositions();
+     }
 diff --git a/plume_metal.cpp b/plume_metal.cpp
 index 373c87e..4990f0b 100644
 --- a/plume_metal.cpp

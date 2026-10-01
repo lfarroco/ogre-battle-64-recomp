@@ -90,6 +90,37 @@ cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
 cmake --build build-app -j
 ```
 
+### Third-party patches
+
+The four vendored trees carry the project's local changes as uncommitted work:
+`tools/N64ModernRuntime` and `tools/RT64` are checked out at a pinned upstream
+commit and left dirty. The **tracked** copy of those changes is the patch files
+in `patches/`, and the two build paths use different sources:
+
+| path | source of the changes |
+|---|---|
+| a developer's machine | the dirty tree; the patches were applied once at setup |
+| a GitHub-hosted release runner (`vars.OGRE_DATA_REPO` set) | the patch files, applied to a pristine checkout of the same commit |
+
+So a patch that no longer matches the tree ships old code, and the build stays
+green. That happened: `patches/rt64-ob64.patch` still read
+`getenv("OGRE_CAPTURE_PRESENT")` after the tree switched to
+`ogre_present_capture_path()`, and `patches/rt64-plume-ob64.patch` had no
+`plume_d3d12.cpp` hunk at all. Neither the presented-frame capture fix nor the
+D3D12 null-texture guard was in v0.5.0 or v0.5.1, which were built on hosted
+runners (session 116).
+
+`tools/patchcheck.py` (or `make patch-check`) compares each patch against its
+tree and exits 1 on any difference. It needs no worktree: for every file a patch
+touches, the repository's own `git diff HEAD -- <file>` must equal the patch's
+block for that file, so equality proves the patch reproduces the tree. A second
+pass fails when the tree changes a file that no patch carries. `make patch-fix`
+rewrites the stale patches; review `git diff patches/` before committing them.
+`tools/release-build.sh` runs the check before packaging, so a developer cannot
+package stale patches. An SDL2 older than 2.0.22 also needs
+`tools/rt64-plume-sdl.patch`; it has no post-image in the tree and is the one
+patch the check does not cover.
+
 The executable is written to `build-app/ogrebattle64`. If it fails with
 "the recompiled game code is missing", you skipped the regeneration section
 above; `tools/release-build.sh` prints the same list.
@@ -565,6 +596,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed, so a packaged build's `error.log` can be verified without provoking a real crash |
 | `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once (reported, not required) and exit 0. `tools/smoke-dist.sh` and `make smoke` use it to prove a package loads and reaches `main` |
 | `OGRE_CONSOLE=1` | Windows: `AllocConsole()` and point stdin/stdout/stderr at it, so a double-clicked GUI build shows the `[boot]` log (the same switch Zelda64Recomp's Windows build calls `--show-console`) |
+| `OGRE_LIVE_CONSOLE=1` | turn on the **live debug console** (session 117). Off by default: with no variable set a stock run polls no path and reads no keyboard, because a console command can write guest RAM (`w`) and restore a checkpoint (`load`). Either trigger can also be turned on on its own by naming its own variable (`OGRE_CONSOLE_FILE`/`OGRE_CONSOLE_AT_MS`, `OGRE_KEY_<n>`). See "The live console" below |
 | `OGRE_GRAPHICS_API=<auto\|d3d12\|vulkan\|metal>` | pin RT64's backend instead of `auto`. RT64 switches D3D12 to Vulkan on an old driver (NVIDIA ≤ 475.14, AMD ≤ Jan 2019, Intel 6th-gen ≤ 31.0.101.2115) and that transition rebuilds the interface on the same window; `vulkan` skips it and `d3d12` is the other side of the A/B. The boot log names the GPU and whether the fallback ran |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
 | `OGRE_SNAP=1\|<frames>` | the runtime's **periodic message-queue snapshot** (`[snap]`, `ultramodern::debug_dump_queue_snapshot`), which is what shows a frozen boot's full/blocked queues when every game thread is parked. **Off by default** (session 116): the snapshot samples `last_func_vram` 100 times at 200 us, dumps every parked thread's call chain, walks the malloc graph and prints ~80 lines, all on the Critical-priority VI thread, so it delays the retrace it observes — 26 ms of frame hitch every 1.5 s on macOS, and more on Windows where `sleep_for(200us)` resolves to the 1 ms system timer that SDL's `timeBeginPeriod(1)` sets. `=1` uses the default 90 VI frames (~1.5 s at 60 VI/s), a number sets its own period in VI frames |
@@ -857,6 +889,16 @@ lost an afternoon to a framebuffer readback that had to be caught mid-frame).
 The console executes commands inside the running game, on the **main thread**,
 where RDRAM is available and a multi-megabyte write cannot race the game thread.
 
+**The console is off unless a run asks for it.** It is a development tool, and a
+command can write guest RAM (`w`) or restore a checkpoint (`load`), so a stock run
+does not poll any path and does not read the keyboard. Turn both triggers on with
+`OGRE_LIVE_CONSOLE=1`. Naming a trigger's own variable also turns that trigger on
+by itself: `OGRE_CONSOLE_FILE` (or `OGRE_CONSOLE_AT_MS`) for the file,
+`OGRE_KEY_<n>` for the keys. `OGRE_LIVE_CONSOLE=0` is an explicit off. Recipes
+written before session 117 write `/tmp/ogre-console.txt` with no variable set and
+need `OGRE_LIVE_CONSOLE=1` added. `OGRE_CONSOLE_ON_CMD` below is unaffected: it
+calls the console directly.
+
 Two triggers, both landing in the same command set:
 
 * **a watched command file** (default `/tmp/ogre-console.txt`, override with
@@ -864,7 +906,8 @@ Two triggers, both landing in the same command set:
   is **removed**, so an external tool can drive a live run:
 
   ```sh
-  OGRE_EXIT_AFTER_MS=600000 ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
+  OGRE_LIVE_CONSOLE=1 OGRE_EXIT_AFTER_MS=600000 \
+    ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
   # in another shell (or from an agent):
   printf 'c\nr 0x8018FDAC 8\nk 0x80243E00 8192\ndump /tmp/at-now.bin\n' > /tmp/ogre-console.txt
   ```
@@ -939,7 +982,7 @@ the first form and ~60 s to the closing movie).
 ```sh
 # leave `c\nsave /tmp/ck.ckpt\nc\n` in the watched file before launch:
 printf 'c\nsave /tmp/ck.ckpt\nc\n' > /tmp/ogre-console.txt
-OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1500 \
+OGRE_LIVE_CONSOLE=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1500 \
   OGRE_TAP_BUTTON="start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a" \
   OGRE_CONSOLE_AT_MS=30000 OGRE_EXIT_AFTER_MS=600000 \
   ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
@@ -1213,6 +1256,7 @@ shift the tap schedule, so a fixed-time schedule does not reproduce):
 
 ```sh
 # poll `c` and dump only while the dispatcher is on a chosen scene+step
+OGRE_LIVE_CONSOLE=1 OGRE_EXIT_AFTER_MS=600000 ./build-app/ogrebattle64 assets/ogre64.z64
 printf 'c\n' > /tmp/ogre-console.txt            # read state...
 printf 'dump /tmp/at-cathedral.bin\n' > /tmp/ogre-console.txt   # ...then dump
 tools/rdram.py /tmp/at-cathedral.bin image 0x80243E28 --width 320 -o /tmp/dst.png

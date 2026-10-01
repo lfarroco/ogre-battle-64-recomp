@@ -40,13 +40,17 @@ echo "[probe] dir=$DIR app=$APP"
 echo "[probe] app stdout -> $DIR/run.log"
 
 # The app reads every OGRE_* knob from the environment. Keep the log chatty
-# enough to read the slow phase off it and to name the screen.
+# enough to read the slow phase off it and to name the screen. `OGRE_KEY_<n>`
+# turns on the key trigger by itself; `OGRE_CONSOLE_FILE` turns on the watched
+# file as well, so an agent can drive this run by writing to $DIR/console.txt
+# (the console is off unless one of its own variables names it, session 117).
 env \
     OGRE_SCENE_LOG=1 \
     OGRE_DL_TRACE=1 \
     OGRE_PROFILE=1 \
     OGRE_COVER="$DIR/cover.txt" \
     OGRE_TRACE_HOOKS="${OGRE_TRACE_HOOKS:-0}" \
+    OGRE_CONSOLE_FILE="$DIR/console.txt" \
     OGRE_KEY_1="snap $DIR/slow" \
     OGRE_KEY_2="save $DIR/menu-open.ckpt" \
     OGRE_KEY_3="cover" \

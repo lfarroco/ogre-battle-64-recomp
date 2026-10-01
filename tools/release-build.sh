@@ -89,6 +89,28 @@ if [ -f tools/rt64-plume-sdl.patch ] && [ -d tools/RT64/src/contrib/plume ]; the
     git -C tools/RT64/src/contrib/plume apply ../../../../tools/rt64-plume-sdl.patch >/dev/null 2>&1 || true
 fi
 
+# --- the patches must describe the trees ------------------------------------
+# A GitHub-hosted runner builds these trees by APPLYING the patches, so its trees
+# match the patches by construction and this check passes there. A developer
+# builds from trees that carry uncommitted work, and a patch that has drifted
+# from them ships old code with a green build: the hosted v0.5.0 and v0.5.1
+# releases carried neither the presented-frame capture fix nor the D3D12
+# null-texture guard, because both live in the RT64 trees and the patch files
+# were stale (session 116). Fail before packaging instead.
+echo "==> checking that the tracked patches describe the vendored trees"
+if ! python3 tools/patchcheck.py; then
+    cat >&2 <<EOF
+
+release-build.sh: a tracked patch no longer describes the tree it patches, so
+the package would ship old code for it. Regenerate, review and commit:
+
+    python3 tools/patchcheck.py --fix
+
+See docs/guides/app-build.md -> "Third-party patches".
+EOF
+    exit 1
+fi
+
 # --- build ------------------------------------------------------------------
 echo "==> packaging for $DIST_OS (static SDL2: ${DIST_STATIC_SDL:-1})"
 make dist "DIST_OS=$DIST_OS"

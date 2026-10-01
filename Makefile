@@ -215,6 +215,18 @@ cross-bank-dispatch:
 cross-bank-check:
 	python3 tools/cross_bank.py check
 
+# `make patch-check`: do the tracked third-party patches still describe the
+# vendored trees? The hosted release applies these patches to pristine
+# checkouts, so a patch that has drifted ships old code with a green build
+# (session 116: the RT64 capture fix was in the tree and in no release).
+# Offline, no worktree, ~1 s. `--fix` rewrites the stale patches.
+patch-check:
+	python3 tools/patchcheck.py
+
+patch-fix:
+	python3 tools/patchcheck.py --fix
+.PHONY: patch-check patch-fix
+
 # `make stubmap`: which dispatched addresses the runtime's function map cannot
 # resolve, and what points at them (see tools/stubmap.py). Offline, reads the
 # generated C + the registration tables; `make stub-check` is the strict form
@@ -709,4 +721,4 @@ dist-tar: dist
 smoke:
 	tools/smoke-dist.sh "$(DIST_DIR)"
 
-.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check app dist dist-mods-check dist-zip dist-tar sdl2-static smoke
+.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke

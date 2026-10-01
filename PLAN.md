@@ -140,9 +140,25 @@ Organize Screen, the credits, the ending and the attract loop.
   `init_capture_env`'s `putenv` name-mangling (the UCRT copies the string), and
   RT64's readback handed the D3D12 backend a null texture. The capture path is
   now app-owned and the D3D12 copy skips sample positions for a buffer
-  destination (session 107). The build is not re-released yet, and the
-  developer's own Windows machine still fails on releases older than the
-  capture code.
+  destination (session 107). **Those two changes were not in any release**: the
+  hosted runner builds the third-party trees from `patches/`, and both RT64
+  patches had drifted from them (session 117). The patches are regenerated and
+  `make patch-check` now fails when a patch stops describing its tree.
+- **Release parity** — a GitHub-hosted release builds three different sources: the
+  public repository, the private generated-code bundle (`ogre-data/files.tar.gz`,
+  which has a commit-drift check), and the `patches/` applied to pristine
+  third-party checkouts, which had none. `tools/patchcheck.py` and
+  `make patch-check` add it, and `tools/release-build.sh` runs it before
+  packaging. Measured: v0.5.1 was built from `c7bd999` (session 112), so session
+  115's slowdown fix and session 116's stutter fix are in no release, and the
+  bundle holds 34 `yield_self` sites against the tree's 33 (session 117).
+- **Debug behaviour in a release** — an audit with no environment variables set
+  found the live console channel (a fixed path whose commands write guest RAM and
+  load checkpoints), 116 `[rsp]` lines/s, per-display-list `[renderer]` lines, and
+  trace hooks on every recompiled function entry and return. The console is now
+  off unless `OGRE_LIVE_CONSOLE=1` (or the trigger's own variable) is set, so a
+  stock run opens no path, reads no keyboard and prints nothing (session 117). The
+  rest is open work below.
 
 What each screen should show is `docs/scenes.md`. Build instructions and every
 `OGRE_*` knob are `docs/guides/app-build.md`. A picture or a display list that a
@@ -265,6 +281,20 @@ holds the evidence.
     produces no `[snap]` output unless the run asked for it; a
     frame-counter-triggered dump would keep the diagnosis at zero periodic cost.
     See `docs/HANDOFF-2026-10-01-session116.md`.
+12. **Gate the remaining debug behaviour that ships (session 117).** The live
+    console is done: it is off unless `OGRE_LIVE_CONSOLE=1` or one of its own
+    trigger variables is set. What is left, ranked by the difficulty of removing
+    it rather than by the cost:
+    (a) `[rsp]` (116 lines/s) and the per-display-list `[renderer]` lines — gate
+    them and set the variable in `make smoke`, `tools/smoke-dist.sh` and the
+    CI `runlog.py --check`, or those checks silently stop checking anything;
+    (b) the trace hooks on every recompiled function entry and return (28 + 4
+    instructions at 5316 sites with the gates off) — making the disabled path a
+    load-and-branch needs a change to `patches/n64recomp-ob64.patch`, so it
+    regenerates the game code and re-runs the stutter measurement;
+    (c) the audio auto-response on `0x800C49E8` is a behaviour shim, not a log:
+    firing the real `OS_EVENT_AI` when a buffer drains lets it be deleted.
+    See `docs/HANDOFF-2026-10-01-session117.md` for the full list.
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off

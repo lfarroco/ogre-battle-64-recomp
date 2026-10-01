@@ -530,10 +530,10 @@ index 6e8c9b8..b053b01 100644
          void addDitherPatterns(const std::array<uint32_t, 4> &extraPatterns);
          uint32_t bestDitherPattern() const;
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..f894351 100644
+index 7de5b69..1519428 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
-@@ -4,12 +4,48 @@
+@@ -4,12 +4,55 @@
  
  #include "rt64_present_queue.h"
  
@@ -545,6 +545,13 @@ index 7de5b69..f894351 100644
  
  #include "rt64_workload_queue.h"
  
++// OGRE: the port owns the presented-frame capture path, because the environment
++// cannot carry a toggle: the UCRT's putenv copies the string it is given, so
++// hiding the entry by rewriting its name works only on POSIX, and removing it
++// frees a string a present thread may still be reading. See the block comment in
++// app/src/sdl_platform.cpp.
++extern "C" const char *ogre_present_capture_path();
++
  namespace RT64 {
 +    // OGRE diagnostic: OGRE_PRESENT_TRACE=1 explains what the presenter decides
 +    // to draw. A black window is either "no color target" (VI not visible, no
@@ -582,13 +589,13 @@ index 7de5b69..f894351 100644
      // PresentQueue
  
      PresentQueue::PresentQueue() {
-@@ -93,6 +129,24 @@ namespace RT64 {
+@@ -93,6 +136,24 @@ namespace RT64 {
      }
  
      void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
 +        // OGRE diagnostics: refresh the capture configuration once per present.
 +        {
-+            ogreCapture.presentPath = getenv("OGRE_CAPTURE_PRESENT");
++            ogreCapture.presentPath = ogre_present_capture_path();
 +            ogreCapture.targetPath = getenv("OGRE_CAPTURE_TARGET");
 +            if (!ogreCapture.afterRead) {
 +                ogreCapture.afterRead = true;
@@ -607,7 +614,7 @@ index 7de5b69..f894351 100644
          FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
-@@ -146,6 +200,14 @@ namespace RT64 {
+@@ -146,6 +207,14 @@ namespace RT64 {
                  viFb = fbManager.find(present.screenVI.fbAddress());
              }
  
@@ -622,7 +629,7 @@ index 7de5b69..f894351 100644
              Framebuffer *presentFb = viFb;
              
              // Show the framebuffer the debugger has requested instead.
-@@ -221,6 +283,46 @@ namespace RT64 {
+@@ -221,6 +290,46 @@ namespace RT64 {
              else {
                  uint32_t fbAddress = present.screenVI.fbAddress();
  
@@ -669,7 +676,7 @@ index 7de5b69..f894351 100644
                  // Use a scratch framebuffer to upload the RAM to the render target.
                  scratchFb.addressStart = fbAddress;
                  scratchFb.width = fbSize.x;
-@@ -254,6 +356,7 @@ namespace RT64 {
+@@ -254,6 +363,7 @@ namespace RT64 {
                  if (!present.paused && (viHistory.top().vi != present.screenVI)) {
                      viHistory.pushVI(present.screenVI, fbSize.x);
                  }
@@ -677,7 +684,7 @@ index 7de5b69..f894351 100644
              }
          }
  
-@@ -266,6 +369,36 @@ namespace RT64 {
+@@ -266,6 +376,36 @@ namespace RT64 {
                  swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
              }
          }
@@ -714,7 +721,7 @@ index 7de5b69..f894351 100644
          
          for (int32_t i = 0; i < framesToPresent; i++) {
              uint32_t frameCountersNextPresented = 0;
-@@ -342,11 +475,97 @@ namespace RT64 {
+@@ -342,11 +482,97 @@ namespace RT64 {
                  }
                  
                  commandList->setFramebuffer(swapChainFramebuffer);
@@ -814,7 +821,7 @@ index 7de5b69..f894351 100644
                  }
  
                  RenderHookDraw *drawHook = GetRenderHookDraw();
-@@ -354,6 +573,28 @@ namespace RT64 {
+@@ -354,6 +580,28 @@ namespace RT64 {
                      drawHook(commandList, swapChainFramebuffer);
                  }
  
@@ -843,7 +850,7 @@ index 7de5b69..f894351 100644
                  {
                      const std::scoped_lock lock(inspectorMutex);
                      if (inspector != nullptr) {
-@@ -367,6 +608,51 @@ namespace RT64 {
+@@ -367,6 +615,51 @@ namespace RT64 {
                      RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                      ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                      ext.presentGraphicsWorker->wait();
