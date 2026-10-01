@@ -567,6 +567,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CONSOLE=1` | Windows: `AllocConsole()` and point stdin/stdout/stderr at it, so a double-clicked GUI build shows the `[boot]` log (the same switch Zelda64Recomp's Windows build calls `--show-console`) |
 | `OGRE_GRAPHICS_API=<auto\|d3d12\|vulkan\|metal>` | pin RT64's backend instead of `auto`. RT64 switches D3D12 to Vulkan on an old driver (NVIDIA ≤ 475.14, AMD ≤ Jan 2019, Intel 6th-gen ≤ 31.0.101.2115) and that transition rebuilds the interface on the same window; `vulkan` skips it and `d3d12` is the other side of the A/B. The boot log names the GPU and whether the fallback ran |
 | `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
+| `OGRE_SNAP=1\|<frames>` | the runtime's **periodic message-queue snapshot** (`[snap]`, `ultramodern::debug_dump_queue_snapshot`), which is what shows a frozen boot's full/blocked queues when every game thread is parked. **Off by default** (session 116): the snapshot samples `last_func_vram` 100 times at 200 us, dumps every parked thread's call chain, walks the malloc graph and prints ~80 lines, all on the Critical-priority VI thread, so it delays the retrace it observes — 26 ms of frame hitch every 1.5 s on macOS, and more on Windows where `sleep_for(200us)` resolves to the 1 ms system timer that SDL's `timeBeginPeriod(1)` sets. `=1` uses the default 90 VI frames (~1.5 s at 60 VI/s), a number sets its own period in VI frames |
 | `OGRE_COVER=1\|<path>` | recompiled-function **coverage census** (session 83): at exit, when the window is closed, or on the live console's `cover`, print every distinct recompiled function the run entered, one `[cover] 0xADDR count` line per function, for `tools/recompcov.py --log`. **Give it a path** (`OGRE_COVER=/tmp/cover.txt`) for a session played by hand — the census then lands in its own file instead of the end of a very chatty stdout, and the app prints one line saying so. `=1` keeps it on stdout for scripted runs. Unlike `OGRE_PROFILE=1` it starts no sampling thread and skips the shadow call chain, so the entry hooks cost one hash insert per call and a playthrough stays near normal speed |
 | `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |
 | `OGRE_SYNTH_AT_MS=<n>` / `OGRE_SYNTH_PERIOD=<n>` | when the probe first submits, and how many VIs between re-submits (default 30; 0 = every VI). Keep `AT_MS` above ~600 ms: before that the game's ucode is not in RDRAM yet and RT64 cannot identify the GBI |
@@ -793,6 +794,31 @@ another thread produces. The landed fixes are the branches in
 `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
 (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48`; sessions
 80, 90, 98, 112, 115).
+
+### A repeated stutter — `tools/dlgaps.py` (session 116)
+
+A stutter that repeats at a constant period is one piece of periodic work, and
+not a slow screen. `tools/dlgaps.py` reads the `OGRE_DL_TRACE=1` series and
+reports the gap distribution plus the phase of every spike, which is what names
+the period:
+
+```sh
+OGRE_DL_TRACE=1 OGRE_EXIT_AFTER_MS=40000 ./build-app/ogrebattle64 assets/ogre64.z64 > /tmp/run.log 2>&1
+tools/dlgaps.py /tmp/run.log                 # summary + phase histogram
+tools/dlgaps.py /tmp/run.log --check         # exit 1 when the spikes are periodic
+tools/dlgaps.py /tmp/run.log --period 3000   # test another period
+```
+
+It skips the first 3 s by default (`--after`), because the boot's module
+streaming produces gaps that are not a stutter, and it treats a gap above
+`--spike` x p50 as a spike. `--check` fails when 5 or more spikes put at least
+60 % of themselves in one tenth of `--period`; that is the signature of the
+runtime's periodic `[snap]` snapshot (session 116) and of a
+`yield_work_loop_branches` misfire (sessions 80, 90, 98, 112, 115), and it is
+what a self-driving run should assert before and after a fix. The tool is a
+heuristic: a degraded run whose slow frames are spread across many phases
+reports `not periodic` even when the work is still there, so read the p90 and
+the spike count next to it.
 
 ### `make elf-rom-check` — is the linked code the ROM's code? (session 65)
 
@@ -1956,7 +1982,8 @@ to load, corrupts memory, or the periodic snapshot kills the process.
    `VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE`) before making it writable.
 4. **The periodic `[snap]` snapshot dereferenced 4 GiB past RDRAM.** The runtime
    dumps a message-queue snapshot every ~90 VI retraces
-   (`ultramodern::debug_dump_queue_snapshot`). Its guest addresses are 32-bit,
+   (`ultramodern::debug_dump_queue_snapshot`), enabled with `OGRE_SNAP` (session
+   116 made it opt-in; it ran unconditionally before that). Its guest addresses are 32-bit,
    and it converted them with `TO_PTR`/`addr - 0xFFFFFFFF80000000`, which only
    works on a value that is already sign-extended: a bare `uint32_t` zero-extends,
    so the computed host address was `rdram + addr + 0x80000000`. Whether that

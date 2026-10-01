@@ -2095,7 +2095,7 @@ index 3198be0..fd92d59 100644
 +}
 +
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index 2f1cfb5..1b6b971 100644
+index 2f1cfb5..88a422a 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -8,6 +8,7 @@
@@ -2185,21 +2185,57 @@ index 2f1cfb5..1b6b971 100644
      ViState* next_state = events_context.vi.get_next_state();
      next_state->mq = mq_;
      next_state->msg = msg;
-@@ -187,6 +230,7 @@ void vi_thread_func() {
+@@ -179,6 +222,32 @@ extern moodycamel::LightweightSemaphore graphics_shutdown_ready;
+ 
+ void set_dummy_vi(bool odd);
+ 
++// OB64 (project addition): `OGRE_SNAP` gates the periodic deadlock snapshot. The
++// snapshot is a heavy diagnostic (`debug_dump_queue_snapshot` samples
++// `last_func_vram` 100 times at 200 us, dumps every parked thread's call chain,
++// walks the malloc graph and prints ~80 lines), and it runs on this thread at
++// Critical priority, so it delays the VI retrace it exists to observe. On macOS
++// one snapshot measures a 26 ms frame hitch, and `sleep_for(200us)` is coarser
++// than that on Windows, so it is off unless a developer asks for it. The value
++// is the period in VI frames: `OGRE_SNAP=1` (or `on`/`true`) uses 90 (~1.5 s at
++// 60 VI/s), a larger number sets its own period, and unset/`0`/`off` is off.
++static int snapshot_period_frames() {
++    const char* value = getenv("OGRE_SNAP");
++    if (value == nullptr || value[0] == '\0') {
++        return 0;
++    }
++    if (strcmp(value, "0") == 0 || strcmp(value, "off") == 0 || strcmp(value, "false") == 0 ||
++        strcmp(value, "no") == 0) {
++        return 0;
++    }
++    if (strcmp(value, "1") == 0 || strcmp(value, "on") == 0 || strcmp(value, "true") == 0 ||
++        strcmp(value, "yes") == 0) {
++        return 90;
++    }
++    const int parsed = atoi(value);
++    return parsed > 1 ? parsed : 0;
++}
++
+ void vi_thread_func() {
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows
+@@ -187,6 +256,8 @@ void vi_thread_func() {
      using namespace std::chrono_literals;
  
      int remaining_retraces = 1;
++    const int snapshot_period = snapshot_period_frames();
 +    int snapshot_counter = 0;
  
      while (!exited) {
          // Determine the next VI time (more accurate than adding 16ms each VI interrupt)
-@@ -229,6 +273,13 @@ void vi_thread_func() {
+@@ -229,6 +300,15 @@ void vi_thread_func() {
          // Update VI registers and swap VI modes.
          events_context.vi.update_vi();
  
-+        // Periodic deadlock snapshot: dump the game's message-queue state every
-+        // ~1.5 s so a frozen boot shows exactly which queues are full/blocked.
-+        if (++snapshot_counter >= 90) {
++        // Periodic deadlock snapshot (`OGRE_SNAP`, off by default): dump the
++        // game's message-queue state every `snapshot_period` VI frames so a
++        // frozen boot shows exactly which queues are full/blocked. See
++        // snapshot_period_frames() for why this is not unconditional.
++        if (snapshot_period > 0 && ++snapshot_counter >= snapshot_period) {
 +            snapshot_counter = 0;
 +            ultramodern::debug_dump_queue_snapshot(events_context.rdram);
 +        }
@@ -2207,7 +2243,7 @@ index 2f1cfb5..1b6b971 100644
          // If the game has started, handle sending VI and AI events.
          if (ultramodern::is_game_started()) {
              remaining_retraces--;
-@@ -237,6 +288,9 @@ void vi_thread_func() {
+@@ -237,6 +317,9 @@ void vi_thread_func() {
              ViState* cur_state = events_context.vi.get_cur_state();
              if (remaining_retraces == 0) {
                  if (cur_state->mq != NULLPTR) {
@@ -2217,7 +2253,7 @@ index 2f1cfb5..1b6b971 100644
                      // Send a message to the VI queue, and do not set it to be requeued if the queue was full.
                      // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next. 
                      ultramodern::enqueue_external_message_src(cur_state->mq, cur_state->msg, false, ultramodern::EventMessageSource::Vi);
-@@ -258,12 +312,14 @@ void vi_thread_func() {
+@@ -258,12 +341,14 @@ void vi_thread_func() {
  void sp_complete() {
      uint8_t* rdram = events_context.rdram;
      std::lock_guard lock{ events_context.message_mutex };
@@ -2232,7 +2268,7 @@ index 2f1cfb5..1b6b971 100644
      ultramodern::enqueue_external_message_src(events_context.dp.mq, events_context.dp.msg, false, ultramodern::EventMessageSource::Dp);
  }
  
-@@ -393,7 +449,13 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+@@ -393,7 +478,13 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  }
              }
              else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
@@ -2247,7 +2283,7 @@ index 2f1cfb5..1b6b971 100644
              }
          }
      }
-@@ -443,6 +505,10 @@ static const OSViMode dummy_mode = []() {
+@@ -443,6 +534,10 @@ static const OSViMode dummy_mode = []() {
      return ret;
  }();
  
@@ -2258,7 +2294,7 @@ index 2f1cfb5..1b6b971 100644
  void set_dummy_vi(bool odd) {
      ViState* next_state = events_context.vi.get_next_state();
      next_state->mode = &dummy_mode;
-@@ -454,17 +520,53 @@ void set_dummy_vi(bool odd) {
+@@ -454,17 +549,53 @@ void set_dummy_vi(bool odd) {
      }
  }
  
@@ -2313,7 +2349,7 @@ index 2f1cfb5..1b6b971 100644
  }
  
  #define OS_VI_GAMMA_ON          0x0001
-@@ -511,7 +613,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
+@@ -511,7 +642,10 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
  
      if ((func & OS_VI_DITHER_FILTER_OFF) != 0) {
          *control_out &= ~VI_CTRL_DITHER_FILTER_ON;
@@ -2325,7 +2361,7 @@ index 2f1cfb5..1b6b971 100644
      }
  }
  
-@@ -550,10 +655,16 @@ extern "C" void osViSetYScale(float scale) {
+@@ -550,10 +684,16 @@ extern "C" void osViSetYScale(float scale) {
  }
  
  extern "C" PTR(void) osViGetNextFramebuffer() {

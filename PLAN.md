@@ -121,6 +121,16 @@ Organize Screen, the credits, the ending and the attract loop.
   115 after the profiler had named other addresses. `debug/menu-probe.sh` runs
   the app, the sampler, the console `snap` output and the coverage census
   together, so no capture time has to be agreed in advance.
+- **Periodic hitch** — the runtime's message-queue snapshot
+  (`ultramodern::debug_dump_queue_snapshot`) ran unconditionally every 90 VI
+  frames on the Critical-priority VI thread, which measured as a 33 -> 59 ms
+  frame every 1.5 s on macOS and is larger on Windows, where its
+  `sleep_for(200us)` sampler resolves to SDL's 1 ms timer. It is now behind
+  `OGRE_SNAP` and off by default (session 116). `OGRE_SNAP=1` restores the old
+  ~1.5 s period for hang diagnosis; a number sets the period in VI frames.
+  `tools/dlgaps.py <run.log>` measures the next such report: it prints the gap
+  distribution and the phase histogram of the spikes, and `--check` fails when
+  they are periodic. See `docs/HANDOFF-2026-10-01-session116.md`.
 - **Debug console** — the live console's `snap [prefix] [ms]` writes the whole
   8 MiB RDRAM image with the game threads parked and, for `ms`, RT64's
   presented-frame capture for the same screen, so a player-reported defect can be
@@ -247,6 +257,14 @@ holds the evidence.
     four-chunk layout the current feature uses is hardcoded to the cathedral
     asset's chunk sizes; a pack image for a backdrop with a different layout is
     left alone (`no canvas rect`). See `docs/guides/hd-backgrounds.md`.
+11. **Confirm the periodic-hitch fix on Windows, and keep the hang dump
+    available.** Session 116 measured the snapshot's 1.5 s hitch on macOS and
+    gated it; the Windows size is inferred from SDL's `timeBeginPeriod(1)` and
+    the 200 us sampler, so one run there decides it (`OGRE_DL_TRACE=1` with
+    `OGRE_SNAP` unset against `OGRE_SNAP=1`). With the gate off by default a hang
+    produces no `[snap]` output unless the run asked for it; a
+    frame-counter-triggered dump would keep the diagnosis at zero periodic cost.
+    See `docs/HANDOFF-2026-10-01-session116.md`.
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off
