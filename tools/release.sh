@@ -45,6 +45,12 @@ warn() { printf '\033[33m==> %s\033[0m\n' "$*"; }
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mrelease: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# The commit a bundle records, from its own ogre-data.txt.
+bundle_commit() {
+    tar xzOf "${1:-dist/ogre-data/files.tar.gz}" ogre-data.txt 2>/dev/null \
+        | sed -n 's/^public commit: //p' || true
+}
+
 version=${VERSION:-${1:-}}
 regen=${REGEN:-1}
 skip_bundle=${SKIP_BUNDLE:-0}
@@ -160,8 +166,7 @@ if [ "$skip_bundle" != 1 ]; then
     # one that no longer describes the tree. A bundle is correct for its own
     # commit, so a stale one is not detectable by comparison alone.
     if [ -f "$bundle_out" ]; then
-        previous=$(tar xzOf "$bundle_out" ogre-data.txt 2>/dev/null \
-            | sed -n 's/^public commit: //p' || true)
+        previous=$(bundle_commit || true)
         if [ -n "$previous" ] && [ "$previous" != "$commit" ]; then
             if git cat-file -e "$previous^{commit}" 2>/dev/null; then
                 warn "the existing bundle was generated at ${previous:0:7}, $(git rev-list --count "$previous..$commit") commit(s) behind $commit, and is replaced"
@@ -174,26 +179,45 @@ if [ "$skip_bundle" != 1 ]; then
 fi
 
 # The bundle carries code generated from the ROM at whatever state this tree
-# was in when it was last regenerated. Nothing in the bundle records that, and
-# the workflow can only compare commits, so prove the two agree: unpack it and
-# compare every file it holds against the tree. This is what catches a release
-# prepared without `make recomp` after a change to the ROM-derived inputs, and
-# it is why SKIP_BUNDLE still checks.
+# was in when it was last regenerated. Nothing in the bundle records the inputs
+# that code came from, and the workflow can only compare commits, so compare the
+# packed code with the tree here: a bundle holding code generated before a change
+# to the ROM-derived inputs fails at this point instead of shipping.
+#
+# The *recorded commit* is a weaker question, and this is the only place that can
+# answer it correctly. The generated code is a function of the ROM and
+# config/, so a commit that changes only tooling or documentation leaves a bundle
+# byte-identical, and the workflow has no ROM to check that and refuses on the
+# commit alone. When the code matches, record the commit being released.
 echo "==> checking that the bundle is this tree's generated code"
 tar xzf "$bundle_out" -C "$tmp" ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc
 recorded=$(sed -n 's/^public commit: //p' "$tmp/ogre-data.txt")
-[ "$recorded" = "$commit" ] || die "the bundle records $recorded, not $commit"
 drift=$(diff -rq "$tmp/RecompiledFuncs" RecompiledFuncs; \
         diff -rq "$tmp/RspFuncs" RspFuncs; \
         diff -q "$tmp/app/src/bank_funcs.inc" app/src/bank_funcs.inc; \
         for d in Bank*Funcs; do diff -rq "$tmp/$d" "$d"; done; true)
 if [ -n "$drift" ]; then
     printf '%s\n' "$drift" >&2
-    die "the bundle does not match the tree (above). It was packed from code
-       generated before the current inputs; re-run without REGEN=0 or
-       SKIP_BUNDLE=1."
+    die "the bundle holds code this tree does not have (above), because it was
+       packed before the current config/ or the ROM. Re-run with the
+       regeneration: REGEN=1, without SKIP_BUNDLE=1."
+fi
+if [ "$recorded" != "$commit" ]; then
+    warn "the code is identical, but the bundle records ${recorded:0:7}; repacking with $commit"
+    manifest=$root/ogre-data.txt
+    trap 'rm -rf "$tmp"; rm -f "$manifest"' EXIT
+    {
+        printf 'public commit: %s\n' "$commit"
+        printf 'public tree: clean\n'
+        printf 'generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$manifest"
+    COPYFILE_DISABLE=1 tar czf "$bundle_out" \
+        --exclude '._*' --exclude '*/._*' --exclude '.DS_Store' --exclude '*/.DS_Store' \
+        ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc build/mods/*.nrm
+    rm -f "$manifest"
 fi
 echo "    identical: RecompiledFuncs/ Bank*Funcs/ RspFuncs/ app/src/bank_funcs.inc"
+echo "    records:   $(bundle_commit) (the commit this release builds)"
 
 if [ "$no_push" = 1 ]; then
     step "[4/4] NO_PUSH=1: stopping here"
