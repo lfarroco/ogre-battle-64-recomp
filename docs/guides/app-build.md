@@ -763,6 +763,37 @@ Four offline tools answer the questions every session otherwise re-derives by
 hand. None of them needs a CUDA/GPU/game run except where noted. The **live
 console** below is the fifth, and the only one that queries a *running* game.
 
+### A slow screen — a host stack sample, not the profiler (sessions 112, 115)
+
+`OGRE_PROFILE=1`'s per-thread function is the **most recently entered** function:
+`recomp_trace_entry` writes `last_func_vram[tid]` on every entry and
+`recomp_trace_return` never restores it
+(`tools/N64ModernRuntime/ultramodern/src/function_trace.cpp:262`). Read its `t4`
+line as a lead, and take a host stack sample while the screen is slow:
+
+```sh
+debug/menu-probe.sh                    # PROBE_DIR/APP/ROM/EXTRA_ENV overridable
+sample <pid> 4 -file /tmp/slow.txt     # or by hand, against a running window
+```
+
+`sample` names the recompiled function each game thread is in, so a chain through
+`yield_self` says the frame period is a recompiler-injected poll-loop wait.
+`debug/menu-probe.sh` runs the app with `OGRE_SCENE_LOG`, `OGRE_DL_TRACE`,
+`OGRE_PROFILE` and `OGRE_COVER`, keeps `sample <pid> 1` running for the life of
+the process, and binds the number keys to `snap` (RDRAM + presented frames),
+`save`, `cover` and `dump`, so a slow second is captured whether or not anyone is
+watching for it. `[renderer] display list N at t=<ms>ms entries=<n>` gives the
+same window as a period series; `entries` is what the list cost in recompiled
+function entries.
+
+A candidate is a **work loop** whose backward branch the heuristic
+(`is_yield_poll_loop`, `tools/N64Recomp/src/recompilation.cpp`) has mistaken for
+a poll: it terminates on a counter or on data already present, and not on a value
+another thread produces. The landed fixes are the branches in
+`config/banks/config-bankN.toml`'s `yield_work_loop_branches`
+(`0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48`; sessions
+80, 90, 98, 112, 115).
+
 ### `make elf-rom-check` — is the linked code the ROM's code? (session 65)
 
 `tools/elfcheck.py` compares every `CONTENTS` section of every linked ELF

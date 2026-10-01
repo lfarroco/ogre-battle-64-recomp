@@ -67,7 +67,35 @@ functions_per_output_file = 100
 # 79 ms gap. A host stack sample (`sample <pid>`) put 1608 of 1670 samples of t4
 # in `yield_self` under func_ovlN_80208E84. The raw ROM word at 0x8020A910 is
 # 0x1440FFC0 (`bnez $v0, 0x8020A814`), delay slot 0x00000000.
-yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08, 0x8020A910]
+#
+# The fifth misfire is func_ovlN_80204C08 (record 9, 0x80204C08), the entry
+# selection the mission's unit UI calls (0x80204300 in func_ovlN_80204230;
+# 0x802048B4 and 0x80204B20 in func_ovlN_802043BC, the frame-pump path
+# func_8008AFE0 -> func_80072398 -> func_800765D8). The loop at
+# 0x80204C1C..0x80204C48 walks 36-byte entries at `state[+0x60]`
+# (`state = *(0x80213690)`), counts the entries whose word at +8 equals the id
+# in `state[+0x66]`, and exits when that count (`$t0`, set to -1 at 0x80204C08,
+# incremented only on a match at 0x80204C38) equals the signed byte in
+# `state[+0x68]`. The body makes no call and no store. The invariant-base load
+# the heuristic keys on is `lb $v1, 0x68($t1)` at 0x80204C3C, the loop's own
+# exit threshold; `$t1` is loaded once at 0x80204C18 and never written. The
+# caller's own scan of the same array at 0x8020484C carries no yield and
+# terminates on the same data, so the threshold is data and not a value another
+# thread produces. 0x80204C48 is the backward branch.
+#
+# Measured on `OGRE_SAVE=assets/scene_5_suspend.bin` with the session-112 tap
+# recipe (title -> 0x12 Load Game -> 0x03) and four A presses in scene 0x03
+# opening the menu. The captured menu state is `state = 0x800E91D0`, array
+# 0x801F3A90, id 0, threshold 1, and the loop exits after five iterations, so
+# the call took the back edge four times and paid four blocking waits of about
+# one VI retrace each. With the unit-command menu open (tooltip `Commands`,
+# `LEADER Deneb`) the mission fell from 75 display lists/s with a 10 ms median
+# gap to 37/s with a 21 ms median and a 50 ms p90; a host stack sample
+# (`sample <pid>`) put 3893 of the frame-pump thread's 7071 samples over the 14
+# slow seconds in `yield_self` under func_ovlN_80204C08 (18-82 % per second).
+# The raw ROM word at RAM 0x80204C48 (ROM 0x155DB8) is 0x1443FFF4
+# (`bne $v0, $v1, 0x80204C1C`), delay slot 0x24E70001 (`addiu $a3, $a3, 1`).
+yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08, 0x8020A910, 0x80204C48]
 
 # Splat is given each record's own code/data boundary (see config/banks/config-bankN.yaml).
 # Extend any piece it still caps in the middle of a call-and-continue emission

@@ -108,17 +108,19 @@ Organize Screen, the credits, the ending and the attract loop.
   It is a reskin at the game's resolution, and not an HD texture replacement.
   See `docs/guides/hd-backgrounds.md` and
   `docs/HANDOFF-2026-09-29-session114.md`.
-- **Performance** — four misclassified work loops in bank unit N carried a
+- **Performance** — five misclassified work loops in bank unit N carried a
   recompiler-injected blocking `yield_self`; their backward branches are listed
   in `config/banks/config-bankN.toml`'s `yield_work_loop_branches`
-  (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`; sessions 80, 90, 98,
-  112). A slow screen is measured with `OGRE_PROFILE=1 OGRE_DL_TRACE=1
-  OGRE_SCENE_LOG=1` for its display-list series and its `t4` `[prof]` line, but
-  the profiler reports the most recently entered function and can name an
-  entry-heavy function rather than the one holding the thread. Take a host stack
-  sample (`sample <pid> 4 -file …`) during the slow state as well; that named
-  `func_ovlN_80208E84` in session 112 after the profiler named two wrong
-  addresses.
+  (`0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48`;
+  sessions 80, 90, 98, 112, 115). A slow screen is measured with `OGRE_PROFILE=1
+  OGRE_DL_TRACE=1 OGRE_SCENE_LOG=1` for its display-list series and its `t4`
+  `[prof]` line, but the profiler reports the most recently entered function and
+  can name an entry-heavy function rather than the one holding the thread. Take a
+  host stack sample (`sample <pid> 4 -file …`) during the slow state as well; that
+  named `func_ovlN_80208E84` in session 112 and `func_ovlN_80204C08` in session
+  115 after the profiler had named other addresses. `debug/menu-probe.sh` runs
+  the app, the sampler, the console `snap` output and the coverage census
+  together, so no capture time has to be agreed in advance.
 - **Debug console** — the live console's `snap [prefix] [ms]` writes the whole
   8 MiB RDRAM image with the game threads parked and, for `ms`, RT64's
   presented-frame capture for the same screen, so a player-reported defect can be
