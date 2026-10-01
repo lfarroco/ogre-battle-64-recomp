@@ -721,4 +721,19 @@ dist-tar: dist
 smoke:
 	tools/smoke-dist.sh "$(DIST_DIR)"
 
-.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke
+# Prepare and start a GitHub release: regenerate the game code, pack the data
+# bundle the hosted release runners unpack, commit and push it to the private
+# data repository, and dispatch the Release workflow, which builds every
+# platform and creates the draft release. The workflow fails a job whose bundle
+# records another commit, and nothing in the bundle records the ROM-derived
+# inputs, so this target is the supported way to publish. tools/release.sh
+# carries the sequence and the environment (VERSION, DATA_REPO, REGEN, NO_PUSH,
+# NO_WAIT, DRAFT). `release-check` is the same script with NO_PUSH=1: it
+# regenerates, packs and reports, and changes nothing outside this tree.
+.PHONY: release release-check
+release:
+	tools/release.sh "$(VERSION)"
+release-check:
+	NO_PUSH=1 tools/release.sh "$(VERSION)"
+
+.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke release release-check

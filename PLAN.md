@@ -75,6 +75,11 @@ Organize Screen, the credits, the ending and the attract loop.
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
   controls, GAME SPEED, WIDESCREEN, mods, `make dist` packages, GitHub releases.
+  `make release VERSION=vX.Y.Z` is the supported way to publish: it regenerates
+  the data bundle the hosted runners unpack, proves the packed code is the
+  tree's, commits and pushes it to the private data repository, and dispatches
+  the Release workflow with `draft=true` (session 120; `make release-check` is
+  the same path with `NO_PUSH=1`).
   The launcher and the overlay draw one `ui::Panel`: the tabs are MAIN (which
   carries the ROM row and EXIT GAME), MODS, CONTROLS, SETTINGS and DEBUG, and the
   panel reserves the CONTROLS tab's height so the header, the tab bar and the
@@ -280,8 +285,11 @@ holds the evidence.
    draft**, whose Linux and macOS archives both contain
    `mods/exp-overflow.nrm` and `mods/skip-boot-logos.nrm`. That release is
    published: session 113's download carries both mods and the session-107 fix.
-   The published `v0.4.0` assets still have the empty `mods/`.
-   See `docs/HANDOFF-2026-09-27-session111.md`.
+   The published `v0.4.0` assets still have the empty `mods/`. Session 120 added
+   `make release`, which is the supported way to prepare this bundle and start
+   the release.
+   See `docs/HANDOFF-2026-09-27-session111.md` and
+   `docs/HANDOFF-2026-10-01-session120.md`.
 10. **HD backgrounds: true HD needs the renderer.** `mods/backgrounds/` reskins
     the backdrop at the game's own 320x240 (box-filtered to the 496x384 canvas),
     so its detail is capped by the original. Sampling a larger texture needs

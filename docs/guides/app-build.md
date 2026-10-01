@@ -401,32 +401,73 @@ runtime joins its saving thread inside `recomp::start`, before either change.
 
 ### Releases (GitHub Actions)
 
-`.github/workflows/release.yml` builds macOS, Linux and Windows packages on a
-version tag, publishes a GitHub release and attaches one archive per platform —
-`.tar.gz` on macOS and Linux, `.zip` on Windows — so the downloads appear on the
-repository's Releases page:
+`.github/workflows/release.yml` builds macOS, Linux and Windows packages,
+creates a GitHub release and attaches one archive per platform — `.tar.gz` on
+macOS and Linux, `.zip` on Windows — so the downloads appear on the repository's
+Releases page.
+
+Prepare a release with the one command that does all of it:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+make release VERSION=v0.6.0
 ```
 
-The release job runs only when every platform's build succeeds. Use **Actions →
-Release → Run workflow** with `tag` set and `draft` enabled to get a draft you
-publish yourself instead.
+`tools/release.sh` is that command. It:
+
+1. regenerates the game code (`make bank-recomp`, `make recomp`, `make
+   rsp-recomp`) and the example mods,
+2. packs `files.tar.gz` with `tools/data-bundle.sh`, then unpacks it and
+   compares every file against the tree, so a bundle holding code generated
+   before the current inputs fails here rather than in CI,
+3. commits and pushes the bundle to the private data repository, and
+4. dispatches the Release workflow with `draft` and waits for all three
+   platform builds.
+
+The draft release is at `https://github.com/<repo>/releases`. Publish it after
+reviewing the assets:
+
+```sh
+gh release edit v0.6.0 --draft=false
+```
+
+The tag is created by the workflow's `gh release create`, on the commit the run
+built. `make release` refuses a version that already has a tag or a release, a
+tracked tree with uncommitted changes, and a branch whose tip is not pushed,
+because the bundle records `git rev-parse HEAD` and the hosted unpack step fails
+when that differs from the commit being built.
+
+`make release-check VERSION=v0.6.0` is the same script with `NO_PUSH=1`: it
+regenerates, packs and reports the bundle, the commit it would push and the run
+it would start, and changes nothing outside this tree.
+
+```sh
+VERSION=v0.6.0          # required only to override; default: newest tag + 1
+DATA_REPO=OWNER/REPO    # default: the OGRE_DATA_REPO Actions variable
+REGEN=0                 # use the generated code already in the tree
+DRAFT=false             # publish instead of drafting
+NO_WAIT=1               # do not wait for the run
+make release
+```
 
 **`platforms` selects the matrix for a dispatched run** (`all`, `windows`,
 `linux` or `macos`; a tag push always builds all three). A Windows-only run is
 about 8 minutes instead of 30, which is the iteration path for a
-Windows-specific bug; it still runs the smoke test and publishes the release, so
-that release carries only the one platform's asset.
+Windows-specific bug; it still runs the smoke test and creates the release, so
+that release carries only the one platform's asset. `make release` always asks
+for `all`.
 
 ```sh
 gh workflow run release.yml -f tag=v0.2.1-rc3 -f platforms=windows
 ```
 
-`tools/release-build.sh` is the single entry point — the workflow just exports
-`DIST_OS` and runs it, so a release artifact is byte-for-byte what `make dist`
-produces locally:
+A tag push runs the workflow too, and on that path the `tag` and `draft` inputs
+are empty: the tag that was pushed is used and the release is published. Use
+`make release` or a dispatch when the release should be a draft; the `draft`
+input defaults to `true` so an unattended dispatch does not publish.
+
+`tools/release-build.sh` is the single build entry point — the workflow just
+exports `DIST_OS` and runs it, so a release artifact is byte-for-byte what
+`make dist` produces locally:
 
 ```sh
 tools/release-build.sh                  # this machine's platform
@@ -447,13 +488,18 @@ where the ROM and the generated code already are.
 A private data repository supplies the generated code, which lets the release
 matrix run on hosted runners with no ROM present.
 
-1. On a machine with the ROM and a built tree, produce the archive:
+1. On a machine with the ROM and a built tree, produce the archive. `make
+   release` does this and the two steps after it; the commands it runs are:
 
    ```sh
-   make && make recomp && make bank-recomp && make rsp-recomp
+   make bank-recomp && make recomp && make rsp-recomp
    make example-mods
    tools/data-bundle.sh                 # -> dist/ogre-data/files.tar.gz
    ```
+
+   The order is `make regenerate`'s: `make recomp` dispatches the cross-bank
+   calls against the records `make bank-recomp` writes into
+   `app/src/bank_funcs.inc`, and refuses to run without them.
 
    The archive holds `RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/` and
    `app/src/bank_funcs.inc` at its root, the packaged example mods
@@ -475,7 +521,9 @@ matrix run on hosted runners with no ROM present.
    the regeneration command. Regenerating is part of preparing a release, not an
    optional refresh.
 
-2. Commit `files.tar.gz` to the private repository.
+2. Commit `files.tar.gz` to the private repository. `make release` copies it
+   there, commits it as `generated code at <commit>, with the example mods` and
+   pushes, then dispatches the workflow.
 
 3. In this repository's settings, set the **Actions variable** `OGRE_DATA_REPO`
    to the private repository slug (for example `OWNER/PRIVATE-REPO`), and add the

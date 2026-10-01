@@ -49,9 +49,12 @@ on:
         required: true
         type: string
       draft:
+        # Default true: `make release` dispatches this workflow, and a release
+        # that a person has not looked at should not become the Latest
+        # download. Pass draft=false for a published release.
         description: 'Create the release as a draft instead of publishing it'
         type: boolean
-        default: false
+        default: true
       platforms:
         description: 'Which platforms to build. `windows` is the fast iteration path (about 8 minutes instead of 30).'
         type: choice
