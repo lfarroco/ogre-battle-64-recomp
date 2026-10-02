@@ -135,6 +135,16 @@ uint16_t gamecontroller_buttons_from_map(const InputMap& map, SDL_GameController
 std::string pad_button_name(int code);
 std::string pad_source_text(const PadBinding& binding);
 
+// The SDL controller button whose short tag matches `name` ("a", "back",
+// "dup", ...), case-insensitively, or -1. The tags are the ones `pad_button_name`
+// and `controls.cfg` use, so a scripted run names a pad button the same way the
+// file does.
+int pad_button_from_name(const std::string& name);
+
+// True when the live map binds `code` to an N64 button. The overlay's own pad
+// button is only free to open the overlay while nothing else uses it.
+bool pad_button_is_bound(int code);
+
 // The first gamepad button held on any of `pads`, or -1. Used by the rebinding
 // capture in the launcher and the overlay; it is an edge in practice because the
 // caller only polls while a capture is armed.

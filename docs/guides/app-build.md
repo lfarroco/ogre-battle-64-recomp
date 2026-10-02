@@ -635,11 +635,13 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
 | `OGRE_LAUNCHER_TAB=<main\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
 | `OGRE_LAUNCHER_KEYS=<name>,…` | push one synthetic keydown per 150 ms through the start screen's real key handler. Names are SDL scancode names (`Tab`, `Down`, `Space`, `p`, `Return`), so `Tab,Tab,Tab,Space,p` opens CONTROLS, arms the A row's rebind and binds `P` |
-| `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS`) |
+| `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS` and `OGRE_LAUNCHER_PAD` entries) |
+| `OGRE_LAUNCHER_PAD=<tag>,…` | push one synthetic `SDL_CONTROLLERBUTTONDOWN` per 150 ms through the panel's real pad handler, so the pad path is exercised on a machine with no gamepad. Tags are the gamepad tags `controls.cfg` uses (`a`, `b`, `back`, `dup`, `dleft`, `lb`, …) |
 | `OGRE_OVERLAY=1` | open the in-game overlay at startup |
 | `OGRE_OVERLAY_AT_MS=<n>` | push one synthetic `ESC` down `n` ms after the overlay is initialised, so the real open path runs without a human |
 | `OGRE_OVERLAY_TAB=<main\|controls\|settings\|debug>` | open the overlay's panel on that tab (`start` is accepted as an alias for `main`, which carries EXIT GAME) |
 | `OGRE_OVERLAY_KEYS=<name>,…` | push one synthetic keydown per 150 ms while the overlay is visible (same names as `OGRE_LAUNCHER_KEYS`). `main` + `Space` activates EXIT GAME |
+| `OGRE_OVERLAY_PAD=<tag>,…` | the same for the pad (same tags as `OGRE_LAUNCHER_PAD`), delivered whether or not the overlay is visible, so a script's first `back` opens it |
 | `OGRE_OVERLAY_OPACITY=<0.2..1.0>` | the overlay window's opacity (default 0.90) |
 | `OGRE_WINDOW_CLOSE_AT_MS=<n>` | push one `SDL_WINDOWEVENT_CLOSE` for the game window `n` ms after the platform was configured, so the window's close path can be exercised without a human clicking the button. Pair it with `OGRE_OVERLAY_AT_MS` and `OGRE_OVERLAY_KEYS="Escape"` to have the overlay's second SDL window open and close first, which is the state the close button used to stop working in |
 | `OGRE_CAPTURE_OVERLAY=<path>` | write the overlay's renderer as a PPM once, after its first frame. `OGRE_OVERLAY_SHOT_MS=<n>` delays it, so the capture can show what `OGRE_OVERLAY_KEYS` changed |
@@ -672,6 +674,10 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, capture only every `n`th present — a multi-minute run becomes a slideshow instead of one 3 MB PPM per frame (files stay numbered by present index) |
 | `OGRE_SPEED=<n>` | scale the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64), so timed sequences — the attract loop, songs — complete in `1/n` of the wall time. Semantics are unchanged: every timer scales together (audio is off in these runs). `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s. This is the debug spelling of **GAME SPEED**: with the variable unset the runtime takes its starting value from `<config>/settings.cfg`, and `OGRE_SPEED` overrides that file for one run without writing it |
 | `OGRE_WIDESCREEN=off\|on` | debug spelling of **WIDESCREEN**: `on` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`. The retired `missions` and `always` spellings are read as `on`. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
+| `OGRE_DISPLAY_EXPERIMENTS=1` | turn on the two experimental DISPLAY rows, RESOLUTION and MSAA, which are hidden and not applied without it. A set `OGRE_RESOLUTION` or `OGRE_MSAA` enables it too |
+| `OGRE_RESOLUTION=native\|2x\|auto` | debug spelling of **RESOLUTION** (experimental; enables the row). `2x` renders at twice the native resolution in each axis and `auto` at the largest integer multiple that fits the window |
+| `OGRE_MSAA=off\|2x\|4x\|8x` | debug spelling of **MSAA** (experimental; enables the row) |
+| `OGRE_WINDOW=windowed\|fullscreen` | debug spelling of **WINDOW**, the same override rule |
 | `OGRE_SOUNDS=off\|on` | debug spelling of **SOUNDS**: `off` queues silence. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED` |
 | `OGRE_VOLUME=<0..100>` | debug spelling of **VOLUME**, the output gain in percent, clamped. Same override rule |
 | `OGRE_FORCE_SCENE=<hex>` | switch a run to attract scene `<hex>` by poking the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it active — no need to wait out the attract loop. `OGRE_FORCE_SCENE_AFTER_MS` (default 3000) delays the first poke so boot can settle |
@@ -1698,6 +1704,28 @@ clears the pad slot, `ESC` cancels. `TAB` / `SHIFT+TAB` (or a mouse click on the
 tab bar) switch tabs. The second column's action text comes from the game's
 controls description.
 
+The line under the bindings is the panel's own pad controls, and is not a
+binding:
+
+```
+MENU PAD NAVIGATION: D-PAD MOVE, A SELECT, SELECT MENU, LB/RB SWITCH TAB
+```
+
+`D-PAD` moves the selection and steps a radio row or slider, `A` and `START`
+activate, `LB`/`RB` switch tab, and the pad's SELECT button is the overlay's
+Back/toggle (it does nothing in the launcher). The line is one section row, and a
+section row's title is wrapped to the whole panel width (`layout_rows` in
+`app/src/ui.cpp`) because a section has no description to its right. `app/src/ui.cpp` maps the SDL button to a `Panel::PadCommand`
+(`Panel::pad_command_for_button`), so the launcher and the overlay act on one
+table. The events are `SDL_CONTROLLERBUTTONDOWN`, which is why a pad press
+cannot auto-repeat; a rebind capture owns the pad while it is armed.
+
+`SDL_CONTROLLER_BUTTON_BACK` (the pad's SELECT) opens and closes the in-game overlay, and only while
+the live map binds nothing to it (`pad_button_is_bound`), so opening the menu
+cannot also press an N64 button in the game. While the overlay is visible the
+game already receives an idle pad (`get_input` in `app/src/sdl_platform.cpp`), so
+navigating the panel does not move the game's own cursor.
+
 ### Game speed (the SETTINGS tab)
 
 GAME SPEED is the runtime's emulated-clock multiplier, the same quantity
@@ -1824,8 +1852,96 @@ OGRE_WIDESCREEN=on OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
   ./build-app/ogrebattle64 2>&1 | grep -E '\[scene\].*0x0003|\[widescreen\]'
 ```
 
-### Sounds and volume (the SETTINGS tab)
+### Display: window, and the experimental resolution and MSAA rows (the SETTINGS tab)
 
+Shipped:
+
+```
+DISPLAY
+WIDESCREEN   [x] OFF [ ] ON
+WINDOW       [x] WINDOWED [ ] FULLSCREEN
+```
+
+`WINDOW` is `GraphicsConfig::wm_option`; the renderer calls its backend's
+`setFullScreen`, so the window is not recreated and the swap chain follows the
+display mode. It is saved as `window = windowed|fullscreen` and
+`OGRE_WINDOW=windowed|fullscreen` overrides the file for one run.
+
+**Fullscreen is the renderer's geometry, and the port must not touch it.** RT64's
+fullscreen is a raw `SetWindowPos` to the monitor rect on Windows and
+`[NSWindow toggleFullScreen:]` on macOS, and neither goes through SDL, so SDL's
+idea of the window's size does not follow. The WIDESCREEN row derives the
+window's shape from its height, so it must not run while fullscreen:
+`widescreen_fit_window` returns early when the live config asks for fullscreen and
+logs `[widescreen] fullscreen: the renderer owns the window's shape` once, and
+`widescreen_update` no longer reports a mode change on its first call (the window
+was created at that mode's shape already). A run that started fullscreen used to
+re-fit the window on its first frame — invisible on macOS, where SDL ignores a
+resize of a window it knows is fullscreen, and a 4:3 window in the display's
+top-left corner on Windows, where SDL did not perform the transition and applied
+the resize. Leaving fullscreen is the other direction: `RT64Renderer::update_config`
+calls `widescreen_request_refit()` after it has restored the window, and the next
+frame re-derives the shape, so a WIDESCREEN change made while fullscreen is
+honoured on the way out.
+
+**RESOLUTION and MSAA are experimental and off.** Both are implemented and both
+reach RT64, and a player run with them produced visual artifacts (developer,
+session 121), so they are hidden and inert until the artifacts are handled. With
+`OGRE_DISPLAY_EXPERIMENTS=1` they appear under WINDOW and are applied:
+
+```
+DISPLAY
+WIDESCREEN   [x] OFF [ ] ON
+RESOLUTION   [x] NATIVE [ ] 2X [ ] AUTO
+MSAA         [x] OFF [ ] 2X [ ] 4X [ ] 8X
+WINDOW       [x] WINDOWED [ ] FULLSCREEN
+```
+
+| row | options | what it changes |
+|---|---|---|
+| `RESOLUTION` | `NATIVE` / `2X` / `AUTO` | `res_option`. `NATIVE` is RT64's `Original`, the game's own 320x240 target, and what the port drew before the row existed. `2X` is `Original2x`, which `set_application_user_config` (`app/src/renderer.cpp`) turns into RT64's `Manual` at `resolutionMultiplier 2.0`. `AUTO` is `WindowIntegerScale`, the largest integer multiple of the native resolution that fits the window |
+| `MSAA` | `OFF` / `2X` / `4X` / `8X` | `msaa_option`, RT64's multisample antialiasing. A change also rebuilds the render targets (`updateMultisampling`) |
+
+The gate is `OGRE_DISPLAY_EXPERIMENTS` (`1`/`on`/`true`/`yes`; `0`/`off`/`false`/
+`no` is off). A set `OGRE_RESOLUTION` or `OGRE_MSAA` also enables it, so the debug
+spellings below work on their own. While it is off:
+
+- the rows are absent from the tab, in the launcher and in the overlay
+  (`app/src/ui.cpp`, `Panel::build_rows`);
+- the two values are not applied at all, whatever the file or the environment
+  says (`applied_resolution`/`applied_antialias` in `app/src/settings.cpp`), and
+  the boot prints
+  `resolution 2x and msaa 4x are experimental and not applied; set OGRE_DISPLAY_EXPERIMENTS=1 to enable them`;
+- a value already in `settings.cfg` is kept, not overwritten: the file records
+  what was configured, and the flag decides whether it is used.
+
+With the flag on they are saved as `resolution = native|2x|auto` and
+`msaa = off|2x|4x|8x`, and `OGRE_RESOLUTION`/`OGRE_MSAA` override the file for one
+run without writing it.
+
+All three rows apply through `RT64Renderer::update_config`
+(`app/src/renderer.cpp:917`) on the next frame, so they can be changed from the
+in-game `ESC` overlay. `settings.cpp` and `widescreen.cpp` are two writers of one
+`GraphicsConfig`: each starts from the live config and changes only its own
+fields, so a widescreen scene transition does not reset the resolution and a
+resolution change does not reset the aspect ratio. The applied values are printed
+once per change:
+
+```
+[renderer] config: resolution 2x (mult 2.00), msaa 4x, window fullscreen
+```
+
+`GRAPHICS API` is not a row. It is fixed at renderer creation, so it stays an
+environment variable (`OGRE_GRAPHICS_API`). `REFRESH RATE` and
+`HIGH-PRECISION FRAMEBUFFER` are also in `GraphicsConfig` and remain at their
+defaults.
+
+Proofs: `native-launcher-settings.png` (shipped rows),
+`native-launcher-settings-experiments.png` (`OGRE_DISPLAY_EXPERIMENTS=1`) and
+`native-overlay-settings.png` (the shipped rows, with the pad script below having
+set WINDOW to FULLSCREEN).
+
+### Sounds and volume (the SETTINGS tab)
 ```
 AUDIO
 SOUNDS   [x] ON [ ] OFF
@@ -1858,8 +1974,10 @@ rows existed has neither key and loads as `ON` / `100`, which is what the app di
 before them. The browser build does not read `settings.cfg` and has no settings
 UI, so `app/src/web_platform.cpp` still plays at full volume.
 
-Proofs: `native-launcher-settings.png` and `native-overlay-settings.png` (the
-rows, in the launcher and in the `ESC` overlay).
+Proofs: `native-launcher-settings.png`, `native-launcher-settings-experiments.png`
+and `native-overlay-settings.png` (the tab in the launcher, the same tab with the
+experimental rows enabled, and in the `ESC` overlay with the pad script above
+having set WINDOW to FULLSCREEN).
 
 ### The in-game overlay
 
@@ -1927,6 +2045,22 @@ OGRE_PREF_DIR=/tmp/gs OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=2500 \
   OGRE_EXIT_AFTER_MS=7000 ./build-app/ogrebattle64
 grep '^game_speed' /tmp/gs/settings.cfg     # game_speed = 4
 
+# the experimental DISPLAY rows, from keys and then from a pad, in the launcher
+# (without OGRE_DISPLAY_EXPERIMENTS the two rows are absent and inert)
+OGRE_PREF_DIR=/tmp/dp OGRE_DISPLAY_EXPERIMENTS=1 OGRE_LAUNCHER=1 \
+  OGRE_LAUNCHER_TAB=settings \
+  OGRE_LAUNCHER_KEYS="Down,Down,Right,Down,Right,Down,Right" \
+  OGRE_LAUNCHER_SHOT=/tmp/dp.ppm ./build-app/ogrebattle64
+grep -E '^(resolution|msaa|window)' /tmp/dp/settings.cfg
+# resolution = 2x / msaa = 2x / window = fullscreen
+
+# a pad opens the overlay and changes WINDOW; the game sees an idle pad
+OGRE_PREF_DIR=/tmp/pad OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_TAB=settings \
+  OGRE_OVERLAY_PAD="back,ddown,ddown,dright" OGRE_CAPTURE_OVERLAY=/tmp/pad.ppm \
+  OGRE_OVERLAY_SHOT_MS=2500 OGRE_EXIT_AFTER_MS=14000 ./build-app/ogrebattle64
+# must print "[overlay] shown", then a "[renderer] config:" line with window
+# fullscreen, then "[input] overlay open: game input suppressed"
+
 # the overlay's EXIT GAME (MAIN is the tab the panel opens on with OGRE_OVERLAY)
 OGRE_PREF_DIR=/tmp/ex OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY=1 \
   OGRE_OVERLAY_TAB=main OGRE_OVERLAY_KEYS="Space" \
@@ -1989,7 +2123,10 @@ MODS         one row per mod, then one row per visible option of that mod; a
 CONTROLS     one row per N64 button with its keyboard key, its gamepad source and
              the field-map action; see "Controller bindings and the in-game
              overlay"
-SETTINGS     GAME SPEED, a radio group; see "Game speed (the SETTINGS tab)"
+SETTINGS     GAME SPEED, then a DISPLAY section (WIDESCREEN, WINDOW, plus the
+             experimental RESOLUTION and MSAA rows when
+             OGRE_DISPLAY_EXPERIMENTS=1) and an AUDIO section (SOUNDS, VOLUME);
+             see the SETTINGS sections below
 DEBUG        the live Chaos Frame readout
 ```
 

@@ -71,6 +71,12 @@ struct OverlayState {
     size_t key_next = 0;
     uint64_t keys_started_ms = 0;
 
+    // OGRE_OVERLAY_PAD: the same scripted-run aid for the gamepad, as SDL
+    // controller button codes. Unlike the key script this is delivered whether or
+    // not the overlay is visible, because `back` is what opens it.
+    std::vector<int> pad_buttons;
+    size_t pad_next = 0;
+    uint64_t pad_started_ms = 0;
 };
 
 OverlayState g_overlay;
@@ -144,6 +150,42 @@ std::vector<SDL_Scancode> parse_key_list(const char* spec) {
         pos = comma + 1;
     }
     return keys;
+}
+
+// "back,down,right,a": gamepad tags from input_map's table, comma separated,
+// trimmed. This is the `OGRE_OVERLAY_PAD` script.
+std::vector<int> parse_pad_list(const char* spec) {
+    std::vector<int> buttons;
+    if (spec == nullptr) {
+        return buttons;
+    }
+    const std::string text = spec;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        const size_t comma = text.find(',', pos);
+        std::string name = text.substr(pos, comma == std::string::npos ? std::string::npos
+                                                                       : comma - pos);
+        const size_t first = name.find_first_not_of(" \t");
+        const size_t last = name.find_last_not_of(" \t");
+        if (first != std::string::npos) {
+            name = name.substr(first, last - first + 1);
+        }
+        if (!name.empty()) {
+            const int code = pad_button_from_name(name);
+            if (code >= 0) {
+                buttons.push_back(code);
+            }
+            else {
+                std::fprintf(stderr, "[overlay] OGRE_OVERLAY_PAD: unknown button '%s'\n",
+                             name.c_str());
+            }
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        pos = comma + 1;
+    }
+    return buttons;
 }
 
 bool create_window() {
@@ -398,6 +440,10 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
         }
     }
     g_overlay.keys = parse_key_list(std::getenv("OGRE_OVERLAY_KEYS"));
+    // The pad script's clock starts here rather than at the first show, because
+    // its first press is what a scripted run uses to open the overlay.
+    g_overlay.pad_buttons = parse_pad_list(std::getenv("OGRE_OVERLAY_PAD"));
+    g_overlay.pad_started_ms = SDL_GetTicks64();
     g_overlay.initialized = true;
 
     const char* start = std::getenv("OGRE_OVERLAY");
@@ -456,6 +502,14 @@ void overlay_handle_event(const SDL_Event& event) {
             event.key.keysym.sym == SDLK_ESCAPE) {
             show();
         }
+        // A pad's Back button opens it too, but only while the input map has
+        // nothing on that button: the overlay must not also press an N64 button
+        // in the game every time it is opened.
+        else if (g_overlay.initialized && event.type == SDL_CONTROLLERBUTTONDOWN &&
+                 event.cbutton.button == SDL_CONTROLLER_BUTTON_BACK &&
+                 !pad_button_is_bound(SDL_CONTROLLER_BUTTON_BACK)) {
+            show();
+        }
         return;
     }
 
@@ -494,12 +548,7 @@ void overlay_handle_event(const SDL_Event& event) {
             }
             else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
                 const size_t index = g_overlay.panel->selected();
-                if (index < g_overlay.panel->row_count() &&
-                    (g_overlay.panel->row_kind(index) == ui::Panel::RowKind::GameSpeed ||
-                     g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Widescreen ||
-                     g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Sound ||
-                     g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Volume ||
-                     g_overlay.panel->row_kind(index) == ui::Panel::RowKind::Option)) {
+                if (g_overlay.panel->row_is_steppable(index)) {
                     g_overlay.panel->activate(index, key == SDLK_RIGHT ? 1 : -1);
                 }
             }
@@ -517,6 +566,36 @@ void overlay_handle_event(const SDL_Event& event) {
                         g_overlay.capture_started_ms = SDL_GetTicks64();
                     }
                 }
+            }
+            break;
+        }
+
+        case SDL_CONTROLLERBUTTONDOWN: {
+            // A rebind capture owns the pad while it is armed; `overlay_render`
+            // polls the held button into it, and `Back` is bindable then like any
+            // other button.
+            if (g_overlay.panel->capturing()) {
+                break;
+            }
+            // Back closes the panel. It is the same button that opens it, and the
+            // game does not see it: `get_input` reports an idle pad while the
+            // overlay is visible.
+            if (event.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) {
+                hide();
+                break;
+            }
+            const ui::Panel::PadCommand command =
+                ui::Panel::pad_command_for_button(event.cbutton.button);
+            if (command == ui::Panel::PadCommand::None) {
+                break;
+            }
+            const ui::RowAction action = g_overlay.panel->pad_command(command);
+            if (action == ui::RowAction::QuitGame) {
+                request_quit();
+            }
+            if (g_overlay.panel->capturing()) {
+                g_overlay.capture_active = true;
+                g_overlay.capture_started_ms = SDL_GetTicks64();
             }
             break;
         }
@@ -593,6 +672,19 @@ void overlay_render() {
         if (g_overlay.game_window != nullptr) {
             synthetic.key.windowID = SDL_GetWindowID(g_overlay.game_window);
         }
+        SDL_PushEvent(&synthetic);
+    }
+
+    // Deliver the next scripted pad press. This runs whether or not the overlay
+    // is visible: the script's first `back` is what a headless run uses to open
+    // it, exactly as a real controller's Back button does.
+    if (g_overlay.pad_next < g_overlay.pad_buttons.size() &&
+        SDL_GetTicks64() - g_overlay.pad_started_ms >= g_overlay.pad_next * 150) {
+        SDL_Event synthetic{};
+        synthetic.type = SDL_CONTROLLERBUTTONDOWN;
+        synthetic.cbutton.state = SDL_PRESSED;
+        synthetic.cbutton.button =
+            static_cast<Uint8>(g_overlay.pad_buttons[g_overlay.pad_next++]);
         SDL_PushEvent(&synthetic);
     }
 

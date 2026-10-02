@@ -178,6 +178,46 @@ ScriptedKeys parse_scripted_keys(const char* spec) {
     return script;
 }
 
+// OGRE_LAUNCHER_PAD=<tag>[,<tag>...]: the same scripted-run aid for the gamepad,
+// one synthetic button down per 150 ms. The names are the gamepad tags
+// `controls.cfg` uses ("a", "back", "dup", "lb", ...); this machine has no pad,
+// so it is how the pad navigation path is exercised. It also drives the
+// synthetic pad events a real controller produces, so a bug in the panel's pad
+// handling shows up here.
+std::vector<int> parse_scripted_pad(const char* spec) {
+    std::vector<int> buttons;
+    if (spec == nullptr) {
+        return buttons;
+    }
+    const std::string text = spec;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        const size_t comma = text.find(',', pos);
+        std::string name = text.substr(pos, comma == std::string::npos ? std::string::npos
+                                                                       : comma - pos);
+        const size_t first = name.find_first_not_of(" \t");
+        const size_t last = name.find_last_not_of(" \t");
+        if (first != std::string::npos) {
+            name = name.substr(first, last - first + 1);
+        }
+        if (!name.empty()) {
+            const int code = pad_button_from_name(name);
+            if (code >= 0) {
+                buttons.push_back(code);
+            }
+            else {
+                std::fprintf(stderr, "[launcher] OGRE_LAUNCHER_PAD: unknown button '%s'\n",
+                             name.c_str());
+            }
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        pos = comma + 1;
+    }
+    return buttons;
+}
+
 }  // namespace
 
 std::filesystem::path executable_directory() {
@@ -381,12 +421,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     };
     auto step_option = [&](int direction) {
         const size_t index = panel.selected();
-        if (index < panel.row_count() &&
-            (panel.row_kind(index) == ui::Panel::RowKind::Option ||
-             panel.row_kind(index) == ui::Panel::RowKind::GameSpeed ||
-             panel.row_kind(index) == ui::Panel::RowKind::Widescreen ||
-             panel.row_kind(index) == ui::Panel::RowKind::Sound ||
-             panel.row_kind(index) == ui::Panel::RowKind::Volume)) {
+        if (index < panel.row_count() && panel.row_is_steppable(index)) {
             panel.activate(index, direction);
         }
     };
@@ -417,6 +452,10 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
 
     // OGRE_LAUNCHER_KEYS drives the screen from synthetic key presses.
     ScriptedKeys script = parse_scripted_keys(std::getenv("OGRE_LAUNCHER_KEYS"));
+    // OGRE_LAUNCHER_PAD does the same for the gamepad, through the same handler a
+    // real controller button uses.
+    std::vector<int> pad_script = parse_scripted_pad(std::getenv("OGRE_LAUNCHER_PAD"));
+    size_t pad_script_next = 0;
     const uint64_t script_started_ms = SDL_GetTicks64();
     const uint64_t script_step_ms = 150;
     // OGRE_LAUNCHER_SHOT_MS delays the screenshot; it defaults to a point after
@@ -427,8 +466,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             shot_at_ms = static_cast<uint64_t>(std::strtoul(value, nullptr, 10));
         }
         else {
-            shot_at_ms = script.keys.empty() ? 0
-                                             : (script.keys.size() + 2) * script_step_ms;
+            shot_at_ms = (std::max(script.keys.size(), pad_script.size()) + 2) * script_step_ms;
         }
     }
 
@@ -445,6 +483,17 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
             synthetic.key.keysym.scancode = code;
             synthetic.key.keysym.sym = SDL_GetKeyFromScancode(code);
             synthetic.key.windowID = SDL_GetWindowID(window);
+            SDL_PushEvent(&synthetic);
+        }
+
+        // The pad script pushes SDL_CONTROLLERBUTTONDOWN, which is the event a
+        // real pad produces and the one the panel's pad path handles.
+        if (pad_script_next < pad_script.size() &&
+            SDL_GetTicks64() - script_started_ms >= pad_script_next * script_step_ms) {
+            SDL_Event synthetic{};
+            synthetic.type = SDL_CONTROLLERBUTTONDOWN;
+            synthetic.cbutton.state = SDL_PRESSED;
+            synthetic.cbutton.button = static_cast<Uint8>(pad_script[pad_script_next++]);
             SDL_PushEvent(&synthetic);
         }
 
@@ -586,6 +635,19 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
                 const std::filesystem::path dropped{event.drop.file};
                 SDL_free(event.drop.file);
                 handle_dropped(dropped);
+            }
+            else if (event.type == SDL_CONTROLLERBUTTONDOWN && !panel.capturing()) {
+                // The pad drives the same panel as the keyboard. A rebind capture
+                // owns the pad while it is armed, so this is skipped then; the
+                // poll below feeds the capture instead.
+                const ui::Panel::PadCommand command =
+                    ui::Panel::pad_command_for_button(event.cbutton.button);
+                if (command != ui::Panel::PadCommand::None) {
+                    run_action(panel.pad_command(command));
+                    if (panel.capturing()) {
+                        capture_started_ms = SDL_GetTicks64();
+                    }
+                }
             }
         }
 

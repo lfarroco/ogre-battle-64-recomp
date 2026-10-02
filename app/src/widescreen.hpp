@@ -34,7 +34,17 @@ bool widescreen_update();
 // 4:3 for `Off` and 16:9 for `On`. Called once right after the
 // window is created, and again only when `widescreen_update` reports a mode
 // change. A manual resize by the player is left alone.
+//
+// A fullscreen window is never reshaped: RT64 owns its geometry then (a raw
+// `SetWindowPos` on Windows, `[NSWindow toggleFullScreen:]` on macOS) and SDL
+// does not see the size it set.
 void widescreen_fit_window(SDL_Window* window);
+
+// Ask for one window re-fit on the next `widescreen_update` call. The renderer
+// calls this from `update_config` when it has just left fullscreen, so the shape
+// is re-derived after the window is back under SDL's control and not before.
+// Safe to call from the renderer thread.
+void widescreen_request_refit();
 
 // The size a run should open its window at: 4:3 for `Off`, 16:9 otherwise.
 void widescreen_initial_window_size(int& width, int& height);

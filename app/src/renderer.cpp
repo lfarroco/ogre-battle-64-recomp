@@ -26,6 +26,7 @@
 
 #include "renderer.hpp"
 #include "gbi.hpp"
+#include "widescreen.hpp"
 
 namespace ogre {
 
@@ -126,6 +127,26 @@ void set_application_user_config(RT64::Application* app, const ultramodern::rend
     app->userConfig.refreshRateTarget = config.rr_manual_value;
     app->userConfig.internalColorFormat = to_rt64(config.hpfb_option);
     app->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
+
+    // One line per applied configuration: the SETTINGS tab's DISPLAY rows change
+    // any of these at runtime, and this is what makes the value a run actually
+    // used readable from its log (the rows themselves only show the panel's
+    // copy).
+    // The names follow `ultramodern::renderer::Resolution` (Original, Original2x,
+    // Auto), not RT64's own enum order.
+    static const char* const kResolutionNames[] = {"native", "2x", "auto"};
+    static const char* const kAntialiasNames[] = {"off", "2x", "4x", "8x"};
+    static const char* const kWindowNames[] = {"windowed", "fullscreen"};
+    const int resolution_index = static_cast<int>(config.res_option);
+    const int antialias_index = static_cast<int>(config.msaa_option);
+    const int window_index = static_cast<int>(config.wm_option);
+    fprintf(stderr, "[renderer] config: resolution %s (mult %.2f), msaa %s, window %s\n",
+            resolution_index >= 0 && resolution_index < 3 ? kResolutionNames[resolution_index]
+                                                          : "?",
+            static_cast<double>(app->userConfig.resolutionMultiplier),
+            antialias_index >= 0 && antialias_index < 4 ? kAntialiasNames[antialias_index] : "?",
+            window_index >= 0 && window_index < 2 ? kWindowNames[window_index] : "?");
+    fflush(stderr);
 }
 
 ultramodern::renderer::SetupResult map_setup_result(RT64::Application::SetupResult result) {
@@ -922,6 +943,14 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
 
         if (new_config.wm_option != old_config.wm_option) {
             app_->setFullScreen(new_config.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
+            // Leaving fullscreen hands the window back with the rect RT64 saved
+            // before it went fullscreen; ask for one re-fit so the shape matches
+            // the WIDESCREEN mode even if the player changed it while
+            // fullscreen. Doing it from the renderer thread would be an SDL call
+            // off the main thread, so this only flags it.
+            if (new_config.wm_option == ultramodern::renderer::WindowMode::Windowed) {
+                ogre::widescreen_request_refit();
+            }
         }
 
         set_application_user_config(app_.get(), new_config);

@@ -20,6 +20,18 @@
 //   callback scales every buffer it queues by `audio_gain_percent()`. See
 //   `SoundMode` and the block below it.
 //
+// Seven settings in three groups, in the order the SETTINGS tab draws them:
+//
+// * GAME SPEED.
+// * DISPLAY: WIDESCREEN, then RESOLUTION, MSAA and WINDOW, which are the rest of
+//   `ultramodern::renderer::GraphicsConfig`. The renderer applies all three on a
+//   change (`RT64Renderer::update_config`, app/src/renderer.cpp), so a row
+//   changed under the Esc overlay takes effect on the next frame. `widescreen.cpp`
+//   owns `ar_option` and this file owns `res_option`, `msaa_option` and
+//   `wm_option`; each writer starts from the live config, so neither loses the
+//   other's value.
+// * AUDIO: SOUNDS and VOLUME.
+//
 // The file is `<config>/settings.cfg`, plain text.
 #pragma once
 
@@ -86,6 +98,107 @@ void set_widescreen_mode(WidescreenMode mode);
 // `right_text`; the drawn row uses the panel's own radio layout.
 std::string widescreen_mode_text();
 
+// RESOLUTION and MSAA are experimental and shipped behind a flag. Both are
+// implemented and reach RT64, but a player run with them produced visual
+// artifacts (developer, session 121), so they are off and their rows are absent
+// from the SETTINGS tab unless `OGRE_DISPLAY_EXPERIMENTS=1` asks for them. The
+// gate also accepts a set `OGRE_RESOLUTION` or `OGRE_MSAA`, so the debug
+// spellings keep working. While it is off the two values are not applied at all
+// (native resolution, no antialiasing) and the values already in
+// `settings.cfg` are kept for a later run with the flag on.
+bool display_experiments_enabled();
+
+// The RESOLUTION row: how many pixels RT64 renders before it scales the picture
+// to the window. `Native` is the game's own target (320x240), which is what the
+// port drew before the row existed; `Double` renders at twice that in each axis;
+// `Auto` renders at the largest integer multiple of the native resolution that
+// fits the window (RT64's `WindowIntegerScale`). The names are the row's own;
+// `settings.cpp` maps them to `ultramodern::renderer::Resolution`.
+//
+// Experimental (`display_experiments_enabled`). `resolution_mode()` returns the
+// mode in use, which is `Native` while the gate is off.
+//
+// The enumerators follow the row's display order, so `Native` is the marker of
+// the first option and the default.
+enum class ResolutionMode {
+    Native = 0,
+    Double = 1,
+    Auto = 2,
+};
+
+constexpr int kResolutionModeCount = 3;
+
+// "NATIVE", "2X" or "AUTO" for the radio row's `index`-th option.
+const char* resolution_mode_label(int index);
+
+// The live mode.
+ResolutionMode resolution_mode();
+
+// The index of the live mode in the radio row.
+int resolution_mode_index();
+
+// Stores `mode` and writes `<config>/settings.cfg`. Applied on the next frame.
+void set_resolution_mode(ResolutionMode mode);
+
+// The RESOLUTION row's options as one string (radio markers and labels).
+std::string resolution_mode_text();
+
+// The MSAA row: RT64's multisample antialiasing on the render target. `Off` is
+// the default and what the port did before the row existed. MSAA affects 3D
+// edges only; the 2D screens are drawn as rectangles and are unchanged.
+//
+// Experimental, on the same gate as RESOLUTION. `antialias_mode()` returns `Off`
+// while the gate is off.
+enum class AntialiasMode {
+    Off = 0,
+    Msaa2X = 1,
+    Msaa4X = 2,
+    Msaa8X = 3,
+};
+
+constexpr int kAntialiasModeCount = 4;
+
+// "OFF", "2X", "4X" or "8X" for the radio row's `index`-th option.
+const char* antialias_mode_label(int index);
+
+// The live mode.
+AntialiasMode antialias_mode();
+
+// The index of the live mode in the radio row.
+int antialias_mode_index();
+
+// Stores `mode` and writes `<config>/settings.cfg`. Applied on the next frame,
+// which also rebuilds the render targets the sample count belongs to.
+void set_antialias_mode(AntialiasMode mode);
+
+// The MSAA row's options as one string (radio markers and labels).
+std::string antialias_mode_text();
+
+// The WINDOW row: fullscreen or not. Fullscreen is RT64's, not SDL's: the
+// renderer is handed the toggle and calls its backend's `setFullScreen`, so the
+// window keeps its size and the swap chain follows the display mode.
+enum class DisplayMode {
+    Windowed = 0,
+    Fullscreen = 1,
+};
+
+constexpr int kDisplayModeCount = 2;
+
+// "WINDOWED" or "FULLSCREEN" for the radio row's `index`-th option.
+const char* display_mode_label(int index);
+
+// The live mode.
+DisplayMode display_mode();
+
+// The index of the live mode in the radio row.
+int display_mode_index();
+
+// Stores `mode` and writes `<config>/settings.cfg`. Applied on the next frame.
+void set_display_mode(DisplayMode mode);
+
+// The WINDOW row's options as one string (radio markers and labels).
+std::string display_mode_text();
+
 // The SOUNDS row: the same two-option radio group as WIDESCREEN. `Off` queues
 // silence instead of skipping the buffer, because the runtime paces the game's
 // audio generation from the queued depth (`ultramodern::audio_dma_busy()` reads
@@ -149,8 +262,10 @@ std::filesystem::path settings_path(const std::filesystem::path& pref_dir);
 
 // Loads `<config>/settings.cfg` if it exists, applies the result to the
 // runtime, and remembers the directory for later writes. `OGRE_SPEED`,
-// `OGRE_WIDESCREEN`, `OGRE_SOUNDS` and `OGRE_VOLUME` win over the file. Call
-// once at startup, after `resolve_pref_dir()`.
+// `OGRE_WIDESCREEN`, `OGRE_RESOLUTION`, `OGRE_MSAA`, `OGRE_WINDOW`,
+// `OGRE_SOUNDS` and `OGRE_VOLUME` win over the file, and
+// `OGRE_DISPLAY_EXPERIMENTS` gates the two experimental rows. Call once at
+// startup, after `resolve_pref_dir()`.
 void load_settings(const std::filesystem::path& pref_dir);
 
 }  // namespace ogre

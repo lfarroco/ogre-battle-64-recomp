@@ -24,6 +24,7 @@
 
 #include "widescreen.hpp"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -113,6 +114,10 @@ constexpr int kInitialHeight = 720;
 WidescreenMode g_last_mode = WidescreenMode::Off;
 bool g_have_last_mode = false;
 
+// Set by the renderer when it has left fullscreen, consumed by the next
+// `widescreen_update`. Written from the renderer thread.
+std::atomic<bool> g_refit_requested{false};
+
 int width_for_height(int height, float aspect) {
     return static_cast<int>(std::lround(static_cast<double>(height) * aspect));
 }
@@ -152,9 +157,30 @@ bool widescreen_update() {
     // behaviour the developer rejected.
     bool mode_changed = false;
     const WidescreenMode mode = widescreen_mode();
-    if (!g_have_last_mode || mode != g_last_mode) {
+    if (!g_have_last_mode) {
+        // The first call is the frame the game starts on, and the window already
+        // has this mode's shape: `create_window` calls `widescreen_fit_window`
+        // right after creating it, with the mode `load_settings` left in place.
+        // Reporting a change here would re-fit the window on the first frame,
+        // which is wrong for a run that starts fullscreen: on Windows RT64's
+        // fullscreen path is a raw `SetWindowPos` to the monitor rect, so SDL
+        // still has the size it created the window at, and `SDL_SetWindowSize`
+        // then shrank the fullscreen window to the 4:3 shape in the display's
+        // top-left corner, with the desktop around it (developer report,
+        // session 121).
         g_last_mode = mode;
         g_have_last_mode = true;
+    }
+    else if (mode != g_last_mode) {
+        g_last_mode = mode;
+        mode_changed = true;
+    }
+
+    // The renderer has left fullscreen, which puts the window back under SDL's
+    // control; the shape is re-derived from the mode now, after the exit rather
+    // than in the same frame as the request (the renderer applies the change on
+    // its own thread).
+    if (g_refit_requested.exchange(false)) {
         mode_changed = true;
     }
 
@@ -181,6 +207,23 @@ void widescreen_fit_window(SDL_Window* window) {
     if (window == nullptr) {
         return;
     }
+    // Fullscreen owns the window's geometry: RT64 sets it with a raw
+    // `SetWindowPos` on Windows and `[NSWindow toggleFullScreen:]` on macOS, and
+    // neither updates SDL's idea of the window's size. Reshaping the window here
+    // would shrink the picture into a corner of the display. The port knows it
+    // asked for fullscreen because it wrote `wm_option` itself, which is more
+    // reliable than SDL's flags: `SDL_WINDOW_FULLSCREEN` is not set on the
+    // Windows path, because SDL did not perform the transition.
+    if (ultramodern::renderer::get_graphics_config().wm_option ==
+        ultramodern::renderer::WindowMode::Fullscreen) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::fprintf(stderr,
+                         "[widescreen] fullscreen: the renderer owns the window's shape\n");
+        }
+        return;
+    }
     int width = 0;
     int height = 0;
     SDL_GetWindowSize(window, &width, &height);
@@ -195,6 +238,10 @@ void widescreen_fit_window(SDL_Window* window) {
     std::fprintf(stderr, "[widescreen] window %dx%d -> %dx%d (window %s, mode %s)\n", width, height,
                  wanted, height, widescreen_mode() == WidescreenMode::Off ? "4:3" : "16:9",
                  widescreen_mode_label(widescreen_mode_index()));
+}
+
+void widescreen_request_refit() {
+    g_refit_requested.store(true);
 }
 
 void widescreen_initial_window_size(int& width, int& height) {

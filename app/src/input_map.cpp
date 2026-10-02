@@ -2,6 +2,7 @@
 
 #include "input_map.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <mutex>
 #include <sstream>
@@ -326,6 +327,30 @@ std::string pad_button_name(int code) {
         }
     }
     return "?";
+}
+
+int pad_button_from_name(const std::string& name) {
+    std::string lowered = name;
+    for (char& c : lowered) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    for (const PadName& entry : kPadNames) {
+        if (lowered == entry.tag) {
+            return entry.code;
+        }
+    }
+    return -1;
+}
+
+bool pad_button_is_bound(int code) {
+    const InputMap map = read_input_map();
+    for (int i = 0; i < map.size(); i++) {
+        const PadBinding& binding = map.row(i).pad;
+        if (binding.source == PadBinding::Source::Button && binding.code == code) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string pad_source_text(const PadBinding& binding) {

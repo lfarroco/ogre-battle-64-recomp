@@ -109,6 +109,9 @@ public:
         ResetBindings,
         GameSpeed,
         Widescreen,
+        Resolution,
+        Antialias,
+        Display,
         Sound,
         Volume,
         ChaosFrame,
@@ -175,9 +178,43 @@ public:
 
     // `direction` is +1 forward, -1 backward.
     RowAction activate(size_t index, int direction);
-    // Picks option `option` of a radio row (GAME SPEED, WIDESCREEN, SOUNDS) or a
-    // cell of the VOLUME slider directly (a click on it).
+    // Picks option `option` of a radio row (GAME SPEED, WIDESCREEN, RESOLUTION,
+    // MSAA, WINDOW, SOUNDS) or a cell of the VOLUME slider directly (a click on
+    // it).
     RowAction choose_option(size_t index, size_t option);
+
+    // True for a row that LEFT/RIGHT steps: a radio row, the volume slider, or a
+    // mod option. The three callers that need this (the launcher's key handler,
+    // the overlay's and the pad's) share it so a new row kind cannot be added to
+    // one and forgotten in another.
+    bool row_is_steppable(size_t index) const;
+
+    // --- pad navigation -------------------------------------------------------
+    // A gamepad drives the same panel the keyboard does. The launcher and the
+    // overlay translate SDL controller buttons into these and hand them to
+    // `pad_command`, so both panels navigate the same way.
+    enum class PadCommand {
+        None,
+        Up,
+        Down,
+        Left,
+        Right,
+        Accept,
+        Back,
+        TabPrev,
+        TabNext,
+    };
+
+    // The command an SDL controller button maps to, or `None`. The D-pad moves
+    // and steps, A and Start accept, B is Back, and the shoulder buttons switch
+    // tab. `SDL_CONTROLLER_BUTTON_BACK` is deliberately not here: the overlay
+    // uses it to open and close itself, and the launcher ignores it.
+    static PadCommand pad_command_for_button(int button);
+
+    // Applies one command and returns the action the caller must run (Play,
+    // QuitGame, BrowseRom, ...). `Back` returns `None`: the overlay closes on it
+    // and the launcher ignores it.
+    RowAction pad_command(PadCommand command);
 
     // --- rebinding capture ----------------------------------------------------
     // Activating a Binding row starts capture; the caller then feeds key and pad
@@ -260,6 +297,10 @@ struct PanelMetrics {
     // the reference still grows the block, because it genuinely needs the room.
     int layout_height = 0;
     std::vector<int> row_heights;
+    // The wrapped lines of a section row's title (a section row's left column
+    // spans the whole panel, because a section has no description) and of a
+    // row's right column.
+    std::vector<std::vector<std::string>> left_lines;
     std::vector<std::vector<std::string>> right_lines;
 };
 

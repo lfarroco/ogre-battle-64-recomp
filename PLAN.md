@@ -75,6 +75,17 @@ Organize Screen, the credits, the ending and the attract loop.
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
   controls, GAME SPEED, WIDESCREEN, mods, `make dist` packages, GitHub releases.
+  A gamepad drives both panels (D-pad moves and steps, `A` selects, `LB`/`RB`
+  switch tab, `SELECT` opens and closes the overlay when no binding uses it), and
+  the SETTINGS tab carries WINDOW (`windowed` / `fullscreen`) beside WIDESCREEN,
+  applied live by `RT64Renderer::update_config` and persisted in `settings.cfg`.
+  A fullscreen window's geometry belongs to the renderer, so the port's
+  WIDESCREEN fit is skipped while fullscreen and re-run once the renderer has
+  restored the window. RESOLUTION (`native` / `2x` / `auto`) and MSAA
+  (`off` … `8x`) are implemented on the same path but ship **behind
+  `OGRE_DISPLAY_EXPERIMENTS=1`**: a player run with them produced visual
+  artifacts (developer, session 121), so their rows are absent and their values
+  are not applied by default (session 121).
   `make release VERSION=vX.Y.Z` is the supported way to publish: it regenerates
   the data bundle the hosted runners unpack, proves the packed code is the
   tree's, commits and pushes it to the private data repository, and dispatches
@@ -329,6 +340,15 @@ holds the evidence.
     model. A browser gamepad therefore cannot reach N64 controller 1 either
     (`docs/HANDOFF-2026-10-01-session118.md`). The change is to OR the first
     pad's state into slot 0; it needs a wasm build and a browser run to verify.
+14. **RESOLUTION and MSAA artifacts.** Both rows work and reach RT64, and a
+    player run with them showed visual artifacts that were not characterised
+    (developer, session 121). They ship behind `OGRE_DISPLAY_EXPERIMENTS=1`
+    (hidden rows, values not applied) until someone reproduces the artifacts
+    with a capture and fixes them in RT64 or in the port's configuration. The
+    first step is a captured A/B of a named screen at native vs `2x`, and at
+    MSAA off vs `4x`, since both settings are one `GraphicsConfig` field.
+    See `docs/HANDOFF-2026-10-01-session121.md`.
+
 Parked, not defects:
 
 - Audio above 1× speed is untested; `OGRE_SPEED` runs always had audio off
