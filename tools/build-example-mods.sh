@@ -36,7 +36,11 @@ fi
 # The same flags the upstream mod template uses: MIPS II, no abicalls (the
 # runtime relocates the sections), no builtin calls (nothing provides memcpy),
 # no PIC (Debian's gcc defaults to PIE, which needs abicalls on MIPS).
-MIPS_CFLAGS="-mips2 -mabi=32 -O2 -G0 -mno-abicalls -mno-odd-spreg \
+# `-mno-check-zero-division`: gcc's default on MIPS II emits a `teq` after a
+# division to trap a zero divisor, and the mod tool has no case for `teq`
+# (`Unhandled instruction: teq` -> "Failed to recompile mod", session 122). The
+# divisor is always a constant here, so the check is dead code.
+MIPS_CFLAGS="-mips2 -march=mips2 -mno-check-zero-division -mabi=32 -O2 -G0 -mno-abicalls -mno-odd-spreg \
 -fno-builtin -ffreestanding -nostdinc -fno-pic -fno-pie \
 -Wall -Wextra -Wno-unused-parameter"
 

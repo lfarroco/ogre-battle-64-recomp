@@ -244,6 +244,15 @@ recompcov:
 	python3 tools/recompcov.py
 .PHONY: recompcov
 
+# `make refscan DUMP=<rdram image>`: check the Item Randomizer's roster scan
+# (`func_8016B774` reimplemented in the mod) against the game's own `+0x02`
+# byte, from an `OGRE_DUMP_RDRAM` image. `mismatches 0` is the pass; see
+# tools/refscan.py and docs/notes-item-equipped.md.
+refscan:
+	@test -n "$(DUMP)" || { echo "usage: make refscan DUMP=<rdram image>" >&2; exit 2; }
+	python3 tools/refscan.py "$(DUMP)"
+.PHONY: refscan
+
 # ---------------------------------------------------------------------------
 # Example mods (mods/). A mod's code is compiled to big-endian MIPS and then
 # recompiled against the base game's symbols, so it needs two derived inputs:

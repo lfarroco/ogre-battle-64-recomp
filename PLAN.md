@@ -75,6 +75,11 @@ Organize Screen, the credits, the ending and the attract loop.
   render.
 - **Player features** — tabbed launcher, in-game `ESC` overlay, rebindable
   controls, GAME SPEED, WIDESCREEN, mods, `make dist` packages, GitHub releases.
+  The modding framework has a third example mod, `mods/item-randomizer/`: it
+  randomizes the item the game grants for a map pickup and for a battle reward,
+  and recomputes the item screen's used count (`PLAN.md` open work 16). Session 122 also
+  bounded the mod-facing diagnostics with a new `recomp_log` export, because a
+  code mod is compiled without libc and cannot print otherwise.
   A gamepad drives both panels (D-pad moves and steps, `A` selects, `LB`/`RB`
   switch tab, `SELECT` opens and closes the overlay when no binding uses it), and
   the SETTINGS tab carries WINDOW (`windowed` / `fullscreen`) beside WIDESCREEN,
@@ -348,6 +353,74 @@ holds the evidence.
     first step is a captured A/B of a named screen at native vs `2x`, and at
     MSAA off vs `4x`, since both settings are one `GraphicsConfig` field.
     See `docs/HANDOFF-2026-10-01-session121.md`.
+15. **A mod's own config file is rejected unless it carries `mod_id`, so every
+    mod option read its default. Closed (session 123).**
+    `parse_mod_config_storage`
+    (`tools/N64ModernRuntime/librecomp/src/mod_manifest.cpp:815`) returned false
+    when the JSON had no `mod_id` key, and `Config::load_config` then leaves every
+    option on its default with no error and no log. The loader now accepts a
+    missing key, because the file's own name is the mod id, and still rejects a
+    key that names a different mod. A/B on one file: unpatched
+    `[mod] start verb mode shops 0 0 0 0`, patched `2 1 1 0` /
+    `[mod] start chance seed 55 12345`. Session 122's `recomp_log` export was also
+    in no patch, so no release carried it and every mod that imports `recomp_log`
+    was refused by a shipped build; both changes are now in
+    `patches/n64modernruntime-ob64.patch` and `tools/patchcheck.py` passes. See
+    `docs/HANDOFF-2026-10-03-session123.md` §1.
+16. **The Item Randomizer: a map pickup is finished and verified; the battle
+    reward is not (session 123).** The mod randomizes a map pickup end to end on
+    the developer's own save: the popup and the inventory both name the
+    replacement (`pickup-table 205 10 0 0` Old Clothing -> Glamdring,
+    `acquire 10 21 0 1`, `table-grant 10 21 0 1`,
+    `frame acq countup reroll 8975 1 0 0`). Session 123 fixed the option loading,
+    the consumable table (base `0x8018E6EC`, name at `+0x00`), the save-load
+    misread, the duplicate-id case, the fight between the two mechanisms, and the
+    unrewritten per-map ground-item list. The save-load signal is a hook on the
+    save-field reader `func_800749C0` (`.main`, regenerates cleanly). A scene
+    change is **not** the signal: the game grants items on scene changes, so a
+    scene-keyed re-prime swallowed the mission-entry grants and the battle
+    reward, which the developer saw as a reward that was "the expected item from
+    the loot table, not a random one". A hook on the used-count rebuild
+    `func_8016B774` crashes the save load. What remains:
+    * **The battle reward is randomized** by rewriting the pending-reward queue
+      at `0x801936D8` (20 `u16`; `func_ovlN_801E49D0` reads
+      `lhu(0x801936D8)` at `0x801E5230`, stores it to `0x8021C760`, grants it at
+      `0x801E53DC` and clears it at `0x801E53F4`). The queue, not the drop table,
+      is where a battle reward id lives at grant time: with the table's 155
+      rewritten to 17 the queue still held `0x809B` and the reward merged 7 -> 8
+      into a stack of Leather Armor the party already owned. Verified with the
+      developer's seed (`reward-queue 155 17 2 0`, `reward-queue 94 235 4 0`) and
+      the developer's report of "oracion" from a battle, and then two rewards read
+      back name for name: vanilla Iron Claw (94) -> 3 Falchion and vanilla Leather
+      Armor (155) -> 193 Magician's Robe, with the message naming the same item
+      for both. The second merged into a stack the party already owned (count
+      1 -> 2), which the list watch alone could never reach.
+    * **The `+0x02` used count is recomputed by the mod (session 124).** The
+      item screen draws `+0x02` then `+0x03` and the equip test is
+      `sltu(+0x02, +0x03)`, while the grant writes the id and `+0x03` only, so a
+      record that was empty with a non-zero `+0x02` reads `1/1` under the new
+      item's name and refuses every equip. A mod cannot call the game's rebuild
+      `func_8016B774` (`jal` from `0x81000000` to `0x80xxxxxx` fails
+      `R_MIPS_26`, and a hook on it crashes the save load), so the mod
+      reimplements it: 30 unit records at `0x80197210` stride `0x19`, 100
+      character records at `0x80193BE0` stride `0x38`, and four class-derived
+      ids per character from `0x80186FF4` into `0x80187C62`. `fix_record_use`
+      writes the count for every record the game newly filled. **The
+      reconstruction is verified against the game's own byte** by `make refscan
+      DUMP=<image>` (`tools/refscan.py`): three developer dumps give 0
+      mismatches over 21, 22 and 25 occupied equipment records and all the
+      consumable records, and `--item <id>` names the records that credit an
+      item. **The write itself has never run in game**: no acquisition in nine
+      runs inherited a non-zero `+0x02`, so the correction has had nothing to
+      fix. A self-test that forced the case was removed because its gate
+      (`drop_table_present()`) tests words the mod itself rewrites. See
+      `docs/HANDOFF-2026-10-03-session124.md` and `docs/notes-item-equipped.md`.
+    * **Bank-function hooks** would let the grant routine be hooked directly. The
+      scope is in `docs/notes-bank-hooks.md`; it needs a merged `mod-syms` dump,
+      a hook-section registry kept out of `sections_info`, and `rom_size` on
+      `BankFunctionEntry`. A hook on `func_8016B774` is known to crash the save
+      load, so the re-prime signal must avoid the save path.
+    See `docs/HANDOFF-2026-10-03-session123.md`.
 
 Parked, not defects:
 

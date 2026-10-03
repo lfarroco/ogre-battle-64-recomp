@@ -85,6 +85,16 @@ bool launcher_forced() {
     return value != nullptr && value[0] != '\0' && strcmp(value, "0") != 0;
 }
 
+// `OGRE_MOD_TEST=1`: an installed mod normally forces the start screen, because
+// the screen owns the mod toggles and a player must be able to turn a mod off
+// before it runs. A scripted run needs the opposite, so this starts the game
+// with `mods.json` as it stands and no screen. It is a bring-up and test knob,
+// not a player-facing setting; `OGRE_LAUNCHER=1` still wins over it.
+bool mod_test_run() {
+    const char* value = getenv("OGRE_MOD_TEST");
+    return value != nullptr && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
 }  // namespace
 
 // Frames the game must have produced before an interactive exit goes through the
@@ -442,7 +452,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (rom_path.empty() || !installed_mods.empty() || launcher_forced()) {
+    if (rom_path.empty() || (!installed_mods.empty() && !mod_test_run()) || launcher_forced()) {
         // The start screen is the whole interface: it returns the path of a ROM
         // it has already validated, or empty if the user closed the window.
         //
