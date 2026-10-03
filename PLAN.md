@@ -421,6 +421,37 @@ holds the evidence.
       `BankFunctionEntry`. A hook on `func_8016B774` is known to crash the save
       load, so the re-prime signal must avoid the save path.
     See `docs/HANDOFF-2026-10-03-session123.md`.
+17. **The Tutorial (scene `0x17`) crashes on entry with a SIGBUS; the Item
+    Randomizer is in no frame of it.** Four macOS crash reports on 2026-10-03 (16:59:21,
+    17:38:38, 17:46:34, 17:46:57) are one fault: `EXC_BAD_ACCESS` /
+    `KERN_PROTECTION_FAILURE` on N64 Thread 3, frame 1 at `func_80075BC0`
+    (the scene dispatcher) and frame 2 at `func_80071EB0` (the streamed-overlay
+    loader). Frame 0 has no symbol and the fault address differs per run
+    (`0x199ab25f0`, `0x1a4e015f0`, `0x1a4c195f0`, `0x19dd635f0`), so the crash is
+    a data address the guest computed, not a fixed one. Every address is above
+    `0xE0000000`, which no guest mapping in this port reaches, so the guest is
+    dereferencing a value that is neither a guest pointer nor a guest code
+    address. The run log ends right after the tutorial's two bank records load
+    (`rom=0x069920` -> `0x80197B90`, `rom=0x1BA020` -> `0x80220F60`) and a save
+    read. The mod is in no frame, it only writes guest RAM and never installs a
+    pointer the game follows, and an unknown guest code address resolves to a stub
+    rather than a jump. The earliest report (16:59) also predates session 124's
+    change to the mod. That is a mechanism argument and not a measurement: the run
+    that would have measured it did not have the mod off. The A/B that was meant to show this did
+    not: `run-with-save.sh` copies `build-app/mods.json` over any `mods.json`
+    written into the preference directory, so the mod was loaded in both runs;
+    the veto has to move `<pref>/mods/item-randomizer.nrm` aside. Open: which
+    instruction in `func_80075BC0` computes the bad address, and whether the
+    tutorial is reachable at all from a suspend save rather than through its own
+    flow (`AGENTS.md` §9). **It is not reproducible now**: the developer reports
+    the tutorial runs fine, and neither binary changed, so the rebuild cannot be
+    the reason (`build-app/ogrebattle64` is still `Oct 3 12:06:40`, 27277408
+    bytes, the binary the reports came from; the mod's `.nrm` is unchanged at
+    8591 bytes). The leading candidate is the save sandbox: a crash mid-write
+    leaves the sandbox copy inconsistent with the imported file, and every report
+    follows another run. If it returns, capture the save at the crash and read
+    `D_800AF028`, the resolved descriptor and its hook words from the frame
+    before. See `docs/notes-tutorial-crash.md` §5.
 
 Parked, not defects:
 
