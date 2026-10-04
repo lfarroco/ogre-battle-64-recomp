@@ -14,19 +14,21 @@ version = "1.0.0"
 display_name = "Item Randomizer"
 
 description = """
+EXPERIMENTAL. This mod is still in development: its behaviour can change between
+builds, and it has no options to tune. It rewrites items the game is about to
+grant, so keep a backup of any save you use it on.
+
 An item the party is given after defeating an enemy unit, and an item found on
-the map, is replaced by a different item from the game's item table.
+the map, is replaced by a different item from the game's item table. The
+replacement may be anything in the table.
 
 Shops, cutscene gifts and quest items are untouched. Where the game reads the id
 out of a table in RAM, the mod rewrites that table, so the message and the
 inventory agree. Where the id comes from streamed bank code the mod cannot hook,
 the mod rewrites the inventory entry instead: the message names what the game
-rolled, and the inventory and the item screen show the replacement.
+rolled, and the inventory and the item screen show the replacement."""
 
-FLAVOR ANYTHING can turn a sword into a helmet into a spellbook. SAME KIND
-keeps the replacement inside the original's own category byte."""
-
-short_description = "Randomize dropped and found items."
+short_description = "EXPERIMENTAL: randomize dropped and found items."
 
 authors = [ "Ogre Battle 64 Recomp" ]
 
@@ -47,52 +49,8 @@ native_libraries = [ ]
 # into the `.nrm`'s `mod.json`, where the runtime reads it.
 enabled_by_default = false
 
-# The rows the client draws in the MODS panel. A mod reads a value with
-# `recomp_get_config_u32("<id>")`; an Enum arrives as the option's index.
-[[manifest.config_options]]
-id = "mode"
-name = "FLAVOR"
-description = "What a replacement may be. ANYTHING rolls over the whole item table. SAME KIND keeps the replacement inside the original item's category byte, so a sword stays a sword."
-type = "Enum"
-options = [ "ANYTHING", "SAME KIND" ]
-default = "ANYTHING"
-
-[[manifest.config_options]]
-id = "chance"
-name = "CHANCE"
-description = "The percent chance that each dropped or found item is randomized at all. 100 replaces every one."
-type = "Number"
-min = 0
-max = 100
-step = 5
-precision = 0
-default = 100
-
-[[manifest.config_options]]
-id = "shops"
-name = "SHOPS"
-description = "Also randomize what a shop sells you. Off by default: the mod detects a purchase by the gold it costs and leaves it alone."
-type = "Bool"
-default = false
-
-[[manifest.config_options]]
-id = "log"
-name = "LOG"
-description = "Write one line per event to the port's log, prefixed [mod]: OFF is silent, NORMAL reports each replacement and save-load re-prime, VERBOSE also reports every acquisition whether or not it was replaced."
-type = "Enum"
-options = [ "OFF", "NORMAL", "VERBOSE" ]
-default = "OFF"
-
-[[manifest.config_options]]
-id = "seed"
-name = "SEED"
-description = "Fixes the random sequence, so the same seed replays the same replacements. 0 picks a new sequence each time the game starts."
-type = "Number"
-min = 0
-max = 4294967295
-step = 1
-precision = 0
-default = 0
+# No config options: the mod always rerolls every eligible item over the whole
+# item table, and its diagnostic output is a compile-time level in the source.
 
 [inputs]
 

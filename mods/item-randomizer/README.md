@@ -1,8 +1,12 @@
 # Item Randomizer
 
+**EXPERIMENTAL.** This mod is still in development: its behaviour can change
+between builds, and it has no options to tune. It rewrites items the game is
+about to grant, so keep a backup of any save you use it on.
+
 An Ogre Battle 64: Recomp code mod. An item the party is given after defeating an
 enemy unit, and an item found on the map, is replaced by a different item from
-the game's own item table.
+the game's own item table. The replacement may be anything in the table.
 
 Shops, cutscene gifts and quest items are left alone.
 
@@ -175,9 +179,9 @@ read as four acquisitions, fixed by the scene-change re-prime) plus an item
 screen that already held the other names.
 
 **A merge into an existing stack leaves the slot's id unchanged**, so the id
-shadow cannot see it. The count shadow reports it as `count-up <id> <slot> <old>
-<new>` at `VERBOSE`, and the per-frame line reports how many slots one
-interaction filled (`frame acq countup reroll <frame> <a> <c> <r>`).
+shadow cannot see it. At log level 2 the count shadow reports it as
+`count-up <id> <slot> <old> <new>`, and the per-frame line reports how many slots
+one interaction filled (`frame acq countup reroll <frame> <a> <c> <r>`).
 
 ## Checking the used count against the game
 
@@ -210,20 +214,26 @@ writes, which is the reconstruction above.
 
 ## Options
 
-The client draws these in the start screen's MODS panel.
+The mod has none. The start screen's MODS panel draws no rows under it, and it
+neither reads nor writes `mod_config/ogre_item_randomizer.json`. The behaviour is
+fixed:
 
-| option | values | what it does |
-|---|---|---|
-| FLAVOR | `ANYTHING` (default), `SAME KIND` | `ANYTHING` rolls over the whole item table. `SAME KIND` keeps the replacement inside the original's category byte. |
-| CHANCE | 0..100, default 100 | The percent chance that each acquired item is randomized at all. |
-| SHOPS | on/off, default off | Also randomize shop purchases. |
-| SEED | 0..4294967295, default 0 | Fixes the random sequence. 0 picks a new one each boot. |
-| LOG | `OFF` (default), `NORMAL`, `VERBOSE` | Writes one line per event to the port's log, prefixed `[mod]`: each replacement, each re-prime, and each change of the drop table's fingerprint. `VERBOSE` also reports every acquisition whether or not it was replaced, every `count-up`, every kept key item, and one `frame` line per frame that changed anything. At most 20 event lines per frame, then one summary, because an unbounded per-event `fprintf` makes combat unplayable. |
+| behaviour | value |
+|---|---|
+| what a replacement may be | anything in the item table |
+| how often | every eligible acquisition is rerolled |
+| shop purchases | left alone, recognised by the gold they cost |
+| the seed | new every boot, derived from the frame counter |
+| the log | silent in a shipped build |
 
-The `VERBOSE` lines, in the order they appear in this file:
+The diagnostics are the compile-time `LOG_LEVEL` in `src/item_randomizer.c`:
+0 is silent, 1 reports each replacement and each save-load re-prime, and 2 also
+reports every acquisition. Raise it and rebuild to diagnose. The lines, in the
+order they appear in this file:
 
 | line | fields |
 |---|---|
+| `start verb`, `start seed` | the run's log level and derived seed, once |
 | `acquire` / `acquire-consumable` | `<id> <slot> <used +0x02> <count +0x03>` |
 | `replace` / `replace-consumable` | `<from> <to> <slot> <list>` |
 | `dup-fix` | `<original> <memoised> <fresh> <list>` |
@@ -241,26 +251,16 @@ The `VERBOSE` lines, in the order they appear in this file:
 | `probe first last present` | `<lhu 0x801EDB38> <lhu 0x801EDC48> <record 7 resident>` |
 | `save-read` | the save-field reader ran, so the next tick re-primes instead of rerolling |
 
+At most 20 event lines per frame, then one summary, because an unbounded
+per-event `fprintf` makes combat unplayable.
+
 An acquisition the mod cannot find a replacement for is left as the original
 item rather than dropped.
 
 
-`LOG` needs the port's `recomp_log` export (`librecomp/src/mod_config_api.cpp`,
+The log needs the port's `recomp_log` export (`librecomp/src/mod_config_api.cpp`,
 a gitignored vendored tree). A build without it refuses this mod at load with
 `Imported function not found:*:recomp_log`.
-
-**A stored option takes effect whether or not the file has a `mod_id` key.** The
-loader (`parse_mod_config_storage`, `librecomp/src/mod_manifest.cpp:815`) checks
-`mod_id` when the key is present and rejects a file whose id does not match the
-mod being opened. A file with no `mod_id` is accepted, because the file's own
-name is the mod id and only that mod's file reaches the check. Before that
-change a missing key made `load_config` return false, which left every option on
-its default with no error and no log, so a value the player set was written and
-then ignored on the next start. A minimal file:
-
-```json
-{"storage":{"log":"VERBOSE","mode":"ANYTHING","chance":100,"shops":false,"seed":0}}
-```
 
 ## Building
 
@@ -289,8 +289,8 @@ the screen owns the mod toggles. `OGRE_MOD_TEST=1` starts the game with
 ## Testing with a save
 
 `run-with-save.sh` installs the built mod into a battery save's own config dir and
-starts the game there. `tools/run-save.sh` does the save half; this adds the mod,
-`mods.json` and a `LOG=VERBOSE` option file.
+starts the game there. `tools/run-save.sh` does the save half; this adds the mod
+and `mods.json`. The mod has no options, so nothing is written to the config dir.
 
 ```sh
 make example-mods
@@ -322,7 +322,7 @@ next pickup is item `0x80CD` = 205 "Old Clothing".
   diff and count diff, and the shop guard, with the addresses read at
   instruction level.
 * `include/modding.h` — the section macros (`RECOMP_HOOK`, `RECOMP_IMPORT`, …).
-* `mod.toml` — the manifest and the option schema.
+* `mod.toml` — the manifest.
 * `mod.ld` — the link script.
 
 The research behind the addresses is in `docs/notes-save-items.md` (the item

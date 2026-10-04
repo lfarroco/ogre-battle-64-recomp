@@ -79,7 +79,11 @@ Organize Screen, the credits, the ending and the attract loop.
   randomizes the item the game grants for a map pickup and for a battle reward,
   and recomputes the item screen's used count (`PLAN.md` open work 16). Session 122 also
   bounded the mod-facing diagnostics with a new `recomp_log` export, because a
-  code mod is compiled without libc and cannot print otherwise.
+  code mod is compiled without libc and cannot print otherwise. The mod is
+  marked EXPERIMENTAL in its manifest and has no config options (session 125):
+  every eligible item is rerolled over the whole item table, the seed is derived
+  from the frame counter each boot, a shop purchase is left alone, and the
+  diagnostics are the compile-time `LOG_LEVEL` in the source.
   A gamepad drives both panels (D-pad moves and steps, `A` selects, `LB`/`RB`
   switch tab, `SELECT` opens and closes the overlay when no binding uses it), and
   the SETTINGS tab carries WINDOW (`windowed` / `fullscreen`) beside WIDESCREEN,
@@ -368,11 +372,16 @@ holds the evidence.
     `patches/n64modernruntime-ob64.patch` and `tools/patchcheck.py` passes. See
     `docs/HANDOFF-2026-10-03-session123.md` §1.
 16. **The Item Randomizer: a map pickup is finished and verified; the battle
-    reward is not (session 123).** The mod randomizes a map pickup end to end on
+    reward is not (session 123), and the mod has no options (session 125).** The
+    mod randomizes a map pickup end to end on
     the developer's own save: the popup and the inventory both name the
     replacement (`pickup-table 205 10 0 0` Old Clothing -> Glamdring,
     `acquire 10 21 0 1`, `table-grant 10 21 0 1`,
-    `frame acq countup reroll 8975 1 0 0`). Session 123 fixed the option loading,
+    `frame acq countup reroll 8975 1 0 0`). Session 125 removed the five MODS
+    panel options: the replacement may be anything in the item table, the roll is
+    unconditional, a shop purchase is always skipped, the seed is derived from
+    the frame counter every boot, and the log is the compile-time `LOG_LEVEL`.
+    Session 123 fixed the option loading,
     the consumable table (base `0x8018E6EC`, name at `+0x00`), the save-load
     misread, the duplicate-id case, the fight between the two mechanisms, and the
     unrewritten per-map ground-item list. The save-load signal is a hook on the

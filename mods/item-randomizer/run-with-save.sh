@@ -3,10 +3,10 @@
 #
 # This wraps `tools/run-save.sh`: that tool imports a save into its own config
 # dir (`.ogre-prefs-save-<name>/`) and runs the app, but it knows nothing about
-# mods, so this script also copies the built mod, `mods.json` and the mod's
-# option file into the same config dir. `OGRE_MOD_TEST=1` is set so the start
-# screen does not appear; without it the launcher waits for a ROM row press and
-# the run never reaches the game.
+# mods, so this script also copies the built mod and `mods.json` into the same
+# config dir. `OGRE_MOD_TEST=1` is set so the start screen does not appear;
+# without it the launcher waits for a ROM row press and the run never reaches the
+# game.
 #
 #   mods/item-randomizer/run-with-save.sh build-app/saves/before-pickup.bin
 #   mods/item-randomizer/run-with-save.sh build-app/saves/before-pickup.bin --reset
@@ -64,7 +64,7 @@ else
     tools/run-save.sh "$save" --import-only
 fi
 
-mkdir -p "$pref/mods" "$pref/mod_config"
+mkdir -p "$pref/mods"
 cp build/mods/item-randomizer.nrm "$pref/mods/"
 # `build-app/mods.json` is the developer's toggle list; write one when it is
 # absent so a fresh clone still enables the mod.
@@ -73,12 +73,6 @@ if [ -f build-app/mods.json ]; then
 else
     printf '{"enabled_mods":["ogre_item_randomizer"],"mod_order":["ogre_item_randomizer"],"latest_game_mode":""}\n' \
         > "$pref/mods.json"
-fi
-# LOG=VERBOSE and CHANCE=100 make a test run report every acquisition and reroll
-# every one of them. A file with no "mod_id" key is accepted by this port.
-if [ ! -f "$pref/mod_config/ogre_item_randomizer.json" ]; then
-    printf '{"storage":{"log":"VERBOSE","mode":"ANYTHING","chance":100,"shops":false,"seed":0}}\n' \
-        > "$pref/mod_config/ogre_item_randomizer.json"
 fi
 
 exec env "OGRE_PREF_DIR=$pref" "OGRE_MOD_TEST=1" "$root/build-app/ogrebattle64" "$rom"

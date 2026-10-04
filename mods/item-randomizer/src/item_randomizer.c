@@ -53,8 +53,8 @@
 //
 //    The shadow carries the count column (+0x03) as well as the id, because a
 //    grant that merges into a stack the party already owns changes no id. At
-//    VERBOSE the mod reports that case as `count-up`, which is the only way to
-//    tell "one interaction granted four items" from "one interaction merged
+//    log level 2 the mod reports that case as `count-up`, which is the only way
+//    to tell "one interaction granted four items" from "one interaction merged
 //    into one stack".
 //
 // 3. THE USED COUNT (+0x02). The item screen draws `+0x02` then `+0x03` and the
@@ -76,10 +76,14 @@
 
 #include "modding.h"
 
-// The recomp mod API. `recomp_get_config_u32` serves the option values the
-// client's MODS panel edits; `recomp_log` writes one line to the port's output.
-RECOMP_IMPORT("*", unsigned int recomp_get_config_u32(const char* id));
+// The recomp mod API. The mod has no config options, so its behaviour is fixed;
+// `recomp_log` writes one line to the port's output for the diagnostics below.
 RECOMP_IMPORT("*", void recomp_log(const char* message));
+
+// The diagnostic level. This is a compile-time constant and not a MODS panel
+// row, because the line format is for development. 0 is silent, 1 reports each
+// replacement and each save-load re-prime, 2 also reports every acquisition.
+#define LOG_LEVEL 0u
 
 #define ITEM_LIST 0x80196B20u
 #define ITEM_SLOTS 278u
@@ -127,10 +131,6 @@ static void wr8(unsigned int addr, unsigned char value) {
 
 static unsigned char rd8(unsigned int addr) {
     return *(volatile unsigned char*)addr;
-}
-
-static unsigned int item_category(unsigned int id) {
-    return rd8(ITEM_TABLE + id * ITEM_TABLE_STRIDE + ITEM_TABLE_CATEGORY);
 }
 
 // --- the two owned-item lists ----------------------------------------------
@@ -271,10 +271,6 @@ static int slot_rerollable(const struct item_list* list, unsigned int id) {
     return slot_class(list, id) <= list->class_max;
 }
 
-static unsigned int config_u32(const char* id) {
-    return recomp_get_config_u32(id);
-}
-
 // --- the session memo ------------------------------------------------------
 
 #define MEMO_SLOTS (ITEM_ID_MAX + 1u)
@@ -295,8 +291,8 @@ static unsigned char s_memo_set[2][MEMO_SLOTS];
 //
 // The flag is set where the pairing is recorded, so it also covers a value a
 // *previous* run left in the saved reward queue when this run's mapping happens
-// to reproduce it (a pinned SEED): the queue walker then leaves it, which is
-// correct, because it is a replacement already.
+// to reproduce it: the queue walker then leaves it, which is correct, because it
+// is a replacement already.
 static unsigned char s_memo_target[2][MEMO_SLOTS];
 static unsigned int s_rng = 0u;
 
@@ -334,17 +330,15 @@ static int list_holds_other(const struct item_list* list, unsigned int id,
 // `avoid_slot` is NO_SLOT for a caller that writes a table rather than a slot.
 #define NO_SLOT 0xFFFFFFFFu
 
-// Rolls a replacement from the list's own id space. `mode` 1 keeps the
-// replacement inside the original's category byte, which only the equipment
-// table has. A candidate the list already holds is skipped so the rewrite
-// cannot create a second record for one id; the last walk accepts one anyway,
-// because leaving a valid item in place beats leaving the original.
+// Rolls a replacement from the list's own id space, over the whole table. A
+// candidate the list already holds is skipped so the rewrite cannot create a
+// second record for one id; the last walk accepts one anyway, because leaving a
+// valid item in place beats leaving the original.
 //
 // `salt` moves the sequence off the one the memo built, so a slot whose
 // memoised replacement is already held can still roll a different item.
-static unsigned int roll_replacement(unsigned int original, unsigned int mode,
-                                     unsigned int list_index, unsigned int avoid_slot,
-                                     unsigned int salt) {
+static unsigned int roll_replacement(unsigned int original, unsigned int list_index,
+                                     unsigned int avoid_slot, unsigned int salt) {
     const struct item_list* list = &s_lists[list_index];
     unsigned int attempt;
 
@@ -355,18 +349,6 @@ static unsigned int roll_replacement(unsigned int original, unsigned int mode,
 
         if (!slot_id_valid(list, candidate) || candidate == original) {
             continue;
-        }
-        if (mode == 1u) {
-            // SAME KIND keeps the replacement in the original's own class: the
-            // consumable table's class byte, or the equipment table's category
-            // byte, which is its +0x04.
-            if (list->class_offset != 0u) {
-                if (slot_class(list, candidate) != slot_class(list, original)) {
-                    continue;
-                }
-            } else if (item_category(candidate) != item_category(original)) {
-                continue;
-            }
         }
         if (avoid_slot != NO_SLOT && list_holds_other(list, candidate, avoid_slot)) {
             continue;
@@ -408,7 +390,7 @@ static unsigned int roll_replacement(unsigned int original, unsigned int mode,
 // item by searching the list for its id and merging into the record it finds,
 // and the list holds no X after the rewrite, so a second grant of X maps to Y
 // again. That is the one case where the memo would put one id into two records.
-static unsigned int replacement_for(unsigned int original, unsigned int mode,
+static unsigned int replacement_for(unsigned int original,
                                     unsigned int list_index, unsigned int avoid_slot) {
     const struct item_list* list = &s_lists[list_index];
     unsigned int forward;
@@ -420,7 +402,7 @@ static unsigned int replacement_for(unsigned int original, unsigned int mode,
     if (s_memo_set[list_index][original]) {
         return s_memo_id[list_index][original];
     }
-    forward = roll_replacement(original, mode, list_index, avoid_slot, 0u);
+    forward = roll_replacement(original, list_index, avoid_slot, 0u);
     if (forward >= 1u && forward <= list->id_max) {
         backward = s_memo_set[list_index][forward] ? s_memo_id[list_index][forward] : 0u;
         if (backward != 0u && backward != forward) {
@@ -449,11 +431,11 @@ static unsigned int replacement_for(unsigned int original, unsigned int mode,
 // record with Y, and the second grant of X maps to Y again. In that case the
 // roll runs again with a salt, and the mapping is left as it was so a table
 // entry still resolves to a stable value.
-static unsigned int replacement_for_slot(unsigned int original, unsigned int mode,
+static unsigned int replacement_for_slot(unsigned int original,
                                         unsigned int list_index, unsigned int slot,
                                         unsigned int* duplicated) {
     const struct item_list* list = &s_lists[list_index];
-    unsigned int replacement = replacement_for(original, mode, list_index, slot);
+    unsigned int replacement = replacement_for(original, list_index, slot);
 
     *duplicated = 0u;
     // Already a replacement this session produced: the grant of it is the
@@ -465,7 +447,7 @@ static unsigned int replacement_for_slot(unsigned int original, unsigned int mod
         return replacement;
     }
     *duplicated = replacement;
-    return roll_replacement(original, mode, list_index, slot, 0x5BF03635u);
+    return roll_replacement(original, list_index, slot, 0x5BF03635u);
 }
 
 // --- logging ---------------------------------------------------------------
@@ -592,11 +574,11 @@ static void log_summary(unsigned int verb, unsigned int total) {
     if (s_log_events > LOG_BUDGET) {
         log_event("more", s_log_events - LOG_BUDGET, total, s_rerolls, 0u);
     }
-    // One line per frame that changed anything, at VERBOSE. It carries what the
-    // per-event lines cannot: how many slots one object interaction filled, and
-    // how many of those were a merge into an existing stack rather than a new
-    // slot. A frame with `acq 4` filled four slots; a frame with `countup 1` and
-    // `acq 0` merged into one.
+    // One line per frame that changed anything, at log level 2. It carries what
+    // the per-event lines cannot: how many slots one object interaction filled,
+    // and how many of those were a merge into an existing stack rather than a
+    // new slot. A frame with `acq 4` filled four slots; a frame with `countup 1`
+    // and `acq 0` merged into one.
     if (verb >= 2u && (s_acq_frame + s_count_ups_frame + s_rerolls_frame + s_uses_frame) != 0u) {
         log_event("frame acq countup reroll", total, s_acq_frame, s_count_ups_frame,
                   s_rerolls_frame);
@@ -645,7 +627,7 @@ static int drop_table_readable(void) {
     return 1;
 }
 
-static void drop_slot(unsigned int index, unsigned int raw, unsigned int mode, unsigned int verb) {
+static void drop_slot(unsigned int index, unsigned int raw, unsigned int verb) {
     unsigned int id = raw & 0x7FFFu;
     unsigned int replacement;
 
@@ -657,7 +639,7 @@ static void drop_slot(unsigned int index, unsigned int raw, unsigned int mode, u
     if (id < 1u || id > ITEM_ID_MAX) {
         return;
     }
-    replacement = replacement_for(id, mode, 0u, NO_SLOT);
+    replacement = replacement_for(id, 0u, NO_SLOT);
     if (replacement != id) {
         unsigned int written = (raw & 0x8000u) | replacement;
 
@@ -1005,7 +987,7 @@ static void fix_list_uses(unsigned int list_index) {
 // Walks the array every frame, the same way as the drop table: a value that
 // still equals what the mod wrote costs two loads, and a map reload restores
 // the ROM values, which are derived again through the memo.
-static void randomize_pickup_table(unsigned int mode, unsigned int verb) {
+static void randomize_pickup_table(unsigned int verb) {
     unsigned int count = rd8(PICKUP_COUNT);
     unsigned int i;
 
@@ -1028,7 +1010,7 @@ static void randomize_pickup_table(unsigned int mode, unsigned int verb) {
             !slot_rerollable(&s_lists[list_index], id)) {
             continue;
         }
-        replacement = replacement_for(id, mode, list_index, NO_SLOT);
+        replacement = replacement_for(id, list_index, NO_SLOT);
         if (replacement != id) {
             unsigned int written = (raw & 0x8000u) | replacement;
 
@@ -1045,7 +1027,7 @@ static void randomize_pickup_table(unsigned int mode, unsigned int verb) {
 // wrote costs two loads and is skipped. After a map reload the game restores
 // the ROM values, so those entries are derived again through the memo and land
 // on the same replacements.
-static void randomize_drop_table(unsigned int mode, unsigned int verb) {
+static void randomize_drop_table(unsigned int verb) {
     unsigned int entry;
     unsigned int column;
 
@@ -1078,7 +1060,7 @@ static void randomize_drop_table(unsigned int mode, unsigned int verb) {
             if (s_drop_valid[index] && raw == (unsigned int)s_drop_written[index]) {
                 continue;
             }
-            drop_slot(index, raw, mode, verb);
+            drop_slot(index, raw, verb);
         }
     }
 }
@@ -1086,7 +1068,7 @@ static void randomize_drop_table(unsigned int mode, unsigned int verb) {
 // Walks the queue every frame, the same way as the two tables: a value that
 // still equals what the mod wrote costs two loads, and a value the game restores
 // is derived again through the memo.
-static void randomize_reward_queue(unsigned int mode, unsigned int verb) {
+static void randomize_reward_queue(unsigned int verb) {
     unsigned int i;
 
     for (i = 0u; i < REWARD_SLOTS; i++) {
@@ -1115,7 +1097,7 @@ static void randomize_reward_queue(unsigned int mode, unsigned int verb) {
             !slot_rerollable(&s_lists[list_index], id)) {
             continue;
         }
-        replacement = replacement_for(id, mode, list_index, NO_SLOT);
+        replacement = replacement_for(id, list_index, NO_SLOT);
         if (replacement != id) {
             unsigned int written = (raw & 0x8000u) | replacement;
 
@@ -1162,15 +1144,17 @@ void item_randomizer_after_save_read(void) {
     s_save_read = 1u;
     // Logged from the hook, because the next tick's re-prime line cannot say
     // whether it was this signal or the record count that fired.
-    recomp_log("save-read");
+    if (LOG_LEVEL != 0u) {
+        recomp_log("save-read");
+    }
 }
 
 RECOMP_HOOK("func_80072944")
 void item_randomizer_tick(void) {
-    unsigned int mode;
-    unsigned int chance;
-    unsigned int allow_shops;
-    unsigned int verb;
+    // No options: every eligible item is rerolled (chance 100), the replacement
+    // may be anything in the item table, a shop purchase is left alone, and the
+    // diagnostics are the compile-time LOG_LEVEL.
+    unsigned int verb = LOG_LEVEL;
     unsigned int slot;
     unsigned int gold_now = rd32(GOLD);
     static unsigned int gold_prev;
@@ -1178,18 +1162,11 @@ void item_randomizer_tick(void) {
     int purchase_frame = 0;
 
     if (s_rng == 0u) {
-        unsigned int seed = config_u32("seed");
-        if (seed == 0u) {
-            seed = 0x2545F491u ^ (rd32(0x800AEFA4u) * 2654435761u);
-        }
-        s_seed_value = seed;
-        s_rng = seed | 1u;
+        // No SEED option: the sequence is derived from the frame counter, which
+        // is the entropy the game gives a mod, and it is new every boot.
+        s_seed_value = 0x2545F491u ^ (rd32(0x800AEFA4u) * 2654435761u);
+        s_rng = s_seed_value | 1u;
     }
-
-    mode = config_u32("mode");
-    chance = config_u32("chance");
-    allow_shops = config_u32("shops");
-    verb = config_u32("log");
 
     s_frames++;
     log_reset();
@@ -1203,16 +1180,15 @@ void item_randomizer_tick(void) {
     // stale list is dropped rather than applied.
     s_lists[0].fix_count = 0u;
     s_lists[1].fix_count = 0u;
-    // Unconditional once: a run must always say the mod is alive and which
-    // settings it resolved, or a silent log is ambiguous between "the hook
-    // never ran", "the option read as 0" and "nothing happened".
-    {
+    // One line per run at any log level: without it a silent log is ambiguous
+    // between "the hook never ran" and "nothing happened".
+    if (LOG_LEVEL != 0u) {
         static unsigned int announced;
 
         if (!announced) {
             announced = 1u;
-            log_event("start verb mode shops", verb, mode, allow_shops, 0u);
-            log_event("start chance seed", chance, s_seed_value, 0u, 0u);
+            log_event("start verb", verb, 0u, 0u, 0u);
+            log_event("start seed", s_seed_value, 0u, 0u, 0u);
             log_event("start droptable first last", rd16(DROP_TABLE), rd16(DROP_LAST_TYPE_ADDR), 0u, 0u);
             // The inputs of the `+0x02` scan: how many character and unit
             // records are loaded at boot, which is 0 until the save is read.
@@ -1220,10 +1196,9 @@ void item_randomizer_tick(void) {
         }
     }
 
-    // The A/B of the scan against the game's own column, once per session and
-    // at NORMAL as well as VERBOSE. It runs before the table walks because
-    // those can emit enough lines to push it past the per-frame budget, and its
-    // result is what says the reimplementation reproduces `func_8016B774`.
+    // A purchase is recognised by the gold it costs. The mod leaves shop items
+    // alone, and the shield is primed on the first frame because a save load
+    // moves gold wholesale.
     if (gold_primed) {
         // Gold falls on a purchase. Primed on the first frame, because a save
         // load moves gold wholesale.
@@ -1237,11 +1212,11 @@ void item_randomizer_tick(void) {
 
     // The source tables first: the popup and the grant both read them, so a
     // replacement here is what makes the message and the inventory agree.
-    randomize_drop_table(mode, verb);
+    randomize_drop_table(verb);
     // The per-map ground-item list is a second window in record 7's image, so it
     // is gated on the same fingerprint.
     if (drop_table_present()) {
-        randomize_pickup_table(mode, verb);
+        randomize_pickup_table(verb);
     }
 
     // A probe for the one question a title-screen run cannot answer: does the
@@ -1284,7 +1259,7 @@ void item_randomizer_tick(void) {
 
     // The reward queue is plain RAM, not a bank window, so it needs no
     // fingerprint. It is the path a battle reward takes.
-    randomize_reward_queue(mode, verb);
+    randomize_reward_queue(verb);
 
     {
         unsigned int list_index;
@@ -1416,12 +1391,12 @@ void item_randomizer_tick(void) {
                         if (verb >= 2u && log_want(verb)) {
                             log_event("keep-quest", id, slot, slot_class(list, id), count);
                         }
-                    } else if (purchase_frame && !allow_shops) {
+                    } else if (purchase_frame) {
                         s_purchases_skipped++;
-                    } else if (chance >= 100u || (rng_next() % 100u) < chance) {
+                    } else {
                         unsigned int duplicated = 0u;
                         unsigned int replacement =
-                            replacement_for_slot(id, mode, list_index, slot, &duplicated);
+                            replacement_for_slot(id, list_index, slot, &duplicated);
 
                         if (replacement != id) {
                             // Reported when the session mapping would have put
