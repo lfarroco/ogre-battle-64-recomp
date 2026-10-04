@@ -83,7 +83,11 @@ Organize Screen, the credits, the ending and the attract loop.
   marked EXPERIMENTAL in its manifest and has no config options (session 125):
   every eligible item is rerolled over the whole item table, the seed is derived
   from the frame counter each boot, a shop purchase is left alone, and the
-  diagnostics are the compile-time `LOG_LEVEL` in the source.
+  diagnostics are the compile-time `LOG_LEVEL` in the source. A frame that fills
+  more than one item record is the game's own bulk grant — a save load, or a map
+  load's starting items and the created units' class equipment — so the mod
+  re-primes its shadows and leaves those items as the game granted them
+  (session 126).
   A gamepad drives both panels (D-pad moves and steps, `A` selects, `LB`/`RB`
   switch tab, `SELECT` opens and closes the overlay when no binding uses it), and
   the SETTINGS tab carries WINDOW (`windowed` / `fullscreen`) beside WIDESCREEN,
@@ -424,6 +428,22 @@ holds the evidence.
       fix. A self-test that forced the case was removed because its gate
       (`drop_table_present()`) tests words the mod itself rewrites. See
       `docs/HANDOFF-2026-10-03-session124.md` and `docs/notes-item-equipped.md`.
+    * **The party's starting items are left as the game granted them (session
+      126).** The map loader `func_ovlR_80215C38` (bankR record 9d, called once
+      per map from bankN `func_ovlN_801AE880+0x764`, `jal 80215c38` at
+      `0x801AEFE4`) equips each unit it creates from that unit's class row via
+      `func_ovlR_801DD430` (`0x80216F10`-`0x80217028`) and then grants the
+      starting set with literal ids: `1,1,1,1,1,8,8,22,22` at `0x80217068` when
+      `lbu(0x8018F4A1)` is 63/64, else `2..5/8/21..23` at `0x802170CC`. Several
+      records fill in one frame, which the old `RELOAD_SLOTS 12` threshold did
+      not catch, so every one was rerolled. `BULK_SLOTS` (1) makes a frame that
+      fills more than one record a re-prime instead of a reroll; a single filled
+      record is still an acquisition, so a find and a reward are unaffected. A/B
+      on a New Game from the title: the old build rerolled the four bulk frames
+      (9, 9, 8 and 14 records, 39 `replace` lines) and the developer saw the
+      randomized starting items; the new build re-primes the same frames and the
+      developer saw the expected items. See
+      `docs/HANDOFF-2026-10-03-session126.md`.
     * **Bank-function hooks** would let the grant routine be hooked directly. The
       scope is in `docs/notes-bank-hooks.md`; it needs a merged `mod-syms` dump,
       a hook-section registry kept out of `sections_info`, and `rom_size` on

@@ -95,15 +95,19 @@ entries over a 3203-frame run), and does two things:
 2. **Watches both lists.** A slot that was **empty and has just been filled** is
    an acquisition: the mod writes a replacement id into that slot. This is what
    makes one find add one item. A slot that merely changed its id is the game
-   re-sorting the list and is left alone. A wholesale change re-primes the shadow
-   instead of rerolling the lot. The signal for a wholesale change is a hook on
-   `func_800749C0`, the save-field reader: it walks the table at `0x800A824C`,
+   re-sorting the list and is left alone. A frame that fills **more than one
+   record** is a bulk grant by the game rather than a set of acquisitions, so the
+   shadows are re-primed and nothing is rerolled. Two things produce a bulk
+   grant. A save load rewrites both lists wholesale; its precise signal is a hook
+   on `func_800749C0`, the save-field reader: it walks the table at `0x800A824C`,
    and entry 1 is the packed blob that carries both item lists. It is `.main`
    code and regenerates cleanly; the used-count rebuild it calls,
    `func_8016B774`, does **not** (a hook on it fails `get_function` and crashes
-   the load). A count of the records that appeared in one frame stays as a
-   fallback: more than 12 equipment records in one frame also re-primes both
-   lists, which covers a load the hook misses.
+   the load). The record count is the fallback for a load the hook misses, and
+   the only signal for the map loader, which no hook can reach: a map load grants
+   the party's starting items and the created units' class equipment in one
+   frame. One interaction grants one item, so a single filled record is still an
+   acquisition.
 
    A scene change is deliberately **not** the signal. The game grants items on
    scene changes — a mission's unit-init grants, and a battle's reward as the
@@ -156,6 +160,19 @@ at the first matching record, so the second record keeps `+0x02 = 0` and the
 equip test reads the first record's numbers.
 
 ## Where it does not reach
+
+**The party's starting items are left as the game granted them.** A new game
+builds the party's item lists during the opening, and a map load grants a
+starting set in one frame: `func_ovlR_80215C38` (bankR record 9d), called once
+per map from bankN `func_ovlN_801AE880+0x764` (`jal 80215c38` at `0x801AEFE4`),
+grants `1,1,1,1,1,8,8,22,22` at `0x80217068` when `lbu(0x8018F4A1)` is 63/64,
+else `2..5/8/21..23` at `0x802170CC`, and equips each unit it creates from that
+unit's class row through `func_ovlR_801DD430` (`0x80216F10`-`0x80217028`). Those
+records appear several per frame, so the multi-record rule re-primes both lists
+instead of rerolling. Measured on a New Game from the title: frames 13907, 14753,
+14754 and 14755 filled 9, 9, 8 and 14 records; before the rule the mod replaced
+all 39 and reported `frame acq countup reroll 13907 9 0 9`, after it each of the
+four frames reports a `re-prime` and no `replace`.
 
 **The drop table covers the map-object path, and not the battle reward.** Table O
 `0x801EDB38` is read by `func_ovlN_801AD6BC`, whose one call site is
@@ -222,6 +239,7 @@ fixed:
 |---|---|
 | what a replacement may be | anything in the item table |
 | how often | every eligible acquisition is rerolled |
+| a frame that fills more than one record | a bulk grant by the game: the shadows re-prime and nothing is rerolled |
 | shop purchases | left alone, recognised by the gold they cost |
 | the seed | new every boot, derived from the frame counter |
 | the log | silent in a shipped build |
@@ -243,7 +261,7 @@ order they appear in this file:
 | `pickup-table` | `<from> <to> <index>` |
 | `reward-queue` | `<from> <to> <queue slot>` |
 | `already-replaced` | `<id> <slot> <list> <count>`, the grant of a value this mod has already produced |
-| `re-prime` | `<changed> <total> <list> <forced: a save was read, or a count>` |
+| `re-prime` | `<changed> <total> <list> <forced>`; `forced` is 1 when the save-field reader ran, and a bulk grant shows `changed` > 1 with `forced` 0 |
 | `acquire ref game` | `<id> <scan count> <game +0x02> <characters loaded>`, with `DIFF` in place of `game` when the two disagree. The scan is recomputed for that frame, so a `DIFF` is a real disagreement and not a stale read |
 | `frame acq countup reroll` | `<frame> <acquisitions> <count-ups> <rerolls>` |
 | `frame uses fixed stale skipped` | `<frame> <corrections> <stale records> <skipped, roster not in RAM>` |

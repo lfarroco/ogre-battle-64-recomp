@@ -48,7 +48,9 @@
 //      reward message is built from the same stored word.
 //    * Everything else, by watching the two owned-item lists and replacing a
 //      record that has just appeared. A save load replaces the whole list at
-//      once, which is not an acquisition, so a wholesale change re-primes the
+//      once, and a map load grants the party's starting items and the created
+//      units' class equipment in one frame; neither is an acquisition, so a
+//      frame that fills more than one record (`BULK_SLOTS`) re-primes the
 //      shadow instead.
 //
 //    The shadow carries the count column (+0x03) as well as the id, because a
@@ -107,9 +109,23 @@ RECOMP_IMPORT("*", void recomp_log(const char* message));
 #define RDRAM_LO 0x80000000u
 #define RDRAM_HI 0x80800000u
 
-// More than this many records changing in one frame is a wholesale rewrite (a
-// save load), not a set of acquisitions.
-#define RELOAD_SLOTS 12u
+// More than this many records filled in one frame is a bulk grant by the game,
+// not a set of acquisitions. One interaction grants one item: a find, a battle
+// reward and a shop purchase each fill one record, or merge into one stack. The
+// game's own setup grants fill several records at once. The map loader
+// `func_ovlR_80215C38` (bankR record 9d, called once per map from bankN
+// `func_ovlN_801AE880+0x764` at 0x801AEFE4) hands the party its starting items
+// in one straight-line run -- ids 1,1,1,1,1,8,8,22,22 at 0x80217068 when
+// `lbu(0x8018F4A1)` is 63/64, else 2..5/8/21..23 at 0x802170CC -- and equips
+// every unit it creates from that unit's class row through `func_ovlR_801DD430`
+// (0x80216F10-0x80217028). Those are the items the party starts a map with, so
+// the mod leaves them as the game granted them: a frame that fills more than
+// one record re-primes the shadows instead of rerolling. Measured on a New Game
+// from the title: frames 13907, 14753, 14754 and 14755 filled 9, 9, 8 and 14
+// records and the old threshold rerolled every one.
+// A save load rewrites both lists wholesale; the save-field reader hook below is
+// its precise signal, and this count is the fallback for a load the hook misses.
+#define BULK_SLOTS 1u
 
 // --- guest memory ----------------------------------------------------------
 
@@ -1291,16 +1307,20 @@ void item_randomizer_tick(void) {
                 }
             }
 
-            // A wholesale replacement (a save load) is not a set of
-            // acquisitions: re-prime instead of rerolling the lot. Two signals
-            // say so: the game's own used-count rebuild has run since the last
-            // tick, or more records were filled in one frame than a grant can
-            // fill. The count alone is not enough for the 40-slot list, whose
-            // whole contents are four records in an early save.
-            // The equipment list is the load signal for both: one save blob
-            // carries both lists, and its 278 records make a load stand out
-            // where the 40-slot list's four records do not.
-            if (forced || !list->primed || changed > RELOAD_SLOTS ||
+            // A frame that fills more than one record is the game's own bulk
+            // grant, not an acquisition: a save load restores both lists at
+            // once, and a map load hands out the party's starting items and the
+            // created units' class equipment. Re-prime the shadows instead of
+            // rerolling the lot. `func_800749C0`, the save-field reader, is the
+            // precise signal for a load; the record count is the fallback for a
+            // load it misses, and the only signal for the map loader, which runs
+            // in bank code no hook can reach. One interaction grants one item, so
+            // a single filled record is still an acquisition.
+            // The equipment list is the setup signal for both lists: one save
+            // blob carries both, and the map loader touches both in the same
+            // frame, so a bulk equipment change re-primes the consumable list
+            // even when its own records only merged into stacks it already held.
+            if (forced || !list->primed || changed > BULK_SLOTS ||
                 (list_index == 1u && equipment_reload)) {
                 for (slot = 0u; slot < list->slots; slot++) {
                     unsigned int base = list->base + slot * LIST_STRIDE;
@@ -1316,7 +1336,7 @@ void item_randomizer_tick(void) {
                 }
                 list->primed = 1u;
                 list->fix_count = 0u;
-                if (list_index == 0u && changed > RELOAD_SLOTS) {
+                if (list_index == 0u && changed > BULK_SLOTS) {
                     equipment_reload = 1u;
                 }
                 continue;
