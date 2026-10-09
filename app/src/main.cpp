@@ -179,6 +179,28 @@ static void update_gfx(void*) {
     }
 }
 
+#if defined(_WIN32) && !defined(__MINGW32__)
+// A click in a console with Quick Edit on starts a text selection, and the next
+// write to that console blocks until the selection ends. The boot log is written
+// on the thread that also pumps the game window, so that click freezes the
+// window and Windows closes the process as an application hang. Clearing the
+// mode requires ENABLE_EXTENDED_FLAGS in the same call; without that flag the
+// clear is ignored.
+static void disable_console_quick_edit() {
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (input == nullptr || input == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD mode = 0;
+    if (!GetConsoleMode(input, &mode)) {
+        return;
+    }
+    mode |= ENABLE_EXTENDED_FLAGS;
+    mode &= ~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE);
+    SetConsoleMode(input, mode);
+}
+#endif
+
 int main(int argc, char** argv) {
 #if defined(_WIN32) && !defined(__MINGW32__)
     // OGRE_CONSOLE=1: allocate a console and put the [boot] log in it. The
@@ -193,6 +215,7 @@ int main(int argc, char** argv) {
         freopen_s(&console, "CONOUT$", "w", stdout);
         freopen_s(&console, "CONOUT$", "w", stderr);
         SetConsoleOutputCP(CP_UTF8);
+        disable_console_quick_edit();
     }
     // A developer who runs the .exe from a terminal expects the [boot] log there,
     // and AttachConsole gives it to them without ever creating a window: it
@@ -204,6 +227,7 @@ int main(int argc, char** argv) {
         FILE* console = nullptr;
         freopen_s(&console, "CONOUT$", "w", stdout);
         freopen_s(&console, "CONOUT$", "w", stderr);
+        disable_console_quick_edit();
     }
 #endif
 

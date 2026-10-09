@@ -449,6 +449,9 @@ if (NOT EMSCRIPTEN)
         # not link SDL2main, so opt out of the rename. Without it the MSVC link
         # fails on an unresolved `main`.
         target_compile_definitions(ogrebattle64 PRIVATE SDL_MAIN_HANDLED)
+        # The start screen's file picker is an IFileDialog owned by the SDL
+        # window (launcher.cpp). ole32/uuid are the COM libraries it uses.
+        target_link_libraries(ogrebattle64 PRIVATE ole32 uuid)
     endif()
     if (UNIX AND NOT APPLE)
         find_package(Threads REQUIRED)

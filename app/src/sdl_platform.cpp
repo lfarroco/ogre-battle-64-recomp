@@ -614,6 +614,138 @@ void open_audio(Platform& platform, uint32_t frequency) {
     SDL_PauseAudioDevice(platform.audio_device, 0);
 }
 
+// A left click on the picture latches a framebuffer pixel. The world-map cursor
+// draw (bank M, state+0x52/+0x54) copies it over the game's own step. Holding a
+// direction or the stick clears the latch, so the pad still drives the cursor.
+// The click does not press A.
+namespace {
+
+std::atomic<int> g_cursor_click_x{0};
+std::atomic<int> g_cursor_click_y{0};
+std::atomic<uint32_t> g_cursor_click_gen{0};
+// The click generation during which the stick and the direction keys have
+// already been seen at rest. A hold that was already down when the click
+// arrived does not match, so the click keeps the cursor.
+std::atomic<uint32_t> g_cursor_click_neutral_gen{0};
+
+constexpr uint32_t kKseg0 = 0x80000000u;
+constexpr uint32_t kKseg0End = 0x80800000u;
+constexpr uint32_t kHeldButtons = 0x800E79B0u;
+constexpr uint32_t kPadPointers = 0x800C47F0u;
+constexpr int kFbWidth = 320;
+constexpr int kFbHeight = 240;
+
+uint32_t guest_off(uint32_t guest) { return guest - kKseg0; }
+
+bool guest_range(uint32_t guest, uint32_t bytes) {
+    return guest >= kKseg0 && bytes <= (kKseg0End - guest);
+}
+
+uint8_t guest_u8(const uint8_t* rdram, uint32_t guest) {
+    return rdram[guest_off(guest) ^ 3u];
+}
+
+uint16_t guest_u16(const uint8_t* rdram, uint32_t guest) {
+    uint16_t value = 0;
+    std::memcpy(&value, rdram + (guest_off(guest) ^ 2u), sizeof(value));
+    return value;
+}
+
+uint32_t guest_u32(const uint8_t* rdram, uint32_t guest) {
+    uint32_t value = 0;
+    std::memcpy(&value, rdram + guest_off(guest), sizeof(value));
+    return value;
+}
+
+void guest_s16(uint8_t* rdram, uint32_t guest, int16_t value) {
+    std::memcpy(rdram + (guest_off(guest) ^ 2u), &value, sizeof(value));
+}
+
+// The presented picture is the 320x240 framebuffer, aspect-fit and centered.
+// Mouse events are in window points; the swapchain is in drawable pixels.
+bool window_to_framebuffer(SDL_Window* window, int window_x, int window_y, int& fb_x, int& fb_y) {
+    int win_w = 0;
+    int win_h = 0;
+    SDL_GetWindowSize(window, &win_w, &win_h);
+    int draw_w = 0;
+    int draw_h = 0;
+    SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+    if (win_w <= 0 || win_h <= 0 || draw_w <= 0 || draw_h <= 0) {
+        return false;
+    }
+    const float px = static_cast<float>(window_x) * static_cast<float>(draw_w) / static_cast<float>(win_w);
+    const float py = static_cast<float>(window_y) * static_cast<float>(draw_h) / static_cast<float>(win_h);
+    const float fb_w = static_cast<float>(kFbWidth);
+    const float fb_h = static_cast<float>(kFbHeight);
+    const float scale = (static_cast<float>(draw_w) / static_cast<float>(draw_h) > fb_w / fb_h)
+                            ? static_cast<float>(draw_h) / fb_h
+                            : static_cast<float>(draw_w) / fb_w;
+    const float origin_x = (static_cast<float>(draw_w) - fb_w * scale) * 0.5f;
+    const float origin_y = (static_cast<float>(draw_h) - fb_h * scale) * 0.5f;
+    const float gx = (px - origin_x) / scale;
+    const float gy = (py - origin_y) / scale;
+    if (gx < 0.0f || gy < 0.0f || gx >= fb_w || gy >= fb_h) {
+        return false;
+    }
+    fb_x = static_cast<int>(gx);
+    fb_y = static_cast<int>(gy);
+    return true;
+}
+
+void note_cursor_click(SDL_Window* window, int window_x, int window_y) {
+    int fb_x = 0;
+    int fb_y = 0;
+    if (!window_to_framebuffer(window, window_x, window_y, fb_x, fb_y)) {
+        return;
+    }
+    g_cursor_click_x.store(fb_x, std::memory_order_relaxed);
+    g_cursor_click_y.store(fb_y, std::memory_order_relaxed);
+    const uint32_t prev = g_cursor_click_gen.load(std::memory_order_relaxed);
+    const uint32_t next = (prev + 1u == 0u) ? 1u : prev + 1u;
+    g_cursor_click_gen.store(next, std::memory_order_release);
+    fprintf(stderr, "[cursor] click -> %d,%d\n", fb_x, fb_y);
+    fflush(stderr);
+}
+
+}  // namespace
+
+// Called from the map cursor's draw, on the game thread, with the cursor state
+// pointer. A latched click overwrites the sprite position. A direction that
+// starts after the click, once the stick has been at rest, drops the latch.
+// A direction that was already held when the click arrived loses to the click.
+extern "C" void ogre_cursor_click_apply(uint8_t* rdram, int32_t state) {
+    const uint32_t gen = g_cursor_click_gen.load(std::memory_order_acquire);
+    if (gen == 0u || rdram == nullptr) {
+        return;
+    }
+    const uint32_t state_guest = static_cast<uint32_t>(state);
+    if (!guest_range(state_guest, 0x56u)) {
+        return;
+    }
+    const uint16_t held = guest_range(kHeldButtons, 2u) ? guest_u16(rdram, kHeldButtons) : 0;
+    bool steering = (held & 0x0F00u) != 0;
+    if (!steering && guest_range(kPadPointers, 4u)) {
+        const uint32_t pad = guest_u32(rdram, kPadPointers);
+        if (guest_range(pad, 4u)) {
+            const int stick_x = static_cast<int8_t>(guest_u8(rdram, pad + 2u));
+            const int stick_y = static_cast<int8_t>(guest_u8(rdram, pad + 3u));
+            steering = stick_x > 10 || stick_x < -10 || stick_y > 10 || stick_y < -10;
+        }
+    }
+    if (steering) {
+        if (g_cursor_click_neutral_gen.load(std::memory_order_relaxed) == gen) {
+            g_cursor_click_gen.store(0u, std::memory_order_release);
+            return;
+        }
+    } else {
+        g_cursor_click_neutral_gen.store(gen, std::memory_order_relaxed);
+    }
+    const int x = g_cursor_click_x.load(std::memory_order_relaxed);
+    const int y = g_cursor_click_y.load(std::memory_order_relaxed);
+    guest_s16(rdram, state_guest + 0x52u, static_cast<int16_t>(x));
+    guest_s16(rdram, state_guest + 0x54u, static_cast<int16_t>(y));
+}
+
 void pump_sdl_events(Platform& platform, bool* quit) {
     // Enumerate once: SDL reports already-connected controllers with
     // SDL_CONTROLLERDEVICEADDED events pushed at SDL_InitSubSystem time, and the
@@ -770,6 +902,15 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // The in-game overlay sees every event first: it owns Escape (open and
         // close) and, while it is up, the keyboard and mouse.
         ogre::overlay_handle_event(event);
+
+        // Left click on the picture moves the map cursor. The Esc overlay owns
+        // the mouse while it is open, and a click in the pillarbox is not a
+        // framebuffer pixel.
+        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT &&
+            !overlay_visible() && platform.window != nullptr &&
+            event.button.windowID == SDL_GetWindowID(platform.window)) {
+            note_cursor_click(platform.window, event.button.x, event.button.y);
+        }
 
         // The game window's close button is the quit path, and SDL_QUIT is not
         // one of the events it arrives as. SDL synthesises SDL_QUIT from a

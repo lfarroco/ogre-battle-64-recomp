@@ -110,7 +110,10 @@ def check_symbols(elf: Path) -> int:
             continue
         total += 1
         want = int(m.group(1), 16)
-        got = int(addr, 16)
+        # N64 addresses live in the low 32 bits. Some 64-bit binutils nm builds
+        # sign-extend them (0x80197B90 prints as ffffffff80197b90); the high
+        # half is not a mislink.
+        got = int(addr, 16) & 0xFFFFFFFF
         if got != want:
             bad += 1
             deltas[got - want] = deltas.get(got - want, 0) + 1
