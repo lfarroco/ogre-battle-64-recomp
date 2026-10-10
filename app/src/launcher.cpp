@@ -21,6 +21,12 @@
 
 #include <SDL.h>
 
+#if defined(_WIN32)
+#include <SDL_syswm.h>
+#include <objbase.h>
+#include <shobjidl.h>
+#endif
+
 #if defined(OGRE_HAVE_NFD)
 #include <nfd.h>
 #endif
@@ -51,8 +57,65 @@ const SDL_Color kFooterColor{110, 116, 126, 255};
 // Opens the platform's file picker. Empty when the build has no dialog (the
 // null-renderer variant links no file-dialog library): dragging a file in, or
 // placing one beside the executable, still works there.
-std::filesystem::path browse_for_rom() {
+//
+// On Windows the picker is owned by `window`. The vendored dialog calls
+// IFileDialog::Show(nullptr), so the picker has no owner: it opens behind this
+// window while the call blocks the thread that paints it, and a click looks
+// like the window has frozen. Show(owner) keeps the picker in front and pumps
+// window messages for the duration.
+std::filesystem::path browse_for_rom(SDL_Window* window) {
+#if defined(_WIN32)
+    HWND owner = nullptr;
+    if (window != nullptr) {
+        SDL_SysWMinfo info;
+        SDL_VERSION(&info.version);
+        if (SDL_GetWindowWMInfo(window, &info) == SDL_TRUE) {
+            owner = info.info.win.window;
+        }
+    }
+
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    // S_FALSE: this thread already initialized COM. RPC_E_CHANGED_MODE: it was
+    // initialized multithreaded, and IFileDialog::Show from that apartment can
+    // block forever, so leave the picker to the fallback below.
+    const bool com_ready = SUCCEEDED(init);
+    IFileOpenDialog* dialog = nullptr;
+    if (com_ready && init != RPC_E_CHANGED_MODE &&
+        SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&dialog)))) {
+        const COMDLG_FILTERSPEC specs[] = {
+            {L"N64 ROM (*.z64; *.n64; *.v64)", L"*.z64;*.n64;*.v64"},
+            {L"All files", L"*.*"},
+        };
+        dialog->SetFileTypes(SDL_arraysize(specs), specs);
+        DWORD options = 0;
+        if (SUCCEEDED(dialog->GetOptions(&options))) {
+            dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
+        }
+        std::filesystem::path chosen;
+        if (SUCCEEDED(dialog->Show(owner))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
+                PWSTR name = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &name)) && name != nullptr) {
+                    chosen = name;
+                    CoTaskMemFree(name);
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
+        if (init == S_OK) {
+            CoUninitialize();
+        }
+        return chosen;
+    }
+    if (init == S_OK) {
+        CoUninitialize();
+    }
+#endif
 #if defined(OGRE_HAVE_NFD)
+    (void)window;
     // The UTF-8 entry points, not the native-char ones: `nfdnchar_t` is
     // `wchar_t` on Windows (nfd.h), so `NFD_OpenDialogN` cannot take the narrow
     // literals below. Plain (not u8) literals: nfdu8char_t is `char`, and in
@@ -76,6 +139,7 @@ std::filesystem::path browse_for_rom() {
     NFD_FreePathU8(chosen);
     return path;
 #else
+    (void)window;
     return {};
 #endif
 }
@@ -366,7 +430,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     // Opens the platform picker and validates the choice. Shared by a click on
     // empty space and the Enter key.
     auto browse_and_accept = [&]() {
-        const std::filesystem::path chosen = browse_for_rom();
+        const std::filesystem::path chosen = browse_for_rom(window);
         if (chosen.empty()) {
 #if !defined(OGRE_HAVE_NFD)
             error = "This build has no file browser. Drop the ROM onto this "
