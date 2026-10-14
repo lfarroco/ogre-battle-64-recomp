@@ -54,7 +54,34 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-14-session144.md`.
+`docs/HANDOFF-2026-10-14-session145.md`.
+
+Session 145 closed session 144's open item 1, "the browser's title and story
+frames are hue-shifted against RT64's target for the same text". The mechanism
+was the decode, and not the GL sampling or the blend as session 144 concluded:
+`decode_texture_rect`'s `IM_SIZ_32b` case read an RGBA32 texel's two big-endian
+halfwords as `(alpha,red)` and `(green,blue)` and so assigned the source bytes
+G, B, A, R to the destination R, G, B, A. RT64 reads the same four guest bytes as
+R, G, B, A (`rt64_rdp.cpp:527` `loadWord<RGBA32>` splits them across TMEM's two
+halves and `TextureDecoder.hlsli`'s `sampleTMEMRGBA32` rebuilds
+`(R<<24)|(G<<16)|(B<<8)|A`), and `tools/ogre_frame.py` decodes the same order
+from a dump. The title draws its 320x240 RGBA32 backdrop as 3-row `G_TEXRECT`
+strips (`img=0x217508`, `stride=1280`), so the shift turned a brown-to-white sky
+magenta-to-white; the attract story's frames were hue-shifted in session 143's
+comparison and use the same case. The browser trace's own numbers moved from
+the `(G,B,A,R)` decode to the `(R,G,B,A)` decode of the same run's RDRAM dump
+(rows 0..3 `mean 25.5 -> 56.8`, rows 21..24 `mean 87.9 -> 104.6`), and the canvas
+against RT64's `OGRE_CAPTURE_TARGET` of the same frame went from 40.7 to 5.1 mean
+absolute difference per channel
+(`docs/proofs/web-title-rgba32-rgba-order-fix.png` against
+`-before.png` and `native-title-rgba32-reference.png`). Session 144's comparison
+was the browser's decode against the browser's canvas, and both agreed because
+the trace's `mean` is computed by the decode under test. New
+`tools/rt64_target.py` reads an `OGRE_CAPTURE_TARGET` `.bin`
+(`R16G16B16A16_UNORM`, 8 bytes/texel) into a PNG, and `docs/guides/app-build.md`
+records that a scripted native run needs `OGRE_MOD_TEST=1` while
+`build-app/mods/` holds mods, or the start screen waits for a ROM and no capture
+is written.
 
 Session 144 closed session 143's second open gap, "CI8 tiles decode black in
 display lists that load no palette". A CI tile whose RDP texture LUT mode
@@ -88,8 +115,9 @@ or black - session 142's "the attract story is only partly drawn".
 `fbSize` minus `OGRE_OVERSCAN`, default 1) and `blit_to_canvas` samples only that
 area. The title logo and the attract story's pages now fill the frame
 (`docs/proofs/web-title-640-after-texrect-fix.png`,
-`docs/proofs/web-attract-story-full-frame.png`). The hue shift between the
-browser's title and story frames and RT64's target for the same text stays open.
+`docs/proofs/web-attract-story-full-frame.png`). Session 145 then fixed the hue
+shift between the browser's title and story frames and RT64's target: it was the
+RGBA32 decode's channel order (see above).
 
 Session 141 continued the renderer. The render targets and the canvas are now
 sized from the VI's scanout size (a port of RT64's `VI::fbSize`, updated only by
@@ -488,15 +516,17 @@ holds the evidence.
    Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
    whose source is a rendered colour image reads RDRAM), presentation resolves
    the VI's origin by containment instead of applying its own view rectangle, and
-   the browser's title and story frames are hue-shifted against RT64's target for
-   the same text (cloud band `(128,86,84)` against `(156,134,77)`, sky matching).
-   Session 144 measured that difference again and did not explain it: the browser
-   and RT64 decode the same texrect (`rect=0,101..320,104`, `img=0x80217508`,
-   `fmt=0 siz=3 line=80 uls=0 ult=84`) and the browser's decode of it is a
-   plausible RGBA32 cloud, while the canvas colour at that row is a different
-   one. The decode is not the mechanism; the sampling or the blend is. The
-   comparison is `[GFX-TEXTRACE]` against `OGRE_TEX_TRACE`/`OGRE_RECT_STATE`,
-   both of which stay.
+   the residual per-channel difference between the browser's canvas and RT64's
+   render target (mean absolute difference 5.1/255 after session 145, with the
+   browser slightly darker: R -1.3, G -1.6, B -2.5). Session 145 closed the hue
+   shift itself: the RGBA32 decode read the texel one byte along
+   (`(G,B,A,R)` for `(R,G,B,A)`), so the browser and RT64 did not decode the same
+   rectangle after all. Session 144's "the browser's decode of it is a plausible
+   RGBA32 cloud, while the canvas colour at that row is a different one" compared
+   the decode against the trace that the same decode computes. The comparison is
+   `[GFX-TEXTRACE]` against `OGRE_TEX_TRACE`/`OGRE_RECT_STATE`, both of which
+   stay, and the frame comparison uses `tools/rt64_target.py` on an
+   `OGRE_CAPTURE_TARGET` `.bin`.
    Session 142 closed the title-screen fault and the geometry behind it.
    `draw_texrect` treated the RDP's lower-right corner as inclusive (`xh + 1`,
    `yh + 1`, and a `xh - xl + 1` texel span). The RDP covers `[ul, lr)` for a
@@ -534,7 +564,16 @@ holds the evidence.
    `docs/proofs/web-attract-story-full-frame.png`), the 640x476 world-map mode is
    unchanged, and the frames were checked against RT64's own render target for
    the same screen.
-   See `docs/HANDOFF-2026-10-14-session144.md`,
+   Session 145 fixed the RGBA32 channel order: `decode_texture_rect`'s
+   `IM_SIZ_32b` case assigned the source bytes G, B, A, R to the destination
+   R, G, B, A, so the title and the story drew their 320x240 RGBA32 backdrop
+   (`img=0x80217508`, `fmt=0 siz=3`) with every channel one byte along; the
+   trace's `mean`/`opaque` for its 3-row rectangles now equal the `(R,G,B,A)`
+   decode of the same run's dump, and the canvas against RT64's
+   `OGRE_CAPTURE_TARGET` of the same frame went from 40.7 to 5.1 mean absolute
+   difference per channel. `tools/rt64_target.py` reads the target `.bin`.
+   See `docs/HANDOFF-2026-10-14-session145.md`,
+   `docs/HANDOFF-2026-10-14-session144.md`,
    `docs/HANDOFF-2026-10-14-session143.md`,
    `docs/HANDOFF-2026-10-14-session142.md`,
    `docs/HANDOFF-2026-10-14-session141.md`, `docs/HANDOFF-2026-10-14-session139.md`

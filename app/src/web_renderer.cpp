@@ -982,13 +982,24 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
                         break;
                     }
                     case gbi::IM_SIZ_32b: {
-                        // RGBA32: two 16-bit halves: (alpha,red) (green,blue).
+                        // RGBA32: one texel is four guest bytes, R then G then B
+                        // then A. RT64 splits the texel across TMEM's two halves
+                        // on load (`loadWord<RGBA32>` puts bytes 0/1 in the lower
+                        // half and 2/3 in the upper) and rebuilds the texel as
+                        // (R<<24)|(G<<16)|(B<<8)|A in `sampleTMEMRGBA32`
+                        // (`src/shaders/TextureDecoder.hlsli`); `tools/ogre_frame.py`
+                        // decodes the same way. Reading the halves as
+                        // (alpha,red) (green,blue) - what this did - moved every
+                        // channel one byte along: rgba[0] came out as the source
+                        // G, rgba[1] as B, rgba[2] as A and rgba[3] as R. On the
+                        // title screen's 320x240 RGBA32 backdrop that made a
+                        // brown-to-white sky decode as magenta-to-white.
                         const uint16_t hi = n64be16(rdram, byte_addr);
                         const uint16_t lo = n64be16(rdram, byte_addr + 2);
-                        rgba[0] = static_cast<uint8_t>(hi & 0xFF);
-                        rgba[1] = static_cast<uint8_t>(lo >> 8);
-                        rgba[2] = static_cast<uint8_t>(lo & 0xFF);
-                        rgba[3] = static_cast<uint8_t>(hi >> 8);
+                        rgba[0] = static_cast<uint8_t>(hi >> 8);    // R
+                        rgba[1] = static_cast<uint8_t>(hi & 0xFF);  // G
+                        rgba[2] = static_cast<uint8_t>(lo >> 8);    // B
+                        rgba[3] = static_cast<uint8_t>(lo & 0xFF);  // A
                         break;
                     }
                     default:
