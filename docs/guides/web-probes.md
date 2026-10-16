@@ -95,6 +95,8 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas | the synthetic draw rendered |
 | `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
 | `spritecheck.cjs` | one rendered sprite vs that composite, side by side | the rendered sprite matches its textures |
+| `palette.cjs` | a forced scene's canvas plus the `[GFX-TEXTRACE]` lines (decoded colours, TLUT entries) | a frame bright enough by `--min-colorful` was kept |
+| `fills.cjs` | a frame with only the RDP's fill rectangles drawn (`ogre_gfx_debug_flags(2)`), so a `G_FILLRECT` colour is read as pixels; pair it with the page log's `[GFX-RECT] fillrect` lines | a frame was captured |
 | `rdram.cjs` | a guest-RDRAM image (`OGRE_RAM_KEY_AT_MS` + `OGRE_RAM_KEY_FULL=1`), read out of `Module.FS` and written next to the page log for `tools/rdram.py` | the dump appeared and held 8 MiB |
 | `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
 
@@ -106,6 +108,14 @@ reports `nonBlack ≈ 32, colorful = 0`** while a drawn frame reports thousands.
 `colorful` is the robust signal — the border is grayscale — which is why
 `boot.cjs --min-pixels` (default 200) is applied to `nonBlack` and the
 `colorful` count is printed alongside it for confirmation.
+
+The screenshot's inner size is the element's CSS box, which the renderer sets to
+an integer multiple of the drawing buffer (`[GFX-PRESENT] canvas resized to
+640x476 (css 640x476, x1)`): a 320x240 VI mode is captured 2x, and a 640-wide
+mode 1:1. `tools/web_frame_cmp.py` turns a screenshot back into drawing-buffer
+pixels for a comparison against a native `OGRE_CAPTURE_TARGET` capture
+(`docs/guides/app-build.md` -> "Comparing a browser frame with a native
+capture").
 
 ### Configuration
 

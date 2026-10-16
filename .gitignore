@@ -11,6 +11,10 @@ build-null/
 build-wasm/
 build-dist/
 dist/
+# Emscripten's sysroot/symbol-list cache when `make web EM_CACHE=.emcache` is
+# used. The default `~/.cache/emscripten-ogre` is outside the tree and is not
+# writable under the agent file sandbox.
+.emcache/
 # `make web-dist`: the static (GitHub Pages) browser package.
 dist-web/
 RecompiledFuncs/

@@ -173,7 +173,7 @@ environment. So `OGRE_SCENE`, `OGRE_STEP`, `OGRE_TRACE_DL`, `OGRE_S2D_TRACE`,
 http://127.0.0.1:8931/app/web/index.html?OGRE_SCENE_LOG=1&OGRE_TAP_MS=1500&OGRE_TAP_BUTTON=start,a,start,a,start,a,a,a,a,a,a,a,a
 ```
 
-`OGRE_TAP_MS`/`OGRE_TAP_BUTTON` are implemented in `web.js` for controller 0,
+`OGRE_TAP_MS`/`OGRE_TAP_BUTTON`/`OGRE_TAP_MAX` are implemented in `web.js` for controller 0 (with the native last-slot-sticks rule; the scene-keyed `OGRE_TAP_SCENE`/`_NOT_SCENE`/`_SCENE_BUTTON` are native-only),
 with the native button vocabulary and the native 150 ms press. Only those two
 are JS-side; they drive the same `ogre_input_set` the keyboard does.
 `debug/probes/atmark.cjs` waits for a regular expression in the page log and
@@ -824,7 +824,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_TAP_MS=<n>` | controller 0 presses Start for 150 ms out of every `n` ms (the native equivalent of the web probes' Enter tap) |
 | `OGRE_TAP_SCENE=<list>` | press `OGRE_TAP_MS`/`OGRE_TAP_BUTTON` only while the dispatcher's scene (`D_800E810E`) is in the list — names from `kScenes` (`title`, `new-game`, …) or hex, `,`/`+`-separated. Scopes a scripted tap to **game state instead of wall time**, so `OGRE_SPEED` and capture readback no longer break the schedule |
 | `OGRE_TAP_NOT_SCENE=<list>` | the complement of the above. `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the title and goes silent the moment New Game is confirmed — no `OGRE_TAP_MAX` tuning |
-| `OGRE_TAP_BUTTON=<list>` | which pad buttons the synthetic taps press, cycled one per tap (`start`, `a`, `b`, `down`, …; `none` skips a tap). **The list shape matters, and so does the form (developer, session 64): a tap that lands while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the sequence from advancing.** The name-entry form (scene `0x07`) is where this bites. The recorded working shape is **a few `start,a` pairs then a long run of plain `a`** — e.g. `"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` (see the checkpoint and `OGRE_NJREAD_LOG` recipes below). An *endless* `start,a` alternation stalls there forever: a scripted run that shows no crash, no stub call, and a final scene of `0x07` is almost always this. If a schedule keeps stalling, drive the run by hand and take a checkpoint instead |
+| `OGRE_TAP_BUTTON=<list>` | which pad buttons the synthetic taps press, one slot per tap (`start`, `a`, `b`, `down`, …; `none` skips a tap). **The last slot sticks** once the list is exhausted (`slot = tap < count ? tap : count - 1`, `app/src/sdl_platform.cpp`), so `"start,start,none"` presses Start twice and then stops tapping while the run continues; `OGRE_TAP_MAX=<n>` stops after n presses. The browser build implements the same rule in `app/web/web.js` (session 151; it used to cycle the list forever). **The list shape matters, and so does the form (developer, session 64): a tap that lands while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the sequence from advancing.** The name-entry form (scene `0x07`) is where this bites. The recorded working shape is **a few `start,a` pairs then a long run of plain `a`** — e.g. `"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` (see the checkpoint and `OGRE_NJREAD_LOG` recipes below). An *endless* `start,a` alternation stalls there forever: a scripted run that shows no crash, no stub call, and a final scene of `0x07` is almost always this. If a schedule keeps stalling, drive the run by hand and take a checkpoint instead |
 | `OGRE_TAP_SCENE_BUTTON=<scene>:<button>[:<count>],…` | the **scene-keyed** sibling of `OGRE_TAP_BUTTON` (session 68). `OGRE_TAP_BUTTON`'s slot index advances with **wall time**, so a route across several scenes has to be hand-tuned to how long each takes — the same "title → Load Game → map" schedule landed on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s (the forced-scene poke races the publisher stills). This one keys the button on the dispatcher's active scene (`D_800E810E`; names from `kScenes` or hex) and presses it every `OGRE_TAP_MS` while that scene runs, at most `<count>` times (default unlimited). Entries in one scene are consumed in order, so `OGRE_TAP_MS=1500 OGRE_TAP_SCENE_BUTTON="title:start:5,0x12:a:3,0x05:right:3,0x05:a:1"` is "Start up to five times on the title (early presses are sometimes swallowed; the scene change stops it), A three times on the Load Game screen, then walk the map cursor right three times and press A". Requires `OGRE_TAP_MS`; it replaces the slot schedule entirely |
 | `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
 | `OGRE_PREF_DIR=<dir>` | use `<dir>` as the runtime config dir instead of the executable's own folder, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write next to the app). The boot log prints the resolved path |
@@ -1018,6 +1018,39 @@ Without `OGRE_PRESENT_ALWAYS` a stalled boot never re-presents and the window
 keeps an old black frame even though the render path works, and without
 `OGRE_PRESENT_FBTARGET` an RDP-only fill has no framebuffer in the manager so the
 presenter uploads empty RDRAM instead of the drawn target.
+
+### Comparing a browser frame with a native capture
+
+`tools/web_frame_cmp.py CANVAS.png TARGET.bin` is the comparator between a
+`#game-canvas` screenshot (see `docs/guides/web-probes.md`) and an
+`OGRE_CAPTURE_TARGET` `.bin` of the same screen. It crops the element's 1 px
+border, undoes the CSS upscale of the drawing buffer, and prints the mean
+absolute / mean signed difference per channel and the fraction of channel
+samples that match exactly.
+
+The element's drawing buffer is not always the CSS box. `resize_canvas`
+(`app/src/web_renderer.cpp`) sets the box to an integer multiple of the buffer
+(`[GFX-PRESENT] canvas resized to 640x476 (css 640x476, x1)`), so a screenshot's
+inner size is that multiple of the buffer and the tool undoes a 2x upscale by
+itself. A capture from a build whose box did not match its buffer needs the
+buffer named: `--buffer 640x476` reconstructs it from the box by the inverse of
+`floor((Y + 0.5) * buffer_h / box_h)`, which is the scale a browser applies to a
+`<canvas>` whose CSS size differs from its drawing buffer.
+
+| flag | meaning |
+|---|---|
+| `--target-size WxH` | the `.bin`'s size (default 320x240; it is not in the file) |
+| `--canvas-size WxH` | the drawing buffer the screenshot shows, when it is not the target size or its 2x |
+| `--buffer WxH` | the drawing buffer the element's CSS box scaled (undo a non-integer scale) |
+| `--inset N` | drop N pixels from every side of both grids, e.g. the column and row `blit_to_canvas` never writes |
+| `--shift-search N` | the mean abs difference for every whole-pixel shift in `[-N, N]`, which separates an offset from a resample |
+| `--diff-out PATH` | write `|difference| x 8` as a PNG |
+
+Read the `--shift-search` minimum and the per-pixel histogram, not the single
+mean: the publisher still's session-147 capture reads `meanAbs=8.26` at `(0,0)`
+and `6.35` one row away, and the true model was neither - the drawing buffer was
+being resampled into a larger CSS box, which `--buffer` undoes to
+`[0.87,0.84,0.75]` and 99.6% exact (`docs/HANDOFF-2026-10-16-session148.md`).
 
 ### The game's own frames
 

@@ -221,7 +221,12 @@
   // owns controller 0.
   //
   // The button vocabulary and the press length match the native side. The slot
-  // index advances with wall time, as it does natively.
+  // index advances with wall time, as it does natively, and **the last slot
+  // sticks** (`sdl_platform.cpp`: `slot = tap < count ? tap : count - 1`), so
+  // `OGRE_TAP_BUTTON="start,start,none"` presses Start twice and then stops
+  // tapping while the run continues - which is how a route reaches a screen that
+  // waits for input (the New Game cathedral does). `OGRE_TAP_MAX=<n>` stops after
+  // n presses, also as natively.
   var TAP_NAMES = {
     start: BTN.START, a: BTN.A, b: BTN.B, z: BTN.Z, l: BTN.L, r: BTN.R,
     up: BTN.UP, down: BTN.DOWN, left: BTN.LEFT, right: BTN.RIGHT,
@@ -238,10 +243,21 @@
     var names = (urlParam("OGRE_TAP_BUTTON") || "start").split(",").map(function (s) {
       return s.trim().toLowerCase();
     });
+    var max = parseInt(urlParam("OGRE_TAP_MAX"), 10);
+    if (!isFinite(max) || max <= 0) {
+      max = -1;
+    }
     var slot = 0;
-    log("[web:input] OGRE_TAP_MS=" + ms + " OGRE_TAP_BUTTON=" + names.join(","));
-    window.setInterval(function () {
-      var name = names[slot % names.length];
+    log("[web:input] OGRE_TAP_MS=" + ms + " OGRE_TAP_BUTTON=" + names.join(",") +
+        (max > 0 ? " OGRE_TAP_MAX=" + max : ""));
+    var timer = window.setInterval(function () {
+      if (max > 0 && slot >= max) {
+        window.clearInterval(timer);
+        tapMask = 0;
+        log("[web:input] tap schedule done after " + slot + " presses");
+        return;
+      }
+      var name = names[slot < names.length ? slot : names.length - 1];
       slot++;
       var mask = TAP_NAMES[name];
       if (mask === undefined) {

@@ -54,7 +54,100 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-16-session147.md`.
+`docs/HANDOFF-2026-10-16-session151.md`.
+
+Session 151 went back to the browser's own items. The browser's scripted tap
+schedule now matches the native one: `app/web/web.js` had cycled
+`OGRE_TAP_BUTTON` forever (`names[slot % names.length]`) while the native advance
+is `slot = tap < count ? tap : count - 1` (`app/src/sdl_platform.cpp`, "the last
+slot sticks") plus `OGRE_TAP_MAX`, so a route could not stop tapping mid-run and
+the browser has none of the native's scene-keyed knobs; a `none` tail now stops
+it, verified by a run logging `[web:input] tap schedule done after 3 presses`.
+Two route facts came out of the attempt to reach the cathedral: the session-54
+title route is racy in the browser (this run's forced title landed at t=8189 ms,
+after the first presses), and `OGRE_SCENE=new-game OGRE_STEP=2` reaches the
+cathedral on both sides and waits for input there, so a cathedral comparison
+needs no taps. The next renderer item is framebuffer-as-texture: the gfx thread
+decodes a `G_LOADTILE`/`G_LOADBLOCK` out of RDRAM at record time
+(`decode_texture_rect`, `app/src/web_renderer.cpp:3827`), while a colour image
+the same display list rendered into is still only in a GL framebuffer and is
+written back on the main thread at present or at a `sync_framebuffers` request
+(`readback_all_framebuffers`), so such a load decodes stale bytes.
+
+Session 150 settled session 149's fill-scissor question and fixed the native
+renderer. The RDP's scissor does clip a FILL-mode write: RetroArch with the
+`parallel_n64` core (ParaLLEl-RDP) run to the attract story shows the letterbox
+rows 0..16 and the bottom band as `(0,0,0)`, the second fill's black, with the
+game's gradient rows from 18 and the last column holding stale content from the
+previous scene. n64brew says the same. `RDP::fillRect`
+(`tools/RT64/src/hle/rt64_rdp.cpp`) now intersects the rectangle with the current
+scissor before `drawRect` and returns on an empty intersection, so RT64 no longer
+clears the whole rectangle the game asked for; the story target's bands are
+`(0,0,0)` where they were `(74,90,0)`, the trace prints `fillRect clipped
+(0,0)-(1279,959) -> (0,72)-(1276,776)`, and the developer confirmed the screen
+("the attract screen has the correct bg color now! it is black instead of
+olive!!"). `patches/rt64-ob64.patch` was regenerated with `make patch-fix` so
+the hosted release path carries the clip, and `make patch-check` PASSes. No
+regression: the publisher stills' `tt.120`..`tt.220` are
+byte-identical to session 146's reference and the title stays at
+`[2.29,2.49,3.10] / 81.4%`. Session 149's "the browser's fill scissor is one
+column narrow" is withdrawn as a browser-vs-reference difference: the reference
+emulator leaves that column unwritten too, so the browser's half-open scissor
+agrees with it. Session 84's olive-band branch reading is corrected at
+instruction level in the handoff: the `0x4F00C308` it named is the data word of a
+`G_SETSCISSOR` pair, and `li a0,0x4AC1` is a `beqz` delay slot, so it is not a
+two-armed colour choice - and with the scissor clipping, the band colour is
+fill 2's black in either case.
+
+Session 149 fixed the browser's fill colour and found that the attract story's
+remaining difference is mostly RT64's. `G_FILLRECT` now decodes the fill colour
+in the colour image's format: a 16-bit image takes the low 16 bits of the
+`G_SETFILLCOLOR` word as RGBA5551 and a 32-bit image the whole word as RGBA8888,
+which is what RT64 does (`ColorConverter::RGBA16::toRGBAF(fillColor & 0xFFFF)` /
+`RGBA32::toRGBAF`). The story's letterbox fill is `0x4AC14AC1`: the browser
+painted the 32-bit decode `(74,193,74)`, a green, where the 16-bit value is
+`(74,90,0)`, and `0x00010001` painted `(0,1,0)` where it is `(0,0,0)`. The four
+fills isolated with `ogre_gfx_debug_flags` bit 1 read before/after as
+`(74,193,74) -> (74,90,0)` and `(0,1,0) -> (0,0,0)`, and the trace prints the
+word, the image size and the scissor. The same screen then splits into two other
+differences: RT64 implements a fill as a clear of the *unscissored* rect
+(`InstanceDrawCall::Type::FillRect` -> `clearColor` with
+`clearRect.rect = convertFixedRect(call.callDesc.rect)`), so the story's fourth
+fill paints the whole 320x240 and RT64's target bands are `(74,90,0)` where the
+browser, which honours the scissor, has `(0,0,0)` - 27% of the frame (64 of 240
+rows) and the largest term in `meanAbs=[25.21,30.50,5.73]`; and the scene itself animates, so its
+rows cannot be compared across runs (`s.160` sky `(10,1,27)` against `s.180`
+`(24,16,47)`). Whether hardware clips a fill by the scissor is now the open
+question that decides which renderer is right there (open work 8(k) below), and
+it also decides whether session 84's olive-band branch reading was chasing a
+symptom.
+
+Session 148 closed the publisher still's one-row offset, and it was not in the
+renderer. `app/web/index.html` pins `#game-canvas` at `640x480` and
+`present_framebuffer` sizes only the drawing buffer, which for that VI mode is
+`640x476`, so the browser scaled the 476-row buffer into the 480-row box and
+`image-rendering: pixelated` made that a nearest-neighbour resample. On session
+147's own capture, canvas row `Y` equals RT64's target row
+`floor((Y + 0.5) * 476 / 480)` for every row: mean absolute difference
+`[0.87, 0.84, 0.75]` per channel, 99.6% of channel samples identical, against
+`10.38` for the identity and `7.26` for the best constant shift. The ATLUS
+strokes are `x 156..471, y 200..283` in the canvas against `156..471, 198..281`
+in RT64: the same box, two rows lower, which is what the stretch does at that
+row. `resize_canvas` now sets the element's CSS box with
+`emscripten_set_element_css_size` to an integer multiple of the drawing buffer
+(`max(1, min(2, 480 / height))`), so a 320x240 buffer keeps the 2x box and the
+640x476 mode is shown 1:1. On the fixed build the still matches RT64's target at
+`[0.87, 0.84, 0.75]` with 99.6% exact and the whole-pixel shift search minimising
+at exactly `(0, 0)` (`0.82`; every other shift `>= 6.80`), the title is unchanged
+at `[2.30, 2.50, 3.12] / 81.3%`, `boot.cjs` renders and `testdraw.cjs` returns 1.
+Over the visible area (`tools/web_frame_cmp.py --inset 1`) the still is exact:
+`meanAbs=[0.0,0.0,0.0]` and 99.997% of channel samples identical, with 9 differing
+pixels - the four that `#game-canvas`'s `border-radius` clips and five at
++-1/+-2. The whole-frame signed difference `-0.87/-0.84/-0.75` is the buffer's
+last column and last row, which the presenter never writes because the VI's
+visible area is 639x475. Two session-147 numbers are corrected: the canvas
+bounding box it recorded was one pixel right and one row low (a crop offset), and
+its "9836 = 4 x 2459 native" stroke count is 9836 in both frames at 640 wide.
 
 Session 147 fixed the browser's palette decode. `decode_texture_rect` chose a
 palette entry's decoder from the entry's own bit 15 (RGBA16 when set, IA16 when
@@ -70,12 +163,10 @@ canvas's colour histogram now equals RT64's capture entry for entry (cream
 `(222,0,41)`). Session 146's reading is corrected in two places: the native
 stroke colour is `(57,90,165)` and not `(48,80,160)` (the earlier value occurs 0
 times in the capture), and the blue native render is correct, so the fault was
-never in RT64's TMEM palette lookup. What is left on that screen is a one-row
-vertical offset (the canvas is one row low: `meanAbs` 11.43 at `dy=0`, 6.35 at
-`dy=-1`; the sub-pixel search puts the minimum at exactly `-1.0`), and the title
+never in RT64's TMEM palette lookup. Session 147's one-row item is closed by
+session 148 above; the title
 is unchanged
-(`meanAbs=[2.32,2.51,3.12] exact=81.2%` against the same target). That is open
-work 8(i) below.
+(`meanAbs=[2.32,2.51,3.12] exact=81.2%` against the same target).
 
 Session 146 fixed the browser's present geometry, which was the bulk of session
 145's residual frame difference. `blit_to_canvas` drew the VI's visible area (the
@@ -640,10 +731,12 @@ holds the evidence.
    RT64's silhouette (`docs/proofs/web-title-lut-mode0-i8-fix.png`). The TMEM
    palette also moved out of the per-display-list state, because it outlives a
    display list the way the colour image does.
-   Session 146 fixed the window the visible area is drawn into (below), and
-   session 147 fixed the palette decode (item (h) below). The browser's own
+   Session 146 fixed the window the visible area is drawn into (below), session
+   147 fixed the palette decode (item (h) below), and session 148 fixed the
+   canvas element's CSS box (item (i) below). The browser's own
    outstanding items are framebuffer-as-texture, the `fldRegs` x/y scale and
-   offset, the one-row sampling offset item (i) below, and the two moving-cloud
+   offset, the unwritten-edge and rounded-corner item (j) below, the RDP fill
+   scissor question (k) below, and the two moving-cloud
    bands.
    **(h) The publisher still's ATLUS letters: closed in session 147.** The
    browser decoded every palette entry by the entry's own bit 15 (RGBA16 when
@@ -659,19 +752,62 @@ holds the evidence.
    `(57,90,165)` and not `(48,80,160)` (0 occurrences in `tt.140.bin`), and
    RT64's blue render is correct, so the fault was never in its TMEM palette
    lookup. `colour_mean`'s CI8 guard change from session 146 stays.
-   **(i) The publisher still sits about one row low in the browser.** After (h),
-   the canvas against RT64's `tt.140` target at 320x240 is
-   `meanAbs=[8.26,9.53,15.92] meanSigned=[-0.09,-0.08,-0.07] exact=58.0%`, and a
-   shift search, including sub-pixel positions, minimises at exactly `dy=-1`
-   (`meanAbs 6.35`) against `11.43` at `dy=0`.
-   The differing pixels are swaps of neighbouring still colours (white against
-   cream, 4593 and 4527 pixels), which is a sampling offset and not a palette
-   error. The 640-wide mode presents `visible=639x475` through a 640x480 canvas,
-   so the 476 -> 480 CSS stretch and the `fldRegs` x/y scale and offset are the
-   two candidates. The 320x240 mode does not show it.
+   **(i) The publisher still sits about one row low in the browser: closed in
+   session 148.** It was the element's CSS box, and not the renderer. Session
+   147 measured the canvas against RT64's `tt.140` target as
+   `meanAbs=[8.26,9.53,15.92] meanSigned=[-0.09,-0.08,-0.07] exact=58.0%` with a
+   shift minimum at `dy=-1`, and named the 476 -> 480 CSS stretch and the
+   `fldRegs` x/y scale and offset as the candidates. `app/web/index.html` pins
+   `#game-canvas` at `640x480`, `present_framebuffer` sizes only the drawing
+   buffer (640x476 for that VI mode), and `image-rendering: pixelated` makes the
+   browser's fit a nearest-neighbour resample: canvas row `Y` is target row
+   `floor((Y + 0.5) * 476 / 480)`, which fits session 147's own capture at
+   `[0.87, 0.84, 0.75]` with 99.6% of channel samples identical (`10.38` for the
+   identity, `7.26` for the best constant shift). `resize_canvas` now calls
+   `emscripten_set_element_css_size` so the CSS box is `max(1, min(2, 480 /
+   height))` times the buffer. On the fixed build the still matches RT64's target
+   at `[0.87, 0.84, 0.75]`, 99.6% exact, minimum at `(0, 0)`; the title is
+   unchanged at `[2.30, 2.50, 3.12] / 81.3%`.
+   **(j) The canvas element's rounded corners clip four content pixels, and the
+   presenter's unwritten last column and row read as differences against a whole
+   render target.** `#game-canvas` carries `border-radius:6px`, so the four
+   corner pixels of every frame are blended with the border (72..108 levels off
+   RT64's target); the last column and row (639 of 640 and 475 of 476) are never
+   written, because `blit_to_canvas` writes only the VI's visible area, which is
+   the `fbSize` minus the overscan crop, while RT64's own window is shrunk to the
+   visible size by `removeBlackBorders`. Both are cosmetic and neither is a
+   rendering difference; over the visible area the publisher still is exact
+   (99.997% of channel samples, 9 differing pixels). `tools/web_frame_cmp.py
+   --inset N` keeps them out of a measurement.
+   **(k) The RDP's scissor clips a FILL-mode write: settled in session 150, and
+   the native renderer fixed.** Session 149 fixed the
+   browser's fill-colour decode (16-bit colours take the low 16 bits as RGBA5551,
+   32-bit colours the whole word as RGBA8888, matching RT64's
+   `ColorConverter::RGBA16/RGBA32::toRGBAF`) and found that the attract story's
+   remaining difference is mostly RT64's: RT64 implements `G_FILLRECT` as a clear
+   of the *unscissored* rect (`InstanceDrawCall::Type::FillRect` ->
+   `clearColor`, with `clearRect.rect = convertFixedRect(call.callDesc.rect)`;
+   the scissor only reaches `fbPair.drawColorRect`), so the story's fourth fill
+   (`0x4AC14AC1`, scissored to rows 18..193) paints the whole 320x240 and RT64's
+   target bands are `(74,90,0)` where the browser has `(0,0,0)`. n64brew's Set
+   Scissor says the scissor clips every pixel-pipeline write, FILL included, which
+   would make RT64 wrong and would also mean session 84's olive-band branch
+   reading chased a symptom (the band rows are outside fill 4's scissor, so they
+   hold fill 2's `0x0001` in either arm). Session 150 answered it with the
+   reference emulator: ParaLLEl-RDP shows those bands as `(0,0,0)` (uniformly
+   black, gradient rows from 18, the last column left stale), so hardware clips
+   the fill; `RDP::fillRect` now intersects with the scissor and RT64's bands are
+   `(0,0,0)` too, which the developer confirmed on screen. The publisher stills
+   are byte-identical to their reference and the title is unchanged. The
+   browser's half-open fill scissor is not a difference from the reference (the
+   reference leaves that column unwritten as well); n64brew's FILL/COPY right-edge
+   inclusivity note stays a possible 1-pixel nuance that no screen has shown.
+   New kept diagnostic `debug/probes/fills.cjs` captures a frame with only the
+   fills drawn. See `docs/HANDOFF-2026-10-16-session149.md`.
    **The native's saved game speed is x4 and the browser's is x1**; every native
    capture needs `OGRE_SPEED=1` to be comparable with the browser.
-   See `docs/HANDOFF-2026-10-16-session146.md`.
+   See `docs/HANDOFF-2026-10-16-session148.md` and
+   `docs/HANDOFF-2026-10-16-session146.md`.
    Session 140 added the static package and the deployment path: `make web-dist`
    writes `dist-web/` (page, shell, Emscripten output, `coi-serviceworker.js`,
    `.nojekyll`), `.github/workflows/pages.yml` uploads it as the Pages artifact

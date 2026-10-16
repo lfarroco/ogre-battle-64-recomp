@@ -1025,7 +1025,7 @@ index 7de5b69..1519428 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..64059f9 100644
+index a10c11a..debb102 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -5,9 +5,14 @@
@@ -1323,7 +1323,52 @@ index a10c11a..64059f9 100644
          // Filter out incorrect rectangles.
          if ((lrx < ulx) || (lry < uly)) {
              return;
-@@ -1197,6 +1415,52 @@ namespace RT64 {
+@@ -1046,6 +1264,44 @@ namespace RT64 {
+             lry |= 3;
+         }
+ 
++        // OGRE: a fill is clipped by the scissor like every other pixel the RDP
++        // processes. n64brew's Set Scissor ("pixels that are outside of this
++        // region will not be processed in the pixel pipeline and will not be
++        // written to memory") and its FILL/COPY edge notes and fill-triangle
++        // hazards are all about this case. RT64 submits a fill as a clear of the
++        // rectangle the game asked for and a clear cannot be scissored, so
++        // without this the attract story's fourth fill - the letterbox colour,
++        // scissored to rows 18..193 - painted the whole 320x240. ParaLLEl-RDP,
++        // the reference emulator, leaves those rows at the second fill's black,
++        // and so does the browser renderer; see
++        // docs/HANDOFF-2026-10-16-session150.md. The scissor is intersected as
++        // stored, i.e. half-open at the right edge, which is what the reference
++        // emulator's last column shows.
++        const FixedRect &scissorRect = state->rdp->scissorRectStack[scissorStackSize - 1];
++        if (!scissorRect.isNull()) {
++            const FixedRect clippedRect = scissorRect.intersection(FixedRect(ulx, uly, lrx, lry));
++            if (clippedRect.isEmpty()) {
++                return;
++            }
++            if ((clippedRect.ulx != ulx) || (clippedRect.uly != uly) ||
++                (clippedRect.lrx != lrx) || (clippedRect.lry != lry)) {
++                if (getenv("OGRE_RDP_TRACE") != nullptr) {
++                    static uint32_t clipTrace = 0;
++                    if (++clipTrace <= 12) {
++                        fprintf(stderr, "[rdp] fillRect clipped (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d)\n",
++                                (int)ulx, (int)uly, (int)lrx, (int)lry,
++                                (int)clippedRect.ulx, (int)clippedRect.uly,
++                                (int)clippedRect.lrx, (int)clippedRect.lry);
++                        fflush(stderr);
++                    }
++                }
++                ulx = clippedRect.ulx;
++                uly = clippedRect.uly;
++                lrx = clippedRect.lrx;
++                lry = clippedRect.lry;
++            }
++        }
++
+         drawRect(ulx, uly, lrx, lry, 0, 0, 0, 0, false, extAlignment);
+     }
+ 
+@@ -1197,6 +1453,52 @@ namespace RT64 {
              return;
          }
  
@@ -1376,7 +1421,7 @@ index a10c11a..64059f9 100644
          // Check if framebuffer pair must be changed.
          checkFramebufferPair();
  
-@@ -1222,6 +1486,17 @@ namespace RT64 {
+@@ -1222,6 +1524,17 @@ namespace RT64 {
                  }
              }
          }
@@ -1394,7 +1439,7 @@ index a10c11a..64059f9 100644
          
          bool flushedState = state->checkDrawState();
  
-@@ -1322,6 +1597,44 @@ namespace RT64 {
+@@ -1322,6 +1635,44 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
  #   endif
  

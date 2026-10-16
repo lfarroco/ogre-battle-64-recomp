@@ -62,6 +62,10 @@
   to the URL to hear it, and <code>?log</code> for the full console.
 </p>
 <div id="gfx-wrap" style="margin-bottom:12px;">
+  <!-- The CSS box here is the initial 2x upscale of web.js's 320x240 drawing
+       buffer. The renderer sets both the buffer and this box on every VI mode
+       change (`resize_canvas`), always as an integer multiple, so the browser
+       never resamples the frame to fit the box. -->
   <canvas id="game-canvas" width="640" height="480"
           style="width:640px; height:480px; image-rendering:pixelated;
                  background:#000; border:1px solid #2a2e35; border-radius:6px;"></canvas>

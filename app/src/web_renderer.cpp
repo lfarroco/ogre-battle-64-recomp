@@ -458,6 +458,12 @@ struct RenderState {
     float prim_color[4] = {1, 1, 1, 1};
     float env_color[4] = {1, 1, 1, 1};
     float fill_color[4] = {0, 0, 0, 1};
+    // The G_SETFILLCOLOR word itself. The fill colour is the one RDP colour
+    // register whose value depends on the *colour image's* format: a 16-bit
+    // image takes the low 16 bits as RGBA5551, a 32-bit image the whole word as
+    // RGBA8888 (see draw_fill_rect). `fill_color` keeps the 32-bit decode for
+    // the canvas path and for the trace.
+    uint32_t fill_color_word = 0;
     // Blender inputs (G_SETFOGCOLOR / G_SETBLENDCOLOR).
     float fog_color[4] = {0, 0, 0, 1};
     float blend_color[4] = {0, 0, 0, 0};
@@ -1807,11 +1813,27 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         fb_writeback_pending_ = 0;
     }
 
-    // Resizes the canvas drawing buffer to the size the VI is scanning out. Only
-    // the browser main thread calls this (from flush_commands' present path), so
-    // the DOM call is legal. The element's CSS size belongs to index.html and is
-    // left alone: a 320x240 buffer keeps its 2x pixelated upscale there, and a
-    // 640x480 one is shown 1:1 at its own size.
+    // Resizes the canvas drawing buffer to the size the VI is scanning out, and
+    // the element's CSS box to an integer multiple of that buffer. Only the
+    // browser main thread calls this (from flush_commands' present path), so the
+    // DOM calls are legal.
+    //
+    // The CSS box has to be a whole multiple of the drawing buffer. A canvas
+    // whose CSS box does not match its buffer is scaled to the box by the
+    // browser, and `image-rendering: pixelated` makes that a nearest-neighbour
+    // resample, not a display-only stretch: the publisher still's VI mode is
+    // 640x476 while index.html pinned a 640x480 box, so the frame on screen was
+    // the 476-row buffer resampled 476 -> 480. Measured against RT64's own
+    // 640x480 render target for the same still, the captured canvas is that
+    // resample exactly (`docs/proofs/web-publishers-atlus-lutmode-fix.png`:
+    // canvas row `Y` = target row `floor((Y + 0.5) * 476 / 480)`, mean abs
+    // 0.87/0.84/0.75 per channel, 99.6% of channel samples exact), which is what
+    // the session-147 "about one row low" difference was. A 320x240 buffer keeps
+    // the 2x upscale index.html had, so the title screen's capture is unchanged.
+    static int css_scale_for(int height) {
+        return std::max(1, std::min(2, kCanvasCssHeight / std::max(1, height)));
+    }
+
     void resize_canvas(int width, int height) {
         if (width < 1 || height < 1 || width > kMaxFramebufferSide ||
             height > kMaxFramebufferSide) {
@@ -1821,6 +1843,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         emscripten_set_canvas_element_size("#game-canvas", width, height);
+        const int scale = css_scale_for(height);
+        emscripten_set_element_css_size("#game-canvas", width * scale, height * scale);
         canvas_width_ = width;
         canvas_height_ = height;
         // The RDRAM fallback's staging texture is canvas-sized.
@@ -1828,8 +1852,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             glDeleteTextures(1, &present_tex_);
             present_tex_ = 0;
         }
-        OGRE_MILESTONE("GFX-PRESENT", "canvas resized to %dx%d for the VI mode", width,
-                       height);
+        OGRE_MILESTONE("GFX-PRESENT",
+                       "canvas resized to %dx%d (css %dx%d, x%d) for the VI mode", width,
+                       height, width * scale, height * scale, scale);
     }
 
     // Draws `tex` over `frac_w` x `frac_h` of the canvas with the COPY combiner
@@ -2719,6 +2744,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned tex_state_dump_logged_ = 0;
     unsigned mtx_logged_ = 0;
     unsigned draw_mtx_logged_ = 0;
+    // How many of the run's first fill/texrect rectangles the GFX-RECT trace has
+    // printed. Eight, so a screen's whole fill sequence is visible: the attract
+    // story's letterbox fill is the *fourth* fill of its display list, and a cap
+    // of three hid exactly the fill whose colour decode matters (session 149).
     unsigned rect_logged_ = 0;
     // OGRE_TEX_TRACE: one line per G_TEXRECT with the image it samples and the
     // colour it decodes to. Bounded, like every other diagnostic here.
@@ -2797,6 +2826,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // tops out at 640x480; the cap keeps a corrupt G_SETCIMG from asking for a
     // gigabyte texture.
     static constexpr int kMaxFramebufferSide = 1024;
+    // The tallest CSS box `#game-canvas` is allowed to become. The element's
+    // displayed size is an integer multiple of the drawing buffer (see
+    // resize_canvas): the 320x240 VI mode keeps the 2x box index.html declares,
+    // and a 640-wide mode is shown 1:1.
+    static constexpr int kCanvasCssHeight = 480;
 
     // Command queues: written by the gfx pthread (execute_dl), drained by the
     // browser main thread (ogre_gfx_flush -> flush_commands).
@@ -3529,6 +3563,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
             case gbi::OP_SETFILLCOLOR: {
                 // G_SET*COLOR packs (R<<24)|(G<<16)|(B<<8)|A.
+                st.fill_color_word = w1;
                 st.fill_color[3] = (p0(w1, 0, 8)) / 255.0f;   // A
                 st.fill_color[0] = (p0(w1, 24, 8)) / 255.0f;  // R
                 st.fill_color[1] = (p0(w1, 16, 8)) / 255.0f;  // G
@@ -4217,21 +4252,47 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (xh < xl || yh < yl) {
             return;
         }
+        // The fill colour is written to the colour image in that image's own
+        // format, so which half of the G_SETFILLCOLOR word it is depends on the
+        // image:
+        //
+        //   16-bit image (G_IM_SIZ_16b): the low 16 bits are an RGBA5551 value
+        //     (RT64's FillRect instance path uses
+        //     `ColorConverter::RGBA16::toRGBAF(fillColor & 0xFFFF)` whenever
+        //     `fbPair.colorImage.siz != G_IM_SIZ_32b`),
+        //   32-bit image: the whole word is RGBA8888
+        //     (`ColorConverter::RGBA32::toRGBAF(fillColor)`).
+        //
+        // The story attract's letterbox fill is `0x4AC14AC1`: as a 16-bit value
+        // it is `(74,90,0)`, the olive RT64 clears its 16-bit target with, and as
+        // 32-bit RGBA8 it is `(74,193,74)`, a green. The fill colour is the only
+        // RDP colour register whose decode depends on the colour image (the
+        // combiner's PRIM/ENV/etc. inputs are 8-bit per channel whatever the
+        // image is, so `fill_color` keeps the 32-bit decode for the canvas path).
+        float c[4] = {st.fill_color[0], st.fill_color[1], st.fill_color[2], st.fill_color[3]};
+        if (st.cimg_address != 0 && ((st.cimg_siz & 3u) != gbi::IM_SIZ_32b)) {
+            uint8_t rgba8[4];
+            rgba16_to_rgba8(static_cast<uint16_t>(st.fill_color_word & 0xFFFFu), rgba8);
+            for (int i = 0; i < 4; ++i) {
+                c[i] = static_cast<float>(rgba8[i]) / 255.0f;
+            }
+        }
         {
-            char detail[96];
-            snprintf(detail, sizeof(detail), "fill=[%.2f,%.2f,%.2f,%.2f] cyc=%d",
-                     st.fill_color[0], st.fill_color[1], st.fill_color[2],
-                     st.fill_color[3], static_cast<int>((st.othermode_h >> 20) & 3));
+            char detail[128];
+            snprintf(detail, sizeof(detail),
+                     "fill=[%.2f,%.2f,%.2f,%.2f] word=0x%08X siz=%u cyc=%d",
+                     c[0], c[1], c[2], c[3], st.fill_color_word, (unsigned)st.cimg_siz,
+                     static_cast<int>((st.othermode_h >> 20) & 3));
             log_wide_draw(st, "fillrect", xl, yl, xh, yh, detail);
         }
-        if (rect_logged_ < 3) {
+        if (rect_logged_ < 8) {
             ++rect_logged_;
             OGRE_MILESTONE("GFX-RECT",
                            "fillrect (%d,%d)-(%d,%d) cyc=%d omh=0x%06X oml=0x%08X "
-                           "fill=[%.2f,%.2f,%.2f,%.2f] scissor=%d(%d,%d,%d,%d)",
+                           "fill=[%.2f,%.2f,%.2f,%.2f] word=0x%08X siz=%u scissor=%d(%d,%d,%d,%d)",
                            xl, yl, xh, yh, static_cast<int>((st.othermode_h >> 20) & 3),
-                           st.othermode_h, st.othermode_l,
-                           st.fill_color[0], st.fill_color[1], st.fill_color[2], st.fill_color[3],
+                           st.othermode_h, st.othermode_l, c[0], c[1], c[2], c[3],
+                           st.fill_color_word, (unsigned)st.cimg_siz,
                            st.scissor_enabled ? 1 : 0,
                            st.scissor_x0, st.scissor_y0, st.scissor_x1, st.scissor_y1);
         }
@@ -4240,7 +4301,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // fill color as PRIMITIVE: rgb = (PRIM - 0) * 1 + 0.
         const float x0 = ndc_x(xl, st), x1 = ndc_x(xh + 1, st);
         const float y0 = ndc_y(yl, st), y1 = ndc_y(yh + 1, st);
-        const float c[4] = {st.fill_color[0], st.fill_color[1], st.fill_color[2], st.fill_color[3]};
         float data[6 * 8];
         for (int i = 0; i < 6; ++i) {
             const int corner = i % 4;
@@ -4644,7 +4704,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         DrawCmd cmd;
         cmd.kind = 2;
         record_state(cmd, st, texture_available(st));
-        if (rect_logged_ < 3) {
+        if (rect_logged_ < 8) {
             ++rect_logged_;
             OGRE_MILESTONE("GFX-RECT",
                            "texrect (%d,%d)-(%d,%d) tile=%d cyc=%d textured=%d ablend=%d pri=%d "
