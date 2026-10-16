@@ -176,6 +176,14 @@ http://127.0.0.1:8931/app/web/index.html?OGRE_SCENE_LOG=1&OGRE_TAP_MS=1500&OGRE_
 `OGRE_TAP_MS`/`OGRE_TAP_BUTTON`/`OGRE_TAP_MAX` are implemented in `web.js` for controller 0 (with the native last-slot-sticks rule; the scene-keyed `OGRE_TAP_SCENE`/`_NOT_SCENE`/`_SCENE_BUTTON` are native-only),
 with the native button vocabulary and the native 150 ms press. Only those two
 are JS-side; they drive the same `ogre_input_set` the keyboard does.
+
+A browser gamepad drives controller 0 as well: `updateGamepads` gives each
+connected pad the lowest free slot, so the first pad lands in slot 0 (N64
+controller 1, the only controller this game reads), and slot 0's mask is the
+pad's buttons OR'd with the keyboard and the tap schedule, the rule
+`sdl_platform.cpp` uses. The pad pass runs after the keyboard pass in the
+animation frame, because it writes slot 0. `debug/probes/gamepad.cjs` checks both
+halves with a synthetic pad.
 `debug/probes/atmark.cjs` waits for a regular expression in the page log and
 captures a canvas series around it, which is how a scene that lasts about a
 second is photographed (`--wait 'GFX-S2D'`, for example).
@@ -201,6 +209,17 @@ python3 tools/rdram.py /tmp/browser-rdram.bin word 0x802507F8
 
 `OGRE_RAM_KEY_AT_MS` takes one dump per run, so a dump has to bracket the
 fault: a trap ends the wasm instance and nothing can be read from it afterwards.
+
+The browser renderer's own diagnostics are milestone lines in the page log plus
+one counter block in `#gfxstats`. The framebuffer-as-texture check
+(`app/src/web_renderer.cpp`, `fb_written_`/`note_fb_texture`) prints
+`[GFX-FBTEX]` when a texture decode reads bytes a recorded draw wrote into a
+colour image that has not been written back to RDRAM yet, and counts them as
+`fbtex: hits=N`; `debug/probes/fbtex.cjs` sweeps for it, and
+`testdraw.cjs --flags 32 --expect-fbtex` is its positive control (debug flag bit
+5, `ogre_gfx_debug_flags(32)`, renders into a colour image and loads a tile back
+out of the same address). See [web-probes.md](web-probes.md) -> "The
+framebuffer-as-texture check".
 
 ## Running
 

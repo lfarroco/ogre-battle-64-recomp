@@ -54,7 +54,50 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-16-session151.md`.
+`docs/HANDOFF-2026-10-16-session153.md`.
+
+Session 153 closed open item 13 (the browser build assigned gamepads to N64
+controllers 2-4). `app/web/web.js` gave each pad slot `(pad.index % 3) + 1`, so
+controller 1 was keyboard-only and a pad was invisible in game; the native rule
+(`app/src/sdl_platform.cpp`) is that a pad takes the lowest free slot and the
+keyboard is OR'd into slot 0. `updateGamepads` now assigns slots 0..3 in that
+order and ORs slot 0's keyboard and tap mask into the pad's buttons. The pad pass
+also had to run *after* the keyboard pass in the animation frame: it writes slot
+0, so the previous order (keyboard, then pads) made a connected pad overwrite the
+keyboard every frame. `ogre_input_debug` now takes a slot and replies `0xFFFF`
+for a slot with no connected device, and the new `debug/probes/gamepad.cjs`
+installs a synthetic pad with `page.addInitScript` and requires slot 0 to carry
+the pad's `A` (`0x8000`) *and* to carry `0xC000` while the probe holds the
+keyboard's `B`. Before the fix the probe read `[web:input] gamepad connected
+(slots 1-3)` and slot 0 idle; after it, `pad 0 -> slot 0` and `0xC000`. The
+change is JS-side plus one debug export, so no renderer path moved: `boot.cjs`
+reports `RENDERED`, `testdraw.cjs --flags 32 --expect-fbtex` still prints
+`fbtex hits=1 lines=1`, and a `start,a,...` tap route still reaches scene `0x09`.
+
+Session 152 built the detector for session 151's framebuffer-as-texture item and
+found no screen that needs the feature. A texture decode
+(`app/src/web_renderer.cpp`, `note_fb_texture`) now compares the guest byte range
+it reads against `fb_written_`, one entry per colour image a recorded draw has
+written since the main thread last wrote the framebuffers back to RDRAM (the new
+`fb_writeback_epoch_` counter), and reports `[GFX-FBTEX]` plus an `fbtex: hits=N`
+counter in `#gfxstats`. The test needs the drawn *rows*, not only the byte range:
+a colour image is sized to `max(viewport, VI height, scissor bottom + 1)`, so a
+640x480 mode's target is 640x481 while the game writes rows 0..479, and the heap
+past the image holds the game's own textures — the range-only version of the
+check reported 142 such loads (scene `0x0A` 9, `0x10` 133) that all read RDRAM
+correctly. `test_draw` gained a positive control under `ogre_gfx_debug_flags` bit
+5 that renders into a colour image and loads a tile back out of the same address;
+`testdraw.cjs --flags 32 --expect-fbtex` prints `fbtex hits=1 lines=1` and the
+same probe with `--flags 0` prints `hits=0 lines=0`. With the control firing, all
+25 forced scene ids (`fbtex.cjs --secs 18`) and three natural routes (the
+unforced boot to title, `OGRE_SCENE=new-game OGRE_STEP=2` to the cathedral, and a
+`start,a,...` tap route; 120 s each, 351/443/471 display lists) report 0 hits.
+The instrument stays, so a screen that needs the feature reports itself. The
+session also found that session 151's native cathedral route does not work in
+this build: with `OGRE_MOD_TEST=1` the native run logs `forcing scene 0x02` and
+`seeded step 2` and then plays `0x09 -> 0x0A -> 0x04`, while the same query in
+the browser reaches `0x0D`, so no browser-vs-native cathedral frame comparison
+was made.
 
 Session 151 went back to the browser's own items. The browser's scripted tap
 schedule now matches the native one: `app/web/web.js` had cycled
@@ -654,7 +697,10 @@ holds the evidence.
    is forty 640x12 texrects. (c) `K4`/`K5` are combiner colour inputs now
    (`convertK[4] / 255`, RT64 `RasterPS.hlsl`) instead of returning 0.
    Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
-   whose source is a rendered colour image reads RDRAM), and the residual
+   whose source is a rendered colour image reads RDRAM) — instrumented in session
+   152 (`[GFX-FBTEX]`, `fbtex: hits=` in `#gfxstats`, the positive control
+   `testdraw.cjs --flags 32 --expect-fbtex`), and no screen reached so far needs
+   it, so it stays unimplemented until one reports itself — and the residual
    per-channel difference between the browser's canvas and RT64's render target,
    which session 146 reduced from 4.66/5.05/5.54 to 2.29/2.48/3.10 mean absolute
    per channel by fixing the present geometry (exact channel samples 39.4% ->
@@ -734,8 +780,11 @@ holds the evidence.
    Session 146 fixed the window the visible area is drawn into (below), session
    147 fixed the palette decode (item (h) below), and session 148 fixed the
    canvas element's CSS box (item (i) below). The browser's own
-   outstanding items are framebuffer-as-texture, the `fldRegs` x/y scale and
-   offset, the unwritten-edge and rounded-corner item (j) below, the RDP fill
+   outstanding items are framebuffer-as-texture (instrumented in session 152, no
+   screen found that needs it), the `fldRegs` x/y scale and offset (RT64 uses
+   them only in `VI::fbSize`, which the browser ports, and not in
+   `VideoInterfacePS` or `cropRectangle`, so no browser change is outstanding
+   there), the unwritten-edge and rounded-corner item (j) below, the RDP fill
    scissor question (k) below, and the two moving-cloud
    bands.
    **(h) The publisher still's ATLUS letters: closed in session 147.** The
@@ -885,13 +934,19 @@ holds the evidence.
     (c) the audio auto-response on `0x800C49E8` is a behaviour shim, not a log:
     firing the real `OS_EVENT_AI` when a buffer drains lets it be deleted.
     See `docs/HANDOFF-2026-10-01-session117.md` for the full list.
-13. **The browser build assigns gamepads to N64 controllers 2-4.** The native
-    fix for issue #13 landed in `app/src/sdl_platform.cpp` (the first pad takes
-    slot 0), but `app/web/web.js` still places gamepads in slots 1..3 with the
-    keyboard alone in slot 0, and `app/src/web_platform.cpp` documents the same
-    model. A browser gamepad therefore cannot reach N64 controller 1 either
-    (`docs/HANDOFF-2026-10-01-session118.md`). The change is to OR the first
-    pad's state into slot 0; it needs a wasm build and a browser run to verify.
+13. **The browser build assigns gamepads to N64 controllers 2-4. Closed (session
+    153).** The native fix for issue #13 landed in `app/src/sdl_platform.cpp` (the
+    first pad takes slot 0), while `app/web/web.js` placed gamepads in slots 1..3
+    with the keyboard alone in slot 0, so a browser gamepad could not reach N64
+    controller 1 (`docs/HANDOFF-2026-10-01-session118.md`). `web.js` now assigns
+    the lowest free slot, so the first pad is controller 1, and slot 0's mask is
+    the pad's buttons OR'd with the keyboard and the tap schedule. The pad pass
+    runs after the keyboard pass, because it writes slot 0. The header comment in
+    `app/src/web_platform.cpp` and its `ogre_input_debug` helper documented the
+    old model and returned slot 0 only; both are corrected, and
+    `debug/probes/gamepad.cjs` verifies the pad in slot 0 and the keyboard beside
+    it. No hand-played check was made with a real pad, so a physical pad on a
+    real page is the one thing still unverified.
 14. **RESOLUTION and MSAA artifacts.** Both rows work and reach RT64, and a
     player run with them showed visual artifacts that were not characterised
     (developer, session 121). They ship behind `OGRE_DISPLAY_EXPERIMENTS=1`

@@ -192,7 +192,7 @@
     }
   }
 
-  // --- Input: keyboard (slot 0) + gamepads (slots 1-3) ------------------------
+  // --- Input: keyboard + gamepads (all in slot 0) -----------------------------
   // N64 button bits, parity with app/src/sdl_platform.cpp.
 
   var BTN = {
@@ -348,43 +348,68 @@
   }
 
   var lastGamepadLog = 0;
+  // Slot assignment, recomputed every frame: each connected pad takes the
+  // lowest slot that is free, so the first pad lands in slot 0. Slot 0 is N64
+  // controller 1, the only controller this game reads, and slot 0 carries the
+  // keyboard and the scripted tap schedule as well (`slot0Mask`), which are
+  // OR'd with the pad's buttons - the rule `sdl_platform.cpp` uses, and the
+  // native fix for issue #13: a pad that never reaches slot 0 is invisible in
+  // game, and a pad that takes the slot away from the keyboard is just as
+  // wrong. `padSlot` is the assignment the previous frame used, so a change is
+  // logged once.
+  var padSlot = [null, null, null, null];
 
-  function updateGamepads(now) {
+  function updateGamepads(now, slot0Mask) {
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var assigned = [null, null, null, null];
     var connectedAny = false;
     for (var i = 0; i < pads.length; i++) {
       var pad = pads[i];
       if (!pad || !pad.connected) {
         continue;
       }
-      // Stable per-physical-pad slot in 1..3 (slot 0 is keyboard-first).
-      var slot = (pad.index % 3) + 1;
+      var slot = assigned.indexOf(null);
+      if (slot === -1) {
+        break;              // four pads fill every slot; the rest get nothing
+      }
+      assigned[slot] = pad.index;
+      padSlot[slot] = pad.index;
       var st = gamepadState(pad);
+      // Slot 0 keeps the keyboard and the taps on top of the pad's own state.
+      if (slot === 0) {
+        st.buttons |= slot0Mask;
+      }
       pushInput(slot, st.buttons, st.x, st.y, 1);
       connectedAny = true;
     }
-    // Disconnect any slot without a live pad.
-    for (var slotN = 1; slotN <= 3; slotN++) {
-      var has = false;
-      for (var k = 0; k < pads.length; k++) {
-        if (pads[k] && pads[k].connected && ((pads[k].index % 3) + 1) === slotN) {
-          has = true;
-          break;
+    for (var slotN = 0; slotN < 4; slotN++) {
+      if (assigned[slotN] === null) {
+        if (padSlot[slotN] !== null) {
+          log("[web:input] pad " + padSlot[slotN] + " left slot " + slotN);
         }
-      }
-      if (!has) {
-        pushInput(slotN, 0, 0, 0, 0);
+        padSlot[slotN] = null;
+        // Slot 0 stays connected to the keyboard; the other slots go idle.
+        if (slotN > 0) {
+          pushInput(slotN, 0, 0, 0, 0);
+        } else {
+          pushInput(0, slot0Mask, 0, 0, 1);
+        }
       }
     }
     if (connectedAny && now - lastGamepadLog > 5000) {
       lastGamepadLog = now;
-      log("[web:input] gamepad connected (slots 1-3)");
+      log("[web:input] gamepad connected (" +
+          assigned.map(function (idx, slot) {
+            return idx === null ? "slot " + slot + " free" : "pad " + idx + " -> slot " + slot;
+          }).join(", ") + ")");
     }
   }
 
   function rafLoop(now) {
-    pushInput(0, keyboardButtons() | tapMask, 0, 0, 1);
-    updateGamepads(now);
+    var slot0Mask = keyboardButtons() | tapMask;
+    // The pad pass runs last: it writes slot 0, so a keyboard update first
+    // would be overwritten every frame by a connected pad.
+    updateGamepads(now, slot0Mask);
     requestAnimationFrame(rafLoop);
   }
   requestAnimationFrame(rafLoop);

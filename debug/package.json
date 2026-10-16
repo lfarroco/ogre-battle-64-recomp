@@ -15,6 +15,8 @@
     "diag": "node probes/diag.cjs",
     "logmode": "node probes/logmode.cjs",
     "testdraw": "node probes/testdraw.cjs",
+    "fbtex": "node probes/fbtex.cjs",
+    "gamepad": "node probes/gamepad.cjs",
     "textures": "node probes/textures.cjs",
     "spritecheck": "node probes/spritecheck.cjs",
     "rdram": "node probes/rdram.cjs",

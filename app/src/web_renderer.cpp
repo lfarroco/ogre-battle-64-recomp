@@ -97,6 +97,9 @@ char g_stats_snapshot[4096];
 //           fill rect (the clear) is deliberately NOT skipped - dropping both
 //           just makes frames accumulate again, which is the bug this
 //           diagnostic was used to find.
+//   bit 5 = `ogre_gfx_test_draw` also renders into a colour image and loads a
+//           tile back out of that same address, the positive control for the
+//           `[GFX-FBTEX]` diagnostic (see `fb_written_`).
 std::atomic<uint32_t> g_debug_flags{0};
 
 std::atomic<uint64_t> g_exec_cmd{0};      // command index within the current DL
@@ -1485,6 +1488,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
     void enable_instant_present() override {}
 
+    // Texture loads whose source overlapped a colour image that was still in a
+    // GL framebuffer (the framebuffer-as-texture gap). Read by ogre_gfx_stats.
+    unsigned fbtex_hits() const { return fbtex_hits_.load(std::memory_order_relaxed); }
+
     void set_canvas(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE handle, int width, int height) {
         std::lock_guard<std::mutex> lock(mutex_);
         canvas_handle_ = handle;
@@ -1513,6 +1520,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // and inside segment 0.
         constexpr uint32_t kDlOff = 0x00C00000;   // scratch DL area (unused)
         constexpr uint32_t kTexOff = 0x00C01000;  // 2x2 RGBA16 texture
+        // Scratch colour image for the framebuffer-as-texture control (debug
+        // flag bit 5): 320x240 RGBA16 is 0x25800 bytes, so it runs to 0x00E7800.
+        constexpr uint32_t kFbOff = 0x00C02000;
 
         auto put32 = [this](uint32_t off, uint32_t v) {
             // rdram stores words byte-reversed (runtime MEM_W convention).
@@ -1567,6 +1577,37 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         put32(o, 0xE4000000 | (63 << 2) << 12 | (47 << 2)); put32(o + 4, 0); o += 8;
         put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
         put32(o, 0xF1000000); put32(o + 4, 0x0020002B); o += 8;
+        // Positive control for the framebuffer-as-texture diagnostic (debug flag
+        // bit 5): render into a colour image and then load a tile out of that
+        // same address in the same list, which is the one case the renderer
+        // decodes from RDRAM bytes that the draw never wrote there. The
+        // `[GFX-FBTEX]` line it must produce is what makes a zero-hit scene
+        // sweep meaningful. Nothing else in the list depends on it: it runs
+        // after the canvas draw, and the game never sets a colour image at
+        // kFbOff, so the GL framebuffer it creates is used only by this list.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 32u) != 0) {
+            // G_SETCIMG: fmt=0 (RGBA), siz=2 (16b), width=320, at kFbOff.
+            put32(o, 0xFF000000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbOff); o += 8;
+            // G_SETFILLCOLOR red, then G_FILLRECT (0,0)-(319,239): the whole image.
+            put32(o, 0xF7000000); put32(o + 4, 0x0000F801); o += 8;
+            put32(o, 0xF6000000 | ((319 << 2) << 12) | (239 << 2)); put32(o + 4, 0); o += 8;
+            // G_SETTIMG the same image, RGBA16, width 320.
+            put32(o, 0xFD100000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbOff); o += 8;
+            // G_SETTILE tile 0: RGBA16, line 160 (320 texels of 16b), tmem 0,
+            // clamp both axes (w1 = 0x00060000, as above).
+            put32(o, 0xF5100000 | (2u << 19) | (160u << 9)); put32(o + 4, 0x00060000); o += 8;
+            // G_SETTILESIZE tile 0: texels (0,0)-(31,31) [10.2 -> 124]
+            put32(o, 0xF2000000); put32(o + 4, (124u << 12) | 124u); o += 8;
+            // G_LOADTILE tile 0 (the load tile is also the sampling tile here)
+            put32(o, 0xF4000000); put32(o + 4, 0x00000000); o += 8;
+            // G_SETCOMBINE, the same 1-cycle TEXEL0 pass-through
+            put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
+            // G_TEXRECT (0,0)-(63,47), tile 0, sampling the image just rendered
+            put32(o, 0xE4000000 | (63 << 2) << 12 | (47 << 2)); put32(o + 4, 0); o += 8;
+            put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
+            // dsdx/dtdy spread the 32x32 tile over 63x47 pixels.
+            put32(o, 0xF1000000); put32(o + 4, 0x02000200); o += 8;
+        }
         // G_ENDDL
         put32(o, 0xDF000000); put32(o + 4, 0x00000000); o += 8;
 
@@ -1811,6 +1852,128 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         }
         fb_writeback_pending_ = 0;
+    }
+
+    // ----- framebuffer-as-texture diagnostic (gfx thread) ----------------------
+    //
+    // Deciding this needs no GL state: a recorded draw's DrawCmd already carries
+    // the colour image it renders into (fb_address/fb_row_bytes/fb_height_px), so
+    // the gfx thread can track which guest byte ranges are only on the GPU and
+    // test every texture decode against them. The two functions below are the
+    // whole check; see `fb_written_`.
+    //
+    // `fbtex_mutex_` exists because the synthetic control display list
+    // (`test_draw`, debug flag bit 5) runs on the browser main thread while the
+    // gfx thread may be recording; both paths touch `fb_written_`. It is held for
+    // a handful of instructions, so it cannot stall the main thread the way
+    // `mutex_` could (that one is held across a display list walk).
+
+    // The pixels of a recorded write are in RDRAM again once the main thread has
+    // written them back, which it publishes with an epoch bump. Caller holds
+    // `fbtex_mutex_`.
+    void drop_written_after_writeback() {
+        const uint32_t epoch = fb_writeback_epoch_.load(std::memory_order_acquire);
+        if (epoch != fb_written_epoch_seen_) {
+            fb_written_epoch_seen_ = epoch;
+            fb_written_.clear();
+        }
+    }
+
+    void note_fb_write(const DrawCmd& cmd) {
+        if (cmd.fb_address == 0 || cmd.fb_row_bytes == 0 || cmd.fb_height_px == 0) {
+            return;
+        }
+        // The guest rows this draw covers. Window row 0 is the image's *bottom*
+        // row (`upload_framebuffer` flips), so guest row = height - 1 - wy; the
+        // main thread computes the same window rows in flush_commands.
+        int row_min = 1 << 30, row_max = -1;
+        for (int i = 0; i < cmd.vertex_count; ++i) {
+            const int wy = static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
+                                            static_cast<float>(cmd.fb_height_px));
+            const int gy = cmd.fb_height_px - 1 - wy;
+            row_min = std::min(row_min, std::max(gy, 0));
+            row_max = std::max(row_max, std::min(gy, static_cast<int>(cmd.fb_height_px) - 1));
+        }
+        if (row_max < row_min) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(fbtex_mutex_);
+        drop_written_after_writeback();
+        if (fb_written_.size() >= 64) {
+            return;
+        }
+        for (FbWrittenRange& r : fb_written_) {
+            if (r.address == cmd.fb_address) {
+                r.row_min = std::min(r.row_min, row_min);
+                r.row_max = std::max(r.row_max, row_max);
+                return;   // one entry per image is enough
+            }
+        }
+        const uint64_t bytes = static_cast<uint64_t>(cmd.fb_row_bytes) * cmd.fb_height_px;
+        if (static_cast<uint64_t>(cmd.fb_address) + bytes > gbi::kRdramSize) {
+            return;   // not a buffer this renderer can address
+        }
+        FbWrittenRange r;
+        r.begin = cmd.fb_address;
+        r.end = static_cast<uint32_t>(cmd.fb_address + bytes);
+        r.address = cmd.fb_address;
+        r.pitch = cmd.fb_row_bytes;
+        r.height = cmd.fb_height_px;
+        r.siz = cmd.fb_siz;
+        r.row_min = row_min;
+        r.row_max = row_max;
+        fb_written_.push_back(r);
+    }
+
+    // The image a tile decodes covers rows y0..y0+height at `stride` bytes each,
+    // starting at `address`. True when that range overlaps rows a draw actually
+    // wrote in a colour image whose pixels are not in RDRAM yet: the decode read
+    // stale bytes. `fb_written_` is capped at 64 images, which is far above the
+    // handful a display list batch writes (a game writing more would drop the
+    // ones past the cap, and that direction loses a report rather than inventing
+    // one).
+    bool note_fb_texture(uint32_t address, int stride, int y0, int height, int w, int h,
+                         int tex_fmt, int tex_siz) {
+        if (address == 0 || stride <= 0 || height <= 0) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(fbtex_mutex_);
+        drop_written_after_writeback();
+        if (fb_written_.empty()) {
+            return false;
+        }
+        const uint64_t begin = address + static_cast<uint64_t>(y0) * stride;
+        const uint64_t end = address + static_cast<uint64_t>(y0 + height) * stride;
+        for (const FbWrittenRange& r : fb_written_) {
+            if (begin >= r.end || r.begin >= end) {
+                continue;   // bytes are outside this image
+            }
+            // Which of the image's rows those bytes fall in. A load whose bytes
+            // land only in rows the game never drew reads RDRAM correctly: the
+            // image is up to one row taller than what was rendered and the heap
+            // past it holds the game's own textures.
+            const uint64_t lo = std::max<uint64_t>(begin, r.begin) - r.begin;
+            const uint64_t hi = std::min<uint64_t>(end, r.end) - 1 - r.begin;
+            const int row_lo = static_cast<int>(lo / r.pitch);
+            const int row_hi = static_cast<int>(hi / r.pitch);
+            if (row_hi < r.row_min || r.row_max < row_lo) {
+                continue;   // no byte the draw wrote is in this range
+            }
+            ++fbtex_hits_;
+            const uint64_t key =
+                (static_cast<uint64_t>(address) << 24) | static_cast<uint64_t>(r.address);
+            if (fbtex_logged_.size() < 24 && fbtex_logged_.insert(key).second) {
+                OGRE_MILESTONE("GFX-FBTEX",
+                               "load tex=0x%06X rect=%dx%d stride=%d fmt=%d siz=%d reads "
+                               "colour image 0x%06X pitch=%u h=%d siz=%u rows=[%d,%d] drawn "
+                               "rows=[%d,%d] by an earlier draw in this batch; the decode read "
+                               "RDRAM, not the rendered pixels", address, w, h, stride, tex_fmt,
+                               tex_siz, r.address, r.pitch, r.height, (unsigned)r.siz, row_lo,
+                               row_hi, r.row_min, r.row_max);
+            }
+            return true;
+        }
+        return false;
     }
 
     // Resizes the canvas drawing buffer to the size the VI is scanning out, and
@@ -2388,6 +2551,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // present path also writes back so RDRAM tracks the last frame.
         if (present || sync_pending) {
             readback_all_framebuffers();
+            // The pixels a recorded draw put into a colour image are in RDRAM
+            // again, so the gfx thread's framebuffer-as-texture ranges are stale.
+            fb_writeback_epoch_.fetch_add(1, std::memory_order_release);
         }
         if (sync_pending) {
             sync_done_.store(sync_request, std::memory_order_release);
@@ -2775,6 +2941,38 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // assembly). Each colour image gets a GL framebuffer object keyed by its
     // guest address, created lazily on first use.
     std::map<uint32_t, GlFramebuffer> gl_framebuffers_;
+    // Framebuffer-as-texture diagnostic. `decode_texture_rect` reads RDRAM on the
+    // gfx thread, while the pixels a recorded draw put into a colour image are
+    // still in a GL framebuffer until the main thread writes them back, so a
+    // G_LOADTILE whose source range lies inside such an image decodes stale
+    // bytes. `fb_written_` holds the byte range of every colour image a recorded
+    // draw has written since the last writeback; a decode that overlaps one is a
+    // framebuffer-as-texture load the renderer does not implement ([GFX-FBTEX]).
+    // The main thread publishes writebacks through `fb_writeback_epoch_`, and
+    // the next check drops the ranges when it sees the epoch move. `fbtex_mutex_`
+    // guards the vector (see the diagnostic section below).
+    struct FbWrittenRange {
+        uint32_t begin = 0;      // first byte of the colour image in RDRAM
+        uint32_t end = 0;        // one past its last byte
+        uint32_t address = 0;    // the image's guest address
+        uint32_t pitch = 0;
+        int height = 0;
+        uint8_t siz = 0;
+        // The guest rows the draws into this image actually covered. The
+        // declared image is up to one row taller than what the game renders
+        // (the target's height is the scissor's bottom row + 1, and the top
+        // row is never drawn), and the heap immediately past the image holds
+        // the game's own textures, so a range test alone reports those loads
+        // as framebuffer-as-texture when RDRAM is in fact the right source.
+        int row_min = 1 << 30;
+        int row_max = -1;
+    };
+    std::vector<FbWrittenRange> fb_written_;
+    mutable std::mutex fbtex_mutex_;   // guards fb_written_ and fbtex_logged_
+    uint32_t fb_written_epoch_seen_ = 0;
+    std::atomic<uint32_t> fb_writeback_epoch_{0};
+    std::atomic<unsigned> fbtex_hits_{0};
+    std::set<uint64_t> fbtex_logged_;
     // The RDP's colour image, kept across display lists (RenderState::cimg_*).
     uint32_t last_cimg_address_ = 0;
     uint32_t last_cimg_row_bytes_ = 0;
@@ -3814,6 +4012,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (t.image_valid && t.image.key == key && t.image.palette == palette_key) {
             return;   // already decoded and queued for this draw
         }
+        // Framebuffer-as-texture diagnostic: this image's source range may still
+        // be on the GPU in a colour image a recorded draw wrote into.
+        note_fb_texture(t.image_address, row_bytes, y0, h, w, h, t.fmt, t.siz);
 
         g_load_seq.fetch_add(1, std::memory_order_relaxed);
         g_load_w.store(static_cast<uint32_t>(w), std::memory_order_relaxed);
@@ -4109,6 +4310,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // lock. Never lock the renderer mutex here - it was held across the
         // whole DL walk before, which both self-deadlocked (mutex_ is not
         // recursive) and starved the browser main thread's flush.
+        note_fb_write(cmd);
         if (ctx->draws.size() < 16384) {
             ctx->draws.push_back(cmd);
         }
@@ -5047,7 +5249,8 @@ const char* ogre_gfx_stats() {
         std::lock_guard<std::mutex> lock(ogre::g_stats_mutex);
         snprintf(buf, sizeof(buf),
                  "%s\nexec: task=%u cmd=%llu @0x%05X op=0x%02X draws=%u flush_ok=%u flush_skip=%u flushed_cmds=%u"
-                 "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X",
+                 "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X"
+                 "\nfbtex: hits=%u (a texture load read a colour image that was still on the GPU)",
                  ogre::g_stats_snapshot,
                  ogre::g_exec_task.load(std::memory_order_relaxed),
                  (unsigned long long)ogre::g_exec_cmd.load(std::memory_order_relaxed),
@@ -5064,7 +5267,8 @@ const char* ogre_gfx_stats() {
                  ogre::g_load_fmt.load(std::memory_order_relaxed),
                  ogre::g_load_siz.load(std::memory_order_relaxed),
                  ogre::g_load_timgw.load(std::memory_order_relaxed),
-                 ogre::g_load_addr.load(std::memory_order_relaxed));
+                 ogre::g_load_addr.load(std::memory_order_relaxed),
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_hits() : 0u);
     }
     return buf;
 }

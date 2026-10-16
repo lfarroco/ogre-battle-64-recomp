@@ -46,9 +46,18 @@ extern "C" void ogre_input_set(int controller, uint16_t buttons, float x, float 
 }
 
 // Debug helper used by the web shell/tests to confirm the JS -> wasm input
-// path works (returns the current slot-0 button mask).
-extern "C" uint16_t ogre_input_debug() {
-    return g_controllers[0].buttons.load(std::memory_order_relaxed);
+// path works: the current button mask of one controller slot, or 0xFFFF when
+// the slot has no connected device (a connected idle keyboard reports 0, so a
+// test can tell the two apart). `slot` out of range replies 0xFFFF.
+extern "C" uint16_t ogre_input_debug(int slot) {
+    if (slot < 0 || slot >= 4) {
+        return 0xFFFF;
+    }
+    ControllerState& c = g_controllers[slot];
+    if (c.connected.load(std::memory_order_relaxed) == 0) {
+        return 0xFFFF;
+    }
+    return c.buttons.load(std::memory_order_relaxed);
 }
 
 static void poll_input() {

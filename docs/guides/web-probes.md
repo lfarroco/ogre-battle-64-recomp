@@ -72,13 +72,16 @@ node debug/probes/stats.cjs                          # dump renderer counters
 node debug/probes/diag.cjs                           # hang characterisation
 node debug/probes/logmode.cjs                        # page-log contract smoke test
 node debug/probes/testdraw.cjs                       # synthetic-draw GL isolation
+node debug/probes/testdraw.cjs --flags 32 --expect-fbtex  # framebuffer-as-texture control
+node debug/probes/fbtex.cjs --scenes 0x04,0x0b --secs 20  # framebuffer-as-texture sweep
+node debug/probes/gamepad.cjs --secs 14               # a pad must reach N64 controller 1
 node debug/probes/textures.cjs --attempts 3 --secs 60 # decoded tile images
 node debug/probes/spritecheck.cjs --out sprite        # one sprite vs its textures
 node debug/probes/rdram.cjs --query 'OGRE_RAM_KEY_AT_MS=52000&OGRE_RAM_KEY_FULL=1'  # guest RDRAM out of the wasm FS
 node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 ```
 
-`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|textures|spritecheck|isolate` and
+`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|fbtex|gamepad|textures|spritecheck|isolate` and
 `npm run serve` work from inside `debug/`.
 
 | Probe | Measures | Exit 0 means |
@@ -92,13 +95,78 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `diag.cjs` | main-thread heartbeat + `Module.print` rate + wedge forensics | (always; read the files) |
 | `progress.cjs` | `tasks=` high-water mark, `GFX-ESCAPE`/`GFX-RUNAWAY` | (see its own row above) |
 | `logmode.cjs` | default one-line status vs `?log`, `ogreLog` API | the page-log contract holds |
-| `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas | the synthetic draw rendered |
+| `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas; `--flags N` sets `ogre_gfx_debug_flags` first, and `--flags 32` adds the framebuffer-as-texture control | the synthetic draw rendered (and, with `--expect-fbtex`, a `[GFX-FBTEX]` line was logged) |
+| `fbtex.cjs` | every `[GFX-FBTEX]` line and the `fbtex: hits=` counter over scene ids (`--scenes`) or arbitrary query strings (`--queries '...\|\|...'`) | (always; read the files) |
+| `gamepad.cjs` | a synthetic pad's `A` reach into the wasm input slots (`Module._ogre_input_debug(slot)`) and the keyboard sharing slot 0 with it | the pad reached slot 0 (N64 controller 1) and the keyboard's `B` still registered |
 | `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
 | `spritecheck.cjs` | one rendered sprite vs that composite, side by side | the rendered sprite matches its textures |
 | `palette.cjs` | a forced scene's canvas plus the `[GFX-TEXTRACE]` lines (decoded colours, TLUT entries) | a frame bright enough by `--min-colorful` was kept |
 | `fills.cjs` | a frame with only the RDP's fill rectangles drawn (`ogre_gfx_debug_flags(2)`), so a `G_FILLRECT` colour is read as pixels; pair it with the page log's `[GFX-RECT] fillrect` lines | a frame was captured |
 | `rdram.cjs` | a guest-RDRAM image (`OGRE_RAM_KEY_AT_MS` + `OGRE_RAM_KEY_FULL=1`), read out of `Module.FS` and written next to the page log for `tools/rdram.py` | the dump appeared and held 8 MiB |
 | `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
+
+### The framebuffer-as-texture check
+
+The renderer keeps each `G_SETCIMG` colour image in a GL framebuffer object and
+writes it back to RDRAM on the browser main thread, at present or at a
+`sync_framebuffers` request. A `G_LOADTILE`/`G_LOADBLOCK` whose source bytes a
+*recorded* draw has written and that has not been written back yet is therefore
+decoded from RDRAM bytes the draw never put there. The gfx thread reports that as
+`[GFX-FBTEX]` (once per distinct texture/image pair, up to 24), counts it in
+`#gfxstats` as `fbtex: hits=N`, and nothing is drawn differently.
+
+`fbtex.cjs` sweeps for it. Each entry gets its own boot, because `OGRE_SCENE` is
+consumed before the boot enters its first scene:
+
+```sh
+node debug/probes/fbtex.cjs --scenes 0x00,0x04,0x0b --secs 18 --out /tmp/fbtex
+node debug/probes/fbtex.cjs --queries 'OGRE_SCENE=new-game&OGRE_STEP=2&OGRE_SCENE_LOG=1' --secs 60
+```
+
+A zero-hit sweep only means something if the check can fire, and
+`testdraw.cjs --flags 32` is that control: debug flag bit 5 makes the synthetic
+list render into a colour image at hidden RDRAM `0x00C02000` and then load a tile
+back out of that same address.
+
+```sh
+node debug/probes/testdraw.cjs --flags 32 --expect-fbtex --out /tmp/fbtex-control
+# -> fbtex hits=1 lines=1, plus the [GFX-FBTEX] line for tex=0xC02000
+node debug/probes/testdraw.cjs --flags 0 --out /tmp/fbtex-off   # -> hits=0 lines=0
+```
+
+The check tests the drawn *rows*, not only the byte range. A colour image is
+sized to `max(viewport, VI height, scissor bottom + 1)` and the game writes one
+row fewer than that, so the heap immediately past the image lies inside its
+declared range; a range-only test reports those loads, and reading RDRAM is
+correct for them.
+
+### The browser gamepad check
+
+N64 controller 1 is slot 0, and it is the only controller this game reads. A
+connected pad takes the lowest free slot and the keyboard is OR'd into slot 0
+(`app/web/web.js` `updateGamepads`, the rule `app/src/sdl_platform.cpp` uses), so
+one pad lands in controller 1 and does not take the keyboard away from it.
+
+A headless browser exposes no real pad, so `gamepad.cjs` installs a synthetic one
+with `page.addInitScript` before the page scripts run:
+`navigator.getGamepads()` returns one connected `standard`-mapping pad holding
+`A`. Nothing sends input events; the pad exists only in the array the shell polls.
+The probe then reads `Module._ogre_input_debug(slot)` for all four slots every
+second.
+
+```sh
+node debug/probes/gamepad.cjs --secs 14 --out /tmp/gamepad
+# -> slot0=0x8000 (the pad's A), slots 1..3 0xFFFF (no device)
+#    [web:input] gamepad connected (pad 0 -> slot 0, slot 1 free, slot 2 free, slot 3 free)
+#    keyboard B while the pad holds A: slot0=0xc000, after release=0x8000
+```
+
+Exit 0 requires both: slot 0 carried `A` at some sample, and the slot-0 mask was
+`0xC000` (`A` from the pad, `B` from `KeyZ`) while the probe held the key. The
+second half is what catches the regression this probe was written for: with the
+pad pass writing slot 0 and the keyboard pass writing it before it, a pad made
+the keyboard dead. `Module._ogre_input_debug(slot)` replies `0xFFFF` for a slot
+with no connected device and the button mask otherwise.
 
 ### Reading the pixel counts
 

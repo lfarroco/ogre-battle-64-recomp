@@ -38,8 +38,11 @@ extern "C" {
 // Push the current state of one controller slot from JS.
 void ogre_input_set(int controller, uint16_t buttons, float x, float y, int connected);
 
-// Current slot-0 button mask (debug / test helper).
-uint16_t ogre_input_debug();
+// Current button mask of one controller slot (debug / test helper), or 0xFFFF
+// when the slot has no connected device. The browser gamepad probe
+// (debug/probes/gamepad.cjs) reads slot 0 to check that a pad reaches N64
+// controller 1.
+uint16_t ogre_input_debug(int slot);
 
 // Byte offsets (within wasm linear memory) of the audio ring-buffer state and
 // sample data, for the AudioWorklet (app/web/audio-worklet.js).
