@@ -54,7 +54,56 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-14-session145.md`.
+`docs/HANDOFF-2026-10-16-session147.md`.
+
+Session 147 fixed the browser's palette decode. `decode_texture_rect` chose a
+palette entry's decoder from the entry's own bit 15 (RGBA16 when set, IA16 when
+clear); the RDP chooses it from the draw's 2-bit texture LUT mode
+(`OTHERMODE_H` bits 14-15), which is `G_TT_RGBA16` (5/5/5/1) or `G_TT_IA16`
+(8-bit intensity plus alpha) for every entry of the tile, and RT64's
+`TextureDecoder.hlsli` switches on that mode. The publisher still's ATLUS strokes
+are entry `0x3AE8`, whose bit 15 is 0, so the browser painted
+`ia16(0x3AE8)` = `(58,58,58)` where the entry is `rgba16(0x3AE8)` =
+`(57,90,165)`; the red T's entry has bit 15 set and matched by accident. The
+canvas's colour histogram now equals RT64's capture entry for entry (cream
+`(239,231,206)`, shadow `(222,214,181)`, strokes `(57,90,165)`, red T
+`(222,0,41)`). Session 146's reading is corrected in two places: the native
+stroke colour is `(57,90,165)` and not `(48,80,160)` (the earlier value occurs 0
+times in the capture), and the blue native render is correct, so the fault was
+never in RT64's TMEM palette lookup. What is left on that screen is a one-row
+vertical offset (the canvas is one row low: `meanAbs` 11.43 at `dy=0`, 6.35 at
+`dy=-1`; the sub-pixel search puts the minimum at exactly `-1.0`), and the title
+is unchanged
+(`meanAbs=[2.32,2.51,3.12] exact=81.2%` against the same target). That is open
+work 8(i) below.
+
+Session 146 fixed the browser's present geometry, which was the bulk of session
+145's residual frame difference. `blit_to_canvas` drew the VI's visible area (the
+`fbSize` minus the overscan crop) over the *whole* canvas, so 319x239 was
+stretched onto 320x240 and every canvas pixel past column 160 and row 120 sampled
+its framebuffer texel one column or row along. The measurement that identifies
+it is that the session-145 build's canvas was *closer* to the target passed
+through that stretch (`2.30/2.50/3.11`) than to the target itself
+(`4.66/5.05/5.54`); on the fixed build the relation is reversed
+(`2.29/2.48/3.10` against `4.56/4.94/5.47`). RT64's
+`VIRenderer::getViewportAndScissor` anchors the viewport of
+`visibleFramebufferSize` at the window's top-left, and the canvas is the VI's own
+size, so the destination rectangle is now the same fraction of the canvas and the
+leftover last column and row are left alone. The same session fixed a second
+off-by-one: the GL scissor used `sx1 - sx0 + 1`, while the RDP's scissor is
+half-open (`convertFixedRect` builds a plume `RenderRect`, exclusive at the right
+and bottom), so the game's `(0,0)-(319,239)` covers pixels 0..318 by 0..238,
+which is why RT64's own render target has a black last column and row. Exact
+channel samples against RT64's target for the same title frame moved from 39.4%
+to 81.4%, and `tools/web_frame_cmp.py` is new as the comparator between a
+`#game-canvas` screenshot and an `OGRE_CAPTURE_TARGET` `.bin`. What remains is two
+moving-cloud bands, and the developer states the port's clouds are not exact
+against retail yet, so the two runs' cloud phases are not separable there. The
+session also read the publisher still's ATLUS letters as RT64 drawing them blue
+(`(48,80,160)`) where the browser drew them black (`(56,56,56)`), and left the
+cause in RT64's TMEM palette lookup; session 147 measured the native colour as
+`(57,90,165)` and found the browser decode at fault. That is open work 8(h) and
+8(i) below.
 
 Session 145 closed session 144's open item 1, "the browser's title and story
 frames are hue-shifted against RT64's target for the same text". The mechanism
@@ -514,11 +563,17 @@ holds the evidence.
    is forty 640x12 texrects. (c) `K4`/`K5` are combiner colour inputs now
    (`convertK[4] / 255`, RT64 `RasterPS.hlsl`) instead of returning 0.
    Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
-   whose source is a rendered colour image reads RDRAM), presentation resolves
-   the VI's origin by containment instead of applying its own view rectangle, and
-   the residual per-channel difference between the browser's canvas and RT64's
-   render target (mean absolute difference 5.1/255 after session 145, with the
-   browser slightly darker: R -1.3, G -1.6, B -2.5). Session 145 closed the hue
+   whose source is a rendered colour image reads RDRAM), and the residual
+   per-channel difference between the browser's canvas and RT64's render target,
+   which session 146 reduced from 4.66/5.05/5.54 to 2.29/2.48/3.10 mean absolute
+   per channel by fixing the present geometry (exact channel samples 39.4% ->
+   81.4%; `tools/web_frame_cmp.py` is the comparator). What is left is two moving
+   cloud bands (rows ~64..112 and ~195..238, browser 12-16 darker), and the
+   developer states the port's clouds are not exact against retail yet, so the
+   two runs' cloud phases are not separable on that screen. Presentation now
+   writes the visible area into the same fraction of the canvas from its
+   top-left, the way RT64's `VIRenderer::getViewportAndScissor` does, and the GL
+   scissor uses the RDP's half-open bounds. Session 145 closed the hue
    shift itself: the RGBA32 decode read the texel one byte along
    (`(G,B,A,R)` for `(R,G,B,A)`), so the browser and RT64 did not decode the same
    rectangle after all. Session 144's "the browser's decode of it is a plausible
@@ -585,6 +640,38 @@ holds the evidence.
    RT64's silhouette (`docs/proofs/web-title-lut-mode0-i8-fix.png`). The TMEM
    palette also moved out of the per-display-list state, because it outlives a
    display list the way the colour image does.
+   Session 146 fixed the window the visible area is drawn into (below), and
+   session 147 fixed the palette decode (item (h) below). The browser's own
+   outstanding items are framebuffer-as-texture, the `fldRegs` x/y scale and
+   offset, the one-row sampling offset item (i) below, and the two moving-cloud
+   bands.
+   **(h) The publisher still's ATLUS letters: closed in session 147.** The
+   browser decoded every palette entry by the entry's own bit 15 (RGBA16 when
+   set, IA16 when clear). The RDP selects the decode from the draw's 2-bit
+   texture LUT mode (`OTHERMODE_H` bits 14-15), so a `G_TT_RGBA16` draw decodes
+   every entry as 5/5/5/1; RT64's `TextureDecoder.hlsli` switches on that mode.
+   The strokes are entry `0x3AE8`, bit 15 clear, so the browser painted
+   `ia16(0x3AE8)` = `(58,58,58)` where the entry is `rgba16(0x3AE8)` =
+   `(57,90,165)`. `decode_texture_rect` now takes the mode, mode 0 still reads a
+   CI tile as I8 (session 144), the image cache key carries the whole mode, and
+   the browser canvas's colour histogram equals RT64's capture entry for entry.
+   Session 146's two readings are corrected here: the native stroke colour is
+   `(57,90,165)` and not `(48,80,160)` (0 occurrences in `tt.140.bin`), and
+   RT64's blue render is correct, so the fault was never in its TMEM palette
+   lookup. `colour_mean`'s CI8 guard change from session 146 stays.
+   **(i) The publisher still sits about one row low in the browser.** After (h),
+   the canvas against RT64's `tt.140` target at 320x240 is
+   `meanAbs=[8.26,9.53,15.92] meanSigned=[-0.09,-0.08,-0.07] exact=58.0%`, and a
+   shift search, including sub-pixel positions, minimises at exactly `dy=-1`
+   (`meanAbs 6.35`) against `11.43` at `dy=0`.
+   The differing pixels are swaps of neighbouring still colours (white against
+   cream, 4593 and 4527 pixels), which is a sampling offset and not a palette
+   error. The 640-wide mode presents `visible=639x475` through a 640x480 canvas,
+   so the 476 -> 480 CSS stretch and the `fldRegs` x/y scale and offset are the
+   two candidates. The 320x240 mode does not show it.
+   **The native's saved game speed is x4 and the browser's is x1**; every native
+   capture needs `OGRE_SPEED=1` to be comparable with the browser.
+   See `docs/HANDOFF-2026-10-16-session146.md`.
    Session 140 added the static package and the deployment path: `make web-dist`
    writes `dist-web/` (page, shell, Emscripten output, `coi-serviceworker.js`,
    `.nojekyll`), `.github/workflows/pages.yml` uploads it as the Pages artifact

@@ -618,8 +618,14 @@ struct State {
     //
     // Returns a mean 0..255 over the sampled texels, and sets `opaque` to the
     // count of texels whose palette entry has alpha 1. Only the formats the game
-    // uses are decoded (CI4/CI8 through the loaded TLUT, RGBA16 directly); any
+    // uses are decoded (CI8 through the loaded TLUT, RGBA16 directly); any
     // other format reports `known = false` and no mean.
+    //
+    // CI8 is `siz = 1`, one index byte per texel, and it is the format of every
+    // publisher still, the title's cloud layers and the njpeg output, so the
+    // guard below admits it. CI4 (`siz = 0`, two indices per byte) is not
+    // decoded: no screen has been found where the colour of a CI4 draw had to be
+    // known, and the nibble order is one more thing to get wrong silently.
     bool colour_mean(uint32_t img, uint32_t t_a, uint32_t s_a, uint32_t tex_w, uint32_t tex_h,
                      double& mean, uint32_t& opaque) {
         mean = 0.0;
@@ -628,8 +634,8 @@ struct State {
         if (!indexed && timg_fmt != 0) {
             return false;   // only RGBA16 is decoded for the direct formats
         }
-        if (timg_siz != 2) {
-            return false;   // only 8-bit indices and 16-bit texels are decoded
+        if (indexed ? (timg_siz != 1) : (timg_siz != 2)) {
+            return false;   // CI8 indices, or 16-bit texels
         }
         if (indexed && !tlut_seen) {
             return false;   // no palette has been loaded yet

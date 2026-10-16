@@ -166,6 +166,10 @@ struct LoadedImage {
     uint64_t palette = 0;             // palette generation a CI decode used
     int width = 0, height = 0;        // loaded rect size in texels
     int origin_s = 0, origin_t = 0;   // tile uls/ult in texels (UV origin)
+    // The decoded colours of the first decodes of a run, packed 0xRRGGBB with
+    // their texel counts. Filled only while `OGRE_TEX_TRACE` is on and for the
+    // first few loads, so a draw's decode is answerable from the log.
+    std::vector<std::pair<uint32_t, uint32_t>> hist;
 };
 
 struct TileState {
@@ -842,7 +846,7 @@ inline void yuv16_to_rgba8(uint8_t y, uint8_t u, uint8_t v, const int32_t* conve
 }
 
 // Decodes a rect [x0,x0+w) x [y0,y0+h) of the current texture image into
-// RGBA8. `tlut` is used for CI formats when `palette_enabled` is set;
+// RGBA8. `tlut` is used for CI formats when `lut_mode` is not 0;
 // `palette` selects the CI4 TLUT bank. `row_bytes` is the source image's row
 // stride in bytes. It is NOT derivable from the rect: the RDP loads TMEM with
 // one row stride and samples it with another (OB64's mask is 16 bytes/row of
@@ -850,17 +854,27 @@ inline void yuv16_to_rgba8(uint8_t y, uint8_t u, uint8_t v, const int32_t* conve
 // dxt). RT64 uses `bytesPerRow = timg_width << siz >> 1` for the load and
 // `line << 3` for the tile; the caller picks.
 //
-// `palette_enabled` is the RDP's texture LUT mode (`OTHERMODE_H` bits 14-15,
-// RT64's `OtherMode::textLUT()`). A CI tile with LUT mode 0 does not read a
-// palette at all: RT64 reinterprets the loaded bytes as I8
-// (`rt64_framebuffer_manager.cpp`'s `(dstFmt == G_IM_FMT_CI) && (dstSiz ==
-// G_IM_SIZ_8b) && (tlutFormat == 0)` case, which runs `ANY8toI8` in
-// `FbReinterpretCS.hlsl`), i.e. the byte is an intensity replicated into RGB
-// and into alpha. Decoding such a tile as CI against an empty palette paints it
-// black, which is what the title screen's 72x28 and 72x20 unit sprites did.
+// `lut_mode` is the RDP's 2-bit texture LUT mode (`OTHERMODE_H` bits 14-15,
+// RT64's `OtherMode::textLUT()`). It selects the decode for every entry of an
+// indexed tile: 2 = `G_TT_RGBA16` (5/5/5/1), 3 = `G_TT_IA16` (8-bit intensity,
+// 8-bit alpha). RT64's `TextureDecoder.hlsli` switches on this mode
+// (`case G_TT_RGBA16: RGBA16ToFloat4(...)`, `case G_TT_IA16: IA16ToFloat16(...)`)
+// and never on the entry's own bit 15. Using bit 15 instead decoded the
+// publisher still's ATLUS strokes - palette entry `0x3AE8`, bit 15 clear, in a
+// `G_TT_RGBA16` draw - as `ia16(0x3AE8)` = (58,58,58) where RT64 paints
+// `rgba16(0x3AE8)` = (57,90,165); the red T's entry has bit 15 set and matched
+// by accident.
+//
+// A CI tile with LUT mode 0 does not read a palette at all: RT64 reinterprets
+// the loaded bytes as I8 (`rt64_framebuffer_manager.cpp`'s
+// `(dstFmt == G_IM_FMT_CI) && (dstSiz == G_IM_SIZ_8b) && (tlutFormat == 0)`
+// case, which runs `ANY8toI8` in `FbReinterpretCS.hlsl`), i.e. the byte is an
+// intensity replicated into RGB and into alpha. Decoding such a tile as CI
+// against an empty palette paints it black, which is what the title screen's
+// 72x28 and 72x20 unit sprites did.
 void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fmt, uint8_t siz,
                          int row_bytes, int x0, int y0, int w, int h, const uint16_t* tlut,
-                         bool tlut_valid, uint8_t palette, bool palette_enabled,
+                         bool tlut_valid, uint8_t palette, int lut_mode,
                          const int32_t* convert_k, std::vector<uint8_t>& out) {
     out.assign(static_cast<size_t>(w) * h * 4, 0);
 
@@ -868,9 +882,12 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
         return;
     }
     // The LUT mode selects how a CI tile's bytes are read (see the note above).
-    if (fmt == gbi::IM_FMT_CI && !palette_enabled) {
+    if (fmt == gbi::IM_FMT_CI && lut_mode == 0) {
         fmt = gbi::IM_FMT_I;
     }
+    // RGBA16 for G_TT_RGBA16 only; IA16 otherwise. A mode of 1 is not a valid
+    // LUT mode, and treating it as IA16 matches RT64's `default` arm.
+    const bool tlut_rgba16 = (lut_mode == 2);
     const int bpp = bytes_per_texel(siz);
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
@@ -928,7 +945,7 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
                     case gbi::IM_FMT_CI: {
                         if (tlut_valid) {
                             const uint16_t e = tlut[palette * 16 + nib];
-                            if ((e >> 15) & 1) {
+                            if (tlut_rgba16) {
                                 rgba16_to_rgba8(e, rgba);
                             } else {
                                 ia16_to_rgba8(e, rgba);
@@ -960,7 +977,7 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
                             case gbi::IM_FMT_CI:
                                 if (tlut_valid) {
                                     const uint16_t e = tlut[v];
-                                    if ((e >> 15) & 1) {
+                                    if (tlut_rgba16) {
                                         rgba16_to_rgba8(e, rgba);
                                     } else {
                                         ia16_to_rgba8(e, rgba);
@@ -1815,15 +1832,27 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                        height);
     }
 
-    // Draws `tex` over the whole canvas with the COPY combiner (TEXEL0 straight
-    // through), which is the present path. `u_max`/`v_min` bound the texture
-    // region the VI scans out: RT64's present shader maps
+    // Draws `tex` over `frac_w` x `frac_h` of the canvas with the COPY combiner
+    // (TEXEL0 straight through), which is the present path. `u_max`/`v_min` bound
+    // the texture region the VI scans out: RT64's present shader maps
     // `videoResolution / textureResolution` over the window
     // (`src/shaders/VideoInterfacePS.hlsl`), so a framebuffer taller than the VI's
     // `fbSize` is cropped rather than squashed with the rows past the colour
     // image. Texture v = 1 is guest row 0 (`upload_framebuffer` flips), so the
     // visible rows are the *high* end of v.
-    void blit_to_canvas(GLuint tex, float u_max = 1.0f, float v_min = 0.0f) {
+    //
+    // `frac_w`/`frac_h` are the visible size over the canvas size. RT64's
+    // `VIRenderer::getViewportAndScissor` draws the VI's visible area into a
+    // viewport of `visibleFramebufferSize` SD pixels anchored at the window's
+    // top-left, so the last column and row of a 320x240 window are never written
+    // (`removeBlackBorders` shrinks the window to the visible size instead). The
+    // canvas is the VI's own size, so the same fraction of it is written here and
+    // the leftover column and row keep whatever the canvas already held. Drawing
+    // the visible area over the *whole* canvas instead stretched 319x239 to
+    // 320x240 and shifted the sampled texel by up to one column and row over the
+    // right and bottom halves of every frame.
+    void blit_to_canvas(GLuint tex, float u_max = 1.0f, float v_min = 0.0f,
+                        float frac_w = 1.0f, float frac_h = 1.0f) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, canvas_width_, canvas_height_);
         glDisable(GL_SCISSOR_TEST);
@@ -1842,14 +1871,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glUniform2f(glGetUniformLocation(program_, "u_uv_origin"), 0.0f, 0.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex);
-        // (x, y, u, v, rgba) per vertex; two triangles covering the canvas.
+        // The destination rectangle: NDC spans the visible fraction of the canvas
+        // from its top-left corner (NDC x = -1, y = +1).
+        const float fw = std::clamp(frac_w, 0.0f, 1.0f);
+        const float fh = std::clamp(frac_h, 0.0f, 1.0f);
+        const float x0 = -1.0f, x1 = -1.0f + 2.0f * fw;
+        const float yt = 1.0f, yb = 1.0f - 2.0f * fh;
+        // (x, y, u, v, rgba) per vertex; two triangles covering the rectangle.
         const float quad[6 * 8] = {
-            -1, -1, 0,     v_min, 1, 1, 1, 1,
-             1, -1, u_max, v_min, 1, 1, 1, 1,
-             1,  1, u_max, 1,     1, 1, 1, 1,
-            -1, -1, 0,     v_min, 1, 1, 1, 1,
-             1,  1, u_max, 1,     1, 1, 1, 1,
-            -1,  1, 0,     1,     1, 1, 1, 1,
+            x0, yb, 0,     v_min, 1, 1, 1, 1,
+            x1, yb, u_max, v_min, 1, 1, 1, 1,
+            x1, yt, u_max, 1,     1, 1, 1, 1,
+            x0, yb, 0,     v_min, 1, 1, 1, 1,
+            x1, yt, u_max, 1,     1, 1, 1, 1,
+            x0, yt, 0,     1,     1, 1, 1, 1,
         };
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_DYNAMIC_DRAW);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1891,7 +1926,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (vi.width > 0 && vi.height > 0) {
             resize_canvas(vi.width, vi.height);
         }
+        const ViSize visible = visible_framebuffer_size(vi);
 
+        const bool have_visible = (visible.width > 0 && visible.height > 0);
+        // The destination geometry: the visible area is written into the canvas
+        // 1:1 from its top-left (RT64's viewport), so a 320x240 VI into a 320x240
+        // canvas leaves the last column and row of the canvas alone.
+        const float present_frac_w = (have_visible && canvas_width_ > 0)
+                                         ? static_cast<float>(visible.width) /
+                                               static_cast<float>(canvas_width_)
+                                         : 1.0f;
+        const float present_frac_h = (have_visible && canvas_height_ > 0)
+                                         ? static_cast<float>(visible.height) /
+                                               static_cast<float>(canvas_height_)
+                                         : 1.0f;
         uint32_t key = address;
         auto it = gl_framebuffers_.find(key);
         if (it == gl_framebuffers_.end() || it->second.tex == 0) {
@@ -1899,17 +1947,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             it = (key != 0) ? gl_framebuffers_.find(key) : gl_framebuffers_.end();
         }
         const bool have_fbo = (it != gl_framebuffers_.end() && it->second.tex != 0);
-        const ViSize visible = visible_framebuffer_size(vi);
         if (present_requests_ <= 12 || (present_requests_ % 300) == 0) {
             ++presents_logged_;
             OGRE_MILESTONE("GFX-PRESENT",
                            "VI scanout 0x%06X -> fb 0x%06X: fbo=%d size=%dx%d siz=%u "
-                           "visible=%dx%d nonBlack=%u canvasDirty=%d fbs=%zu status=0x%08X "
+                           "visible=%dx%d canvas=%dx%d nonBlack=%u canvasDirty=%d fbs=%zu status=0x%08X "
                            "(present %u)",
                            address, have_fbo ? key : 0u, have_fbo ? 1 : 0,
                            have_fbo ? it->second.width : 0, have_fbo ? it->second.height : 0,
                            have_fbo ? (unsigned)it->second.siz : 0u,
                            have_fbo ? visible.width : 0, have_fbo ? visible.height : 0,
+                           canvas_width_, canvas_height_,
                            have_fbo ? it->second.last_nonblack : 0u,
                            canvas_dirty_ ? 1 : 0, gl_framebuffers_.size(), vi_status_,
                            present_requests_);
@@ -1920,7 +1968,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // than the VI's scanout (a 320x240 image that grew to 320x476 across
             // the publishers' hi-res mode). Present only the visible area, the way
             // RT64 does; the rows past the colour image hold the next one.
-            const bool have_visible = (visible.width > 0 && visible.height > 0);
             const float u_max = (have_visible && it->second.width > 0)
                                     ? std::min(1.0f, static_cast<float>(visible.width) /
                                                          static_cast<float>(it->second.width))
@@ -1931,7 +1978,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                     ? std::max(0.0f, 1.0f - static_cast<float>(visible.height) /
                                                                static_cast<float>(it->second.height))
                                     : 0.0f;
-            blit_to_canvas(it->second.tex, u_max, v_min);
+            blit_to_canvas(it->second.tex, u_max, v_min, present_frac_w, present_frac_h);
             canvas_dirty_ = false;
             return;
         }
@@ -1957,7 +2004,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         tmp.siz = siz;
         tmp.row_bytes = static_cast<uint32_t>(canvas_width_) << siz >> 1;
         upload_framebuffer(tmp, address);
-        blit_to_canvas(present_tex_);
+        blit_to_canvas(present_tex_, 1.0f, 0.0f, present_frac_w, present_frac_h);
     }
 
     // ----- main-thread flush (ogre_gfx_flush) ------------------------------------
@@ -2226,12 +2273,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 }
             }
 
-            // Scissor.
+            // Scissor. The RDP's scissor rectangle is half-open like the rest of
+            // the RDP's rectangles (`FixedRect`, RT64 `rt64_common.cpp`): RT64
+            // rounds a scissor's lower-right corner up into a render rect and the
+            // render target's scissor is exclusive, so a scissor of
+            // `(0,0)-(319,239)` - what this game sets - covers pixels 0..318 by
+            // 0..238 and leaves the last column and row unwritten. GL's scissor is
+            // also `[x, x+w)`, so the stored pixel bounds are used as they are
+            // instead of adding one back.
             if (cmd.scissor_on) {
                 const int x = cmd.sx0;
-                const int y = target_height - cmd.sy1 - 1;
-                const int w = cmd.sx1 - cmd.sx0 + 1;
-                const int h = cmd.sy1 - cmd.sy0 + 1;
+                const int y = target_height - cmd.sy1;
+                const int w = cmd.sx1 - cmd.sx0;
+                const int h = cmd.sy1 - cmd.sy0;
                 glEnable(GL_SCISSOR_TEST);
                 glScissor(x, y, std::max(w, 0), std::max(h, 0));
             } else {
@@ -2707,6 +2761,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // and the whole title scene issues no G_LOADTLUT at all.
     uint16_t tlut_[256]{};
     bool tlut_valid_ = false;
+    // How many of the 256 entries are non-zero. A LOADTLUT that runs before the
+    // game's palette DMA lands fills the table with zeros without failing, and
+    // that is otherwise invisible in the log.
+    int tlut_nonzero_ = 0;
     uint16_t tlut_count_ = 0;
     uint64_t tlut_generation_ = 0;   // bumped by every G_LOADTLUT (image cache key)
     std::set<uint64_t> vi_size_keys_;   // distinct VI scanout sizes (gfx thread)
@@ -3380,6 +3438,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 }
                 tlut_valid_ = true;
                 tlut_count_ = count;
+                tlut_nonzero_ = 0;
+                for (int i = 0; i < 256; ++i) {
+                    if (tlut_[i] != 0) {
+                        ++tlut_nonzero_;
+                    }
+                }
                 ++tlut_generation_;
                 if (trace_) {
                     ++trace_tluts_;
@@ -3701,14 +3765,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         // A CI image's decoded colour depends on the palette and on the RDP's
-        // texture LUT mode as well as on the source bytes, and both outlive the
-        // display list. A G_LOADTLUT in between, or a display list that switches
-        // the LUT mode off, makes the same address decode to a different image,
-        // so the key carries the palette generation and the LUT mode.
+        // 2-bit texture LUT mode as well as on the source bytes, and both
+        // outlive the display list. A G_LOADTLUT in between, or a display list
+        // that switches the LUT mode, makes the same address decode to a
+        // different image, so the key carries the palette generation and the
+        // whole LUT mode. RGBA16 (2) and IA16 (3) decode the same entry to
+        // different colours, so a bool is not enough.
         const bool indexed = (t.fmt == gbi::IM_FMT_CI);
-        const bool palette_enabled = (st.othermode_h & 0xC000u) != 0;
-        const uint64_t palette_key = indexed ? (tlut_generation_ * 2 + (palette_enabled ? 1u : 0u))
-                                             : 0;
+        const uint32_t lut_mode = (st.othermode_h >> 14) & 3u;
+        const uint64_t palette_key =
+            indexed ? (tlut_generation_ * 4 + lut_mode) : 0;
         const uint64_t key = make_image_key(t, tile, t.image_address, x0, y0, w, h, row_bytes);
         if (t.image_valid && t.image.key == key && t.image.palette == palette_key) {
             return;   // already decoded and queued for this draw
@@ -3724,8 +3790,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         std::vector<uint8_t> pixels;
         decode_texture_rect(rdram_, t.image_address, t.fmt, t.siz, row_bytes, x0, y0, w, h,
-                            tlut_, tlut_valid_, t.palette, palette_enabled, st.convert_k,
-                            pixels);
+                            tlut_, tlut_valid_, t.palette, static_cast<int>(lut_mode),
+                            st.convert_k, pixels);
         g_load_done.fetch_add(1, std::memory_order_relaxed);
         // OGRE_TEX_TRACE: the colour the decoded image holds. The native
         // renderer prints the same number from the RDRAM bytes through the
@@ -3745,6 +3811,32 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
             t.trace_mean = count ? static_cast<float>(double(sum) / double(count) / 3.0) : 0.0f;
             t.trace_opaque = opaque;
+        }
+        // The decoded colour histogram of the first few loads. A draw whose
+        // mean is right but whose letters are the wrong colour differs from one
+        // whose whole window is wrong, and only the histogram separates them.
+        // Cleared when this call does not compute one, so a later draw never
+        // reports an earlier decode's histogram.
+        t.image.hist.clear();
+        if (trace_ && trace_draws_ < 8) {
+            std::map<uint32_t, uint32_t> colhist;
+            for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+                const uint32_t c = (uint32_t(pixels[i]) << 16) | (uint32_t(pixels[i + 1]) << 8) |
+                                   uint32_t(pixels[i + 2]);
+                ++colhist[c];
+            }
+            for (const auto& kv : colhist) {
+                t.image.hist.emplace_back(kv.first, kv.second);
+            }
+            // The palette entries this decode actually read, so the histogram
+            // can be reproduced without a second dump.
+            OGRE_MILESTONE("GFX-TEXTRACE",
+                           "  decode tile=%d img=0x%06X rect=%d,%d..%d,%d siz=%d tmem=%u "
+                           "gen=%llu e0=%04X e113=%04X e230=%04X nonzero=%u",
+                           tile, t.image_address, x0, y0, x0 + w, y0 + h, (int)t.siz,
+                           (unsigned)t.tmem, (unsigned long long)tlut_generation_,
+                           (unsigned)tlut_[0], (unsigned)tlut_[113], (unsigned)tlut_[230],
+                           tlut_nonzero_);
         }
 
         // Debug copy for ogre_gfx_debug_tex (probes inspect what was sampled).
@@ -4595,6 +4687,36 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            tt.image_valid ? tt.image.height : 0, uv[0][0], uv[0][1], uv[3][0],
                            uv[3][1], tt.trace_mean, tt.trace_opaque, st.othermode_l,
                            (st.othermode_h >> 14) & 3u);
+            // The palette generation does not tell a loaded palette from an
+            // empty one: `tlut_valid_` is set by the first G_LOADTLUT whatever
+            // it read. Print the entries the decode used and the colours the
+            // decode produced, for the first few draws of a run.
+            if (trace_draws_ <= 8) {
+                OGRE_MILESTONE("GFX-TEXTRACE",
+                               "  tlut gen=%llu n=%u e0=%04X e1=%04X e2=%04X e3=%04X "
+                               "e113=%04X e230=%04X",
+                               (unsigned long long)tlut_generation_, (unsigned)tlut_count_,
+                               tlut_[0], tlut_[1], tlut_[2], tlut_[3], tlut_[113], tlut_[230]);
+                if (tt.image.hist.empty() == false) {
+                    // The four most common decoded colours and their texel
+                    // counts.
+                    std::vector<std::pair<uint32_t, uint32_t>> h = tt.image.hist;
+                    std::sort(h.begin(), h.end(),
+                              [](const std::pair<uint32_t, uint32_t>& a,
+                                 const std::pair<uint32_t, uint32_t>& b) {
+                                  return a.second > b.second;
+                              });
+                    char buf[192];
+                    int off = 0;
+                    const size_t shown = h.size() < 4 ? h.size() : 4;
+                    for (size_t i = 0; i < shown; ++i) {
+                        off += snprintf(buf + off, sizeof(buf) - static_cast<size_t>(off),
+                                        " %06X:%u", h[i].first, h[i].second);
+                    }
+                    OGRE_MILESTONE("GFX-TEXTRACE", "  decoded colours:%s (%u distinct)", buf,
+                                   (unsigned)h.size());
+                }
+            }
             if (trace_draws_ == kTraceMaxDraws) {
                 OGRE_MILESTONE("GFX-TEXTRACE", "trace limit %u reached; %u G_LOADTLUT(s) seen",
                                kTraceMaxDraws, trace_tluts_);
