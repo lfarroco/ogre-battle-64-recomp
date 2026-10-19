@@ -95,7 +95,7 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `diag.cjs` | main-thread heartbeat + `Module.print` rate + wedge forensics | (always; read the files) |
 | `progress.cjs` | `tasks=` high-water mark, `GFX-ESCAPE`/`GFX-RUNAWAY` | (see its own row above) |
 | `logmode.cjs` | default one-line status vs `?log`, `ogreLog` API | the page-log contract holds |
-| `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas; `--flags N` sets `ogre_gfx_debug_flags` first, and `--flags 32` adds the framebuffer-as-texture control | the synthetic draw rendered (and, with `--expect-fbtex`, a `[GFX-FBTEX]` line was logged) |
+| `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas; `--flags N` sets `ogre_gfx_debug_flags` first, `--flags 32` adds the framebuffer-as-texture positive control, and `--flags 96` adds the column and row negative controls | the synthetic draw rendered (and, with `--expect-fbtex`, a `[GFX-FBTEX]` line was logged; with `--expect-hits N`, exactly N hits were counted) |
 | `fbtex.cjs` | every `[GFX-FBTEX]` line and the `fbtex: hits=` counter over scene ids (`--scenes`) or arbitrary query strings (`--queries '...\|\|...'`) | (always; read the files) |
 | `gamepad.cjs` | a synthetic pad's `A` reach into the wasm input slots (`Module._ogre_input_debug(slot)`) and the keyboard sharing slot 0 with it | the pad reached slot 0 (N64 controller 1) and the keyboard's `B` still registered |
 | `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
@@ -123,22 +123,42 @@ node debug/probes/fbtex.cjs --scenes 0x00,0x04,0x0b --secs 18 --out /tmp/fbtex
 node debug/probes/fbtex.cjs --queries 'OGRE_SCENE=new-game&OGRE_STEP=2&OGRE_SCENE_LOG=1' --secs 60
 ```
 
+The same sweep also reports each run's `[GFX-SAMPLER]` census: textured draws
+by `G_TF_*` filter and how many sample a masked (wrapping/mirroring) tile. That
+is how the screens were checked for the sampler port (session 164): the forced
+title and world map are point-sampled, the publisher still is point-sampled with
+no masks, and the tutorial `0x17` is the reached bilinear screen.
+
 A zero-hit sweep only means something if the check can fire, and
 `testdraw.cjs --flags 32` is that control: debug flag bit 5 makes the synthetic
 list render into a colour image at hidden RDRAM `0x00C02000` and then load a tile
-back out of that same address.
+back out of that same address. `--flags 96` adds bit 6, two loads that must not
+be reported. The first is from texels 160..191 of the same image: the fill covers
+columns 0..63 only, so that load is in the drawn rows and outside every drawn
+column. The second is from a second colour image at `0x00C28000` whose fill
+covers rows 100..163 only, and it reads rows 98..99, inside the fill's columns and
+outside every row the fill drew. The old `height - 1 - wy` inversion recorded the
+fill as rows 99..163, so that load was reported too.
 
 ```sh
 node debug/probes/testdraw.cjs --flags 32 --expect-fbtex --out /tmp/fbtex-control
 # -> fbtex hits=1 lines=1, plus the [GFX-FBTEX] line for tex=0xC02000
+node debug/probes/testdraw.cjs --flags 96 --expect-hits 1 --out /tmp/fbtex-cols
+# -> fbtex hits=1 lines=1; 2 with the column test disabled, and 2 with the row
+#    inversion one row up
 node debug/probes/testdraw.cjs --flags 0 --out /tmp/fbtex-off   # -> hits=0 lines=0
 ```
 
-The check tests the drawn *rows*, not only the byte range. A colour image is
-sized to `max(viewport, VI height, scissor bottom + 1)` and the game writes one
-row fewer than that, so the heap immediately past the image lies inside its
-declared range; a range-only test reports those loads, and reading RDRAM is
-correct for them.
+The check tests the drawn *rows* and *columns*, not only the byte range. A colour
+image is sized to `max(viewport, VI height, scissor bottom + 1)` and the game
+writes one row fewer than that, so the heap immediately past the image lies
+inside its declared range; a range-only test reports those loads, and reading
+RDRAM is correct for them. The columns are the same question one axis over: a
+draw covers a rect, so a load in one of its rows but outside its columns reads
+bytes the draw did not write, and the `[GFX-FBTEX]` line prints both ranges
+(`cols=[..)` and `drawn cols=[..)`). The rows are exact: `note_fb_write` inverts
+`ndc_yf` as `(1 - pos) / 2 * height` and treats a vertex as an edge, so a fill of
+rows 100..163 is recorded as 100..163.
 
 ### The browser gamepad check
 
@@ -179,8 +199,10 @@ reports `nonBlack ≈ 32, colorful = 0`** while a drawn frame reports thousands.
 
 The screenshot's inner size is the element's CSS box, which the renderer sets to
 an integer multiple of the drawing buffer (`[GFX-PRESENT] canvas resized to
-640x476 (css 640x476, x1)`): a 320x240 VI mode is captured 2x, and a 640-wide
-mode 1:1. `tools/web_frame_cmp.py` turns a screenshot back into drawing-buffer
+639x475 (css 639x475, x1)`): the drawing buffer is the VI's visible area, so a
+319x239 visible area is captured 2x (638x478) and a 639-wide one 1:1. Every pixel
+of the buffer is written by the present blit (session 160), so `inset: 1` crops
+only the element's border. `tools/web_frame_cmp.py` turns a screenshot back into drawing-buffer
 pixels for a comparison against a native `OGRE_CAPTURE_TARGET` capture
 (`docs/guides/app-build.md` -> "Comparing a browser frame with a native
 capture").
@@ -212,6 +234,59 @@ a real display list arrived. `harness.attemptLoop()` re-runs the whole boot unti
 that happens; without it, a probe reports a false negative about half the time.
 This is the single most important behaviour the probes inherited from the
 `/tmp` scripts.
+
+## Boot from a battery save — the `OGRE_SAVE` page knob
+
+`?OGRE_SAVE=<url>` fetches a 32 KiB port battery image and installs it as this
+page's SRAM battery before the runtime reads it (session 168). The page writes
+`/ogre/saves/ogrebattle64-us-rev1.bin` — the path `pi.cpp`'s `init_saving` ->
+`read_save_file` reads (`librecomp/src/pi.cpp:288/414/435-440`) — from the
+IDBFS mount, `FS.syncfs(false)`s it, and holds `ogre_start_boot()` until the
+import settles. Both boot paths wait: the stored-ROM auto-start and a ROM picked
+with `#rom-input`.
+
+```sh
+# assets/escort_suspend.bin is served at /assets/escort_suspend.bin, and the page
+# is served from /app/web/, so a relative URL resolves from the server root.
+node debug/probes/shots.cjs --url 'http://127.0.0.1:8931/app/web/index.html?OGRE_SAVE=assets/escort_suspend.bin&OGRE_SCENE_LOG=1' --secs 120 --shots 4 --gap 3000 --out /tmp/web-save
+```
+
+The page log then holds:
+
+```
+[web:save] OGRE_SAVE=assets/escort_suspend.bin -> /ogre/saves/ogrebattle64-us-rev1.bin (imported after the /ogre mount, before the boot)
+[web:save] persistent storage mounted at /ogre
+[web:save] OGRE_SAVE=assets/escort_suspend.bin: fetching /assets/escort_suspend.bin
+[web:save] imported assets/escort_suspend.bin (32768 bytes) -> /ogre/saves/ogrebattle64-us-rev1.bin
+...
+[save] loaded /ogre/saves/ogrebattle64-us-rev1.bin (32768 bytes)
+```
+
+Notes:
+
+- The import runs on every page load and overwrites the persisted battery, so a
+  run always starts from the named image. Without the knob, a battery the game
+  wrote earlier stays in IndexedDB and is loaded instead.
+- A failed fetch logs `[web:save] OGRE_SAVE=<url>: import failed: ... - booting
+  without it` and the boot proceeds with a blank battery.
+- `#save-input` on the page ("Load save") writes a chosen 32 KiB image through the
+  same code path and reloads the page, which then boots from it without a query
+  string.
+
+`OGRE_TAP_SCENE_BUTTON` is the scene-keyed tap schedule on the page:
+`<scene>:<buttons>[:<count>],...` with the `OGRE_SCENE` names (`title`, `intro`,
+`publishers`, `story`, `unit-info`, `tutorial`, `menu`, `new-game`) or a hex id,
+`+`-joined buttons, and unlimited presses when the count is absent. It replaces
+`OGRE_TAP_BUTTON` while set and presses once per `OGRE_TAP_MS` while the named
+scene is active; the scene id comes from the page's own `[scene]` lines, so the
+route does not depend on how long the boot or a scene took. The mission save's
+route, which reaches scene `0x03`:
+
+```sh
+?OGRE_SAVE=assets/escort_suspend.bin&OGRE_SCENE=title&OGRE_SCENE_LOG=1&OGRE_TAP_MS=4000&OGRE_TAP_SCENE_BUTTON=title:start:6,0x12:a:6
+```
+
+`OGRE_TAP_SCENE` and `OGRE_TAP_NOT_SCENE` are still native-only.
 
 ## The page contract
 

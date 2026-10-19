@@ -26,6 +26,10 @@
 // scene list, which is how a natural route (`OGRE_TAP_*`, `OGRE_STEP`) is
 // checked. Writes `<prefix>-result.json` and `<prefix>.txt` (one block per
 // entry).
+//
+// Each entry also carries the renderer's `[GFX-SAMPLER]` census from the same
+// run: textured draws by G_TF_* filter (point/bilerp/average) and how many sample
+// a masked tile, so a sweep says which screens use which sampling rule.
 
 const fs = require('fs');
 const h = require('../lib/harness.cjs');
@@ -61,7 +65,7 @@ function withQuery(url, extra) {
   const rows = [];
   for (const { label, query } of entries) {
     const { page, errors } = await h.openPage(browser);
-    const row = { scene: label, query, hits: 0, lines: [], sceneLines: [], tasks: 0, error: null };
+    const row = { scene: label, query, hits: 0, lines: [], sceneLines: [], tasks: 0, sampler: null, error: null };
     try {
       await h.gotoPage(page, { ...cfg, url: withQuery(cfg.url, query) });
       await h.loadRom(page, cfg);
@@ -99,6 +103,14 @@ function withQuery(url, extra) {
         }
       }
       row.hits = Math.max(row.hits, row.lines.length);
+      // The sampler census the renderer prints on its first textured batch, so
+      // one sweep says which screens sample with point or bilinear filtering and
+      // which sample a wrapping/mirroring tile.
+      const samplerLines = full
+        .split('\n')
+        .map((l) => l.replace(/^\[stderr\] /, '').trim())
+        .filter((l) => l.includes('[GFX-SAMPLER]'));
+      if (samplerLines.length) row.sampler = samplerLines[samplerLines.length - 1];
     } catch (e) {
       row.error = String(e.message || e);
     }
@@ -106,6 +118,7 @@ function withQuery(url, extra) {
     rows.push(row);
     console.log(
       `${label}: tasks=${row.tasks} hits=${row.hits}` +
+        (row.sampler ? ` ${row.sampler.replace('[GFX-SAMPLER] ', '')}` : '') +
         (row.lines.length ? ` first="${row.lines[0].slice(0, 170)}"` : '') +
         (row.error ? ` error=${row.error.slice(0, 120)}` : '')
     );
@@ -117,6 +130,7 @@ function withQuery(url, extra) {
     .map((r) =>
       [
         `${r.scene}: tasks=${r.tasks} hits=${r.hits} query=${r.query}`,
+        r.sampler ? `  ${r.sampler}` : null,
         ...r.sceneLines.map((l) => `  scene: ${l}`),
         ...r.lines.map((l) => `  ${l}`),
         r.error ? `  error: ${r.error}` : null,

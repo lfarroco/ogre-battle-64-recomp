@@ -173,9 +173,56 @@ environment. So `OGRE_SCENE`, `OGRE_STEP`, `OGRE_TRACE_DL`, `OGRE_S2D_TRACE`,
 http://127.0.0.1:8931/app/web/index.html?OGRE_SCENE_LOG=1&OGRE_TAP_MS=1500&OGRE_TAP_BUTTON=start,a,start,a,start,a,a,a,a,a,a,a,a
 ```
 
-`OGRE_TAP_MS`/`OGRE_TAP_BUTTON`/`OGRE_TAP_MAX` are implemented in `web.js` for controller 0 (with the native last-slot-sticks rule; the scene-keyed `OGRE_TAP_SCENE`/`_NOT_SCENE`/`_SCENE_BUTTON` are native-only),
-with the native button vocabulary and the native 150 ms press. Only those two
-are JS-side; they drive the same `ogre_input_set` the keyboard does.
+`OGRE_TAP_MS`/`OGRE_TAP_BUTTON`/`OGRE_TAP_MAX` are implemented in `web.js` for
+controller 0, with the native last-slot-sticks rule, the native button
+vocabulary and the native 150 ms press. `OGRE_TAP_SCENE_BUTTON` is implemented
+there too (session 168): the page reads the active scene id from its own
+`[scene]` lines and mirrors the native `<scene>:<buttons>[:<count>]` schedule,
+so `?OGRE_SCENE=title&OGRE_TAP_MS=1000&OGRE_TAP_SCENE_BUTTON=title:start:5,0x12:a:3`
+drives the forced title -> Load Game -> mission route without wall-clock tuning.
+`OGRE_TAP_SCENE`/`OGRE_TAP_NOT_SCENE` remain native-only. Only the tap knobs are
+JS-side; they drive the same `ogre_input_set` the keyboard does.
+
+`OGRE_SAVE=<url>` is the page's battery import (session 168): the image is
+fetched, written to `/ogre/saves/ogrebattle64-us-rev1.bin` after the IDBFS load,
+synced and the boot waits for it, so `[save] loaded /ogre/saves/...` appears in
+the page log. See `docs/guides/web-probes.md` -> "Boot from a battery save".
+
+`OGRE_FOG` works the same way. The browser performs the native fog/cloud
+display-list repair (rewrites each stale-tile white-combiner rectangle to sample
+its layer image from `D_801B80E0`) by default, and `?OGRE_FOG=0` disables it.
+`OGRE_FOG_TRACE=1` and `OGRE_FOG_SUMMARY=1` log the repairs. `OGRE_FOG_SCALE` is
+native-only: the browser always samples the game's own image (the native default
+`100`), and the scratch-staged scaled copy is not implemented there.
+
+`OGRE_TEXF` selects the browser's texture sampler. `rt64` (the default) ports
+RT64's `TextureSampler.hlsli` into the fragment shader: the tile-window clamp,
+the `masks`/`maskt` wrap and mirror, point/bilerp/average from the draw's
+`G_TF_*`, RT64's default three-point filter, and `round(uv * 128) / 128` on the
+interpolated coordinate. `1` (or `bilinear`) runs the same shader sampler with
+true bilinear, and `gl` restores the fixed-function sampler this renderer used
+before, which is the one-variable control for a sampler A/B. The filter is draw
+state now, so a texture shared by a bilerp and a point draw is filtered per draw.
+The `[GFX-SAMPLER]` page-log line counts the run's textured draws by filter,
+mask and whether the tile asks for a `G_TX` shift the browser does not apply
+(`textured draws=591 point=591 bilerp=0 average=0 masked=456 shifted=0
+persp=0 nonpersp=0` on the forced title). `persp=` counts triangle draws whose
+vertex clip `w`'s differ and `nonpersp=` counts draws with `G_TP_NONE`. It prints on the first textured batch and every 400 textured
+draws, so a long screen still reports itself. `[GFX-FOG-DRAW]` states a repaired
+fog group's size, filter, clamp and mask.
+
+The browser attaches each colour image as an RGBA16F texture when the context
+exposes `EXT_color_buffer_float`, and as RGBA8 otherwise. RT64's colour targets
+are `R16G16B16A16_UNORM` in its default `internalColorFormat` (Automatic resolves
+to High when the device reports `preferHDR`, which the native runs on this
+machine do), so a stack of translucent draws quantizes once, when the framebuffer
+is written back to RDRAM, rather than at every blend. WebGL2 has no 16-bit UNORM
+colour attachment without `EXT_texture_norm16`, which Chromium does not expose,
+so RGBA16F is the closest renderable format. `?OGRE_HPFB=0` forces RGBA8 for an
+A/B, and the `[RENDERER] colour attachment:` page-log line says which one a run
+used. The RDRAM writeback still converts to the RDP's RGBA5551 through RT64's
+`Float4ToRGBA16` rule (8-bit rounding for RGB, the 16-bit `usesHDR` coverage test
+for alpha) and an RGBA32 target still rounds through 8 bits.
 
 A browser gamepad drives controller 0 as well: `updateGamepads` gives each
 connected pad the lowest free slot, so the first pad lands in slot 0 (N64
@@ -213,13 +260,17 @@ fault: a trap ends the wasm instance and nothing can be read from it afterwards.
 The browser renderer's own diagnostics are milestone lines in the page log plus
 one counter block in `#gfxstats`. The framebuffer-as-texture check
 (`app/src/web_renderer.cpp`, `fb_written_`/`note_fb_texture`) prints
-`[GFX-FBTEX]` when a texture decode reads bytes a recorded draw wrote into a
+`[GFX-FBTEX]` when a texture load reads bytes a recorded draw wrote into a
 colour image that has not been written back to RDRAM yet, and counts them as
 `fbtex: hits=N`; `debug/probes/fbtex.cjs` sweeps for it, and
 `testdraw.cjs --flags 32 --expect-fbtex` is its positive control (debug flag bit
 5, `ogre_gfx_debug_flags(32)`, renders into a colour image and loads a tile back
-out of the same address). See [web-probes.md](web-probes.md) -> "The
-framebuffer-as-texture check".
+out of the same address). The check tests the drawn rows and the drawn columns;
+debug flag bit 6 (64) adds two negative controls, a load from the same image in
+the drawn rows and outside the drawn columns and a load from a second image in a
+row its fill never drew, so `testdraw.cjs --flags 96 --expect-hits 1` fails if
+either axis stops being tested or the row inversion is off by one. See
+[web-probes.md](web-probes.md) -> "The framebuffer-as-texture check".
 
 ## Running
 
@@ -918,7 +969,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_SCHED_TRACE=1` | enable the scheduler traces and, at exit, dump the race-free scheduler event ring (`[sched-ring]`): every insert/pop/remove/resume/park/wake/swap with a global sequence number and the running queue after it. This is how a thread that yielded and was never resumed is read off a run |
 | `OGRE_SCHED_TRACE_TID=<tid>` | with `OGRE_SCHED_TRACE`, filter the ring dump to events involving thread `<tid>` |
 | `OGRE_NOP_RECT=<selectors>` | app-side bisect aid: walk the display list before RT64 parses it and replace matching `G_TEXRECT`s (and their `RDPHALF_1`/`RDPHALF_2` pair) with `G_SPNOOP`, so a suspected draw disappears and the layers under it show. Selectors: `any`, `tex:<hex>` (the current `SETTIMG` address), `flip` (`dsdx < 0`), `x:<a>-<b>`, `y:<a>-<b>`, `n:<index>` |
-| `OGRE_FOG=0` | disable the session-35 repair that rewrites OB64's fog/cloud "wrap" rectangles to sample the layer's own image (found through the game's layer table at `D_801B80E0`). On by default. The repair was a no-op until session 36 (its `G_SETTILESIZE`/`G_LOADTILE` extents were in texels, not the GBI's quarter-texels); it now draws the title's logo-band fog and the `©1999 QUEST` sweep (`docs/HANDOFF-2026-09-14-session36.md` §3) |
+| `OGRE_FOG=0` | disable the session-35 repair that rewrites OB64's fog/cloud "wrap" rectangles to sample the layer's own image (found through the game's layer table at `D_801B80E0`). On by default. The repair was a no-op until session 36 (its `G_SETTILESIZE`/`G_LOADTILE` extents were in texels, not the GBI's quarter-texels); it now draws the title's logo-band fog and the `©1999 QUEST` sweep (`docs/HANDOFF-2026-09-14-session36.md` §3). The browser build performs the same repair (`app/src/web_renderer.cpp` `FogWalker`, session 162) and `?OGRE_FOG=0` disables it there |
 | `OGRE_FOG_TRACE=1` | report each repaired fog rectangle group (layer, image address, dimensions and the rectangle's `s`/`t`) |
 | `OGRE_FOG_SCALE=<percent>` | scale the fog image's intensity when it is staged for the fog group (**default 100 = the game's own asset**, which is the right level: the combiner is `RGB=ONE, ALPHA=TEXEL0`, so the overlay is white modulated by the layer image's intensity, mean 5.1% / peak 20.4%). Lower values stage a scaled copy in the last 64 KiB of RDRAM, which OB64 leaves untouched (the first use reports it if that area is not zero); `45` gives a softer, non-retail look |
 | `OGRE_FOG_SUMMARY=1` | one `[fog-summary]` line per display list (groups repaired, layer/image used) plus one `[fog-group]` line per white group (`s`, `t`, the inherited tile, layer, image installed). This is how the `©1999 QUEST` blink was traced |
@@ -1047,11 +1098,13 @@ border, undoes the CSS upscale of the drawing buffer, and prints the mean
 absolute / mean signed difference per channel and the fraction of channel
 samples that match exactly.
 
-The element's drawing buffer is not always the CSS box. `resize_canvas`
-(`app/src/web_renderer.cpp`) sets the box to an integer multiple of the buffer
-(`[GFX-PRESENT] canvas resized to 640x476 (css 640x476, x1)`), so a screenshot's
-inner size is that multiple of the buffer and the tool undoes a 2x upscale by
-itself. A capture from a build whose box did not match its buffer needs the
+The element's drawing buffer is the VI's visible area (`fbSize` minus the
+overscan crop; session 160), and `resize_canvas` (`app/src/web_renderer.cpp`)
+sets the box to an integer multiple of the buffer (`[GFX-PRESENT] canvas resized
+to 639x475 (css 639x475, x1)`), so a screenshot's inner size is that multiple of
+the buffer and the tool undoes a 2x upscale by itself. Every pixel of the buffer
+is written by the present blit, so a whole-canvas measurement no longer needs
+`--inset`. A capture from a build whose box did not match its buffer needs the
 buffer named: `--buffer 640x476` reconstructs it from the box by the inverse of
 `floor((Y + 0.5) * buffer_h / box_h)`, which is the scale a browser applies to a
 `<canvas>` whose CSS size differs from its drawing buffer.
@@ -1061,7 +1114,7 @@ buffer named: `--buffer 640x476` reconstructs it from the box by the inverse of
 | `--target-size WxH` | the `.bin`'s size (default 320x240; it is not in the file) |
 | `--canvas-size WxH` | the drawing buffer the screenshot shows, when it is not the target size or its 2x |
 | `--buffer WxH` | the drawing buffer the element's CSS box scaled (undo a non-integer scale) |
-| `--inset N` | drop N pixels from every side of both grids, e.g. the column and row `blit_to_canvas` never writes |
+| `--inset N` | drop N pixels from every side of both grids, e.g. when comparing against a target larger than the buffer |
 | `--shift-search N` | the mean abs difference for every whole-pixel shift in `[-N, N]`, which separates an offset from a resample |
 | `--diff-out PATH` | write `|difference| x 8` as a PNG |
 

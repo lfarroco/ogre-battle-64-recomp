@@ -54,7 +54,266 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-16-session153.md`.
+`docs/HANDOFF-2026-10-18-session168.md`.
+
+Session 168 gave the browser a battery-save import and the native scene-keyed
+tap route, and reached the 3D mission scene `0x03` from
+`assets/escort_suspend.bin`. `?OGRE_SAVE=<url>` fetches a 32 KiB port image,
+writes it to `/ogre/saves/ogrebattle64-us-rev1.bin` after the IDBFS load,
+`syncfs(false)`s it, and holds `ogre_start_boot()` until the import settles, so
+`pi.cpp`'s `read_save_file` reads it; the run logs `[web:save] imported
+assets/escort_suspend.bin (32768 bytes) -> /ogre/saves/...` and then `[save]
+loaded /ogre/saves/ogrebattle64-us-rev1.bin (32768 bytes)`. `OGRE_TAP_SCENE_BUTTON`
+is now a page knob too (`<scene>:<buttons>[:<count>]`, the active scene read from
+the page's own `[scene]` lines), so the census's route
+`title:start:6,0x12:a:6` drives the browser from the forced title through Load
+Game to `[scene] t=85121ms id=0x0003`. The mission then **traps**: the worker
+logs `Uncaught RuntimeError: memory access out of bounds` after five of the six
+overlay bank loads the native run makes (`0x0E4910`, `0x0EBBD0`, `0x101D00`,
+`0x145230`, `0x14EC00`; the native continues with `0x171EC0 ram=0x80214FA0`) and
+submits no mission display list, so the canvas keeps the last presented frame,
+the Load Game screen with its warning prompt. There is therefore no browser
+mission frame to compare: `docs/proofs/web-mission-baseline.png` is that frozen
+canvas beside the native mission frame (`t.800`, the intro's `Castle Burgund`
+target). The census's 916 448 lit, 926 539 backface-culled and 516 463
+depth-tested draws of scene `0x0003` remain the expected size of the
+depth/lighting/culling gap, not a measurement of it. See
+`docs/HANDOFF-2026-10-18-session168.md`.
+
+Session 158 excluded the last named candidate for the title screen's band
+residual, the RDP tile-window/mask sampling rule. The browser applies `cms` and
+`masks` only by choosing `GL_CLAMP_TO_EDGE` or `GL_REPEAT` for the uploaded tile
+window, and session 157's lead was that the fog layer `0x249538` is 200 texels
+wide while its draw's `s` runs to 320. A tagged probe (`probe158`) printed all 22
+five-row fog strips of a title frame: `masks=0 maskt=0 cms=0 cmt=0`, the upload
+is `200x5`, both wrap modes are `GL_CLAMP_TO_EDGE`, the `s` span is 0..200 texels
+over the window `uls=0, lrs=796` = texels 0..199, and the browser's sampler
+selects the same texel as RT64's `clampWrapMirrorSample` in 66 of 66
+comparisons. The same probe read the destination row before and after each fog
+draw and shows the draw is the blend of its decoded texel (the texel at alpha
+255, no change at alpha 0), and a fresh browser frame equals the native capture
+in 36 of 36 sampled pixels of rows 200..231, where the fog writes opaquely. So no
+masking rule was implemented. The residual's shape is unchanged and now fully
+localised: the fresh pair `probe-00` against `t.137` is
+`meanAbs=[2.32,2.52,3.14] / 81.3%`, rows 120..189 are `0.03`, rows 80..119 are
+`-7.75` across the whole width, and rows 190..238 are `0.05` at x < 140 (where
+the fog is opaque) and `-11.5` at x >= 140 (where the cloud shows). Every
+differing row is a row whose visible layer is translucent; every opaque row is
+exact. Next: one native run with `OGRE_TEX_TRACE=1 OGRE_TEX_TRACE_COLOUR=1` to
+compare the native's decoded `mean`/`opaque` per `0x217508` strip with the
+browser's, which separates image content from the composition beneath the
+partial-alpha cloud. See `docs/HANDOFF-2026-10-17-session158.md`.
+
+Session 159 ran that comparison and closed the content/alpha candidate. The
+native's `colour_mean` decodes CI8 and RGBA16 only, so a tagged probe
+(`probe159`) added the window decode of an RGBA32 tile to
+`app/src/renderer.cpp` and the same window's alpha statistics to the browser's
+`[GFX-TEXTRACE]` line. Window by window over the same draws (the tile window
+`uls..lrs`/`ult..lrt` in texels, the same `(imgw+1)*4` row stride on both sides),
+444 of 444 draw windows agree and none differ (`|dmean| < 0.15`, equal `opaque`),
+including all 54 windows of `0x217508` over the 53 native frames the trace armed
+for. The cloud image's content is constant across that span and equals the
+browser's decode, so both renderers hold the same RGBA32 bytes and the same
+alpha, and the survivor is the composition. The residual's shape is now measured
+per row: zero in rows 186..193 and 234..238, rising from row 194 to a mean of
++18.9 over the 5116 differing pixels of rows 195..232 (native brighter), from a
+slanted left edge (x≈168 at row 200, x≈152 at row 210) to x=319. The difference
+is neither a translation (the identity shift is the best of +-1 in x and y) nor
+an alpha scale (correlation with the browser's own value 0.011). The two runs'
+display lists also differ in structure, so a layer cannot be attributed by
+comparing them: the browser draws 135 textured draws per list with the cloud as
+53 full-width 320x3 strips, and the native 590 with the cloud as seven 72-pixel
+columns of 1-pixel strips. Session 156's 0.46-3.01-level bound on adjacent
+native phases keeps that out of the residual. The probes are reverted and no
+renderer behaviour changed. See `docs/HANDOFF-2026-10-17-session159.md`.
+
+Session 160 closed the two mechanical browser items. The canvas drawing buffer
+is now the VI's visible area, which is what RT64's presenter writes: session 148
+measured the publisher still's unwritten last column and last row as a whole-frame
+difference of -0.87/-0.84/-0.75 per channel (222 and 223 levels on those two
+edges) and the `border-radius` arc as 26 differing pixels in the visible area, and
+the fix is `resize_canvas(visible.width, visible.height)` in
+`present_framebuffer` with the 1:1 blit over the whole canvas plus the removal of
+`border-radius` from `#game-canvas`. The publisher still now matches RT64's target
+exactly (`meanAbs=[0.0,0.0,0.0]`, 100.0% over 639x475, every corner and both edges
+equal to the target), the presented pixels of the same still are otherwise
+identical (303499 of 303525; the 26 that changed are the corner arcs), and the
+title is unchanged (`[2.31,2.52,3.15] / 81.4%` over 319x239 for the pre-change and
+post-change captures, which are pixel-identical). The LOADTLUT destination item was
+measured before any change: a tagged `probe160` printed every load's `tmem` and
+`palette` over 8 forced scenes plus the publisher still, and all four loads are
+`tmem=0x100 palette=0` with 16 and 256 entries, which is the destination RT64's
+fixed palette base samples (`RDP_TMEM_PALETTE` 0x800 in bytes), so the browser's
+`palette*16` key is the same addressing and the item closes as unexercised with a
+kept `OGRE_TLUT_TRACE=1` report. See
+`docs/HANDOFF-2026-10-17-session160.md`.
+
+Session 162 ported the native `OGRE_FOG` repair to the browser's display-list
+path, and the title screen now matches the native fog-on frame. A browser
+`FogWalker` in `app/src/web_renderer.cpp` runs on each submitted list in RDRAM
+before the walker reads it: it tracks the last `SETTIMG`, `SETTILE t7`,
+`LOADTILE`, `SETTILE t0` and `SETTILESIZE t0` plus the white combiner
+(`w1 == 0xFFFF73B9`), reads the layer table at `D_801B80E0`
+(`+0xFC + i*0x24`), and rewrites that setup to sample the layer's own image with
+`masks`/`maskt`, the whole-image `LOADTILE` and the whole-image `SETTILESIZE`
+(the rule is `renderer.cpp:1003-1219`). `OGRE_FOG=0` disables it (default on,
+like the native, and `?OGRE_FOG=0` already reaches `getenv` through the page's
+`ENV`). Measured over fresh series (397 native fog-on frames, 587 fog-off; 40
+browser shots each way), the fog-on minimum is `t.177`
+`meanAbs=[0.09,0.09,0.12] exact=91.5%` (bands 0.014/0.273/0.060) against
+session 161's `[2.08,2.23,2.74]/79.2%`; the fog-off control is
+`[0.03,0.03,0.03] exact=97.3%` (0.042/0.011/0.026), and the cross-controls are
+2.740 and 2.733. The 0.273 in rows 64..119 is 0-3-level blend rounding: the
+browser's fog overlay per band is `-0.683/5.691/-0.007/6.719` against the
+native's `-0.674/5.705/-0.007/6.637`, and the band-minimising frame gives 0.074
+with every difference exactly one level. The publisher still is
+`[0.0,0.0,0.0]/100%`, `boot.cjs` is `RENDERED`, and neither the publisher nor
+the story fires the repair. See `docs/HANDOFF-2026-10-17-session162.md`.
+
+Session 163 ported RT64's high-precision colour buffer to the browser and
+corrected session 162's explanation of the remaining fog band. A browser colour
+image is now an RGBA16F attachment when `EXT_color_buffer_float` is available
+(RGBA8 otherwise, or with `OGRE_HPFB=0`), because RT64's default
+`internalColorFormat` resolves to High on this machine and its targets are
+`R16G16B16A16_UNORM`: the native renderer quantizes a stack of translucent draws
+once, on the RDRAM writeback, instead of at every blend. The float attachment
+needs `type=GL_HALF_FLOAT` (WebGL2 rejects `UNSIGNED_BYTE` for RGBA16F, status
+0x8CD6), float staging in `upload_framebuffer`, and a `GL_FLOAT` readback that
+converts through `float4_to_rgba16` (RT64 `Float4ToRGBA16` with dither 0 and the
+16-bit `usesHDR` coverage test); the RGBA8 path keeps its 8-bit rule, an
+incomplete float attachment falls back to RGBA8, and the fragment shader asks
+for `highp`. Measured at the same native instant (`t.177`), the RGBA16F canvas
+is `meanAbs=0.098` (bands 0.014/0.271/0.060) and the RGBA8 canvas is `0.099`
+(0.014/0.273/0.060); the two canvases differ from each other by 0.0091 mean,
+0.906% of channel samples at exactly one level. So the 0.27 fog band is not
+per-blend quantization: against the native target converted with the target's
+own 8-bit rounding, the band is still 0.241 (the target's own high-byte-vs-round
+difference is 0.068 there), and the amplified difference is one wave in rows
+81..119, the translucent top edge of the repaired fog layer. The new
+`[GFX-FOG-SUMMARY]` line shows that layer's image record is I8 (`siz=1 fmt=4`)
+64x64 at `0x801D51E8` (layer 2), so the next comparison is the sampled intensity
+and blend alpha of one repaired group, not another target format. No regression:
+the publisher still is `[0.0,0.0,0.0]/100%`, `testdraw --flags 96` reports
+`fbtex hits=1`, and `boot.cjs` is `RENDERED` (`nonBlack=25424`). See
+`docs/HANDOFF-2026-10-17-session163.md`.
+
+Session 164 ported RT64's texture sampler into the browser fragment shader and
+measured what the screens actually sample. `OGRE_TEXF` selects it: `rt64`
+(default) is RT64's three-point filter, `1`/`bilinear` is true bilinear in the
+same shader, and `gl` is the fixed-function sampler this renderer used before.
+The port covers `clampWrapMirrorSample` (tile-window clamp, `masks`/`maskt` wrap,
+mirror), `sampleTextureLevel`'s point/bilerp/average selection, RT64's default
+three-point weights, and the `SIMULATE_LOW_PRECISION` quantization of the
+interpolated coordinate to 1/128 texel; the filter mode is now draw state
+(OTHERMODE_H `G_TF_*`) instead of a property of the uploaded texture, `AVERAGE`
+exists, and a masked tile wraps/mirrors instead of the whole texture repeating.
+Measured with the new `[GFX-SAMPLER]` census: the forced title is 591 textured
+draws, all `point`, 456 masked; the forced world map is 99 draws, all `point`, 1
+masked; the publisher still is 56 draws, all `point`, 0 masked. So filtering is
+not what the title fog band is: the repaired fog draws are point-sampled 320x1
+strips and 64x64 blocks (`[GFX-FOG-DRAW]`: `filt=0`, `mask=(64,64)`,
+`cm=(0,0)`), and the band is unchanged by the port at the same native instant.
+The tutorial `0x17` is the one reached screen with bilinear draws (8 textured
+draws, 6 `bilerp`, 6 masked): its background is a 64x64 tiling I8 image drawn
+447x335 texels over 320x240 with `masks=6`, which is a draw the new rules apply
+to. The browser's tutorial dialogue box is broken in both samplers (open work
+8(r)), so the sampler is verified by the point-sampled screens being unchanged
+and by the flag/census data, not by that screen's content. See
+`docs/HANDOFF-2026-10-17-session164.md`.
+
+Session 161 verified session 160 and closed the title screen's band residual as a
+missing display-list repair, not a renderer difference. The publisher still's
+canvas is the visible area (639x475) and all 303525 of its pixels equal RT64's
+target, so the presenter leaves no canvas pixel unwritten and the
+`border-radius` removal was the last non-game pixel. The per-draw `s`/`t` of the
+two title runs' scrolling layers were compared for the first time: at the third
+display list of each run the 135 non-degenerate draws are identical in order,
+image, rectangle, `s`, `t`, `dsdx`, `dtdy` and tile window (the sky image
+`0x1C3EA8`'s partial tile is `0,16..63,80 s=32` in both), so the two runs share a
+scroll state. The native list also holds 456 draws with a degenerate tile window
+(`ult == lrt`): the mirrored `0x1E2918` pieces and the 72-pixel `0x217508`
+columns, which are the `OGRE_FOG` repair's pieces (the native app rewrites their
+tile setup to sample the layer image; the browser's `draw_texrect` rejects them
+with the guard that mirrors RT64's `RDP::drawTexRect`). Turning that repair off
+in the native series and comparing the same animation instant gives
+`meanAbs=0.052` (rows 0.046/0.072/0.044) against `2.349` with it on, so the
+residual is exactly the fog layer the browser does not draw. No renderer
+behaviour changed; the port of the fog pass is the open item. See
+`docs/HANDOFF-2026-10-17-session161.md`.
+
+Session 156 measured the title screen's two moving cloud bands, the last known
+browser rendering difference, and answered the phase question. A native series
+of 525 `OGRE_CAPTURE_TARGET` frames (forced title, `OGRE_SPEED=1`) was compared
+with a 40-frame browser series of the same forced scene, and the minimum over
+the series is `title-03` against `t.574`: `meanAbs=[2.08,2.23,2.74]`,
+`meanSigned=[-2.03,-2.17,-2.67]`, 79.2% exact with the presenter's unwritten edge
+inset out (`[2.31,2.32,2.71] / 79.2%` without). Native frames of the same phase
+are identical in the bands and adjacent phases differ by 0.46-3.01, so the
+remaining 8-13 levels of one-signed band difference cannot be phase: **the
+renderer draws the cloud layers differently.** (Session 161 corrects the
+mechanism: the browser draws the same cloud and sky draws as the native at the
+same scroll state, and the difference is the 456 zero-texel-window rectangles the
+native's `OGRE_FOG` pass rewrites into the fog layer, which the browser skips.) The draw state is the same in both
+renderers for the strip at rows 101..104 (rect, S/T step, texel window, image
+`0x80217508`, `fmt=0 siz=3`, `line=80`, palette 0, LUT mode 0, 1-cycle, combiner
+`0xFCFFFFFF`/`0xFFFCF279`, force blend `P=CC A=CC_A M=FB B=1-A`), and the
+browser's decoded texel mean equals an independent decode of the same rows
+(92.11/92.1, 104.55/104.6, 66.73/66.7). The band rows are exactly where the cloud
+strips sample partial-alpha texels, and there the browser's pixel equals the raw
+texel (94/95, 108/140, 155/156, 245/246 at rows 98/101/104/110) while the native's
+is a blend. That is the open lead: the sampled alpha is not the value the blend
+uses, and the next experiment is to print the fragment's combiner alpha for one
+cloud strip. `[GFX-TEXTRACE]` gained the draw's `cyc/omh/ablend/force/ccyc` to
+make that comparison from one line. An alpha probe that forced every RGBA32
+texel's alpha to 128 changed the frame hugely but could not separate the
+hypotheses, so it was reverted. See `docs/HANDOFF-2026-10-17-session156.md`.
+
+Session 155 closed the two items session 154 left. (a) The `[GFX-FBTEX]` row
+test's inversion was one row up: `note_fb_write` computed
+`height - 1 - trunc((pos + 1) / 2 * height)` for a vertex, which is `y - 1` where
+the float product lands on or above the integer (194 of the 241 rows of a
+240-tall image) and `y` where it lands below. It now inverts `ndc_yf` with
+`(1 - pos) / 2 * height`, treats a vertex as an edge (the lower-right corner is
+exclusive, so the last row covered is the bottom edge minus one) and rounds with
+`std::lround`, so a fill of rows 100..163 is recorded as 100..163. `test_draw`'s
+bit-6 branch gained a row control - a second colour image at `0x00C28000`, a fill
+of rows 100..163, and a load of rows 98..99 - and `--expect-hits 1` is the
+assertion: the old arithmetic prints `fbtex hits=2 lines=2` with
+`drawn rows=[99,163]` and `FAIL: expected fbtex hits=1, read 2`, the fixed build
+prints `hits=1 lines=1` and exits 0. (b) Framebuffer-as-texture is **closed as a
+decision: no reachable screen needs it.** The full 25-scene sweep
+(`fbtex.cjs --scenes 0x00..0x18 --secs 18`) reports `0 over 25`, with 21 of the
+25 scenes producing display lists (3..136 tasks; `0x02`/`0x03`/`0x0D`/`0x0E`
+produce one task and a page error, so they say nothing, and `0x0B` reached only
+the 3-task idle trajectory), and a natural tap route through the opening
+(`start,a,start,a,a,a,a,a,a,a` at 1200 ms) reports `tasks=196 hits=0`. The
+detector and its counter stay. Diagnostic only: no rendered frame moves, and the
+boot is unchanged (`RENDERED nonBlack 25136`). See
+`docs/HANDOFF-2026-10-17-session155.md`.
+
+Session 154 closed session 152's `[GFX-FBTEX]` over-report. The detector's row
+test fired for a load whose bytes lie in a row a draw wrote but outside every
+column it wrote, and the load side claimed the whole row stride for a rect that
+reads only `w * bytes_per_texel` bytes of each row. `app/src/web_renderer.cpp`
+now records the byte columns each draw covered (`FbWrittenRange::col_min`/
+`col_max`, from the same vertex mapping the row test uses and
+`bytes_per_texel(fb_siz)`), bounds the load's rect to `x0 .. x0+w` texels, ends
+its row range at the rect's last row, and requires both axes to overlap. The
+column test is applied only when the image's pitch divides the load's stride;
+otherwise the row-only answer stands. `test_draw`'s positive fill is narrowed to
+columns 0..63 of its 320x240 image and a new debug flag bit 6 (64) adds the
+negative control, a second load from texels 160..191 in the drawn rows and
+outside the drawn columns. Measured with only the column comparison disabled:
+`testdraw.cjs --flags 96` reports `fbtex hits=2 lines=2`, the second line
+`cols=[320,384) drawn cols=[0,128)`; with it, `hits=1 lines=1` and only
+`cols=[0,64) drawn cols=[0,128)`. The probe gained `--expect-hits N` so that is a
+hard assertion, and the bit-5 and bit-0 controls, the boot
+(`RENDERED nonBlack 25136 / colorful 19296`) and the scene sweep
+(`0x04`/`0x0A` `hits=0`, `0x10` `tasks=52 hits=0`) are unchanged. Diagnostic
+only: no rendered frame moves. The session also corrected session 153's claim
+that `app/src/web_platform.cpp`'s header comment records the native slot rule;
+the committed tree still had the old "slot 0 is the keyboard, slots 1-3 are
+gamepads" text, which is now rewritten.
 
 Session 153 closed open item 13 (the browser build assigned gamepads to N64
 controllers 2-4). `app/web/web.js` gave each pad slot `(pad.index % 3) + 1`, so
@@ -312,6 +571,152 @@ found while measuring: the browser build faults with `divide by zero` the first
 time the game renders the hi-res title screen, in the session-140 package and in
 this one alike.
 
+**Renderer completeness (session 176).** The WebGL2 renderer implements the RDP
+state the screens it reaches use: TMEM with RT64's load layout and YUV16, RT64's
+texture sampler (`clampWrapMirrorSample`, point/bilerp/average, the three-point
+filter, the `1/128` quantisation, `ShiftScaleMap`, `G_TP` from OTHERMODE_H bit
+19), alpha compare and `CVG_X_ALPHA`/`CVG_DST` coverage, the combiner (two
+cycles, key centre/scale, `K4`/`K5`), the blender, fog colour, `G_FOG` per-vertex
+alpha, `G_LIGHTING` with seven lights plus ambient, backface culling, the depth
+pipeline (`G_SETZIMG`/`G_SETPRIMDEPTH`, RT64 screen-z, a target keyed by the
+depth image, on by default), the half-pixel triangle offset, a high-precision
+`RGBA16F` colour attachment, RDRAM framebuffer indirection with the writeback
+only on the game's own sync request, S2DEX2 object rectangles and the njpeg YUV16
+backdrop, and the browser port of the `OGRE_FOG` repair.
+
+Verified with numbers, against a native `OGRE_CAPTURE_TARGET` of the same screen:
+the boot smoke probe renders on attempt 1 of 3 on a quiet machine
+(`nonBlack=24452 colorful=10140`); the synthetic controls pass (`--flags 96` ->
+`fbtex hits=1 lines=1`, `--flags 128` reads the near triangle, `--flags 384` the
+far one); the title's attract **story** beat matches native `t.640` at
+`meanAbs=[0.24,0.25,0.28]` (85.1% exact) and its **logo** beat matches `t.1080`
+at `[1.88,1.96,2.23]` (72.1%), with the clouds exact (`0.07`/`0.08`) and the logo
+and copyright bands the residual (`5.32`/`8.49`, no placement offset; the four
+frames side by side are `docs/proofs/web-title-forced-pair-175.png`); the
+mission `0x03` renders (`nonBlack=303208 colorful=294108`); the tutorial `0x17` box
+is `0.25/0.00/0.18` by band and the world map `nonBlack=252820` (session 174).
+
+**The mission pair is now frame-locked, and the low mean hides a missing sprite
+layer (session 176).** A native mission series was captured from the same save and
+route as the browser's (637 targets at 60 Hz, `OGRE_CAPTURE_EVERY=1`, mission
+entered at `[scene] t=17821ms id=0x0003`, window `t.264`..`t.640`) and compared with
+every browser mission frame over every native frame (2262 pairs, the
+`web_frame_cmp.compare()` arithmetic in `/tmp/w176/crosscmp.c`). The global minimum
+is browser `m4-a1-014` against native `t.289`: `meanAbs 4.74/3.59/1.90`,
+`meanSigned -1.12/-0.81/-1.40`, `exact=45.08%`, and ranks 2-5 are
+`3.421/3.424/3.429/3.434`, flat inside a 0.5 s window because the map is static at
+that phase. Terrain regions of the best pair: top cliff rows 0..38 `0.93`, left
+grass `1.66`, right terrain `2.95`, bottom middle `8.56`. The residual is not the
+terrain: **the browser does not draw the party's character sprites.** In the party
+cluster (x18..78 y60..98) the pair measures `26.54`, 735 of 2280 pixels differ by
+more than 30, the browser's brightest channel value is 97 against native's 255, and
+`docs/proofs/web-mission-framelocked.png` shows native's five characters where the
+browser has the terrain and the cursor brackets only. The three element-screenshot
+frames are 6.7-7.3 against their best natives; at those phases the note box is
+`4.65` (79.8% exact) and two other elements lose their texels one at a time: the
+portrait box `13.58` (31.3%) and the MISSION band `8.94` (18.6%, 207 bright glyph
+pixels against native's 1083, no lattice period and no parity bias). That stipple
+and the absent sprites are one family, an alpha/coverage rejection on alpha-tested
+sprites (`G_AC_THRESHOLD` at `web_renderer.cpp:1596-1599`, `G_AC_DITHER` at
+`:1600-1606`, `CVG_X_ALPHA` coverage at `:1614-1617`).
+
+**The stipple was the `G_AC` enum mapping (session 177).** The mission's portrait
+frame and `MISSION` band lost their texels one at a time because the shader
+tested `u_ac == 2` for `G_AC_THRESHOLD` and `u_ac == 1` for `G_AC_DITHER`, while
+RT64's values are 0/1/3. The 33 770 `acmp=1` mission draws therefore ran the
+dither arm against a random hash; a combiner alpha around 0.2 kept about a fifth
+of the texels. The shader now runs the threshold compare for `acmp=1` and RT64's
+`initRand`/`nextRand` dither for `acmp=3`, with the frame, instance and pixel
+seeds and the NOISE pre-consumption. The synthetic control
+(`testdraw.cjs --flags 512 --expect-alpha`) reads full/none/partial for
+threshold/blend-0, threshold/blend-1 and dither, and the depth, fbtex and tutorial
+controls are unchanged. The browser boot stalled at scene `0x0000` with
+`tasks=0` on every attempt after about 01:40, so the frame-locked mission
+re-capture is pending; that is the measurement that will close or re-open the
+missing party sprites. See `docs/HANDOFF-2026-10-19-session177.md`.
+
+Residuals, each with the reason it is not closed:
+
+- **The mission's stipple was the `G_AC` enum mapping: fixed in session 177, and
+  the mission re-capture is pending.** RT64's values are `G_AC_NONE 0`,
+  `G_AC_THRESHOLD 1`, `G_AC_DITHER 3`
+  (`tools/RT64/src/shared/rt64_f3d_defines.h:8-10`); the browser's shader treated
+  `u_ac == 2` as the threshold arm and `u_ac == 1` as the dither arm. A real
+  `G_AC_THRESHOLD` draw ran the dither arm against a random hash, so a combiner
+  alpha of about 0.2 kept a fifth of the texels at random: the portrait frame's
+  border and the `MISSION` band glyphs. The mission census has 33 770 `acmp=1`
+  draws and no `acmp=2`. `u_ac == 1` is now the threshold compare against the
+  blend alpha and `u_ac == 3` is RT64's `initRand`/`nextRand` dither (frame,
+  instance and pixel seeds, NOISE pre-consumption). The synthetic control proves
+  the mapping: `testdraw.cjs --flags 512 --expect-alpha` reads
+  `threshold/full=full threshold/none=none dither/partial=partial`
+  (`[GFX-AC-TEST]` 1406/1406, 0/1406, 277/1369). The frame-locked mission
+  re-capture is the open item: the browser boot stalled at scene `0x0000` with
+  `tasks=0` on every attempt in the second half of session 177, so whether the
+  party sprites and the two overlay elements are now solid is **not measured**.
+  If the sprites are still absent after this fix, that is a second mechanism and
+  must be named separately.
+- **The lit terrain has a colour offset.** Signed G +6.2 / B -14.3 on the top cliff
+  and R +6.4 / B -7.6 on the bottom band; the 2D elements do not carry it. Not named.
+- **`G_CD` colour dither is not implemented.** The game does enable it (`[GFX-TP]`
+  families decode as `G_CD_MAGICSQ` on the title, map, mission and attract story,
+  `G_CD_BAYER` on the tutorial), but RT64 applies it only inside its native-format
+  writeback shader (`FbWriteColorCS.hlsl:19-21`, `FbReinterpretCS.hlsl:20-23`) and
+  the presented frame samples the GPU render target, as the browser's samples its
+  GL colour image. The browser's writeback already uses the same
+  `Float4ToRGBA16` with dither 0, and no reached screen reads a framebuffer back
+  (`[GFX-FBREAD]` is absent from every session-174/175 log), so dither can only
+  change RDRAM bytes a screen never displays. It is a readback-path difference.
+- **A dense browser mission series is still not captured.** The round's three
+  browser frames come from Playwright screenshots that cost 12.9 s each under load
+  average 15-50, so they sample the intro at three phases instead of every
+  250-400 ms. `canvas.toDataURL` reads the same drawing buffer (the renderer creates
+  its context with `preserveDrawingBuffer = true`) at 0.2-1.0 s per frame and is the
+  replacement to finish.
+- **The Load Game screen draws white before its content arrives** (session 174's
+  item, unchanged).
+- **The publisher stills `0x0A` do not present, and the natural boot never reaches a
+  scene in the browser.** Six natural boots of 20 s each (10-66 shots per boot)
+  printed no `[scene]` line at all and every captured frame was black; the forced
+  entry advances 30 display lists (`texrect=136 fillrect=96 triangles=0`) but
+  presents nothing. So the earlier exact match (`meanAbs 0.0`/100% over 639x475) is
+  not re-confirmed.
+- **The S2DEX2 opcode census is implemented and unexercised.** `[GFX-S2D-CENSUS]`
+  counts every opcode byte of an S2DEX2 list and prints the undecoded ones, but no
+  reached screen submits an S2DEX2 list (the njpeg backdrop in scene `0x02` does),
+  so the claim that those lists carry only `0xDA`/`0xDC` still rests on session
+  51's trace. `0x05`/`0x06`/`0x07` are the opcodes to watch: they fall through to
+  the F3DEX2 triangle arms and would draw from an empty vertex buffer.
+- **Unexercised by measurement**: `ZMODE_DEC`, the `G_AC_DITHER` hash, `G_TEXGEN`,
+  `G_SHADE`, the depth image's RDRAM transfer, `a_w` in `gl_Position`, S2DEX2
+  `0x01`/`0x02`'s full-matrix path, `OGRE_RAM_KEY_AT_MS` in a browser, and the
+  deployed GitHub Pages site by hand.
+
+- **The boot intro's soldier trails were the fill quad's second triangle
+  (session 178).** The intro (`0x09`) draws 12 soldiers once per frame into a
+  triple-buffered 320x240 colour image, each frame starting with one full-screen
+  black `G_FILLRECT`. The renderer built that fill as six vertices in the order
+  top-left, bottom-left, bottom-right, top-right, then paired them as
+  `(0,1,2)` and `(3,0,1)`. The second pair repeats the first triangle's left
+  edge, so both triangles covered the left half of the rectangle and the right
+  half was never written. Every buffer therefore kept the previous frames'
+  right half: as the ring of soldiers ran outward, each earlier position
+  stayed on screen, and the frame filled with a wedge of repeated sprites
+  clipped by the quad's diagonal. The developer saw it as "a triangle on the
+  right where the sprites are not cleaned up". The two triangles are now
+  `(0,1,2)` and `(0,2,3)`, which is the same index pattern the S2DEX object
+  rectangle and the texrect already use. Verified against a native RT64
+  capture of the same phase (`p.155`: three soldiers per corner and the cube,
+  no trail): the browser frame at the same task now shows the same picture, and
+  the synthetic controls still pass (`--flags 96` -> `fbtex hits=1 lines=1`,
+  `--flags 128` near, `--flags 384` far, `--flags 512` alpha). The other
+  screens whose fills are not full-screen (the attract story's letterbox) have
+  not been re-measured since the quad got its second triangle.
+
+See `docs/HANDOFF-2026-10-19-session178.md` for this fix, and
+`docs/HANDOFF-2026-10-18-session176.md` / `-session175.md` for the numbers and the
+screens those rounds did not re-measure.
+
 ## Status
 
 The game runs end to end. A build boots the publisher stills, the title, the New
@@ -533,6 +938,75 @@ Organize Screen, the credits, the ending and the attract loop.
   off unless `OGRE_LIVE_CONSOLE=1` (or the trigger's own variable) is set, so a
   stock run opens no path, reads no keyboard and prints nothing (session 117). The
   rest is open work below.
+- **Browser renderer state (session 174)** — `G_TP` is decoded from OTHERMODE_H
+  bit 19, the tile `ShiftScaleMap` is applied in the sampler, the chroma-key
+  centre/scale reach the combiner's `KEY_CENTER`/`KEY_SCALE` inputs, and `G_FOG`
+  replaces the vertex alpha. The permanent `[GFX-TP]` family census reports
+  `changes=0` on every reached screen, the sampler's `shifted=` count is 0 on the
+  tutorial, title and map, the mission's nonzero count changes no pixel (runtime
+  A/B), and no reached screen selects a key input or sets `G_FOG`. The tutorial
+  box, title, map and mission numbers are unchanged at their own capture phases.
+  Publisher stills `0x0A` were not reached and the title/attract 0.11-0.20 match
+  was not reproduced. See `docs/HANDOFF-2026-10-18-session174.md`.
+- **Browser title parity** — the browser renderer now performs the native
+  `OGRE_FOG` display-list repair, so the forced title frame matches the native
+  fog-on render target at `[0.09,0.09,0.12]` (91.5% exact, `--inset 1`) and the
+  `OGRE_FOG=0` control at `[0.03,0.03,0.03]` (97.3%), down from
+  `[2.08,2.23,2.74]` (79.2%). The remaining fog-band difference is 0-3 levels of
+  blend rounding. The publisher still is `[0.0,0.0,0.0]/100%` over 639x475, and
+  neither the publisher nor the attract story fires the repair (session 162).
+- **Browser texture sampler** — the browser samples the RDP's tiles with a port
+  of RT64's `TextureSampler.hlsli` instead of the GL fixed-function sampler:
+  tile-window clamp, `masks`/`maskt` wrap and mirror, point/bilerp/average from
+  OTHERMODE_H, RT64's default three-point filter, and the 1/128 texel
+  quantization of the interpolated coordinate. `OGRE_TEXF` selects `rt64`
+  (default), `bilinear`, or `gl`. The `[GFX-SAMPLER]` census shows the forced
+  title and world map are point-sampled (591 and 99 textured draws, 0 bilinear)
+  and the tutorial `0x17` is the reached bilinear screen (6 of 8 draws, 6
+  masked). The census also counts draws whose tile asks for a `G_TX` shift,
+  which the sampler now applies (RT64's `ShiftScaleMap`, session 174): the
+  forced title (1182 draws), the forced
+  world map (198), the attract/intro run (8885, of which 2116 are
+  `G_TF_AVERAGE`) and the tutorial's dialogue-box batch (447, 423 point and 24
+  bilerp) all report `shifted=0`; the mission `0x03` is the screen that
+  exercises the field (18 794-24 563 of 27 692-33 450 textured draws) and its
+  frame is unchanged by the multiply (a runtime A/B, four of five interleaved
+  pairs bit-identical). See `docs/HANDOFF-2026-10-17-session164.md`,
+  `docs/HANDOFF-2026-10-18-session165.md` and `-session174.md`.
+- **Browser TMEM and coverage** — the browser samples the RDP's TMEM instead of
+  decoding each tile from RDRAM. A persistent 4 KiB `tmem_` receives every
+  LOADTILE/LOADBLOCK/LOADTLUT (and YUV) with RT64's byte layout, and a draw
+  decodes its tile at `tmem << 3` with `line << 3` over RT64's sample window
+  (`min(tile rect, 1 << mask)`). The fragment shader also runs the RDP's alpha
+  compare and `CVG_X_ALPHA` coverage, so a zero-alpha texel is discarded and the
+  target alpha is the `CVG_DST` coverage value. The tutorial `0x17` dialogue
+  box was the reached defect for both: its portrait, text, border and parchment
+  now match RT64's target (`docs/proofs/web-tutorial-fixed-side-by-side.png`),
+  where before the portrait was torn, the glyph cells were opaque black and the
+  border was a bright green band. `boot.cjs` is `RENDERED`, `testdraw --flags
+  96` reports `fbtex hits=1`, and the title frame matches the native at 1.56
+  mean abs at its phase. The tutorial box's border rows and portrait are
+  pixel-exact against the native target. Its remaining difference was the
+  box-interior parchment, which session 166 measured: it is **one** draw pair
+  (two triangles) over the whole interior (rows 170..222) of the 64x64 CI4
+  image at `v` 0..51, **point-sampled** (`OTHERMODE_H=0x088C30`, `G_TF_POINT`),
+  at about 0.98 texel per pixel, and it wraps by `maskt=6`. The sampler
+  arithmetic, the tile state and the RSP viewport all agree with RT64's, and
+  RT64 selected the texel **one row above** the browser's at the same pixel (24
+  of 24 rows), i.e. its quad sits about one screen pixel lower. Session 167
+  names the mechanism as RT64's half-pixel screen offset
+  (`rt64_framebuffer_renderer.cpp:1528` `halfPixelOffset`, applied in
+  `RasterVS.hlsl:25` as `screenOffset * ndcPos.w`) and applies it in
+  `transform_vertex` for the triangle path only: the box goes from `5.88` to
+  `0.22` mean over rows 166..219 against the native target, its parchment from
+  `10.49` to `0.25`, the glyphs from `13.32`/`4.01` to `0.00` and the portrait
+  from `1.10` to `0.00`, with the texrect border unchanged. The title frame does
+  not move and the world map changes only on its triangle-drawn unit sprite.
+  Session 165's "two texels per pixel and a flat `v=51` band below"
+  is withdrawn: the lower rows look flat only because the paper texture has no
+  contrast there. See
+  `docs/HANDOFF-2026-10-18-session166.md` and
+  `docs/HANDOFF-2026-10-18-session167.md`.
 
 What each screen should show is `docs/scenes.md`. Build instructions and every
 `OGRE_*` knob are `docs/guides/app-build.md`. A picture or a display list that a
@@ -696,18 +1170,24 @@ holds the evidence.
    (`docs/proofs/web-title-640-before-uv-fix.png`), because its 320x240 backdrop
    is forty 640x12 texrects. (c) `K4`/`K5` are combiner colour inputs now
    (`convertK[4] / 255`, RT64 `RasterPS.hlsl`) instead of returning 0.
-   Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
-   whose source is a rendered colour image reads RDRAM) — instrumented in session
-   152 (`[GFX-FBTEX]`, `fbtex: hits=` in `#gfxstats`, the positive control
-   `testdraw.cjs --flags 32 --expect-fbtex`), and no screen reached so far needs
-   it, so it stays unimplemented until one reports itself — and the residual
+   Closed in session 162: the residual
    per-channel difference between the browser's canvas and RT64's render target,
    which session 146 reduced from 4.66/5.05/5.54 to 2.29/2.48/3.10 mean absolute
    per channel by fixing the present geometry (exact channel samples 39.4% ->
-   81.4%; `tools/web_frame_cmp.py` is the comparator). What is left is two moving
-   cloud bands (rows ~64..112 and ~195..238, browser 12-16 darker), and the
-   developer states the port's clouds are not exact against retail yet, so the
-   two runs' cloud phases are not separable on that screen. Presentation now
+   81.4%; `tools/web_frame_cmp.py` is the comparator). Session 161 showed the
+   remainder was not the two cloud bands but the native app's `OGRE_FOG`
+   display-list repair, which the browser had not ported, and session 162 ported
+   it: the title against RT64's target at the same instant is
+   `meanAbs=[0.09,0.09,0.12]` (91.5% exact) with the repair on, against
+   `[2.08,2.23,2.74]` (79.2%) before, and `[0.03,0.03,0.03]` (97.3%) in the
+   repair-off control. Session 163 ported RT64's high-precision colour buffer
+   (RGBA16F with `EXT_color_buffer_float`) and showed the remaining 1-3 levels
+   are not blend precision: at the same instant the float and 8-bit attachments
+   differ by 0.009 mean and the residual against the native stays 0.098 vs
+   0.099. Against the native target's own 8-bit rounding the fog band is still
+   0.241, localized to the translucent top edge of the repaired I8 fog layer.
+   See `docs/HANDOFF-2026-10-17-session161.md`, `-session162.md` and
+   `-session163.md`. Presentation now
    writes the visible area into the same fraction of the canvas from its
    top-left, the way RT64's `VIRenderer::getViewportAndScissor` does, and the GL
    scissor uses the RDP's half-open bounds. Session 145 closed the hue
@@ -719,6 +1199,23 @@ holds the evidence.
    `[GFX-TEXTRACE]` against `OGRE_TEX_TRACE`/`OGRE_RECT_STATE`, both of which
    stay, and the frame comparison uses `tools/rt64_target.py` on an
    `OGRE_CAPTURE_TARGET` `.bin`.
+   Session 157 measured the cloud draw's blend path and found it correct: GL
+   blending is enabled with the RDP's factors and `GL_FUNC_ADD`, the fragment
+   alpha equals the decoded texel alpha, and the GL result equals
+   `alpha*src + (1-alpha)*dst` on all 47 mid-alpha pixels of a probed row. The
+   band residual is in the translucent layers of the composition (`0x1E2918`
+   below the cloud, `0x249538` above it), not in the cloud draw. See
+   `docs/HANDOFF-2026-10-17-session157.md`.
+   Session 158 excluded the fog layer `0x249538` as well, and with it the RDP
+   tile-window/mask candidate: its 22 five-row strips carry `masks=0 maskt=0
+   cms=0 cmt=0`, sample `s` 0..200 texels over a 200-texel window, and the
+   browser's sampler selects the same texel as RT64's
+   `clampWrapMirrorSample` in 66 of 66 comparisons. The fog's draw output is the
+   blend of its decoded texel, and the browser equals the native in 36 of 36
+   sampled pixels of rows 200..231 where the fog is opaque. Every remaining
+   differing row is a row whose visible layer is translucent (`0x217508`), and
+   every opaque row is exact. See
+   `docs/HANDOFF-2026-10-17-session158.md`.
    Session 142 closed the title-screen fault and the geometry behind it.
    `draw_texrect` treated the RDP's lower-right corner as inclusive (`xh + 1`,
    `yh + 1`, and a `xh - xl + 1` texel span). The RDP covers `[ul, lr)` for a
@@ -780,13 +1277,14 @@ holds the evidence.
    Session 146 fixed the window the visible area is drawn into (below), session
    147 fixed the palette decode (item (h) below), and session 148 fixed the
    canvas element's CSS box (item (i) below). The browser's own
-   outstanding items are framebuffer-as-texture (instrumented in session 152, no
-   screen found that needs it), the `fldRegs` x/y scale and offset (RT64 uses
+   outstanding items were the `fldRegs` x/y scale and offset (RT64 uses
    them only in `VI::fbSize`, which the browser ports, and not in
-   `VideoInterfacePS` or `cropRectangle`, so no browser change is outstanding
-   there), the unwritten-edge and rounded-corner item (j) below, the RDP fill
-   scissor question (k) below, and the two moving-cloud
-   bands.
+   `VideoInterfacePS` or `cropRectangle`, so no browser change was outstanding
+   there), the unwritten-edge and rounded-corner item (j, closed in session 160),
+   the RDP fill scissor question (k, settled in session 150), and the title's
+   cloud bands (closed in session 162 as the missing `OGRE_FOG` repair port).
+   Framebuffer-as-texture is closed (item (m) below) and the `LOADTLUT`
+   destination is closed as unexercised (item (o) below).
    **(h) The publisher still's ATLUS letters: closed in session 147.** The
    browser decoded every palette entry by the entry's own bit 15 (RGBA16 when
    set, IA16 when clear). The RDP selects the decode from the draw's 2-bit
@@ -817,17 +1315,46 @@ holds the evidence.
    height))` times the buffer. On the fixed build the still matches RT64's target
    at `[0.87, 0.84, 0.75]`, 99.6% exact, minimum at `(0, 0)`; the title is
    unchanged at `[2.30, 2.50, 3.12] / 81.3%`.
-   **(j) The canvas element's rounded corners clip four content pixels, and the
-   presenter's unwritten last column and row read as differences against a whole
-   render target.** `#game-canvas` carries `border-radius:6px`, so the four
-   corner pixels of every frame are blended with the border (72..108 levels off
-   RT64's target); the last column and row (639 of 640 and 475 of 476) are never
-   written, because `blit_to_canvas` writes only the VI's visible area, which is
-   the `fbSize` minus the overscan crop, while RT64's own window is shrunk to the
-   visible size by `removeBlackBorders`. Both are cosmetic and neither is a
-   rendering difference; over the visible area the publisher still is exact
-   (99.997% of channel samples, 9 differing pixels). `tools/web_frame_cmp.py
-   --inset N` keeps them out of a measurement.
+   **(j) The canvas element's rounded corners and the presenter's unwritten last
+   column and row: closed in session 160.** `#game-canvas` carried
+   `border-radius:6px` and `present_framebuffer` sized the drawing buffer to the
+   VI's `fbSize` while `blit_to_canvas` wrote only the visible area (`fbSize`
+   minus the overscan crop) into its top-left corner, so 639 of 640 columns and
+   475 of 476 rows were written. Measured against RT64's `tt.140` target: the
+   publisher still's last column (476/476 pixels) and last row (640/640) differed
+   by a mean of 222.4 and 223.1 levels, the four corners showed the page
+   background `(20,22,26)` against the target's `(239,231,206)`, and the
+   `border-radius` arcs made 26 pixels of the visible area differ by up to 219
+   levels. The drawing buffer is now the visible area (`resize_canvas(visible.
+   width, visible.height)`, present fraction 1.0, so every pixel is written by
+   the 1:1 blit), `#game-canvas` has no `border-radius`, and the RDRAM fallback
+   stages its texture at the VI's pitch (`vi.width << siz >> 1`) rather than the
+   canvas's. The publisher still measures `meanAbs=[0.0,0.0,0.0]`, 100.0% over
+   639x475, with every corner and both edges equal to the target; the presented
+   pixels of the same still are otherwise identical (`303499` of `303525`, the 26
+   that changed are the corner arcs) so no frame moved; the title is unchanged
+   (`[2.31,2.52,3.15] / 81.4%` over 319x239, pre- and post-change captures
+   pixel-identical). See `docs/HANDOFF-2026-10-17-session160.md`.
+   **(o) The LOADTLUT destination key: measured, unexercised, and reported.**
+   The browser keys a palette upload by the load tile's `palette` field
+   (`palette * 16`), where RT64 writes the table at `loadTile.tmem << 3` and
+   samples it from the fixed upper-half base `RDP_TMEM_PALETTE` = `0x800` in
+   bytes, CI4 at `0x800 + (palette << 7)` and CI8 at `0x800 + (index << 3)`
+   (`tools/RT64/src/shaders/TextureDecoder.hlsli`). A tagged `probe160` printed
+   every `LOADTLUT` destination and every CI draw's tile fields over 8 forced
+   scenes (`0x04`, `0x05`, `0x07`, `0x0A`, `0x0B`, `0x0C`, `0x17`, `0x18`) plus
+   the forced publisher still: the four distinct loads are all
+   `tmem=0x100 palette=0` (16 entries/32 bytes at `0x1F16C0` and `0x1F1A90`, 256
+   entries/512 bytes at `0x1F1A00` and `0x207CA8`), and all six CI draws are
+   `palette=0` with `tmem=0x0` (their own texture address), `siz=0` against the
+   16-entry tables and `siz=1` against the 256-entry ones, one of them
+   `lut_mode=0` and reading no palette. `tmem=0x100` is the address the fixed base
+   samples, and the browser's entry `palette*16 + i` is TMEM byte
+   `0x800 + palette*128 + i*8`, so the two agree on every measured screen. The
+   item closes as unexercised, and `OGRE_TLUT_TRACE=1` prints one `[GFX-TLUT]`
+   line per distinct load destination, saying whether it is the assumed
+   `tmem=0x100 palette=0`, so a screen that loads elsewhere reports itself.
+   See `docs/HANDOFF-2026-10-17-session160.md`.
    **(k) The RDP's scissor clips a FILL-mode write: settled in session 150, and
    the native renderer fixed.** Session 149 fixed the
    browser's fill-colour decode (16-bit colours take the low 16 bits as RGBA5551,
@@ -853,6 +1380,101 @@ holds the evidence.
    inclusivity note stays a possible 1-pixel nuance that no screen has shown.
    New kept diagnostic `debug/probes/fills.cjs` captures a frame with only the
    fills drawn. See `docs/HANDOFF-2026-10-16-session149.md`.
+   **(l) The `[GFX-FBTEX]` row test's column over-report: closed in session
+   154.** Session 152 recorded that the detector compared a load against the rows
+   a draw covered and not the columns, so it could report a load that reads a
+   drawn row but no drawn pixel. `app/src/web_renderer.cpp` now records the byte
+   columns each draw covered and bounds the load's rect to its own columns; the
+   `testdraw.cjs` negative control (debug flag bit 6) proved it, `fbtex hits=2
+   lines=2` with the column comparison disabled and `hits=1 lines=1` with it. Its
+   open item 4, that the row test over-reports the top row by one, is closed in
+   session 155 (item (m) below).
+   **(m) The `[GFX-FBTEX]` row inversion, and framebuffer-as-texture: closed in
+   session 155.** `note_fb_write` computed
+   `height - 1 - trunc((pos + 1) / 2 * height)`, which is `y - 1` where the float
+   product lands on or above the integer and `y` where it lands below, so a fill
+   of rows 100..163 was recorded as 99..163. The inverse is now
+   `(1 - pos) / 2 * height` with the vertex treated as an edge (the lower-right
+   corner is exclusive) and `std::lround`, so the recorded rows are the rows the
+   draw covers. `test_draw`'s bit 6 gained a row control - a second colour image
+   at `0x00C28000`, a fill of rows 100..163 and a load of rows 98..99 - and
+   `testdraw.cjs --flags 96 --expect-hits 1` is the assertion: the old
+   arithmetic prints `fbtex hits=2 lines=2` with `drawn rows=[99,163]` and
+   `FAIL: expected fbtex hits=1, read 2`, the fixed build prints `hits=1
+   lines=1` and exits 0. Framebuffer-as-texture itself is closed as **no screen
+   needs it, with the sweep recorded**: the full 25-scene sweep
+   (`fbtex.cjs --scenes 0x00..0x18 --secs 18`) reports
+   `TOTAL framebuffer-as-texture loads: 0 over 25`, 21 of the scenes producing
+   display lists (3..136 tasks; `0x02`/`0x03`/`0x0D`/`0x0E` produce one task and
+   a page error; `0x0B` reached only the 3-task idle trajectory), the fixed build
+   re-checks `0x04`/`0x0A`/`0x10` at `hits=0` (`tasks` 39/25/29), and a natural
+   tap route through the opening reports `tasks=196 hits=0`. The detector stays
+   so a screen that needs the feature reports itself. See
+   `docs/HANDOFF-2026-10-17-session155.md`.
+   **(n) The title's cloud bands: closed in session 162 as the browser's missing
+   `OGRE_FOG` repair, not a blend defect.** 525 native `OGRE_CAPTURE_TARGET` frames
+   of the forced title
+   (`OGRE_SPEED=1`, `OGRE_CAPTURE_EVERY=1`) against 40 browser frames of the same
+   forced scene: the minimum over the series is `meanAbs=[2.08,2.23,2.74]`,
+   `meanSigned=[-2.03,-2.17,-2.67]`, 79.2% exact with the presenter's unwritten
+   edge inset out (`[2.31,2.32,2.71] / 79.2%` without), and the per-row profile
+   keeps a one-signed -8..-13 in rows 80..119 and 190..233. Session 156 left
+   three candidates: GL blending not enabled for that draw, the sampled alpha
+   not the decoded texel alpha, or the blend mapping wrong. Session 157
+   measured all three and all are false. `GL_BLEND` is enabled for the
+   `0x217508` draw with `GL_SRC_ALPHA`/`GL_ONE_MINUS_SRC_ALPHA` and
+   `GL_FUNC_ADD`, `glGetError()` is 0; the fragment alpha of the shader equals
+   the decoded texel alpha (159 at image (8,13), whose decode is
+   `(190,175,157,159)`, and 0 at a fully transparent texel); and the GL blend
+   result equals `alpha*frag + (1-alpha)*dst` on all 47 mid-alpha pixels of a
+   probed row, worst deviation 0. The bands are the rows where no layer of the
+   list is opaque: the list is one opaque black `G_FILLRECT`, then the sky
+   `0x1C3EA8` (rows 0..89, 16..80), `0x1E2918` (24..129), `0x217508` (80..239)
+   and `0x249538` (126..238), with rows 120..189 exact because `0x217508` is
+   opaque there. Where the `0x217508` texel is transparent the two renderers
+   agree exactly at rows 200/210/220 (meanSigned 0.0) and where it is opaque the
+   browser writes the raw texel while the native is 12..44 levels brighter
+   (row 200 x=200 browser (21,23,8) vs native (42,44,30)), so the difference is
+   in the layers that are translucent in those rows, not in the probed draw.
+   Next: point the same row readback at `0x249538` and `0x1E2918`, and check the
+   tile-window masking the browser does not implement. Session 158 did both and
+   excluded the tile-window candidate: on all 22 five-row texrect strips of the
+   first title frame the `probe158` line reads `masks=0 maskt=0 cms=0 cmt=0`,
+   the upload is `200x5`, both wrap modes are `GL_CLAMP_TO_EDGE`, and the
+   browser's texel equals RT64's `clampWrapMirrorSample` texel in 66 of 66
+   comparisons. The `s` range is 0..200 texels (`uv0=(0.000,0.000)`,
+   `uv3=(200.000,5.000)`) over a window of `uls=0, lrs=796` = texels 0..199, so
+   no sample is out of window; session 157's "s runs to 320" is corrected. The
+   fog draw's own output is the blend of its decoded texel (`bef=(0,0,0)` ->
+   `aft=(18,39,36)` at alpha 255, `bef == aft` at alpha 0), and the fresh browser
+   frame equals the native capture in 36 of 36 sampled pixels of rows 200..231,
+   including the pixels the fog writes opaquely. The fresh pair's profile puts
+   every difference on a row whose visible layer is translucent: rows 120..189
+   `0.03`, rows 80..119 `-7.75` across the whole width, rows 190..238 `0.05` at
+   x < 140 (where the fog is opaque) and `-11.5` at x >= 140 (where the cloud
+   shows). Next: one native run with `OGRE_TEX_TRACE=1 OGRE_TEX_TRACE_COLOUR=1`
+   to compare the native's decoded `mean`/`opaque` per `0x217508` strip with the
+   browser's; equal numbers put the difference in the composition (the
+   destination the partial-alpha cloud blends onto), different numbers put it in
+   the image's content or alpha. Session 159 ran it and closed that candidate.
+   `colour_mean` does not decode RGBA32, so a tagged probe printed the tile
+   window of an RGBA32 draw on the native side and the same window's alpha
+   statistics on the browser side: 444 of 444 draw windows agree and none differ
+   (`|dmean| < 0.15`, equal `opaque`), including all 54 windows of `0x217508`
+   over 53 native frames, whose content is constant. So the RGBA32 bytes and the
+   alpha are the same in both runs and the survivor is the composition. The
+   residual is zero in rows 186..193 and 234..238, and +18.9 mean over the 5116
+   differing pixels of rows 195..232 (native brighter) from a slanted left edge;
+   it is neither a translation nor an alpha scale on the composite. The two
+   runs' lists also differ in structure (browser 135 draws with full-width
+   `0x217508` strips, native 590 with seven 72-pixel columns of 1-pixel strips),
+   which session 156's 0.46-3.01-level phase bound keeps out of the residual, so
+   the next instrument is a per-draw readback of one target row inside one
+   renderer. See
+   `docs/HANDOFF-2026-10-17-session156.md`,
+   `docs/HANDOFF-2026-10-17-session157.md`,
+   `docs/HANDOFF-2026-10-17-session158.md` and
+   `docs/HANDOFF-2026-10-17-session159.md`.
    **The native's saved game speed is x4 and the browser's is x1**; every native
    capture needs `OGRE_SPEED=1` to be comparable with the browser.
    See `docs/HANDOFF-2026-10-16-session148.md` and
@@ -882,6 +1504,309 @@ holds the evidence.
    pass), CI and this machine use different Emscripten versions, and the first
    load downloads the whole 21 MB wasm before the visitor has picked a ROM. See
    `docs/HANDOFF-2026-10-14-session140.md` and `docs/WEB-PORT-DEPLOYMENT.md`.
+   **(p) The title fog repair in the browser: closed in session 162.** The
+   browser now performs the native `OGRE_FOG` repair as a pre-pass over each
+   submitted display list (`web_renderer.cpp` `FogWalker`/`fog_repair_group`,
+   called from `execute_dl` before `gbi::walk_dl`), with the same white-combiner
+   test (`0xFFFF73B9`), zero-area-window test, layer-table reads at `D_801B80E0`
+   (`+0xFC + i*0x24`), image-record field order and `SETTIMG`/`SETTILE t7`/
+   `SETTILE t0`/`LOADTILE`/`SETTILESIZE t0` rewrite as
+   `app/src/renderer.cpp:1003-1219`, plus the same layer advance (0, 2, 3, ...)
+   and the negative-coordinate fallback. It is a browser-side port only;
+   `renderer.cpp` is unchanged. `OGRE_FOG=0` disables it (default on), read from
+   the page query string by the existing `ENV` publish in `app/web/web.js`.
+   Measured: browser title vs native fog-on `t.177` is
+   `[0.09,0.09,0.12]` 91.5% exact (rows 0.014/0.273/0.060) against
+   `[2.08,2.23,2.74]`/79.2% before; vs native fog-off `t.279` it is
+   `[0.03,0.03,0.03]` 97.3%; the cross-controls are 2.740 and 2.733. Session 163
+   retested the remaining band with RT64's high-precision colour attachment and
+   found it is not blend precision: the RGBA16F and RGBA8 canvases differ by
+   0.0091 mean (0.906% of samples, one level) while both stay ~0.098 against
+   `t.177`, and against the native target's own 8-bit rounding the band is still
+   0.241. The difference is one wave in rows 81..119, the translucent top edge
+   of the repaired fog layer, whose image is a 64x64 I8 image
+   (`[GFX-FOG-SUMMARY]`: `siz=1 fmt=4`, layer 2, `0x801D51E8`). Session 164
+   corrected the "compare the sampled intensity" next step: `[GFX-FOG-DRAW]`
+   shows the repaired groups are point-sampled (`filt=0`, `mask=(64,64)`,
+   `cm=(0,0)`) 320x1 strips and 64x64 1:1 blocks, so the sampled texel is exact
+   in both renderers and a filter difference is excluded; the remaining
+   candidate is the composition under the fog's partial alpha. See (q).
+   Publisher `[0.0,0.0,0.0]/100%`, `boot.cjs` `RENDERED`, and the story's fills
+   are unchanged; none of those three runs fires the repair. See
+   `docs/HANDOFF-2026-10-17-session162.md` and `-session163.md`.
+   **(q) The RDP texture sampler: ported from RT64 in session 164.** The browser
+   sampled with the GL fixed-function sampler, whose filtering was a property of
+   the uploaded texture (the `G_TF_*` of whichever draw caused the decode), which
+   had no `masks`/`maskt` wrap or mirror beyond the whole texture repeating, no
+   `G_TF_AVERAGE`, and no hardware coordinate quantization. `web_renderer.cpp`
+   now runs RT64's `TextureSampler.hlsli` in the fragment shader:
+   `clampWrapMirrorSample` (clamp to the tile window, modulo the mask, mirror on
+   `G_TX_MIRROR`), `sampleTextureLevel`'s point/bilerp/average selection, the
+   three-point filter RT64's default `threePointFiltering` uses, and
+   `round(uv * 128) / 128`. The filter is now per draw from OTHERMODE_H.
+   `OGRE_TEXF=rt64` (default), `1`/`bilinear`, `gl` (the old path) select it, and
+   `[GFX-SAMPLER]` counts textured draws by filter and mask. Measured: title 591
+   textured draws (point 591, masked 456), world map 99 (point 99, masked 1),
+   publisher 56 (point 56, masked 0); `[GFX-FOG-DRAW]` shows the repaired fog
+   draws are `filt=0` point-sampled, so the fog band is not a filtering
+   difference; the tutorial `0x17` is the reached bilinear screen (6 of 8 draws
+   bilerp, 6 masked) and its 64x64 tiling background is drawn 447x335 texels over
+   320x240 with `masks=6`. No regression on the point-sampled screens
+   (`boot.cjs` `RENDERED`, `testdraw --flags 96` `fbtex hits=1`, title series
+   matching the native at `0.134` mean / band `0.070`). See
+   `docs/HANDOFF-2026-10-17-session164.md`.
+   **(r) The browser's tutorial `0x17` dialogue box: closed in session 167.**
+   The forced tutorial drew a torn portrait, opaque black glyph cells and a
+   bright green border against RT64's clean Deneb portrait and readable text.
+   Both remaining faults were one mechanism: the renderer decoded each tile
+   directly from RDRAM with the `SETTIMG` width as the row stride, while the RDP
+   samples TMEM (a load's source stride and the tile's `line` are independent),
+   and its fragment shader had no alpha-compare/coverage path, so the
+   `CVG_X_ALPHA` draws painted their zero-alpha palette entries. `web_renderer.cpp`
+   now keeps a persistent 4 KiB TMEM, copies every load into it with RT64's
+   layout, decodes a tile at `tmem << 3` over RT64's sample window, and runs the
+   RDP's alpha compare and coverage discard. The strip tiles decode 16x8 from
+   `img=0x24E340` (`line=1 masks=4 maskt=3`) and the glyphs 16x16 CI4, with the
+   palette at TMEM `0x800`. The remaining difference was the box-interior
+   parchment, measured in session 166: one draw pair over the whole interior,
+   **point-sampled**, at about 0.98 texel per pixel, whose sampled texel row was
+   one less in RT64 than in the browser at the same pixel (24 of 24 rows).
+   Session 166 recorded that as "mechanism unnamed"; session 167 names it:
+   **RT64's half-pixel screen offset**. `rt64_framebuffer_renderer.cpp:1528`
+   builds `halfPixelOffset = {1/width, -1/height}`, assigns it as
+   `triangles.screenOffset` (lines 1571-1572), and `RasterVS.hlsl:25` applies it
+   as `ndcPos.xy = ndcPos.xy * screenScale + screenOffset * ndcPos.w`, i.e. half
+   a pixel right and half a pixel down for every non-rect vertex; the browser's
+   `transform_vertex` did not apply it. The two-line change (`sx += 1/W`,
+   `sy -= 1/H`) brings the box to `0.22` mean over rows 166..219 against the
+   session-166 native target, from `5.88`: parchment rows 172..195 `10.49 ->
+   0.25`, lower rows 196..218 `2.01 -> 0.17`, portrait `1.10 -> 0.00`, the name
+   line `13.32 -> 0.00` and the text body `4.01 -> 0.00`, with the border rows
+   (texrects) unchanged at `0.33 -> 0.29`. The texel-row test is 24/24 at columns
+   100, 150, 200 and 285 after the change (3/24 at column 285 before). The title
+   is unchanged (`0.20 -> 0.18` best native match at its scroll phase) and the
+   world map's frame moves only on its triangle-drawn unit sprite. Session 165's
+   "two texels per pixel, flat `v=51` band below" is withdrawn (the lower rows
+   lack contrast, which is why they matched). The browser also interpolates
+   attributes perspective-correctly (vertex clip `w` through the rasterizer, as
+   RT64's `RSPProcessCS`/`RasterVS` do) and carries RT64's `G_TP_NONE` halving;
+   the box's quad has constant `w`, so those changes leave it unchanged. The old proofs `web-tutorial-browser-vs-native.png` and
+   `web-tutorial-sampler-ab.png` show the defect this replaces; the pair after,
+   during and against the native is
+   `docs/proofs/web-tutorial-half-pixel-before-after.png`. See
+   `docs/HANDOFF-2026-10-18-session165.md`,
+   `docs/HANDOFF-2026-10-18-session166.md` and
+   `docs/HANDOFF-2026-10-18-session167.md`.
+   **(s) The browser reaches mission scene `0x03` from a battery save and then
+   traps before its first frame (session 168).** `?OGRE_SAVE=<url>` imports a
+   32 KiB battery to `/ogre/saves/ogrebattle64-us-rev1.bin` after the IDBFS load
+   and before `ogre_start_boot()`, and `?OGRE_TAP_SCENE_BUTTON=...` is the
+   native scene-keyed tap schedule keyed on the page's own `[scene]` lines. With
+   `assets/escort_suspend.bin` the browser logs `[save] loaded
+   /ogre/saves/ogrebattle64-us-rev1.bin (32768 bytes)`, drives the forced title
+   -> Load Game -> `[scene] t=85121ms id=0x0003`, streams five of the six
+   overlay banks the native streams, and then the worker reports `Uncaught
+   RuntimeError: memory access out of bounds` without submitting a mission
+   display list. The canvas keeps the Load Game frame. **Session 169 names the
+   trap and gets a mission frame.** The trap is a guest `MEM_W` store in
+   `func_80071950` (the message-queue node unlink), reached from the scene-`0x03`
+   enter `func_80173724` -> `func_801792DC` (flush pending queue message) ->
+   `func_800712C4` (queue send). The flush reads the queue-pool global
+   `0x8018FC88` (`G = 0x80243E10`, set by the queue init `func_8017909C`), and in
+   the browser the words at `G-0x20`/`G-8` hold `0xFFFDFFFD` - two 16-bit
+   `0xFFFD` = RGBA5551 (31,31,31,1) opaque white, i.e. pixel data written into the
+   game's heap block - where the native run has valid list pointers and `0`. The
+   flush then unlinks a node whose pointer is the white pattern and stores
+   through it, out of bounds. The bank link is not involved: all 22
+   `func_ovlP_*` symbols are in `build-wasm/ogrebattle64.wasm` and
+   `libBankPFuncs.a` is in the wasm link line, and the sixth record is requested
+   only after an A press in scene `0x03` (native log), not on the enter path.
+   The writer of the white data is still unnamed; the native watchpoint on
+   `0x80243E10` shows only `func_8017909C`. When the clobber happens to land
+   eight bytes higher the enter survives and the browser **renders the mission**:
+   `docs/proofs/web-mission-first-frame.png` is that frame beside the native
+   `t.800` (meanAbs R=23.54 G=14.96 B=7.86, exact=0.3094, against session 168's
+   two-different-screens 81.14/73.78/54.39 and 0.0406). Lighting, depth and
+   culling are still unimplemented, so the browser's terrain is unshaded.
+   **Session 170 names the writer and fixes it.** `D_8018FC88` is the sprite
+   part cache (session 132's layout), not a message queue: `func_8017909C`
+   allocates it, `func_801792DC` releases it (`D_8018FC88 = free(...)`),
+   `func_800712C4` is the game allocator's free/coalesce path and
+   `func_80071950` is a tree-node unlink. The words that trap are the **block
+   header** at `G-0x20`: `+0x18` is the size the free tests against `0x21` and
+   `+0x08`/`+0x0C`/`+0x10` are the links it stores through. The writer is the
+   browser renderer's framebuffer writeback, `readback_framebuffer` /
+   `readback_all_framebuffers` in `app/src/web_renderer.cpp`: scene `0x12`
+   renders a 320x240 colour image at guest `0x80228080`
+   (`0x228080..0x24D880`), the cache block at `0x80243E10` lies inside it, and
+   `ogre_gfx_flush` wrote **every** framebuffer back on **every present**, so the
+   image's 16-bit pixels landed on the live cache header (`probe170` logged
+   `writeback fb=0x228080 covers 0x243DF0 ... rows(wy)=[0,239]`, and the guest
+   dump showed 22 891 `0xFFFD` halfwords in `G ±0x8000`; native has none). The
+   fix writes framebuffers back only for the game's own
+   `ogre_sync_framebuffers` request, which is where RT64 does it
+   (`State::syncFramebuffers`) and the only point at which the guest is blocked
+   on the renderer; the route then reaches `0x03` and renders
+   (`nonBlack=303148`, `colorful=288300`) with `G-4 = 0x353212FF`, the native
+   value. See `docs/HANDOFF-2026-10-18-session170.md`.
+   **Session 171 lands the two biggest renderer features this scene uses:
+   `G_LIGHTING` (916 448 of 989 100 triangle draws) and backface culling
+   (926 539).** `app/src/web_renderer.cpp` keeps RT64's lights
+   (`std::array<Light, RSP_MAX_LIGHTS + 1>`, `hle/rt64_rsp.h:163`): `G_MOVEMEM`
+   index 10 (`MV_LIGHT`, slot `offset/24`, slots >= 2) writes one light,
+   `G_MOVEWORD` `G_MW_NUMLIGHT`/`G_MW_LIGHTCOL`/`G_MW_FOG` set the count, a
+   colour and the fog vector, and the 24 raw bytes are read with the runtime's
+   `n64b` (`off ^ 3`). `transform_vertex` then replaces the vertex colour with
+   RT64's result (`RSPProcessCS.hlsl:88-108`): the Vtx colour bytes are the
+   normal over 127, `ambient = light[num_lights]`, and each of the
+   `num_lights` lights adds `max(dot(norm, normalize(dir * worldMat)), 0) * col`
+   with `worldMat = st.modelview_stack.back()` (`hle/rt64_rsp.cpp:538`, the
+   G_MTX MODELVIEW matrix, `extended.viewProjMatrix` identity), then
+   `rgb = min(result, 1)`. The light layout is measured from the game's own
+   bytes (`raw 4D 4D 7F 00 4D 4D 7F 00 FD 99 C5 00`, pads at 3/7/11), so the
+   logical reads are colour 0/1/2 and direction 8/9/10. Point lights are
+   unreachable (RT64's `pointLighting` flag is false for every GBI,
+   `gbi/rt64_gbi.h:39`) and are not implemented. Culling mirrors
+   `RSP::drawIndexedTri` (`hle/rt64_rsp.cpp:1059/1094/1132`): both bits draw
+   nothing, `G_CULL_FRONT` alone swaps the first and last index, then
+   `N = cross(V, U)` from screen-space positions (NDC `(x, -y)`) must have
+   `N.z >= 0`. F3DEX2's cull bits are `0x200`/`0x400`. A permanent
+   `[GFX-LIGHT]` census prints every 400 lit draws. **Measured** against native
+   `/tmp/w168/nat2/t.800`: `meanAbs 23.72/15.30/8.11` (`exact 0.3090`) ->
+   `5.28/5.05/3.73` (`exact 0.4372`), `meanSigned +0.91/+1.16/+0.84`; terrain
+   regions top cliff rows 0..38 `18.92 -> 0.93`, right terrain `17.94 -> 2.26`,
+   bottom middle `17.18 -> 5.24`, left grass `18.10 -> 7.87`, whole frame
+   `15.71 -> 4.69`. The two frames are different intro phases (portrait box
+   position, camera distance, `MISSION` band). No regression: the tutorial
+   `0x17` frame is byte-identical to session 167's (`md5
+   10b3536365b1bcfb6d2e2116aaf42a24`, box 0.22), the title's best native match
+   is 0.11 (no triangle draws), and the world map differs from session 167's
+   frame only by its fade (gain 1.932, residual 0.99). Depth (516 463 draws)
+   and per-vertex fog alpha are the remaining features of this scene. See
+   `docs/HANDOFF-2026-10-18-session171.md`.
+   **Session 172 lands the RDP depth pipeline's state, target, transform and a
+   synthetic assertion, and ships the depth test off.** `G_SETZIMG` (2 360
+   commands of scene `0x0003`) and `G_SETPRIMDEPTH` (11 740) now decode into
+   `RenderState` (`zimg_*` with address `w1 & 0xFFFFFF`, fmt 21-23, siz 19-20,
+   width bits 0-11 + 1; `prim_depth = (z & 0x7FFF)/32767`), `DrawCmd` carries
+   `depth_test = zCmp && !copy && zMode != ZMODE_DEC` and
+   `depth_write = zUpd && !copy` plus `z_source_prim`, `prim_depth` and per-vertex
+   NDC z, each `GlFramebuffer` owns a `GL_DEPTH_COMPONENT24` renderbuffer cleared
+   to 1.0, and the fragment shader runs RT64's F3D depth clip
+   (`1022.0/1024.0`, RasterPS.hlsl:63-104). The vertex depth is RT64's screen z:
+   `pos.z/w * vscale[2]/1024 + vtrans[2]/1024` (`hle/rt64_rsp.cpp:23/714/908`,
+   so the axis is `/1024`, and the mission's `Vp_t [640 480 511 0]` puts the 511
+   at index 2, not RT64's struct index 3), and the shader gets `2*z - 1` so
+   `gl_FragCoord.z` is that 0..1 value. A permanent `[GFX-DEPTH]` census prints
+   the zCmp/zUpd/prim/DEC counts, the `G_SETZIMG` configurations, the draw's
+   window-z range and the viewport z transform. **The synthetic control is the
+   correctness proof**: `test_draw` debug flag bit 7 draws the near triangle first
+   (red) and the far one second (blue) with `Z_CMP|Z_UPD`, and the renderer reads
+   the target's pixel back - `testdraw.cjs --flags 128 --expect-depth near` reads
+   red, `--flags 384 --expect-depth far` (Z_CMP cleared) reads blue, both exit 0.
+   On the mission, `[GFX-DEPTH]` reads `zcmp=zupd=20307` of 44 800 draws (45%,
+   the `0x00552078` group), `prim=0`, `dec=0`, `zimg_seen=2` (`0x228080`,
+   `0x3350C0`, both `fmt=0 siz=0 width=1` - RT64's `setDepthImage` takes only the
+   address). Session 172 measured the test as a frame regression (7.25/6.63/6.98,
+   `exact 0.3614`, top cliff 0.93 -> 9.52) and shipped it off; **session 173 shows
+   that regression was a capture-phase difference, not a depth effect, and the
+   test now ships on** (open item 8(u)). Depth off measured 4.77/4.54/3.19,
+   `exact 0.4387`, cliff 0.93 at that round's phase. `ZMODE_DEC` is reported, not
+   approximated. See `docs/HANDOFF-2026-10-18-session172.md` and
+   `-session173.md`.
+   **(u) The browser's depth target was keyed by the colour image, not by the
+   depth image; fixed, and the mission's depth test is not what the top band
+   showed.** Session 173 found the ordering problem in the target, not in the
+   comparison: every `GlFramebuffer` (one per `G_SETCIMG` address) owned its own
+   depth renderbuffer, while RT64 keys its depth `RenderTarget` by `G_SETZIMG`'s
+   address/width/siz independently of the colour target
+   (`hle/rt64_state.cpp:1354-1365`, `:1389-1401`,
+   `hle/rt64_framebuffer_manager.cpp:171`). The mission renders one depth image
+   (`0x3350C0`) from four colour images (`0x3350C0`, `0x025C00`, `0x04B400`,
+   `0x000400`; the new `[GFX-DEPTH] pair` census reads `pairs=11`), so the colour
+   images after the first drew against a cleared buffer. The depth renderbuffers
+   now live in a map keyed by the depth image, the flush attaches the matching one
+   to the colour FBO and clears it once, and the contents persist across colour
+   switches as RT64's do. **The measured result is that the depth test changes no
+   pixel of the mission's gameplay frames**: with flag bit 9 toggling it inside one
+   run at the same intro phase, four of five on/off pairs are bit-identical
+   (whole frame and rows 0..38, 200..238, 40..180 all `0.000`). So session 172's
+   `0.93 -> 9.52` was a phase difference (the captured band contains the note
+   box, the portrait and the scrolling MISSION text), not a depth ordering
+   failure, and that item is withdrawn as a depth finding. The depth test now
+   ships **on** by default (`OGRE_DEPTH=0` disables it); the synthetic control
+   still passes (`--flags 128 --expect-depth near`, `--flags 384 --expect-depth
+   far`), and a one-shot `[GFX-DEPTH] first depth-tested draw` line reports the
+   attachment (`status=0x8CD5` complete). Not re-measured this round: tutorial
+   `0x17`, title `0x04`, map `0x05`. See
+   `docs/HANDOFF-2026-10-18-session173.md`.
+   **(t) The browser mission frame is between two intro phases.** The scene
+   `0x03` frames compared this round are the same screen at two moments (the
+   browser's camera and the "Castle Burgund" portrait box sit differently from
+   native `t.800`'s), so a whole-frame number is not a like-for-like measure.
+   A frame-locked pair needs a deterministic tick: a save state entered at the
+   same step in both renderers, or an `OGRE_CAPTURE_TARGET` series on the native
+   side matched to the browser frame's phase, as the title comparison does
+   against `/tmp/w162/nat-fog/t.*.bin`.
+   **(v) The browser renderer takes `G_TP` from OTHERMODE_H bit 19, applies the
+   tile `ShiftScaleMap`, feeds the chroma-key combiner inputs and applies
+   per-vertex fog alpha (session 174).** `record_state` read bit 10, which is
+   not an RDP field; RT64's `G_MDSFT_TEXTPERSP` is bit 19
+   (`tools/RT64/src/shared/rt64_f3d_defines.h:51`, consumed at
+   `src/shaders/TextureSampler.hlsli:221-226`). The new `[GFX-TP]` census prints
+   one line per (kind, OTHERMODE_H) family with the old and new reading and
+   `changes=0` on every family of the tutorial, title, map, mission and attract
+   story: every observed triangle family has both bits set and the rect families
+   have bit 19 clear while `kind != 0` keeps their correction suppressed.
+   `ShiftScaleMap` (`hle/rt64_state.cpp:33-51`, `:306-307`,
+   `TextureSampler.hlsli:226`) is now a uniform pair multiplied into the sampled
+   coordinate before the 1/128 rounding; it is 0 on the tutorial, title and map,
+   and the mission's ~19-25 k shifted draws do not change its frame (runtime
+   A/B). `OP_SETKEYR`/`OP_SETKEYGB` decode RT64's fields
+   (`hle/rt64_rdp.cpp:1223-1236`, `gbi/rt64_gbi_rdp.cpp:154-169`) and the
+   combiner's `C_KEY_CENTER`/`C_KEY_SCALE` inputs return them
+   (`RasterPS.hlsl:185-186`, `shared/rt64_color_combiner.h:482-485`); a one-shot
+   `[GFX-KEY]` reports the first draw that reads one and no reached screen did.
+   `G_FOG` now replaces the vertex alpha with
+   `clamp((max(tfPos.z,0)/tfPos.w * mul + offset)/255, 0, 1)`
+   (`RSPProcessCS.hlsl:70-80`), with a one-shot `[GFX-FOG] per-vertex alpha`
+   note; no reached screen sets `G_FOG`. Measured this round: tutorial box
+   0.25/0.00/0.18 by band against native `t.335` (frame rows 0.29), map
+   `nonBlack=252820` with fade gain 1.927 and residual 0.84, mission
+   `meanAbs 7.07-7.58` with `exact 0.3489-0.3633` against `t.800` at its own
+   intro phase. Not verified: the publisher stills `0x0A` (the forced entry
+   never advanced) and the title/attract 0.11-0.20 match (the browser's forced
+   title lands on the menu, which the native series does not contain). See
+   `docs/HANDOFF-2026-10-18-session174.md`.
+   **(w) The close-out round: smoke on a quiet machine, a fresh title pair, the
+   S2DEX2 opcode census, and the `G_CD` decision (session 175).** The smoke
+   battery passes on a quiet machine — `boot.cjs --attempts 3 --secs 40`
+   `RENDERED` on attempt 1 (`nonBlack=24452 colorful=10140`), `testdraw --flags
+   96` `fbtex hits=1 lines=1`, `--flags 128` reads the near (red) triangle and
+   `--flags 384` the far (blue) one — so session 174's `NO RENDER` was
+   environmental. The title comparison is re-made with a **fresh native series of
+   the same forced scene** (`/tmp/w175/nat-title60`, 80 targets): the browser's
+   attract **story** frame matches `t.640` at `[0.24,0.25,0.28]` (85.1% exact)
+   and its **logo** frame matches `t.1080` at `[1.88,1.96,2.23]` (72.1%), with
+   the clouds exact (`0.07`/`0.08`) and the difference on the logo (`5.32`) and
+   copyright (`8.49`) bands, at a `(0,0)` shift minimum. So `/tmp/w162/nat-fog`
+   was the wrong series (attract backdrop and story overlay, no logo) and the
+   forced title is not deterministic in the browser (three runs, two beats). The
+   new permanent `[GFX-S2D-CENSUS]` counts every S2DEX2 opcode byte and prints
+   `undecoded=`; **no reached screen submits an S2DEX2 list**, and the forced
+   `new-game` route never advanced (`tasks=1`), so the census is compiled and
+   unexercised and the `0xDA`/`0xDC`-only claim still rests on session 51's
+   trace. `G_CD` is decided not to be implemented: the game enables it
+   (`G_CD_MAGICSQ` on title/map/mission/story, `G_CD_BAYER` on the tutorial), but
+   RT64 dithers only in its native-format writeback and the presented canvas
+   samples the GL colour image, and no reached screen reads a framebuffer back
+   (`[GFX-FBREAD]` absent), so it is a readback-path difference. The publisher
+   `0x0A` forced entry now advances 30 display lists (`texrect=136 fillrect=96`)
+   but presents nothing (black canvas or the unpresented canvas), so the still is
+   still unverified. Mission `0x03` on the final build: `nonBlack=303208`,
+   `colorful=294108`, whole frame `7.88/7.18/6.91` (`exact=0.3481`), terrain
+   `10.30/7.57/4.62/9.48`, with the same intro-phase caveat. See
+   `docs/HANDOFF-2026-10-18-session175.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

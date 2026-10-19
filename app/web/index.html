@@ -55,20 +55,31 @@
     <input type="file" id="rom-input" accept=".z64,.n64,.v64,.bin">
   </label>
 </div>
+<div id="save" style="margin-bottom:16px;">
+  <label>Load save (32 KiB battery <code>.bin</code>):
+    <input type="file" id="save-input" accept=".bin,.srm,.n64">
+  </label>
+</div>
 <p class="muted" id="controls">
   Controls (keyboard): X=A, Z=B, C=Z, Enter=Start, Q=L, E=R, arrows=D-pad,
   I/K/J/L=C buttons. Gamepads: slots 1-3. Game audio is <b>muted</b> (the audio
   microcode is not emulated yet, so the samples screech) — add <code>?audio</code>
   to the URL to hear it, and <code>?log</code> for the full console.
+  <code>?OGRE_SAVE=&lt;url&gt;</code> fetches a battery image and installs it as
+  <code>/ogre/saves/ogrebattle64-us-rev1.bin</code> before the boot (relative URLs
+  resolve from the server root, e.g. <code>?OGRE_SAVE=assets/escort_suspend.bin</code>).
 </p>
 <div id="gfx-wrap" style="margin-bottom:12px;">
   <!-- The CSS box here is the initial 2x upscale of web.js's 320x240 drawing
        buffer. The renderer sets both the buffer and this box on every VI mode
        change (`resize_canvas`), always as an integer multiple, so the browser
-       never resamples the frame to fit the box. -->
+       never resamples the frame to fit the box. The canvas has no border radius:
+       a rounded corner blends the frame's own corner pixels with the page
+       background, and those pixels are game output (session 160 measured the
+       four corners 180..219 levels off RT64's target). -->
   <canvas id="game-canvas" width="640" height="480"
           style="width:640px; height:480px; image-rendering:pixelated;
-                 background:#000; border:1px solid #2a2e35; border-radius:6px;"></canvas>
+                 background:#000; border:1px solid #2a2e35;"></canvas>
   <p class="muted" id="gfx-status" style="font-size:12px; margin:4px 0 0;">
     graphics: waiting for the WebGL2 context (created on ROM pick)
   </p>

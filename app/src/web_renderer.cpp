@@ -38,6 +38,7 @@
 #include <cstring>
 #include <chrono>
 #include <map>
+#include <utility>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -47,6 +48,7 @@
 
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
+#include <emscripten/html5_webgl.h>
 #include <emscripten/threading.h>
 #include <GLES3/gl3.h>
 
@@ -99,7 +101,10 @@ char g_stats_snapshot[4096];
 //           diagnostic was used to find.
 //   bit 5 = `ogre_gfx_test_draw` also renders into a colour image and loads a
 //           tile back out of that same address, the positive control for the
-//           `[GFX-FBTEX]` diagnostic (see `fb_written_`).
+//           `[GFX-FBTEX]` diagnostic (see `fb_written_`);
+//   bit 6 = two negative controls on top of bit 5's image: a load in a drawn
+//           row and outside every drawn column, and a load in a row the fill
+//           never drew (`test_draw`, `testdraw.cjs --flags 96`).
 std::atomic<uint32_t> g_debug_flags{0};
 
 std::atomic<uint64_t> g_exec_cmd{0};      // command index within the current DL
@@ -431,6 +436,21 @@ inline const char* blend_pm_name(int v) { return (v >= 0 && v <= 3) ? kBlendPMNa
 inline const char* blend_a_name(int v) { return (v >= 0 && v <= 3) ? kBlendANames[v] : "?"; }
 inline const char* blend_b_name(int v) { return (v >= 0 && v <= 3) ? kBlendBNames[v] : "?"; }
 
+// RT64's `ShiftScaleMap` (tools/RT64/src/hle/rt64_state.cpp:33-51): the scale a
+// tile's G_TX shifts/shiftt field applies to the sampled coordinate,
+// `uvCoord = inputUV * perspCorrectionMod * float2(shifts, shiftt)`
+// (shaders/TextureSampler.hlsli:226). `State::setupDrawCall` stores the table
+// value in `RDPTile::shifts`/`shiftt` (`hle/rt64_state.cpp:306-307`).
+inline float tex_shift_scale(uint32_t shift) {
+    static const float kShiftScaleMap[16] = {
+        1.0f,       1.0f / 2.0f, 1.0f / 4.0f,  1.0f / 8.0f,
+        1.0f / 16.0f, 1.0f / 32.0f, 1.0f / 64.0f, 1.0f / 128.0f,
+        1.0f / 256.0f, 1.0f / 512.0f, 1.0f / 1024.0f, 32.0f,
+        16.0f,      8.0f,       4.0f,         2.0f
+    };
+    return kShiftScaleMap[shift & 0xF];
+}
+
 // Rendering state carried across a display list.
 enum class GbiKind { F3DEX2, S2DEX2 };
 
@@ -444,6 +464,15 @@ constexpr uint8_t S2D_OBJ_RECTANGLE_R = 0xDA;
 constexpr uint8_t S2D_OBJ_MOVEMEM = 0xDC;
 constexpr uint8_t S2D_RDPHALF_0 = 0xE4;
 
+// F3DEX2 geometry-mode bits this renderer evaluates. G_LIGHTING, G_FOG and
+// G_ZBUFFER are RT64 `shared/rt64_f3d_defines.h:100-103`. G_SHADE (0x00000004)
+// has no arm: shading is always smooth.
+constexpr uint32_t kGeomCullFront = 0x00000200;  // G_CULL_FRONT
+constexpr uint32_t kGeomCullBack = 0x00000400;   // G_CULL_BACK
+constexpr uint32_t kGeomCullBoth = kGeomCullFront | kGeomCullBack;
+constexpr uint32_t kGeomFog = 0x00010000;        // G_FOG
+constexpr uint32_t kGeomLighting = 0x00020000;   // G_LIGHTING
+
 struct RenderState {
     // Matrices (RSP row-vector convention).
     Mat4 projection = Mat4::identity();
@@ -453,6 +482,25 @@ struct RenderState {
     uint32_t geometry_mode = 0;
     uint32_t othermode_h = 0;  // 24-bit; cycle type at bits 20-21
     uint32_t othermode_l = 0;
+
+    // RSP lights. F3DEX2 has no light command of its own: G_MOVEMEM index 10
+    // (MV_LIGHT) writes one entry, and G_MOVEWORD sets the count and a colour.
+    // RT64 keeps `std::array<Light, RSP_MAX_LIGHTS + 1> lights`
+    // (tools/RT64/src/hle/rt64_rsp.h:163) and treats entry `num_lights` as the
+    // ambient term (RSPProcessCS.hlsl:92 `ambientIndex = lightIndex +
+    // lightCount - 1`), so 7 directional/point lights plus ambient.
+    static constexpr int kMaxLights = 8;       // RT64 RSP_MAX_LIGHTS (7) + ambient
+    static constexpr int kLightStride = 24;    // G_MOVEMEM slot = offset/24
+    // The 24 raw bytes of each slot, already in N64 byte order (copied with
+    // n64b at G_MOVEMEM time). RT64 memcpy's sizeof(Light) = 16 bytes
+    // (RSP::setLight); the trailing 8 bytes are kept so the slot stride and the
+    // stored image agree, and are never read.
+    uint8_t lights[kMaxLights][kLightStride]{};
+    int num_lights = 0;
+    // G_MOVEWORD G_MW_FOG: the fog vector RT64 keeps per RSP state. Stored so
+    // the command is decoded where RT64 decodes it; no per-vertex fog alpha is
+    // applied (see transform_vertex).
+    int32_t fog_mul = 0, fog_offset = 0;
 
     // Vertices.
     RawVertex vertices[kMaxVertices]{};
@@ -470,6 +518,13 @@ struct RenderState {
     // Blender inputs (G_SETFOGCOLOR / G_SETBLENDCOLOR).
     float fog_color[4] = {0, 0, 0, 1};
     float blend_color[4] = {0, 0, 0, 0};
+    // G_SETKEYR / G_SETKEYGB: the chroma-key centre and scale, 0..1. RT64
+    // `RDP::setKeyR`/`setKeyGB` divide each 8-bit field by 255
+    // (hle/rt64_rdp.cpp:1223-1236); the width fields are ignored. They are the
+    // combiner's KEY_CENTER / KEY_SCALE inputs (RasterPS.hlsl:185-186,
+    // shared/rt64_color_combiner.h:482-485).
+    float key_center[3] = {0, 0, 0};
+    float key_scale[3] = {0, 0, 0};
 
     // Scissor (integer pixels, inclusive bounds).
     bool scissor_enabled = false;
@@ -555,6 +610,24 @@ struct RenderState {
     uint16_t cimg_width = 0;       // the image's width in texels (320 or 640)
     uint8_t cimg_siz = 0;          // 2 = 16b RGBA5551, 3 = 32b RGBA8888
     uint8_t cimg_fmt = 0;          // G_IM_FMT_RGBA for every image OB64 sets
+
+    // G_SETZIMG: the RDP depth image. RT64 keeps it in `RDP::depthImage` and
+    // allocates the depth buffer from it (hle/rt64_rdp.cpp `setDepthImage`,
+    // `maskAddress(address)` = `address & 0xFFFFFF`; the fmt/siz/width fields
+    // are the same shape as G_SETCIMG's). This renderer has no RDRAM depth
+    // image: the depth buffer is a GL renderbuffer owned by the target's
+    // GlFramebuffer, and these fields are recorded on it for the diagnostics.
+    uint32_t zimg_address = 0;
+    uint16_t zimg_width = 0;
+    uint8_t zimg_siz = 0;
+    uint8_t zimg_fmt = 0;
+
+    // G_SETPRIMDEPTH: RT64 `RDP::setPrimDepth` (hle/rt64_rdp.cpp:1160):
+    // `primDepth.x = (z & 0x7FFF) / 32767` (0..1 screen depth) and
+    // `primDepth.y = (dz & 0xFFFF) / 65535` (the decal tolerance, unused here
+    // because ZMODE_DEC is not implemented).
+    float prim_depth = 0.0f;
+    float prim_depth_dz = 0.0f;
 };
 
 // Reads a 32-bit word from rdram with the runtime's byte-reversed storage.
@@ -854,14 +927,13 @@ inline void yuv16_to_rgba8(uint8_t y, uint8_t u, uint8_t v, const int32_t* conve
     out[3] = 255;
 }
 
-// Decodes a rect [x0,x0+w) x [y0,y0+h) of the current texture image into
-// RGBA8. `tlut` is used for CI formats when `lut_mode` is not 0;
-// `palette` selects the CI4 TLUT bank. `row_bytes` is the source image's row
-// stride in bytes. It is NOT derivable from the rect: the RDP loads TMEM with
-// one row stride and samples it with another (OB64's mask is 16 bytes/row of
-// 8-bit texels sampled as 32 4-bit texels, and a LOADBLOCK's stride is its
-// dxt). RT64 uses `bytesPerRow = timg_width << siz >> 1` for the load and
-// `line << 3` for the tile; the caller picks.
+// Decoding a tile's image. The RDP samples TMEM, not RDRAM: a load command
+// copies its source into TMEM with one row stride and the render tile samples
+// it with another (`line << 3`), so `decode_tmem_tile` reads TMEM at
+// `tile.tmem << 3` with the tile's own `line`. RT64's `RDP::loadTile`/
+// `loadBlock` (the writes) and `TextureDecoder.hlsli` (the reads) are the
+// reference. Which load wrote a given TMEM base is not recorded, and does not
+// need to be: a later load overwrites it in command order.
 //
 // `lut_mode` is the RDP's 2-bit texture LUT mode (`OTHERMODE_H` bits 14-15,
 // RT64's `OtherMode::textLUT()`). It selects the decode for every entry of an
@@ -881,155 +953,179 @@ inline void yuv16_to_rgba8(uint8_t y, uint8_t u, uint8_t v, const int32_t* conve
 // intensity replicated into RGB and into alpha. Decoding such a tile as CI
 // against an empty palette paints it black, which is what the title screen's
 // 72x28 and 72x20 unit sprites did.
-void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fmt, uint8_t siz,
-                         int row_bytes, int x0, int y0, int w, int h, const uint16_t* tlut,
-                         bool tlut_valid, uint8_t palette, int lut_mode,
-                         const int32_t* convert_k, std::vector<uint8_t>& out) {
-    out.assign(static_cast<size_t>(w) * h * 4, 0);
 
-    if (row_bytes <= 0) {
+// One byte of a tile's TMEM image, following RT64's sampler
+// (`TextureDecoder.hlsli` `implLoadTMEM` and `sampleTMEMWithConvert`): the tile
+// base is `tmem << 3`, rows are `line << 3` bytes apart, a texel's byte offset
+// inside its row is `(s << shift) >> 1`, and an odd row holds the two 4-byte
+// halves of each 8-byte word swapped. The load wrote them swapped
+// (`loadRowStep`'s `tmemXorMask ^= 4`) and the sampler reads them back, so a
+// decode that reads TMEM directly applies the same swap.
+inline uint8_t tmem_sample_byte(const uint8_t* tmem, uint32_t address, uint32_t stride,
+                                uint32_t address_mask, int shift, int x, int y, int extra,
+                                uint32_t or_address = 0) {
+    const uint32_t rel = static_cast<uint32_t>(y) * stride +
+                         ((static_cast<uint32_t>(x) << shift) >> 1) +
+                         static_cast<uint32_t>(extra);
+    uint32_t a = rel;
+    if ((y & 1) != 0) {
+        const uint32_t row_start = (rel / stride) * stride;
+        const uint32_t word = (rel - row_start) / 4;
+        a = row_start + (word ^ 1u) * 4u + (rel & 3u);
+    }
+    return tmem[((address + a) & address_mask) | or_address];
+}
+
+// The 16-bit palette entry a CI texel selects, at RT64's fixed palette base
+// (`RDP_TMEM_PALETTE` 0x800): CI4 uses `0x800 + (palette << 7) + (index << 3)`
+// and CI8 `0x800 + (index << 3)`, one entry per 8 bytes.
+inline uint16_t tmem_palette_entry(const uint8_t* tmem, uint8_t palette, uint8_t siz,
+                                   uint32_t index) {
+    const uint32_t at = 0x800u + ((siz == gbi::IM_SIZ_4b)
+                                      ? ((static_cast<uint32_t>(palette) << 7) | (index << 3))
+                                      : (index << 3));
+    return static_cast<uint16_t>((tmem[at & 0xFFF] << 8) | tmem[(at + 1) & 0xFFF]);
+}
+
+// Decodes a tile's image out of TMEM the way RT64's `sampleTMEMWithConvert`
+// reads it. `w`/`h` are RT64's `sampleWidth`/`sampleHeight` (the tile window
+// clamped to its wrap mask), and the image starts at `tile.tmem << 3`; the
+// tile's `uls`/`ult` are the UV origin, not a source offset.
+void decode_tmem_tile(const uint8_t* tmem, const TileState& tile, int w, int h,
+                      int lut_mode, const int32_t* convert_k, std::vector<uint8_t>& out) {
+    out.assign(static_cast<size_t>(w) * h * 4, 0);
+    const uint32_t stride = static_cast<uint32_t>(tile.line) << 3;
+    if (stride == 0 || w <= 0 || h <= 0) {
         return;
     }
-    // The LUT mode selects how a CI tile's bytes are read (see the note above).
-    if (fmt == gbi::IM_FMT_CI && lut_mode == 0) {
-        fmt = gbi::IM_FMT_I;
-    }
-    // RGBA16 for G_TT_RGBA16 only; IA16 otherwise. A mode of 1 is not a valid
-    // LUT mode, and treating it as IA16 matches RT64's `default` arm.
-    const bool tlut_rgba16 = (lut_mode == 2);
-    const int bpp = bytes_per_texel(siz);
+    const uint32_t address = static_cast<uint32_t>(tile.tmem) << 3;
+    const bool indexed = (tile.fmt == gbi::IM_FMT_CI) && (lut_mode != 0);
+    const bool rgba32 = (tile.fmt == gbi::IM_FMT_RGBA) && (tile.siz == gbi::IM_SIZ_32b);
+    // RT64 masks a sample to the lower half of TMEM for CI and RGBA32 (whose
+    // upper half holds the other two colour channels), and to all 4 KiB for
+    // every other format.
+    const uint32_t address_mask = (rgba32 || indexed) ? 0x7FFu : 0xFFFu;
+    const int shift = rgba32 ? 2 : static_cast<int>(tile.siz);
+    const bool yuv16 = (tile.fmt == gbi::IM_FMT_YUV) && (tile.siz == gbi::IM_SIZ_16b);
+
+    auto load = [&](int x, int y, int extra = 0, uint32_t or_address = 0) {
+        return tmem_sample_byte(tmem, address, stride, address_mask, shift, x, y, extra,
+                                or_address);
+    };
+
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            const int tx = x0 + x;
-            const int ty = y0 + y;
             uint8_t rgba[4] = {0, 0, 0, 255};
 
-            // YUV16 is the one format whose source is not one texel per
-            // `bpp` bytes: two texels share a 32-bit word, and the RDP's
-            // LOADTILE de-interleaves the pair into TMEM's two halves (see
-            // `yuv16_to_rgba8` and RT64's `loadYUVTileToTMEM`). Handle it
-            // before the byte addressing below.
-            if (fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
-                const uint32_t word_addr = timg_address +
-                                           static_cast<uint32_t>(ty * row_bytes + (tx >> 1) * 4);
-                // Guest word bytes are [U, Y(even), V, Y(odd)]; the runtime
-                // stores each 32-bit word byte-reversed, so `n64b` at those
-                // guest offsets is the only correct read.
-                const uint8_t yv = (tx & 1) ? n64b(rdram, static_cast<int>(word_addr) + 3)
-                                            : n64b(rdram, static_cast<int>(word_addr) + 1);
-                const uint8_t uv = n64b(rdram, static_cast<int>(word_addr) + 0);
-                const uint8_t vv = n64b(rdram, static_cast<int>(word_addr) + 2);
-                yuv16_to_rgba8(yv, uv, vv, convert_k, rgba);
-                const size_t yo = (static_cast<size_t>(y) * w + x) * 4;
-                out[yo + 0] = rgba[0];
-                out[yo + 1] = rgba[1];
-                out[yo + 2] = rgba[2];
-                out[yo + 3] = rgba[3];
-                continue;
-            }
-
-            if (siz == gbi::IM_SIZ_4b) {
-                // Two texels per byte; byte index = (ty*row_bytes + tx/2).
-                const uint32_t byte_addr =
-                    timg_address + static_cast<uint32_t>(ty * row_bytes + tx / 2);
-                const uint8_t byte = n64b(rdram, static_cast<int>(byte_addr));
-                const uint8_t nib = (tx & 1) ? (byte & 0xF) : (byte >> 4);
-                switch (fmt) {
+            if (yuv16) {
+                // A YUV tile is one luma byte per texel in TMEM's upper half
+                // and one U/V pair per two texels in the lower half, both at
+                // the tile's row stride (RT64 `sampleTMEMYUV16`).
+                const uint32_t row_base = address + stride * static_cast<uint32_t>(y);
+                const uint32_t row_xor = ((y & 1) != 0) ? 4u : 0u;
+                const uint8_t yy = tmem[((row_base + (static_cast<uint32_t>(x) ^ row_xor)) | 0x800u) &
+                                        0xFFFu];
+                const uint32_t chroma = row_base + (((static_cast<uint32_t>(x) >> 1) << 1) ^ row_xor);
+                const uint8_t uu = tmem[chroma & 0xFFFu];
+                const uint8_t vv = tmem[(chroma + 1u) & 0xFFFu];
+                yuv16_to_rgba8(yy, uu, vv, convert_k, rgba);
+            } else if (tile.siz == gbi::IM_SIZ_4b) {
+                const uint8_t byte = load(x, y);
+                const uint8_t nib = (x & 1) ? (byte & 0xF) : (byte >> 4);
+                switch (tile.fmt) {
                     case gbi::IM_FMT_IA: {
-                        const uint8_t i = (nib >> 1) * 255 / 7;
-                        const uint8_t a = (nib & 1) ? 255 : 0;
+                        const uint8_t i = static_cast<uint8_t>((nib >> 1) * 255 / 7);
                         rgba[0] = rgba[1] = rgba[2] = i;
-                        rgba[3] = a;
+                        rgba[3] = (nib & 1) ? 255 : 0;
                         break;
                     }
                     case gbi::IM_FMT_I: {
-                        // I4 is intensity only: the texel is (i,i,i,i), so the
-                        // alpha carries the intensity too (RT64 I4ToFloat4).
-                        // Without this, an I4/I8 image sampled as TEXEL0_ALPHA
-                        // has alpha 1 everywhere and its mask does nothing.
-                        const uint8_t i = nib * 255 / 15;
+                        const uint8_t i = static_cast<uint8_t>(nib * 255 / 15);
                         rgba[0] = rgba[1] = rgba[2] = rgba[3] = i;
                         break;
                     }
-                    case gbi::IM_FMT_CI: {
-                        if (tlut_valid) {
-                            const uint16_t e = tlut[palette * 16 + nib];
-                            if (tlut_rgba16) {
-                                rgba16_to_rgba8(e, rgba);
-                            } else {
-                                ia16_to_rgba8(e, rgba);
-                            }
+                    case gbi::IM_FMT_CI:
+                        if (lut_mode == 2) {
+                            rgba16_to_rgba8(
+                                tmem_palette_entry(tmem, tile.palette, tile.siz, nib), rgba);
+                        } else if (lut_mode == 3) {
+                            ia16_to_rgba8(
+                                tmem_palette_entry(tmem, tile.palette, tile.siz, nib), rgba);
+                        } else {
+                            // A CI tile with no TLUT behaves like I (RT64
+                            // `sampleTMEM4b`'s CI arm: the palette index is the
+                            // intensity). Painting it black was the title
+                            // prologue's two unit sprites, session 144.
+                            const uint8_t i = nib;
+                            rgba[0] = rgba[1] = rgba[2] = rgba[3] = i;
                         }
                         break;
-                    }
                     default:
                         break;
                 }
-            } else {
-                const uint32_t byte_addr =
-                    timg_address + static_cast<uint32_t>(ty * row_bytes + tx * bpp);
-                switch (siz) {
-                    case gbi::IM_SIZ_8b: {
-                        const uint8_t v = n64b(rdram, static_cast<int>(byte_addr));
-                        switch (fmt) {
-                            case gbi::IM_FMT_IA: {
-                                const uint8_t i = (v >> 4) * 255 / 15;
-                                const uint8_t a = (v & 0xF) * 255 / 15;
-                                rgba[0] = rgba[1] = rgba[2] = i;
-                                rgba[3] = a;
-                                break;
-                            }
-                            case gbi::IM_FMT_I:
-                                // Intensity replicates into alpha (RT64 I8ToFloat4).
-                                rgba[0] = rgba[1] = rgba[2] = rgba[3] = v;
-                                break;
-                            case gbi::IM_FMT_CI:
-                                if (tlut_valid) {
-                                    const uint16_t e = tlut[v];
-                                    if (tlut_rgba16) {
-                                        rgba16_to_rgba8(e, rgba);
-                                    } else {
-                                        ia16_to_rgba8(e, rgba);
-                                    }
-                                }
-                                break;
-                            default:
-                                break;
-                        }
+            } else if (tile.siz == gbi::IM_SIZ_8b) {
+                const uint8_t v = load(x, y);
+                switch (tile.fmt) {
+                    case gbi::IM_FMT_IA:
+                        rgba[0] = rgba[1] = rgba[2] = static_cast<uint8_t>((v >> 4) * 255 / 15);
+                        rgba[3] = static_cast<uint8_t>((v & 0xF) * 255 / 15);
                         break;
-                    }
-                    case gbi::IM_SIZ_16b: {
-                        const uint16_t v = n64be16(rdram, byte_addr);
-                        if (fmt == gbi::IM_FMT_IA) {
-                            ia16_to_rgba8(v, rgba);
+                    case gbi::IM_FMT_I:
+                        rgba[0] = rgba[1] = rgba[2] = rgba[3] = v;
+                        break;
+                    case gbi::IM_FMT_CI:
+                        if (lut_mode == 2) {
+                            rgba16_to_rgba8(
+                                tmem_palette_entry(tmem, tile.palette, tile.siz, v), rgba);
+                        } else if (lut_mode == 3) {
+                            ia16_to_rgba8(tmem_palette_entry(tmem, tile.palette, tile.siz, v),
+                                          rgba);
                         } else {
-                            rgba16_to_rgba8(v, rgba);
+                            // No TLUT: CI behaves like I (RT64 `sampleTMEM8b`).
+                            rgba[0] = rgba[1] = rgba[2] = rgba[3] = v;
                         }
                         break;
-                    }
-                    case gbi::IM_SIZ_32b: {
-                        // RGBA32: one texel is four guest bytes, R then G then B
-                        // then A. RT64 splits the texel across TMEM's two halves
-                        // on load (`loadWord<RGBA32>` puts bytes 0/1 in the lower
-                        // half and 2/3 in the upper) and rebuilds the texel as
-                        // (R<<24)|(G<<16)|(B<<8)|A in `sampleTMEMRGBA32`
-                        // (`src/shaders/TextureDecoder.hlsli`); `tools/ogre_frame.py`
-                        // decodes the same way. Reading the halves as
-                        // (alpha,red) (green,blue) - what this did - moved every
-                        // channel one byte along: rgba[0] came out as the source
-                        // G, rgba[1] as B, rgba[2] as A and rgba[3] as R. On the
-                        // title screen's 320x240 RGBA32 backdrop that made a
-                        // brown-to-white sky decode as magenta-to-white.
-                        const uint16_t hi = n64be16(rdram, byte_addr);
-                        const uint16_t lo = n64be16(rdram, byte_addr + 2);
-                        rgba[0] = static_cast<uint8_t>(hi >> 8);    // R
-                        rgba[1] = static_cast<uint8_t>(hi & 0xFF);  // G
-                        rgba[2] = static_cast<uint8_t>(lo >> 8);    // B
-                        rgba[3] = static_cast<uint8_t>(lo & 0xFF);  // A
-                        break;
-                    }
                     default:
                         break;
+                }
+            } else if (tile.siz == gbi::IM_SIZ_16b) {
+                const uint16_t value = static_cast<uint16_t>((load(x, y) << 8) | load(x, y, 1));
+                switch (tile.fmt) {
+                    case gbi::IM_FMT_IA:
+                        ia16_to_rgba8(value, rgba);
+                        break;
+                    case gbi::IM_FMT_RGBA:
+                        rgba16_to_rgba8(value, rgba);
+                        break;
+                    case gbi::IM_FMT_CI:
+                    case gbi::IM_FMT_I:
+                        // RT64 `sampleTMEMI16`: not a real format. Intensity
+                        // comes from the high byte and alpha from the low one
+                        // (the observed hardware behaviour).
+                        rgba[0] = rgba[2] = static_cast<uint8_t>(value >> 8);
+                        rgba[1] = rgba[3] = static_cast<uint8_t>(value & 0xFF);
+                        break;
+                    default:
+                        break;
+                }
+            } else if (tile.siz == gbi::IM_SIZ_32b) {
+                if (rgba32) {
+                    // R,G live in TMEM's lower half and B,A in its upper half
+                    // (RT64 `loadWord<RGBA32>` / `sampleTMEMRGBA32`).
+                    rgba[0] = load(x, y);
+                    rgba[1] = load(x, y, 1);
+                    rgba[2] = load(x, y, 0, 0x800);
+                    rgba[3] = load(x, y, 1, 0x800);
+                } else {
+                    // RT64 `sampleTMEMI32`: odd columns decode R,G from the
+                    // lower half and even columns B,A from the upper half.
+                    if ((x & 1) != 0) {
+                        rgba[0] = rgba[2] = load(x, y);
+                        rgba[1] = rgba[3] = load(x, y, 1);
+                    } else {
+                        rgba[0] = rgba[2] = load(x, y, 0, 0x800);
+                        rgba[1] = rgba[3] = load(x, y, 1, 0x800);
+                    }
                 }
             }
 
@@ -1047,20 +1143,28 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
 // ============================================================================
 
 const char* kVertexShaderSrc = R"GLSL(#version 300 es
-layout(location = 0) in vec2 a_pos;
-layout(location = 1) in vec2 a_uv;
+layout(location = 0) in vec2 a_pos;    // NDC x, y
+layout(location = 1) in vec2 a_uv;   // texel coordinates (s10.5 x G_TEXTURE scale)
 layout(location = 2) in vec4 a_color;
-out vec2 v_uv0;           // TEXEL0's tile
-out vec2 v_uv1;           // TEXEL1's tile
+layout(location = 3) in float a_z;     // NDC z (-1..1); see transform_vertex
+layout(location = 4) in float a_w;     // clip-space w (1 for a rectangle)
+out vec2 v_tex;          // the same texel coordinates, for the sampler
 out vec4 v_shade;
-uniform vec2 u_uv_scale;   // tile 0: (1/tex_w, 1/tex_h)
-uniform vec2 u_uv_origin;  // tile 0: (uls, ult)
-uniform vec2 u_uv_scale1;  // tile 1
-uniform vec2 u_uv_origin1;
 void main() {
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-    v_uv0 = (a_uv - u_uv_origin) * u_uv_scale;
-    v_uv1 = (a_uv - u_uv_origin1) * u_uv_scale1;
+    // RT64's RasterVS multiplies the whole position by w before the rasterizer
+    // (`ndcPos.xyz *= ndcPos.w`), which makes the varying interpolation
+    // perspective-correct. Writing w here is measurably wrong for this port's
+    // sampler, though: with w in gl_Position the mission frame's top cliff goes
+    // from 0.93 to 10.27 mean abs against native `/tmp/w168/nat2/t.800` and the
+    // whole frame from 5.28 to 7.74 (session 172 measured both). The w is still
+    // uploaded (attribute 4) because it is RDP state, but the clip position
+    // keeps w = 1 and interpolates in screen space, which is what the stored
+    // native frame agrees with.
+    gl_Position = vec4(a_pos, a_z, 1.0);
+    // The tile's origin and size moved into the fragment shader: RT64's
+    // sampler works in texel space, and it quantizes the interpolated
+    // coordinate to the hardware's 1/128 texel before sampling.
+    v_tex = a_uv;
     v_shade = a_color;
 }
 )GLSL";
@@ -1076,9 +1180,11 @@ void main() {
 // mux 1, and in the second cycle the TEXEL0/TEXEL1 values are swapped and the
 // COMBINED inputs are wrapped instead of clamped.
 const char* kFragmentShaderSrc = R"GLSL(#version 300 es
-precision mediump float;
-in vec2 v_uv0;
-in vec2 v_uv1;
+// RT64's RasterPS works in fp32 (`float`, `hlslpp::float4`). `mediump` is
+// fp16 on parts of the mobile GLSL spec and would round the combiner and
+// blender a second time, so the shader asks for fp32 explicitly.
+precision highp float;
+in vec2 v_tex;
 in vec4 v_shade;
 out vec4 fragColor;
 uniform sampler2D u_tex0;
@@ -1091,6 +1197,21 @@ uniform int u_ca1, u_cb1, u_cc1, u_cd1;
 uniform int u_aa1, u_ab1, u_ac1, u_ad1;
 uniform int u_cycle;   // 0 = COPY (texel0 passthrough), 1 or 2 = combiner cycles
 uniform int u_use_tex;
+// ---- RT64 texture sampler (tools/RT64/src/shaders/TextureSampler.hlsli) ----
+// Per texture unit: the decoded image's size in texels, the tile's uls/ult in
+// texels, the clamp/mirror mode per axis (G_TX_WRAP 0, G_TX_MIRROR 1,
+// G_TX_CLAMP 2) and the wrap size per axis in texels (0 = no mask). These are
+// RT64's RDPTile fields after `State::setupDrawCall`: `masks` is the wrap size
+// `1 << masks`, and a tile with no mask is forced to clamp.
+uniform vec2 u_tsize0, u_tsize1;
+uniform vec2 u_torig0, u_torig1;
+uniform ivec2 u_tcm0, u_tcm1;
+uniform ivec2 u_tmask0, u_tmask1;
+uniform int u_tex_filter;   // OTHERMODE_H G_TF_*: 0 POINT, 2 BILERP, 3 AVERAGE
+uniform int u_texf;         // 0 GL sampler, 1 shader bilinear, 2 RT64 3-point
+uniform int u_tex_persp;    // 0 halves the coordinate (G_TP_NONE, non-rect)
+// The tile's G_TX shift scale (RT64 `ShiftScaleMap[shifts]`), one vec2 per unit.
+uniform vec2 u_tshift0, u_tshift1;
 // Blender / render mode (RT64 Blender::run in shared/rt64_blender.h). The P/M/A/B
 // selector enums and the approximation codes are the CPU-side BlendPM/BlendA/
 // BlendB/BlendApprox values.
@@ -1100,23 +1221,137 @@ uniform vec4 u_blend_color;
 // divides the raw 9-bit field by 255; K4/K5 carry no sign extension.
 uniform float u_k4;
 uniform float u_k5;
+// G_SETKEYR/G_SETKEYGB centre and scale (RT64 `ccInputs.keyCenter/keyScale`,
+// RasterPS.hlsl:185-186). Only the RGB channels are combiner inputs.
+uniform vec3 u_key_center;
+uniform vec3 u_key_scale;
 uniform int u_bp0, u_bm0, u_ba0, u_bb0;
 uniform int u_bp1, u_bm1, u_ba1, u_bb1;
 uniform int u_force_blend;
 uniform int u_blend_approx;
 uniform int u_combiner_cycles;
+// The RDP's alpha compare and coverage path (RT64 RasterPS.hlsl). A texel
+// whose combiner alpha is zero is discarded when CVG_X_ALPHA is set, which is
+// what makes a transparent CI4 texel transparent instead of painting its
+// colour: `resultCvg = (8/cvgRange) * combinerAlpha` and anything below one
+// coverage step is cut. The alpha written to the target is the coverage value
+// (`cvgDst`), not the blender's alpha.
+uniform int u_alpha_blend;    // the draw's GL blend is enabled (alpha is its factor)
+uniform int u_ac;             // OTHERMODE_L bits 0-1: G_AC_NONE 0, G_AC_THRESHOLD 1, G_AC_DITHER 3
+// The two seeds of RT64's alpha dither (`Random.hlsli` `initRand`): the frame
+// count and the draw's instance index. `u_dither_frame` is this renderer's
+// present counter and `u_dither_instance` the draw's index, which are RT64's
+// `FrParams.frameCount` and `instanceIndex` in kind, not in value.
+uniform uint u_dither_frame;
+uniform uint u_dither_instance;
+// RT64's F3D depth clip (RasterPS.hlsl:63-104). The F3D microcodes clip polygons
+// earlier than the hardware's own depth range: a non-rect draw whose depth
+// source is G_ZS_PIXEL is dropped outside [0, 1022/1024]. `u_zclip` is 0 for a
+// rectangle and for a G_ZS_PRIM draw (RT64 sets MaxDepth = 1.0 for both, and the
+// `z < 0` half cannot fire for a prim depth, which is already 0..1).
+uniform int u_zclip;
+uniform int u_cvg_x_alpha;    // CVG_X_ALPHA
+uniform int u_cvg_dst;        // 0 clamp, 1 wrap, 2 full, 3 save
+uniform float u_cvg_range;    // 255 for the 8-bit attachment, 65535 for RGBA16F
 // Debug: 1 = output TEXEL1's RGB raw, 2 = output TEXEL0's RGB raw. Set from
 // ogre_gfx_debug_flags bits 3-4 by the probes; bypasses the combiner and the
 // blender so the sampled texture can be compared with the decoded image.
 uniform int u_debug_mode;
 
-// The texel a TEXEL0/TEXEL1 selector samples in the cycle being evaluated.
-// In the second cycle of a 2-cycle combiner the RDP swaps the two texel values
-// (RT64 fromColorInput: secondCycle ? texVal1 : texVal0). Each unit carries its
-// own UV transform, from its tile's uls/ult and loaded size.
+// ---------------------------------------------------------------------------
+// RT64 sampler: TextureSampler.hlsli `clampWrapMirrorSample` and
+// `sampleTextureLevel`, restricted to the two fields this renderer has - a
+// decoded RGBA8 image per tile, no TMEM, no mip levels, no texture
+// replacement. The texel arithmetic is RT64's, including its `modulo` and the
+// `SIMULATE_LOW_PRECISION` quantization of the interpolated coordinate.
+// ---------------------------------------------------------------------------
+int tex_modulo(int x, int y) {
+    // RT64 Math.hlsli `modulo`: a mathematical modulus, defined at y == 0 (it
+    // returns x) so a tile with no mask cannot divide by zero.
+    return (y != 0) ? x - y * int(floor(float(x) / float(y))) : x;
+}
+
+vec4 sampler_texel(int unit, ivec2 t, vec2 size, ivec2 cm, ivec2 mask) {
+    ivec2 hi = ivec2(size) - ivec2(1);
+    // clampWrapMirrorSample: clamp to the tile window first, then wrap.
+    if (cm.x == 2) t.x = clamp(t.x, 0, hi.x);
+    if (cm.y == 2) t.y = clamp(t.y, 0, hi.y);
+    if (mask.x > 0) {
+        if (cm.x == 1 && tex_modulo(t.x, mask.x * 2) >= mask.x) {
+            t.x = (mask.x - 1) - tex_modulo(t.x, mask.x);
+        } else {
+            t.x = tex_modulo(t.x, mask.x);
+        }
+    }
+    if (mask.y > 0) {
+        if (cm.y == 1 && tex_modulo(t.y, mask.y * 2) >= mask.y) {
+            t.y = (mask.y - 1) - tex_modulo(t.y, mask.y);
+        } else {
+            t.y = tex_modulo(t.y, mask.y);
+        }
+    }
+    // The GL texture holds the one tile window the game loaded, where RT64
+    // holds the whole decoded TMEM area. A coordinate the wrap above sends past
+    // this window has no texel here, so it clamps instead of reading out of
+    // bounds (which GL defines as zero).
+    t = clamp(t, ivec2(0), hi);
+    return unit == 1 ? texelFetch(u_tex1, t, 0) : texelFetch(u_tex0, t, 0);
+}
+
+// sampleTextureLevel's filter selection and weight arithmetic. `uv` is the
+// interpolated texel coordinate, `origin` the tile's uls/ult in texels.
+vec4 sample_unit(int unit, vec2 uv, vec2 size, vec2 origin, ivec2 cm, ivec2 mask,
+                 bool filtering) {
+    vec2 local = round(uv * 128.0) / 128.0 - origin;   // SIMULATE_LOW_PRECISION
+    ivec2 base = ivec2(floor(local));
+    vec4 s00 = sampler_texel(unit, base, size, cm, mask);
+    if (!filtering) {
+        return s00;
+    }
+    vec4 s01 = sampler_texel(unit, base + ivec2(0, 1), size, cm, mask);
+    vec4 s10 = sampler_texel(unit, base + ivec2(1, 0), size, cm, mask);
+    vec4 s11 = sampler_texel(unit, base + ivec2(1, 1), size, cm, mask);
+    vec2 frac_part = local - floor(local);
+    if (u_texf < 2) {
+        // True bilinear (`linearFiltering` in RT64, the GL sampler's rule).
+        return mix(mix(s00, s10, frac_part.x), mix(s01, s11, frac_part.x), frac_part.y);
+    }
+    bool use_average =
+        (u_tex_filter == 3) && all(lessThanEqual(abs(frac_part - vec2(0.5)), vec2(1.0 / 128.0)));
+    if (use_average) {
+        return (s00 + s01 + s10 + s11) / 4.0;
+    }
+    // Three-point bilinear, written by ArthurCarvalho and ported to RT64; the
+    // RT64 default (`threePointFiltering = true`) uses this, not plain bilinear.
+    vec4 tri0 = mix(s00, s10, frac_part.x) + (s01 - s00) * frac_part.y;
+    vec4 tri1 = mix(s11, s01, 1.0 - frac_part.x) + (s10 - s11) * (1.0 - frac_part.y);
+    return mix(tri0, tri1, step(1.0, frac_part.x + frac_part.y));
+}
+
+// The GL fixed-function path (`OGRE_TEXF=gl`), which is what this renderer did
+// before the sampler port: texture units normalized by the tile's origin/size.
+vec4 fixed_texel(int unit, vec2 uv, vec2 size, vec2 origin) {
+    vec2 st = (uv - origin) / size;
+    return unit == 1 ? texture(u_tex1, st) : texture(u_tex0, st);
+}
+
 vec4 tex_val(int sel, bool second) {
     bool use1 = (sel == 2) != second;
-    return use1 ? texture(u_tex1, v_uv1) : texture(u_tex0, v_uv0);
+    // COPY mode has no combiner cycle: the RDP samples TEXEL0 point-sampled
+    // (RT64 `filterBilerp` requires cycleType != G_CYC_COPY).
+    bool filtering = (u_tex_filter != 0) && (u_cycle != 0);
+    // RT64's `perspCorrectionMod`: a non-perspective triangle halves the
+    // interpolated coordinate. The tile's shift scale multiplies it next, in the
+    // same expression as RT64 (`TextureSampler.hlsli:226`), before the 1/128
+    // rounding inside sample_unit.
+    vec2 uv = v_tex * (u_tex_persp != 0 ? 1.0 : 0.5) *
+              (use1 ? u_tshift1 : u_tshift0);
+    if (u_texf == 0) {
+        return use1 ? fixed_texel(1, uv, u_tsize1, u_torig1)
+                    : fixed_texel(0, uv, u_tsize0, u_torig0);
+    }
+    return use1 ? sample_unit(1, uv, u_tsize1, u_torig1, u_tcm1, u_tmask1, filtering)
+                : sample_unit(0, uv, u_tsize0, u_torig0, u_tcm0, u_tmask0, filtering);
 }
 
 // RT64 ColorCombiner::fromColorInput, sel = CSEL_*.
@@ -1126,7 +1361,8 @@ vec4 color_input(int sel, bool second, vec4 combined) {
     if (sel == 3) return u_prim;                                // PRIMITIVE
     if (sel == 4) return v_shade;                               // SHADE
     if (sel == 5) return u_env;                                 // ENVIRONMENT
-    if (sel == 6 || sel == 7) return vec4(0.0);                 // KEY_CENTER/KEY_SCALE
+    if (sel == 6) return vec4(u_key_center, 0.0);               // KEY_CENTER
+    if (sel == 7) return vec4(u_key_scale, 0.0);                // KEY_SCALE
     if (sel == 8) return vec4(combined.a);                      // COMBINED_ALPHA
     if (sel == 9) return vec4(tex_val(1, second).a);            // TEXEL0_ALPHA
     if (sel == 10) return vec4(tex_val(2, second).a);           // TEXEL1_ALPHA
@@ -1306,13 +1542,42 @@ vec4 blender_run(vec4 cc) {
     return vec4(blender_color, final_alpha);
 }
 
+// RT64 `src/shaders/Random.hlsli` `initRand` / `nextRand`, ported verbatim.
+// `initRand` is the DXR-path seed generator (16 rounds), and `nextRand` is a
+// 32-bit LCG whose top 24 bits are the returned fraction.
+uint dither_init_rand(uint val0, uint val1) {
+    uint v0 = val0, v1 = val1, s0 = 0u;
+    for (int n = 0; n < 16; ++n) {
+        s0 += 0x9e3779b9u;
+        v0 += ((v1 << 4) + 0xa341316cu) ^ (v1 + s0) ^ ((v1 >> 5) + 0xc8013ea4u);
+        v1 += ((v0 << 4) + 0xad90777du) ^ (v0 + s0) ^ ((v0 >> 5) + 0x7e95761eu);
+    }
+    return v0;
+}
+
+uint dither_next_rand(inout uint s) {
+    s = 1664525u * s + 1013904223u;
+    return s;
+}
+
 void main() {
+    // The F3D depth clip. gl_FragCoord.z is the RDP's screen depth (0..1): the
+    // vertex shader writes `2 * screen_z - 1` as NDC z and GL maps that back.
+    if (u_zclip != 0) {
+        const float MaxDepth = 1022.0 / 1024.0;
+        if (gl_FragCoord.z < 0.0 || gl_FragCoord.z > MaxDepth) {
+            discard;
+        }
+    }
     if (u_debug_mode == 1) {
-        fragColor = vec4(texture(u_tex1, v_uv1).rgb, 1.0);
+        // Point-sampled so the probe compares the decoded texel itself.
+        fragColor = vec4(sample_unit(1, v_tex, u_tsize1, u_torig1, u_tcm1, u_tmask1, false).rgb,
+                         1.0);
         return;
     }
     if (u_debug_mode == 2) {
-        fragColor = vec4(texture(u_tex0, v_uv0).rgb, 1.0);
+        fragColor = vec4(sample_unit(0, v_tex, u_tsize0, u_torig0, u_tcm0, u_tmask0, false).rgb,
+                         1.0);
         return;
     }
     if (u_cycle == 0) {
@@ -1330,6 +1595,10 @@ void main() {
     c.a = (alpha_input(u_aa0, false, c.a) - alpha_input(u_ab0, false, c.a)) *
               alpha_input(u_ac0, false, c.a) + alpha_input(u_ad0, false, c.a);
 
+    // RT64 ColorCombiner::run: the alpha compared against the threshold is the
+    // one the first evaluated cycle produced, before the second cycle runs.
+    float alpha_compare_value = c.a;
+
     if (u_cycle == 2) {
         // RT64: wrapInputC when the cycle's color C input is COMBINED (CSEL 0),
         // wrapInputABD otherwise; alpha uses A_COMBINED (ASEL 0).
@@ -1343,9 +1612,59 @@ void main() {
     }
 
     wrap_clamp(c.r); wrap_clamp(c.g); wrap_clamp(c.b); wrap_clamp(c.a);
+    wrap_clamp(alpha_compare_value);
+
+    // Alpha compare (RT64 RasterPS.hlsl:205-217). G_AC_THRESHOLD compares
+    // against the blend colour's alpha; G_AC_DITHER against a per-pixel
+    // pseudo-random value. `u_ac` is OTHERMODE_L bits 0-1 as RT64 reads them
+    // (`OtherMode::alphaCompare()` returns `L & 3`), so the values are
+    // G_AC_NONE 0, G_AC_THRESHOLD 1 and G_AC_DITHER 3
+    // (tools/RT64/src/shared/rt64_f3d_defines.h:8-10).
+    if (u_ac == 1) {
+        if (alpha_compare_value < u_blend_color.a) {
+            discard;
+        }
+    } else if (u_ac == 3) {
+        // RT64's dither, `nextRand` seeded from the frame count and the pixel
+        // (`Random.hlsli`, RasterPS.hlsl:65 `randomSeed = initRand(FrParams.
+        // frameCount, instanceIndex * pixelPosSeed.y * pixelPosSeed.x, 16)`).
+        // The combiner's NOISE input consumes one `nextRand` before the compare
+        // does (RasterPS.hlsl:189 vs :213), so the compare reads the second.
+        ivec2 pixel_pos = ivec2(floor(gl_FragCoord.xy));
+        uint seed = dither_init_rand(u_dither_frame,
+                                     u_dither_instance * uint(pixel_pos.y) * uint(pixel_pos.x));
+        dither_next_rand(seed);
+        float dither_value =
+            float(dither_next_rand(seed) & 0x00FFFFFFu) / float(0x01000000u);
+        if (alpha_compare_value < dither_value) {
+            discard;
+        }
+    }
+
+    // Coverage. With CVG_X_ALPHA the combiner's alpha is the coverage; a value
+    // below one eight-of-a-step carries no coverage and the pixel is dropped,
+    // so a transparent texel contributes no colour. The alpha written to the
+    // target is the coverage value selected by CVG_DST, and the GL blend uses
+    // the blender's alpha instead while it is enabled.
+    float cvg = 8.0 * ((u_cvg_x_alpha != 0) ? c.a : 1.0);
+    if (cvg < 1.0) {
+        discard;
+    }
+    float coverage;
+    if (u_cvg_dst == 3) {
+        coverage = 0.0;                                     // CVG_DST_SAVE
+    } else if (u_cvg_dst == 2) {
+        coverage = 7.0 / u_cvg_range;                       // CVG_DST_FULL
+    } else if (u_cvg_dst == 0) {
+        coverage = min(cvg, 7.0) / u_cvg_range;             // CVG_DST_CLAMP
+    } else {
+        coverage = cvg / u_cvg_range;                       // CVG_DST_WRAP
+    }
+
     // The blender turns the combiner output into the written pixel and, when it
     // reads the framebuffer, into the alpha the GL blend mixes with.
-    fragColor = blender_run(c);
+    vec4 outc = blender_run(c);
+    fragColor = vec4(outc.rgb, (u_alpha_blend != 0) ? outc.a : coverage);
 }
 )GLSL";
 
@@ -1374,6 +1693,341 @@ GLuint compile_shader(GLenum type, const char* src) {
 }
 
 // ============================================================================
+// OGRE_FOG: repair OB64's stale-tile fog pieces (browser port)
+// ============================================================================
+//
+// OB64 draws each scrolling fog/cloud layer as a set of `G_TEXRECT`s with the
+// white combiner (`FCFFFFFF FFFF73B9` = RGB ONE, ALPHA TEXEL0). The draws
+// inherit the cloud loop's last `G_SETTILESIZE t0`, which covers no texels
+// (`uls == lrs` or `ult == lrt`), so the sample collapses onto one stale row
+// and RT64 paints an opaque white band instead of the fog. The game's layer
+// table at `D_801B80E0` still names the image each layer is meant to draw, so
+// the texture setup the rectangle inherits is rewritten to sample that image.
+//
+// This is a port of `app/src/renderer.cpp` `namespace nop_rect`
+// (`Walker::fog_fix`) + `namespace fog` (`repair`); the native code is the
+// spec, and the rewrite below is the same bytes for the same reads:
+//
+//   - `D_801B80E0` holds the layer table pointer. Layer `i`'s record is at
+//     `table + 0xFC + i*0x24`; its first word is an image record, whose
+//     `+8` is the image data, logical byte 2 is `fmt`, byte 3 is `siz`, and
+//     the 16-bit fields at logical 6 and 4 are width and height.
+//   - The walker tracks the last `SETTIMG`, `SETTILE t7`, `LOADTILE`/`LOADBLOCK`,
+//     `SETTILE t0` and `SETTILESIZE t0` before the draw, plus the white-combiner
+//     flag (`G_SETCOMBINE` w1 == `0xFFFF73B9`) and the tile window.
+//   - At a white-combiner `G_TEXRECT` whose inherited window is zero-area,
+//     layer `fog_layer` is repaired and `fog_layer` advances 0 -> 2 -> 3 ...
+//     A group with a negative `s`/`t` keeps the loop's own one-row tile instead
+//     (see the native comment).
+//   - The rewrite is `SETTIMG` (fmt/siz/width + image address), `SETTILE t7`
+//     and `SETTILE t0` (same image at TMEM 0; tile 0 wraps by `masks`/`maskt`),
+//     `LOADTILE` of the whole image, and `SETTILESIZE t0` over the whole image
+//     in quarter-texel units.
+//
+// The native `OGRE_FOG_SCALE` scratch staging is not ported: the browser always
+// samples the game's own image (`scale = 100`), which is the default.
+//
+// Like the native pass, this runs on the submitted display list in RDRAM before
+// the renderer walks it. `OGRE_FOG=0` disables it (default on, like the native).
+
+constexpr uint32_t kFogLayerTable = 0x801B80E0u;  // D_801B80E0: layer table
+
+inline void fog_put32(uint8_t* rdram, uint32_t off, uint32_t w) {
+    rdram[off + 0] = static_cast<uint8_t>(w);
+    rdram[off + 1] = static_cast<uint8_t>(w >> 8);
+    rdram[off + 2] = static_cast<uint8_t>(w >> 16);
+    rdram[off + 3] = static_cast<uint8_t>(w >> 24);
+}
+
+struct FogImage {
+    uint32_t address = 0;   // guest address of the image data (record + 8)
+    uint32_t size = 0;
+    uint32_t width = 0, height = 0;
+    uint32_t siz = 0, fmt = 0;
+};
+
+// The image record the game's layer `index` draws, or false when it is not
+// usable. Same reads and same byte order as the native `fog::layer_image`.
+inline bool fog_layer_image(uint8_t* rdram, uint32_t index, uint32_t& rec) {
+    const uint32_t table = rd32(rdram + (kFogLayerTable - 0x80000000u));
+    if (table < 0x80000000u || table >= 0x80800000u) {
+        return false;
+    }
+    const uint32_t entry = (table - 0x80000000u) + 0xFCu + index * 0x24u;
+    if (entry + 8 > 0x20000000u) {
+        return false;
+    }
+    rec = rd32(rdram + entry);
+    return rec >= 0x80000000u && rec < 0x80800000u;
+}
+
+// The record's fields, read the way the game reads them: the runtime stores
+// each word byte-reversed, so a byte field at logical offset `o` lives at
+// `o ^ 3` and a 16-bit field at `o` lives at the two bytes starting at `o ^ 2`.
+inline bool fog_read_image(uint8_t* rdram, uint32_t rec, FogImage& img) {
+    const uint32_t o = rec - 0x80000000u;
+    if (o + 8 > 0x20000000u) {
+        return false;
+    }
+    const uint8_t* p = rdram + o;
+    img.siz = p[0];                  // logical byte 3 lives at 3 ^ 3 = 0
+    img.fmt = p[1];                  // logical byte 2 lives at 2 ^ 3 = 1
+    img.height = p[(4 ^ 2)] | (p[(5 ^ 2)] << 8);
+    img.width = p[(6 ^ 2)] | (p[(7 ^ 2)] << 8);
+    img.address = rec + 8;
+    if (img.siz > 3 || img.fmt > 4 || img.width == 0 || img.height == 0 || img.width > 256 ||
+        img.height > 256 || img.address >= 0x80800000u) {
+        return false;
+    }
+    // Bits per texel for the G_IM_SIZ_* codes (0 = 4b, 1 = 8b, 2 = 16b, 3 = 32b).
+    const uint32_t bits = 4u << img.siz;
+    const uint32_t bytes_per_row = (img.width * bits) / 8u;
+    img.size = bytes_per_row * img.height;
+    return img.size != 0 && img.address + img.size <= 0x80800000u;
+}
+
+// Rewrite the texture setup a zero-area rectangle inherits so it samples the fog
+// layer's own image. Returns the image address the repair installed, or 0 when
+// no repair was applied.
+inline uint32_t fog_repair_group(uint8_t* rdram, uint32_t layer, uint32_t settimg,
+                                 uint32_t settile7, uint32_t loadtile, uint32_t settile0,
+                                 uint32_t tilesize, uint32_t uls, uint32_t ult, uint32_t lrs,
+                                 uint32_t lrt, int rect_s, int rect_t, bool verbose) {
+    // A zero-area tile is the marker: a one-texel tile is `lrs == uls + 4`.
+    if (!(lrs == uls || lrt == ult)) {
+        return 0;
+    }
+    if (settimg == 0 || settile7 == 0 || loadtile == 0 || settile0 == 0 || tilesize == 0) {
+        return 0;
+    }
+    uint32_t rec = 0;
+    FogImage img;
+    if (!fog_layer_image(rdram, layer, rec) || !fog_read_image(rdram, rec, img)) {
+        return 0;
+    }
+    // Every white group in the frame is a fog piece. The title screen has three:
+    // the layer wrap behind the logo (the first group, `s = 63..0`) and the
+    // bottom-of-screen sweep (later groups of one-screen-row-tall rectangles
+    // whose `t` walks one texture row and whose `s` walks the width). They all
+    // inherit the cloud loop's zero-area tail tile, which names a row of the
+    // *cloud* texture rather than the layer's image.
+    //
+    // The sweep's `s` runs past 64 (it walks a 320-wide cloud texture: `s` up to
+    // ~118 texels), so the repaired tile wraps (see `masks`/`maskt` below)
+    // instead of the group being dropped. Only a group with a negative
+    // coordinate cannot be repaired at all; it keeps a valid one-row tile so the
+    // renderer reads the row the loop left behind instead of a fabricated one.
+    if ((rect_s < 0) || (rect_t < 0)) {
+        const uint32_t oneRow = 0xF2000000u | (uls << 12) | ult;
+        const uint32_t oneRowLr = ((lrs > uls ? lrs : uls) << 12) | (ult + 4);
+        fog_put32(rdram, tilesize, oneRow);
+        fog_put32(rdram, tilesize + 4, oneRowLr);
+        return 0;
+    }
+    const uint32_t bytes_per_row = (img.width * (4u << img.siz)) / 8u;
+    const uint32_t line = std::max(bytes_per_row / 8u, 1u);  // SETTILE `line` in 64-bit words
+    // G_SETTILESIZE / G_LOADTILE carry uls/ult/lrs/lrt in quarter-texel units,
+    // not texels; `last` is the whole image in those units.
+    const uint32_t last = (((img.width - 1) * 4u) << 12) | ((img.height - 1) * 4u);
+    // G_SETTIMG: fmt/siz/width + the image address.
+    fog_put32(rdram, settimg, 0xFD000000u | (img.fmt << 21) | (img.siz << 19) | (img.width - 1));
+    fog_put32(rdram, settimg + 4, img.address);
+    // G_SETTILE for the load tile (7) and the draw tile (0): same image at TMEM
+    // offset 0. The draw tile wraps: the sweep's `s` walks to ~118 texels, so
+    // without a mask the samples past the edge would be clamped away.
+    // `masks`/`maskt` are the log2 of the wrap size, so this only applies to the
+    // power-of-two layer images; anything else keeps the game's clamp.
+    const uint32_t tile_w0 = 0xF5000000u | (img.fmt << 21) | (img.siz << 19) | (line << 9);
+    const auto mask_bits = [](uint32_t n) -> uint32_t {
+        uint32_t bits = 0;
+        while ((1u << bits) < n) {
+            ++bits;
+        }
+        return ((1u << bits) == n) ? bits : 0;
+    };
+    const uint32_t masks = mask_bits(img.width);
+    const uint32_t maskt = mask_bits(img.height);
+    fog_put32(rdram, settile7, tile_w0);
+    fog_put32(rdram, settile7 + 4, 7u << 24);
+    fog_put32(rdram, settile0, tile_w0);
+    fog_put32(rdram, settile0 + 4, (maskt << 14) | (masks << 4));
+    // G_LOADTILE: the whole image into the load tile (uls/ult = 0,0).
+    fog_put32(rdram, loadtile, 0xF4000000u);
+    fog_put32(rdram, loadtile + 4, (7u << 24) | last);
+    // G_SETTILESIZE for the draw tile: the rectangle's texture coordinates are
+    // tile-relative, so the tile spans the whole image.
+    fog_put32(rdram, tilesize, 0xF2000000u);
+    fog_put32(rdram, tilesize + 4, last);
+    if (verbose) {
+        fprintf(stderr,
+                "[fog] layer %u image=0x%08X %ux%u siz=%u fmt=%u line=%u rect s=%d t=%d -> "
+                "repaired a zero-area group\n",
+                layer, img.address, img.width, img.height, img.siz, img.fmt, line, rect_s, rect_t);
+        fflush(stderr);
+    }
+    return img.address;
+}
+
+struct FogWalker {
+    uint8_t* rdram;
+    bool verbose = false;
+    uint32_t segments[16] = {};
+    uint32_t budget = 200000;
+    uint32_t layer = 0;
+    uint32_t settimg = 0, settile7 = 0, loadtile = 0, settile0 = 0, tilesize = 0;
+    uint32_t uls = 0, ult = 0, lrs = 0, lrt = 0;
+    bool white = false;
+    uint32_t fixed = 0;
+    uint32_t last_image = 0;
+    uint32_t last_layer = 0;
+    uint32_t dl = 0;
+    uint32_t group_index = 0;
+    uint32_t white_groups = 0;
+    uint32_t zero_groups = 0;
+
+    void walk(uint32_t off, int depth) {
+        if (depth > 32) {
+            return;
+        }
+        for (;;) {
+            if (budget == 0 || off + 8 > 0x20000000u) {
+                return;
+            }
+            --budget;
+            const uint8_t* p = rdram + off;
+            const uint32_t w0 = rd32(p);
+            const uint32_t w1 = rd32(p + 4);
+            const uint8_t op = static_cast<uint8_t>(w0 >> 24);
+
+            if (op == 0xFD) {  // G_SETTIMG
+                settimg = off;
+                off += 8;
+                continue;
+            }
+            if (op == 0xF5) {  // G_SETTILE
+                if (p0(w1, 24, 3) == 7) {
+                    settile7 = off;
+                } else if (p0(w1, 24, 3) == 0) {
+                    settile0 = off;
+                }
+            } else if (op == 0xF4 || op == 0xF3) {  // G_LOADTILE / G_LOADBLOCK
+                loadtile = off;
+            } else if (op == 0xF2) {  // G_SETTILESIZE
+                if (p0(w1, 24, 3) == 0) {
+                    tilesize = off;
+                    uls = p0(w0, 12, 12);
+                    ult = p0(w0, 0, 12);
+                    lrs = p0(w1, 12, 12);
+                    lrt = p0(w1, 0, 12);
+                }
+            } else if (op == 0xFC) {  // G_SETCOMBINE
+                white = (w1 == 0xFFFF73B9u);
+            }
+            if (op == 0xDB) {  // G_MOVEWORD: segment registers
+                gbi::set_segment_from_moveword(segments, w0, w1);
+                off += 8;
+                continue;
+            }
+            if (op == 0xDE) {  // G_DL
+                const uint32_t target = gbi::resolve_address(segments, w1);
+                const bool push = ((w0 >> 16) & 1) == 0;
+                if (push) {
+                    walk(target, depth + 1);
+                    off += 8;
+                } else {
+                    off = target;
+                }
+                continue;
+            }
+            if (op == 0xDF) {  // G_ENDDL
+                return;
+            }
+            if (op == 0xE4 || op == 0xE5) {  // G_TEXRECT / G_TEXRECTFLIP
+                if (white) {
+                    ++white_groups;
+                    if (lrs == uls || lrt == ult) {
+                        ++zero_groups;
+                    }
+                    const int rect_s =
+                        static_cast<int16_t>(p0(rd32(rdram + off + 12), 16, 16)) / 32;
+                    const int rect_t =
+                        static_cast<int16_t>(p0(rd32(rdram + off + 12), 0, 16)) / 32;
+                    const uint32_t used_image =
+                        fog_repair_group(rdram, layer, settimg, settile7, loadtile, settile0,
+                                         tilesize, uls, ult, lrs, lrt, rect_s, rect_t, verbose);
+                    if (summary_enabled()) {
+                        fprintf(stderr,
+                                "[fog-group] dl=%u n=%u s=%d t=%d uls=%u ult=%u lrs=%u lrt=%u "
+                                "layer=%u used=0x%08X\n",
+                                dl, group_index, rect_s, rect_t, uls, ult, lrs, lrt, layer,
+                                used_image);
+                        ++group_index;
+                    }
+                    if (used_image != 0) {
+                        ++fixed;
+                        last_image = used_image;
+                        last_layer = layer;
+                        layer = (layer == 0) ? 2 : layer + 1;
+                    }
+                    white = false;  // the combiner applies to one group
+                }
+                off += 24;
+                continue;
+            }
+            // G_BRANCH_Z is the only 16-byte command in F3DEX2.
+            off += (op == 0x04) ? 16 : 8;
+        }
+    }
+
+    static bool summary_enabled() {
+        static const bool on = getenv("OGRE_FOG_SUMMARY") != nullptr;
+        return on;
+    }
+};
+
+// Repairs one submitted display list in RDRAM. `dl` is the browser's task
+// number, used only by the summary log. Returns the number of repaired groups.
+inline uint32_t fog_repair_display_list(uint8_t* rdram, uint32_t dl_offset, uint32_t dl) {
+    static const bool enabled = [] {
+        const char* v = getenv("OGRE_FOG");
+        return v == nullptr || strcmp(v, "0") != 0;
+    }();
+    if (!enabled || rdram == nullptr) {
+        return 0;
+    }
+    static const bool verbose = getenv("OGRE_FOG_TRACE") != nullptr;
+    static const bool summary = getenv("OGRE_FOG_SUMMARY") != nullptr;
+    static uint32_t lists = 0;
+    ++lists;
+    FogWalker walker;
+    walker.rdram = rdram;
+    walker.verbose = verbose;
+    walker.dl = dl;
+    walker.walk(dl_offset, 1);
+    if (walker.fixed != 0 && lists <= 2) {
+        OGRE_MILESTONE("GFX-FOG", "task %u: repaired %u fog group(s)", dl, walker.fixed);
+    }
+    if (summary) {
+        // The last repaired layer's image record, so a run says what the
+        // repaired draws sample (format, size, pitch). The fog is the one part
+        // of the title/story frame whose composite still differs from RT64 by
+        // 1-3 levels, so the format is the first thing to read.
+        uint32_t rec = 0;
+        FogImage img;
+        const bool have = fog_layer_image(rdram, walker.last_layer, rec) &&
+                          fog_read_image(rdram, rec, img);
+        OGRE_MILESTONE("GFX-FOG-SUMMARY",
+                       "task %u: repaired=%u last_layer=%u last_image=0x%08X white=%u zero=%u "
+                       "image siz=%u fmt=%u %ux%u",
+                       dl, walker.fixed, walker.last_layer, walker.last_image,
+                       walker.white_groups, walker.zero_groups,
+                       have ? img.siz : 0u, have ? img.fmt : 0u,
+                       have ? img.width : 0u, have ? img.height : 0u);
+    }
+    return walker.fixed;
+}
+
+// ============================================================================
 // The renderer
 // ============================================================================
 
@@ -1397,6 +2051,13 @@ struct DrawCmd {
     float pos[12] = {};                   // NDC (x,y) per vertex
     float uv[12] = {};                    // texture (u,v) per vertex
     float shade[24] = {};                 // rgba per vertex
+    // The vertex's clip-space w, for perspective-correct interpolation. The
+    // RDP interpolates texture coordinates and colours by dividing by the
+    // interpolated 1/w (`RSPProcessCS.hlsl` stores `tfPos.w` in the screen
+    // position; `RasterVS` multiplies it back into gl_Position), so a triangle
+    // whose corners have different w does not interpolate them linearly in
+    // screen space. A 2D rectangle uses w = 1.
+    float w[6] = {};
     // Combiner mux (decoded).
     int ca[2] = {}, cb[2] = {}, cc[2] = {}, cd[2] = {};
     int aa[2] = {}, ab[2] = {}, ac[2] = {}, ad[2] = {};
@@ -1408,6 +2069,14 @@ struct DrawCmd {
     bool force_blend = false;
     bool alpha_blend = false;      // GL blend: src_alpha / one-minus-src-alpha
     int combiner_cycles = 1;
+    // The RDP alpha-compare and coverage path (RT64 RasterPS.hlsl): the
+    // combiner's alpha is compared against a threshold or a dither, and with
+    // CVG_X_ALPHA it is the pixel's coverage, so a zero-alpha texel is dropped
+    // instead of painting its colour. The alpha written to the target is the
+    // coverage selected by CVG_DST.
+    int acmp = 0;                  // OTHERMODE_L bits 0-1: 0 none, 1 threshold, 3 dither
+    bool cvg_x_alpha = false;
+    int cvg_dst = 0;               // 0 clamp, 1 wrap, 2 full, 3 save
     float fog[4] = {0, 0, 0, 1};
     float blend_color[4] = {0, 0, 0, 0};
     // Raw RDP state for the diagnostics (the numeric mux fields alone cannot
@@ -1420,13 +2089,42 @@ struct DrawCmd {
     // `ccInputs.K4 = convertK[4] / 255.0f`). Raw 9-bit values; no sign extension
     // or `2*K+1` scaling, unlike k0..k3 of the YUV matrix.
     float k4 = 0.0f, k5 = 0.0f;
+    // G_SETKEYR/G_SETKEYGB's centre and scale, RT64's combiner KEY_CENTER /
+    // KEY_SCALE inputs (hle/rt64_rdp.cpp:1223-1236).
+    float key_center[3] = {0, 0, 0};
+    float key_scale[3] = {0, 0, 0};
     bool textured = false;
     uint64_t tex_key = 0;    // TEXEL0's tile image
     uint64_t tex_key1 = 0;   // TEXEL1's tile image
+    // The GL fixed-function UV transform per unit (the `OGRE_TEXF=gl` path and
+    // the `[GFX-UV]` diagnostic): 1/size and the tile origin in texels.
     float tex_scale[2] = {1, 1};
     float tex_origin[2] = {0, 0};
     float tex_scale1[2] = {1, 1};
     float tex_origin1[2] = {0, 0};
+    // RT64 sampler state per unit (RDPTile): the decoded image's texel size,
+    // the tile origin, the per-axis clamp/mirror mode (G_TX_WRAP 0,
+    // G_TX_MIRROR 1, G_TX_CLAMP 2) and the wrap size per axis (0 = no mask).
+    // The image's size is the tile window, so a mask past it is clamped in the
+    // shader.
+    float tex_size[2][2] = {{1, 1}, {1, 1}};
+    int tex_cms[2] = {2, 2};
+    int tex_cmt[2] = {2, 2};
+    int tex_masks[2] = {0, 0};
+    int tex_maskt[2] = {0, 0};
+    // The tile's G_TX shift fields. RT64 scales the interpolated coordinate by
+    // `ShiftScaleMap[shifts]`/`[shiftt]` (`hle/rt64_state.cpp:33-51`,
+    // `shaders/TextureSampler.hlsli:226`) before the tile origin is
+    // subtracted; `tex_shift` holds the table value the shader multiplies.
+    int tex_shifts[2] = {0, 0};
+    int tex_shiftt[2] = {0, 0};
+    float tex_shift[2][2] = {{1.0f, 1.0f}, {1.0f, 1.0f}};
+    int tex_filter = 0;   // OTHERMODE_H G_TF_*: 0 POINT, 2 BILERP, 3 AVERAGE
+    // OTHERMODE_H G_TP_PERSP, bit 19 (`shared/rt64_f3d_defines.h:51`
+    // `G_MDSFT_TEXTPERSP`). RT64 halves a non-perspective, non-rect draw's
+    // texture coordinate (`perspCorrectionMod` in TextureSampler.hlsli:221-226)
+    // to compensate for the missing perspective divide.
+    bool tex_persp = true;
     int tex_sc = 0, tex_tc = 0;   // raw G_TEXTURE scale fields (diagnostics)
     bool blend = false;
     bool scissor_on = false;
@@ -1441,7 +2139,49 @@ struct DrawCmd {
     // game, 640x480 for the world map).
     uint16_t fb_width_px = 0, fb_height_px = 0;
     uint8_t fb_siz = 0, fb_fmt = 0;
+    // G_SETZIMG's configuration at draw time (RenderState::zimg_*), stored on
+    // the target for the `[GFX-DEPTH]` census.
+    uint32_t zimg_address = 0;
+    uint16_t zimg_width = 0;
+    uint8_t zimg_siz = 0, zimg_fmt = 0;
+    // Depth pipeline, decoded from OTHERMODE_L exactly as RT64 decodes its
+    // pipeline flags (render/rt64_framebuffer_renderer.cpp:1729-1730):
+    //   depth_test  = zCmp && !copy && zMode != ZMODE_DEC
+    //   depth_write = zUpd && !copy
+    // `z_mode` keeps the raw G_MDSFT_ZMODE field so a decal draw states itself
+    // (the decal test is not implemented; see note_depth_census).
+    bool depth_test = false;
+    bool depth_write = false;
+    bool z_source_prim = false;   // OTHERMODE_L G_ZS_PRIM (bit 2)
+    float prim_depth = 0.0f;      // G_SETPRIMDEPTH's 0..1 screen depth
+    int z_mode = 0;               // 0 OPA, 0x400 INTER, 0x800 XLU, 0xC00 DEC
+    // NDC depth per vertex, alongside pos[]. The clip-space z the vertex shader
+    // writes is `z_ndc * w` (see transform_vertex).
+    float z[6] = {};
+    // Test-only: the synthetic depth control's last triangle asks the flush to
+    // read the target's centre pixel back and log `[GFX-DEPTH-TEST]`.
+    bool depth_probe = false;
+    // Test-only: the synthetic alpha-compare control (`test_draw`, debug flag
+    // bit 9) marks its three rectangles 1..3, and the flush counts the target
+    // pixels each one drew and logs `[GFX-AC-TEST]`.
+    int ac_probe = 0;
 };
+
+// RT64's Float4ToRGBA16 (`src/shaders/Formats.hlsli`) with the dither value 0
+// and the high-precision (`usesHDR`) coverage rule: RGB rounds through 8 bits
+// and keeps 5, the alpha coverage bit is bit 2 of the 16-bit alpha. When the
+// colour image is a 16-bit float target this is the only quantization between
+// the fragment shader and RDRAM; with the 8-bit fallback the caller has the
+// same value already rounded, and the two agree except at a rounding tie.
+inline uint16_t float4_to_rgba16(float r, float g, float b, float a) {
+    auto c5 = [](float v) {
+        const long n = std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+        return static_cast<uint16_t>(std::min(n, 255L) >> 3);
+    };
+    const long cvg = std::lround(std::clamp(a, 0.0f, 1.0f) * 65535.0f) % 8;
+    return static_cast<uint16_t>((c5(r) << 11) | (c5(g) << 6) | (c5(b) << 1) |
+                                 ((cvg & 0x4) ? 1 : 0));
+}
 
 // A GL framebuffer object standing in for one RDP colour image. The guest
 // address is the key: everything the game draws into that address renders here,
@@ -1450,9 +2190,26 @@ struct DrawCmd {
 struct GlFramebuffer {
     GLuint fbo = 0;
     GLuint tex = 0;
+    // The depth attachment currently attached to `fbo`. The renderbuffers
+    // belong to `depth_targets_`, keyed by the RDP depth image (G_SETZIMG) and
+    // not by this colour image: RT64 keys its depth RenderTarget by the depth
+    // image's own framebuffer address and width, so one depth buffer serves
+    // every colour image that names it (hle/rt64_state.cpp `getTargetsFromPair`,
+    // `RenderTargetKey(depthFb->addressStart, depthFb->width, depthFb->siz,
+    // Framebuffer::Type::Depth)`; rt64_framebuffer_manager.cpp:171). This field
+    // only records what is attached right now, so a colour-image switch does not
+    // re-attach an unchanged depth buffer. The depth values live on the GPU
+    // only: they are not written back to RDRAM and not uploaded from it.
+    GLuint depth_rb = 0;
+    // The last G_SETZIMG configuration this target was drawn with, for the
+    // `[GFX-DEPTH]` census.
+    uint32_t z_address = 0;
+    uint16_t z_width = 0;
+    uint8_t z_siz = 0, z_fmt = 0;
     int width = 0, height = 0;
     uint32_t row_bytes = 0;   // the guest row pitch (width << siz >> 1)
     uint8_t siz = 0, fmt = 0;
+    bool fp = false;          // the attachment is RGBA16F, not RGBA8
     bool inited = false;      // the RDRAM content has been uploaded
     // Rows (window coordinates, 0 = bottom) that have been drawn into since the
     // last writeback. The readback copies only this band: rows the RDP never
@@ -1468,13 +2225,40 @@ struct GlFramebuffer {
     uint32_t last_nonblack = 0;
 };
 
+// One RDP depth image (`G_SETZIMG`) as a GL renderbuffer. RT64's depth
+// RenderTarget is keyed by the depth image's address, width and siz and a colour
+// RenderTarget by the colour image's, so the two are independent objects
+// (hle/rt64_state.cpp `getTargetsFromPair`: `fbKey.colorTargetKey` and
+// `fbKey.depthTargetKey` are separate keys). A pass that renders into colour
+// image A with depth image Z, then into colour image B with the same Z, keeps
+// Z's contents in RT64; a depth buffer attached to the colour image instead
+// would start B at the clear value and lose them.
+//
+// The depth image's own `G_SETZIMG` word carries no usable size in this game
+// (width 1, siz 0, fmt 0: the RDP only keeps the address), so the buffer is
+// sized from the colour target that draws into it, taking the largest one seen.
+// RT64 asserts depth >= colour for the same reason.
+struct GlDepthTarget {
+    GLuint rb = 0;
+    int width = 0;
+    int height = 0;
+    uint32_t created_at = 0;   // draw sequence at creation, for the census
+};
+
 class WebGLRenderer final : public ultramodern::renderer::RendererContext {
   public:
     WebGLRenderer() {
         setup_result = ultramodern::renderer::SetupResult::Success;
         chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+        // Depth test/write switch. On by default; `OGRE_DEPTH=0` turns the test
+        // and the write off, which is the A/B for a frame whose depth ordering is
+        // in question.
+        const char* depth_env = getenv("OGRE_DEPTH");
+        depth_enabled_ = !(depth_env != nullptr && depth_env[0] == '0');
         const char* tex_trace = getenv("OGRE_TEX_TRACE");
         trace_ = tex_trace != nullptr && tex_trace[0] != '\0' && tex_trace[0] != '0';
+        const char* tlut_trace = getenv("OGRE_TLUT_TRACE");
+        tlut_trace_ = tlut_trace != nullptr && tlut_trace[0] != '\0' && tlut_trace[0] != '0';
         OGRE_MILESTONE("RENDERER", "webgl2 renderer pending canvas handoff");
     }
 
@@ -1521,8 +2305,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         constexpr uint32_t kDlOff = 0x00C00000;   // scratch DL area (unused)
         constexpr uint32_t kTexOff = 0x00C01000;  // 2x2 RGBA16 texture
         // Scratch colour image for the framebuffer-as-texture control (debug
-        // flag bit 5): 320x240 RGBA16 is 0x25800 bytes, so it runs to 0x00E7800.
+        // flag bit 5): 320x240 RGBA16 is 0x25800 bytes, so it runs to
+        // 0x00C27800. The row control (debug flag bit 6) uses a second image
+        // after it, at 0x00C28000, because the two controls need separate drawn
+        // row ranges: one image's drawn rows are the union of every draw into
+        // it.
         constexpr uint32_t kFbOff = 0x00C02000;
+        constexpr uint32_t kFb2Off = 0x00C28000;
+        // The depth control (debug flag bit 7) needs its own target: 320x240
+        // RGBA16 is 0x25800 bytes, so it sits after kFb2Off's image
+        // (0x00C28000..0x00C4D800) at 0x00C4E000. Its depth image address is a
+        // scratch guest address with no GL meaning; it exists so the
+        // G_SETZIMG path and the `[GFX-DEPTH]` census are exercised.
+        constexpr uint32_t kFbDepthOff = 0x00C4E000;
+        constexpr uint32_t kFbDepthZOff = 0x00C74000;
+        constexpr uint32_t kMtxOff = 0x00C76000;    // the control's scale matrix
+        constexpr uint32_t kVtxNearOff = 0x00C76040;  // 3 vertices, z = -16384
+        constexpr uint32_t kVtxFarOff = 0x00C76080;   // 3 vertices, z = +16384
+        // The alpha-compare control (debug flag bit 9) needs its own target
+        // (320x240 RGBA16 = 0x25800 bytes, so 0x00C78000..0x00C9D800) and a 2x2
+        // IA16 texture after it.
+        constexpr uint32_t kFbAcOff = 0x00C78000;
+        constexpr uint32_t kAcTexOff = 0x00CA0000;
 
         auto put32 = [this](uint32_t off, uint32_t v) {
             // rdram stores words byte-reversed (runtime MEM_W convention).
@@ -1588,9 +2392,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if ((g_debug_flags.load(std::memory_order_relaxed) & 32u) != 0) {
             // G_SETCIMG: fmt=0 (RGBA), siz=2 (16b), width=320, at kFbOff.
             put32(o, 0xFF000000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbOff); o += 8;
-            // G_SETFILLCOLOR red, then G_FILLRECT (0,0)-(319,239): the whole image.
+            // G_SETFILLCOLOR red, then G_FILLRECT (0,0)-(63,239). The fill
+            // covers the left fifth of the image: the positive control's load
+            // (texels 0..31) lands inside it, and the negative control's load
+            // (texels 160..191, debug flag bit 6) is in the same drawn rows but
+            // outside the drawn columns.
             put32(o, 0xF7000000); put32(o + 4, 0x0000F801); o += 8;
-            put32(o, 0xF6000000 | ((319 << 2) << 12) | (239 << 2)); put32(o + 4, 0); o += 8;
+            put32(o, 0xF6000000 | ((63 << 2) << 12) | (239 << 2)); put32(o + 4, 0); o += 8;
             // G_SETTIMG the same image, RGBA16, width 320.
             put32(o, 0xFD100000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbOff); o += 8;
             // G_SETTILE tile 0: RGBA16, line 160 (320 texels of 16b), tmem 0,
@@ -1598,8 +2406,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             put32(o, 0xF5100000 | (2u << 19) | (160u << 9)); put32(o + 4, 0x00060000); o += 8;
             // G_SETTILESIZE tile 0: texels (0,0)-(31,31) [10.2 -> 124]
             put32(o, 0xF2000000); put32(o + 4, (124u << 12) | 124u); o += 8;
-            // G_LOADTILE tile 0 (the load tile is also the sampling tile here)
-            put32(o, 0xF4000000); put32(o + 4, 0x00000000); o += 8;
+            // G_LOADTILE tile 0 (the load tile is also the sampling tile here).
+            // The load's own rect is what it copies, so it matches the tile:
+            // texels (0,0)-(31,31). A load with a zero rect copies one word and
+            // leaves the tile degenerate, which `draw_texrect` drops.
+            put32(o, 0xF4000000); put32(o + 4, (124u << 12) | 124u); o += 8;
             // G_SETCOMBINE, the same 1-cycle TEXEL0 pass-through
             put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
             // G_TEXRECT (0,0)-(63,47), tile 0, sampling the image just rendered
@@ -1607,6 +2418,208 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
             // dsdx/dtdy spread the 32x32 tile over 63x47 pixels.
             put32(o, 0xF1000000); put32(o + 4, 0x02000200); o += 8;
+            if ((g_debug_flags.load(std::memory_order_relaxed) & 64u) != 0) {
+                // Negative control for the column half of the test (debug flag
+                // bit 6, requires bit 5's image): the same colour image, a load
+                // whose destination rows the fill drew and whose columns it did
+                // not. A test that compares rows only reports it; the load's
+                // bytes are outside every column a draw wrote, so it must not.
+                // G_SETTILESIZE tile 0: texels (160,0)-(191,31) [10.2 fixed].
+                // The upper-left corner is in the command word and the
+                // lower-right in the next one, as OP_TEXRECT decodes them.
+                put32(o, 0xF2000000 | ((160 << 2) << 12) | 0);
+                put32(o + 4, ((191 << 2) << 12) | (31 << 2)); o += 8;
+                // G_LOADTILE tile 0 (the load tile is also the sampling tile):
+                // texels (160,0)-(191,31), the tile's own rect.
+                put32(o, 0xF4000000 | ((160 << 2) << 12) | 0);
+                put32(o + 4, ((191 << 2) << 12) | (31 << 2)); o += 8;
+                // The same 1-cycle TEXEL0 pass-through.
+                put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
+                // G_TEXRECT (160,0)-(223,47), tile 0, sampling texels 160..191.
+                put32(o, 0xE4000000 | (223 << 2) << 12 | (47 << 2));
+                put32(o + 4, (160 << 2) << 12 | 0); o += 8;
+                put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
+                put32(o, 0xF1000000); put32(o + 4, 0x02000200); o += 8;
+
+                // Negative control for the row half of the test (debug flag
+                // bit 6): a second colour image whose fill covers rows 100..163
+                // only, and a load of rows 98..99, whose columns are inside the
+                // fill's. Those rows are outside every row the fill drew and
+                // inside the band the pre-session-155 inversion recorded: the
+                // guest row was `height - 1 - wy`, which is `y - 1` for row 100,
+                // so a fill of 100..163 was recorded as 99..163 and the row test
+                // reported the load at row 99. The inversion is exact now, so
+                // the load must not be reported. The fill does not start at row
+                // 0: its top row is clamped to 0 (`std::max(gy, 0)`), which
+                // hides a one-row over-report there. The load spans two rows
+                // because `draw_texrect` drops a tile with `lrt == ult` (RT64's
+                // degenerate-tile guard), so a one-row load never reaches the
+                // decode.
+                put32(o, 0xFF000000 | (2u << 19) | (320 - 1)); put32(o + 4, kFb2Off); o += 8;
+                put32(o, 0xF7000000); put32(o + 4, 0x0000F801); o += 8;
+                // G_FILLRECT (0,100)-(63,163): rows 100..163, columns 0..63.
+                put32(o, 0xF6000000 | ((63 << 2) << 12) | (163 << 2));
+                put32(o + 4, (0 << 2) << 12 | (100 << 2)); o += 8;
+                // G_SETTIMG the second image, RGBA16, width 320.
+                put32(o, 0xFD100000 | (2u << 19) | (320 - 1)); put32(o + 4, kFb2Off); o += 8;
+                // G_SETTILE tile 0: RGBA16, line 160 (320 texels of 16b), clamp.
+                put32(o, 0xF5100000 | (2u << 19) | (160u << 9));
+                put32(o + 4, 0x00060000); o += 8;
+                // G_SETTILESIZE tile 0: texels (0,98)-(31,99) - rows 98 and 99.
+                put32(o, 0xF2000000 | ((0 << 2) << 12) | (98 << 2));
+                put32(o + 4, ((31 << 2) << 12) | (99 << 2)); o += 8;
+                // G_LOADTILE tile 0 (the load tile is also the sampling tile):
+                // texels (0,98)-(31,99), the tile's own rect.
+                put32(o, 0xF4000000 | (98 << 2));
+                put32(o + 4, ((31 << 2) << 12) | (99 << 2)); o += 8;
+                // The same 1-cycle TEXEL0 pass-through.
+                put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
+                // G_TEXRECT (0,100)-(63,163), tile 0, sampling texels 0..31 of
+                // rows 98..99. Its own draw lands inside the fill's rows, so it
+                // does not add a row to the image's drawn range.
+                put32(o, 0xE4000000 | (63 << 2) << 12 | (163 << 2));
+                put32(o + 4, (0 << 2) << 12 | (98 << 2)); o += 8;
+                put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
+                put32(o, 0xF1000000); put32(o + 4, 0x02000200); o += 8;
+            }
+        }
+        // The depth pipeline's synthetic control (debug flag bit 7): two
+        // identical triangles at different depths, drawn in the adversarial
+        // order - the NEAR one first, the FAR one second - so a renderer
+        // without a depth test shows the far colour and one with a test shows
+        // the near colour. Bit 8 (256) is the negative control: it clears
+        // Z_CMP and keeps Z_UPD, so the far triangle must overwrite the near
+        // one. The last triangle is marked for the renderer's pixel readback
+        // (`[GFX-DEPTH-TEST]`).
+        //
+        // Geometry/state: a modelview matrix with 1/32768 on the diagonal (0
+        // integer part, fraction 2), so a vertex of +-32767 lands at NDC
+        // +-0.99997; the two triangles carry z = -16384 (screen depth 0.25)
+        // and z = +16384 (0.75), both inside RT64's F3D depth clip
+        // (1022/1024). The combiner is `(0 - 0) * COMBINED + PRIM`, i.e. the
+        // primitive colour, which is what makes the readback a single value.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 128u) != 0) {
+            auto put16 = [this](uint32_t base, int off, uint16_t v) {
+                // The logical halfword at `off` lives at byte `off ^ 2` (see
+                // n64h): store it little-endian there.
+                const uint32_t a = base + static_cast<uint32_t>(off ^ 2);
+                rdram_[a] = static_cast<uint8_t>(v & 0xFF);
+                rdram_[a + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+            };
+            auto put8 = [this](uint32_t base, int off, uint8_t v) {
+                rdram_[base + static_cast<uint32_t>(off ^ 3)] = v;
+            };
+            // read_matrix reads the matrix's halves with a plain rd16 at
+            // `addr + i*2` and `addr + 32 + i*2`, not through n64h's `^ 2`
+            // addressing, so the matrix needs its own little-endian writer.
+            auto put16raw = [this](uint32_t base, int off, uint16_t v) {
+                rdram_[base + static_cast<uint32_t>(off)] = static_cast<uint8_t>(v & 0xFF);
+                rdram_[base + static_cast<uint32_t>(off) + 1] =
+                    static_cast<uint8_t>((v >> 8) & 0xFF);
+            };
+            // Scale matrix: int parts all zero except m[3][3] = 1, fraction 2
+            // on the three diagonal entries (2/65536 = 1/32768). read_matrix
+            // swaps the column pairs (`c ^ 1`), so store through the same swap.
+            for (int i = 0; i < 16; ++i) {
+                put16raw(kMtxOff, i * 2, 0);
+                put16raw(kMtxOff, 32 + i * 2, 0);
+            }
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    const int i = r * 4 + (c ^ 1);
+                    if (r == c && r < 3) {
+                        put16raw(kMtxOff, 32 + i * 2, 2);     // fraction 1/32768
+                    } else if (r == 3 && c == 3) {
+                        put16raw(kMtxOff, i * 2, 1);          // integer 1
+                    }
+                }
+            }
+            // 3 vertices at (x, y) = (-32767,-32767), (32767,-32767),
+            // (-32767,32767): after the y flip they are NDC (-1,1), (1,1),
+            // (-1,-1), the region y >= x. NDC (-0.6, -0.2) - the pixel the
+            // readback samples - is well inside it.
+            const int16_t vx[3] = {-32767, 32767, -32767};
+            const int16_t vy[3] = {-32767, -32767, 32767};
+            for (int set = 0; set < 2; ++set) {
+                const uint32_t base = set == 0 ? kVtxNearOff : kVtxFarOff;
+                const int16_t vz = set == 0 ? -16384 : 16384;
+                for (int i = 0; i < 3; ++i) {
+                    const uint32_t vbase = base + static_cast<uint32_t>(i * 16);
+                    put16(vbase, 0, static_cast<uint16_t>(vx[i]));
+                    put16(vbase, 2, static_cast<uint16_t>(vy[i]));
+                    put16(vbase, 4, static_cast<uint16_t>(vz));
+                    put16(vbase, 6, 0);
+                    put16(vbase, 8, 0);
+                    put16(vbase, 10, 0);
+                    put8(vbase, 12, 255);
+                    put8(vbase, 13, 255);
+                    put8(vbase, 14, 255);
+                    put8(vbase, 15, 255);
+                }
+            }
+            // G_SETCIMG the control's target, G_SETZIMG a scratch depth image.
+            put32(o, 0xFF000000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbDepthOff); o += 8;
+            put32(o, 0xFE000000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbDepthZOff); o += 8;
+            // G_RDPSETOTHERMODE: OTHERMODE_H = 0 (1-cycle), OTHERMODE_L =
+            // Z_CMP|Z_UPD|AA_EN|IM_RD (0x78). Bit 8 clears Z_CMP only.
+            const uint32_t oml = (g_debug_flags.load(std::memory_order_relaxed) & 256u) != 0
+                                     ? 0x68u : 0x78u;
+            put32(o, 0xEF000000); put32(o + 4, oml); o += 8;
+            // G_SETCOMBINE: rgb = (ZERO - ZERO) * COMBINED + PRIM, alpha = ONE
+            // (cycle-1 fields; see Combiner::decode).
+            put32(o, 0xFC000100); put32(o + 4, 0x08E000FE); o += 8;
+            // G_MTX MODELVIEW|LOAD|NOPUSH: the F3DEX2 stored byte is
+            // `flags ^ G_MTX_PUSH`, so 0x02 ^ 0x01 = 0x03.
+            put32(o, 0xDA000003); put32(o + 4, kMtxOff); o += 8;
+            // The near set into slots 0..2, the far set into slots 3..5.
+            put32(o, 0x01003006); put32(o + 4, kVtxNearOff); o += 8;
+            put32(o, 0x0100300C); put32(o + 4, kVtxFarOff); o += 8;
+            // Near first, red, then far, blue. G_TRI1 packs each index doubled:
+            // v1 at bits 16-23, v2 at bits 8-15, v0 at bits 0-7, which is what
+            // the executor's p0(17,7)/p0(9,7)/p0(1,7) reads back.
+            put32(o, 0xFA000000); put32(o + 4, 0xFF0000FF); o += 8;
+            put32(o, 0x05000000 | (1 * 2 << 16) | (2 * 2 << 8) | (0 * 2)); put32(o + 4, 0); o += 8;
+            put32(o, 0xFA000000); put32(o + 4, 0x0000FFFF); o += 8;
+            put32(o, 0x05000000 | (4 * 2 << 16) | (5 * 2 << 8) | (3 * 2)); put32(o + 4, 0); o += 8;
+        }
+        // The alpha-compare control (debug flag bit 9): three identical
+        // rectangles on a scratch target, each drawn with a combiner alpha of
+        // 0.2 (G_SETPRIMCOLOR's alpha), differing only in OTHERMODE_L's
+        // alpha-compare field and in the blend colour's alpha:
+        //
+        //   1. G_AC_THRESHOLD (L bits 0-1 = 1) with blend alpha 0: every
+        //      fragment passes.
+        //   2. G_AC_THRESHOLD with blend alpha 1: every fragment is discarded.
+        //   3. G_AC_DITHER (L bits 0-1 = 3): a fraction of the fragments pass.
+        //
+        // A combiner alpha of 0.2 is the mission band's own situation: a glyph
+        // texel whose alpha the compare rejects.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 512u) != 0) {
+            // The proven 2x2 RGBA16 texture the canvas rectangle above uses,
+            // and a combiner alpha taken from PRIMITIVE (0.2), so the control
+            // measures the compare and not the texture decode.
+            put32(o, 0xFF000000 | (2u << 19) | (320 - 1)); put32(o + 4, kFbAcOff); o += 8;
+            put32(o, 0xF7000000); put32(o + 4, 0x00000000); o += 8;
+            put32(o, 0xF6000000 | ((319 << 2) << 12) | (239 << 2)); put32(o + 4, 0); o += 8;
+            put32(o, 0xFD100001); put32(o + 4, kTexOff); o += 8;
+            put32(o, 0xF5100200); put32(o + 4, 0x00060000); o += 8;
+            put32(o, 0xF2000000); put32(o + 4, 0x4004); o += 8;
+            put32(o, 0xF4000000); put32(o + 4, 0x4004); o += 8;
+            // G_SETPRIMCOLOR: white with alpha 0x33 (0.2).
+            put32(o, 0xFA000000); put32(o + 4, 0xFFFFFF33); o += 8;
+            // G_SETCOMBINE, cycle-1 fields: rgb = (TEXEL0 - ZERO) * SHADE + 0,
+            // alpha = (PRIM - PRIM) * COMBINED + PRIM = 0.2.
+            put32(o, 0xFC000024); put32(o + 4, 0x0860001B); o += 8;
+            for (int i = 0; i < 3; ++i) {
+                put32(o, 0xEF000000); put32(o + 4, (i == 2) ? 3u : 1u); o += 8;
+                put32(o, 0xF9000000); put32(o + 4, (i == 1) ? 0x000000FFu : 0x00000000u);
+                o += 8;
+                const int y0 = 10 + i * 50, y1 = 49 + i * 50;
+                put32(o, 0xE4000000 | ((49 << 2) << 12) | (y1 << 2));
+                put32(o + 4, ((10 << 2) << 12) | (y0 << 2)); o += 8;
+                put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
+                put32(o, 0xF1000000); put32(o + 4, 0x00340034); o += 8;
+            }
         }
         // G_ENDDL
         put32(o, 0xDF000000); put32(o + 4, 0x00000000); o += 8;
@@ -1620,6 +2633,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // thread, which must never block on the renderer mutex.
         ExecCtx ctx;
         execute_dl(rdram_, kDlOff, st, ctx);
+        // The depth control's last triangle carries the pixel readback marker,
+        // and the next flush reports it (`note_depth_probe`). Both run on the
+        // browser main thread, so no lock or atomic is needed for the flag.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 128u) != 0) {
+            for (auto it = ctx.draws.rbegin(); it != ctx.draws.rend(); ++it) {
+                if (it->fb_address == kFbDepthOff) {
+                    it->depth_probe = true;
+                    depth_probe_pending_ = true;
+                    break;
+                }
+            }
+        }
+        // The alpha-compare control's three rectangles carry markers 1..3, and
+        // the flush counts each one's surviving pixels (`note_ac_probe`).
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 512u) != 0) {
+            int next = 3;
+            for (auto it = ctx.draws.rbegin(); it != ctx.draws.rend() && next > 0; ++it) {
+                if (it->fb_address == kFbAcOff && it->kind == 2 && it->textured) {
+                    it->ac_probe = next--;
+                }
+            }
+        }
         {
             std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
             if (!lock.owns_lock()) {
@@ -1677,7 +2712,65 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
         glBindTexture(GL_TEXTURE_2D, fb.tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        if (fb.fp) {
+            // A sized float texture takes float client data only: WebGL2 rejects
+            // `format=RGBA, type=UNSIGNED_BYTE` for an RGBA16F internal format
+            // (INVALID_OPERATION, and a texSubImage that writes nothing). Scale
+            // the decoder's 8-bit values instead; the decode itself is the same
+            // one RT64 feeds its render target (`RGBA16ToFloat4` etc.).
+            std::vector<float> fpx(px.size());
+            for (size_t i = 0; i < px.size(); ++i) {
+                fpx[i] = px[i] / 255.0f;
+            }
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_FLOAT, fpx.data());
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        }
+    }
+
+    // The key of the depth buffer a draw uses. A display list that sent
+    // G_SETZIMG gets one buffer per depth image; one that never did (the boot
+    // blanking lists) gets one per colour image, which is what the renderer did
+    // before the depth image became the key. The high bit keeps the two
+    // namespaces apart: the mission's depth image address (0x3350C0) is also one
+    // of its colour image addresses.
+    static uint64_t depth_target_key(const DrawCmd& cmd) {
+        return cmd.zimg_address != 0 ? ((uint64_t{1} << 32) | cmd.zimg_address)
+                                     : cmd.fb_address;
+    }
+
+    // The depth renderbuffer for a draw, created (and registered for its
+    // one-time clear to the far value) on first use. Sized from the colour
+    // target because this game's G_SETZIMG word carries no usable size, and
+    // grown rather than recreated when several colour targets of different sizes
+    // share one depth image (RT64 asserts depth >= colour).
+    GLuint depth_target_for(const DrawCmd& cmd, int width, int height) {
+        GlDepthTarget& d = depth_targets_[depth_target_key(cmd)];
+        const int w = std::max(width, 1);
+        const int h = std::max(height, 1);
+        if (d.rb != 0 && (d.width < w || d.height < h)) {
+            glDeleteRenderbuffers(1, &d.rb);
+            d.rb = 0;
+        }
+        if (d.rb == 0) {
+            const int nw = std::max(w, d.width);
+            const int nh = std::max(h, d.height);
+            glGenRenderbuffers(1, &d.rb);
+            glBindRenderbuffer(GL_RENDERBUFFER, d.rb);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, nw, nh);
+            d.width = nw;
+            d.height = nh;
+            d.created_at = ++depth_target_seq_;
+            depth_needs_clear_.insert(d.rb);
+            if (depth_targets_logged_ < 8) {
+                ++depth_targets_logged_;
+                OGRE_MILESTONE("GFX-DEPTH",
+                               "depth target #%u for SETZIMG addr=0x%06X %dx%d "
+                               "(colour 0x%06X %dx%d, GL_DEPTH_COMPONENT24)",
+                               d.created_at, cmd.zimg_address, nw, nh, cmd.fb_address, w, h);
+            }
+        }
+        return d.rb;
     }
 
     // Creates the GL framebuffer for a draw's colour image if it does not exist
@@ -1711,6 +2804,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
              fb.row_bytes != row_bytes)) {
             glDeleteFramebuffers(1, &fb.fbo);
             glDeleteTextures(1, &fb.tex);
+            // The depth renderbuffer is owned by `depth_targets_` (keyed by the
+            // depth image) and survives this colour target's recreation, the way
+            // RT64's depth RenderTarget survives a colour target resize.
             fb = GlFramebuffer{};
         }
         if (fb.fbo == 0) {
@@ -1719,10 +2815,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             fb.siz = cmd.fb_siz;
             fb.fmt = cmd.fb_fmt;
             fb.row_bytes = row_bytes;
+            // The RDP's blender writes each draw's result into its internal
+            // colour buffer, and RT64's high-precision mode keeps that buffer
+            // at 16 bits (`RenderTarget::colorBufferFormat`, an R16G16B16A16
+            // target) so a stack of translucent draws quantizes once, when the
+            // framebuffer is written back to RDRAM, not at every draw. An
+            // RGBA8 attachment quantizes at every blend instead, which is the
+            // 1-3 level difference the title's fog rows showed (session 162).
+            // `EXT_color_buffer_float` makes RGBA16F renderable; without it the
+            // 8-bit attachment stays and only the precision of blended pixels
+            // differs from RT64.
+            fb.fp = hp_fb_;
             glGenTextures(1, &fb.tex);
             glBindTexture(GL_TEXTURE_2D, fb.tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
-                         GL_UNSIGNED_BYTE, nullptr);
+            glTexImage2D(GL_TEXTURE_2D, 0, fb.fp ? GL_RGBA16F : GL_RGBA8, width, height, 0,
+                         GL_RGBA, fb.fp ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE, nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1731,33 +2838,180 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                                    fb.tex, 0);
+            // The depth attachment is not created here: it belongs to the draw's
+            // G_SETZIMG depth image (see depth_target_for), and the flush
+            // attaches it before the draw. A colour image with no depth image is
+            // a complete framebuffer on its own.
+            fb.depth_rb = 0;
+            glDepthMask(GL_TRUE);
             const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-            if (status != GL_FRAMEBUFFER_COMPLETE) {
-                OGRE_MILESTONE("GFX-FB", "framebuffer 0x%06X incomplete (status 0x%04X)",
+            if (status != GL_FRAMEBUFFER_COMPLETE && fb.fp) {
+                // A context can advertise EXT_color_buffer_float and still refuse
+                // the attachment (no float memory left, a software path). Keep the
+                // 8-bit attachment: it costs blend precision, not the frame.
+                OGRE_MILESTONE("GFX-FB",
+                               "RGBA16F attachment 0x%06X incomplete (status 0x%04X); "
+                               "falling back to RGBA8",
                                cmd.fb_address, static_cast<unsigned>(status));
+                fb.fp = false;
+                glBindTexture(GL_TEXTURE_2D, fb.tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                             GL_UNSIGNED_BYTE, nullptr);
+                hp_fb_ = false;   // every later colour image takes the 8-bit path
+            }
+            const GLenum final_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (final_status != GL_FRAMEBUFFER_COMPLETE) {
+                OGRE_MILESTONE("GFX-FB", "framebuffer 0x%06X incomplete (status 0x%04X)",
+                               cmd.fb_address, static_cast<unsigned>(final_status));
                 glDeleteFramebuffers(1, &fb.fbo);
                 glDeleteTextures(1, &fb.tex);
                 fb.fbo = 0;
                 fb.tex = 0;
+                fb.depth_rb = 0;
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 return fb;
             }
             if (framebuffers_logged_ < 16) {
                 ++framebuffers_logged_;
                 OGRE_MILESTONE("GFX-FB",
-                               "framebuffer 0x%06X: %dx%d siz=%u fmt=%u pitch=%u",
+                               "framebuffer 0x%06X: %dx%d siz=%u fmt=%u pitch=%u %s depth=24",
                                cmd.fb_address, width, height, (unsigned)cmd.fb_siz,
-                               (unsigned)cmd.fb_fmt, row_bytes);
+                               (unsigned)cmd.fb_fmt, row_bytes,
+                               fb.fp ? "rgba16f" : "rgba8");
+            }
+            // The first colour target, once: the `[GFX-DEPTH]` census (gfx
+            // thread) states what the display list asked for, and this states
+            // what the pipeline has to work with.
+            if (!depth_target_logged_) {
+                depth_target_logged_ = true;
+                OGRE_MILESTONE("GFX-DEPTH",
+                               "colour target 0x%06X %dx%d; depth comes from SETZIMG "
+                               "addr=0x%06X fmt=%u siz=%u width=%u (keyed by the depth image)",
+                               cmd.fb_address, width, height, cmd.zimg_address,
+                               (unsigned)cmd.zimg_fmt, (unsigned)cmd.zimg_siz,
+                               (unsigned)cmd.zimg_width);
             }
             fb.inited = false;
             fb.min_row = 1 << 30;
             fb.max_row = -1;
+        }
+        // The depth image the display list last named, kept on the target for
+        // the census. A zero address means the game never sent G_SETZIMG.
+        if (cmd.zimg_address != 0) {
+            fb.z_address = cmd.zimg_address;
+            fb.z_width = cmd.zimg_width;
+            fb.z_siz = cmd.zimg_siz;
+            fb.z_fmt = cmd.zimg_fmt;
         }
         if (!fb.inited) {
             upload_framebuffer(fb, cmd.fb_address);
             fb.inited = true;
         }
         return fb;
+    }
+
+    // Test-only readback for the synthetic alpha-compare control (`test_draw`,
+    // debug flag bit 9): counts the fragments of one of the control's three
+    // rectangles that the alpha compare let through. The target is a scratch
+    // colour image filled with black, so a discarded fragment reads black and a
+    // surviving one reads the IA16 texture's white.
+    void note_ac_probe(const DrawCmd& cmd, GlFramebuffer* fb) {
+        if (fb == nullptr || fb->fbo == 0) {
+            OGRE_MILESTONE("GFX-AC-TEST", "rect=%d no target bound", cmd.ac_probe);
+            return;
+        }
+        float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+        for (int i = 0; i < cmd.vertex_count; ++i) {
+            minx = std::min(minx, cmd.pos[i * 2 + 0]);
+            maxx = std::max(maxx, cmd.pos[i * 2 + 0]);
+            miny = std::min(miny, cmd.pos[i * 2 + 1]);
+            maxy = std::max(maxy, cmd.pos[i * 2 + 1]);
+        }
+        const int gx0 = std::clamp(static_cast<int>((minx + 1.0f) * 0.5f * fb->width) + 1, 0,
+                                   fb->width - 1);
+        const int gx1 = std::clamp(static_cast<int>((maxx + 1.0f) * 0.5f * fb->width) - 1, gx0,
+                                   fb->width - 1);
+        const int gy0 = std::clamp(static_cast<int>((miny + 1.0f) * 0.5f * fb->height) + 1, 0,
+                                   fb->height - 1);
+        const int gy1 = std::clamp(static_cast<int>((maxy + 1.0f) * 0.5f * fb->height) - 1, gy0,
+                                   fb->height - 1);
+        const int w = gx1 - gx0 + 1, h = gy1 - gy0 + 1;
+        static std::vector<uint8_t> block;
+        block.resize(static_cast<size_t>(w) * h * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        if (fb->fp) {
+            // The control target takes the renderer's high-precision attachment
+            // (RGBA16F), and WebGL2 rejects GL_UNSIGNED_BYTE for it with
+            // INVALID_OPERATION, which read as an all-zero block. Read floats
+            // and scale them, as `note_depth_probe` does.
+            static std::vector<float> fblock;
+            fblock.resize(static_cast<size_t>(w) * h * 4);
+            glReadPixels(gx0, gy0, w, h, GL_RGBA, GL_FLOAT, fblock.data());
+            for (size_t i = 0; i + 3 < fblock.size(); i += 4) {
+                for (int c = 0; c < 4; ++c) {
+                    block[i + c] = static_cast<uint8_t>(std::lround(
+                        std::clamp(fblock[i + c], 0.0f, 1.0f) * 255.0f));
+                }
+            }
+        } else {
+            glReadPixels(gx0, gy0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, block.data());
+        }
+        int lit = 0, peak = 0;
+        for (size_t i = 0; i + 3 < block.size(); i += 4) {
+            const int m = std::max({block[i], block[i + 1], block[i + 2]});
+            if (m > 20) {
+                ++lit;
+            }
+            peak = std::max(peak, m);
+        }
+        OGRE_MILESTONE("GFX-AC-TEST",
+                       "rect=%d acmp=%d blend_a=%.3f om_l=0x%06X window=%d,%d..%d,%d "
+                       "lit=%d/%d peak=%d",
+                       cmd.ac_probe, cmd.acmp, cmd.blend_color[3], cmd.othermode_l, gx0, gy0,
+                       gx1, gy1, lit, w * h, peak);
+    }
+
+    // Test-only readback for the synthetic depth control (`test_draw`, debug
+    // flag bit 7): reads one pixel of the target the control drew into, right
+    // after the draw, and logs it as `[GFX-DEPTH-TEST]`. The target is a scratch
+    // colour image whose depth buffer was cleared to 1.0 when it was created, so
+    // the result does not depend on any other draw or on the canvas.
+    //
+    // The pixel is the one the control's triangles cover at NDC (-0.6, -0.2):
+    // window x = 0.2 * width, y = 0.4 * height (window row 0 is NDC y = -1).
+    void note_depth_probe(const DrawCmd& cmd, GlFramebuffer* fb) {
+        if (!depth_probe_pending_) {
+            return;
+        }
+        depth_probe_pending_ = false;
+        if (fb == nullptr || fb->fbo == 0) {
+            OGRE_MILESTONE("GFX-DEPTH-TEST", "no depth target bound for the control draw");
+            return;
+        }
+        const int px_x = static_cast<int>(fb->width / 5);
+        const int px_y = static_cast<int>(fb->height * 2 / 5);
+        unsigned out[4] = {0, 0, 0, 0};
+        if (fb->fp) {
+            float f[4] = {0, 0, 0, 0};
+            glReadPixels(px_x, px_y, 1, 1, GL_RGBA, GL_FLOAT, f);
+            for (int i = 0; i < 4; ++i) {
+                out[i] = static_cast<unsigned>(
+                    std::lround(std::clamp(f[i], 0.0f, 1.0f) * 255.0f));
+            }
+        } else {
+            uint8_t b[4] = {0, 0, 0, 0};
+            glReadPixels(px_x, px_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, b);
+            for (int i = 0; i < 4; ++i) {
+                out[i] = b[i];
+            }
+        }
+        OGRE_MILESTONE("GFX-DEPTH-TEST",
+                       "target=0x%06X %dx%d pixel=(%d,%d) rgba=(%u,%u,%u,%u) "
+                       "zcmp=%d zupd=%d zmode=0x%03X",
+                       cmd.fb_address, fb->width, fb->height, px_x, px_y,
+                       out[0], out[1], out[2], out[3],
+                       cmd.depth_test ? 1 : 0, cmd.depth_write ? 1 : 0,
+                       (unsigned)cmd.z_mode);
     }
 
     // Writes a framebuffer's rendered rows back into RDRAM in the RDP's layout:
@@ -1787,10 +3041,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
         const int rows = wy1 - wy0 + 1;
         static std::vector<uint8_t> px;
+        static std::vector<float> fpx;
         px.resize(static_cast<size_t>(w) * rows * 4);
         glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(0, wy0, w, rows, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        if (fb.fp) {
+            // The attachment holds the blend result at 16-bit float precision.
+            // Read that, and let `float4_to_rgba16` do RT64's single 8-bit
+            // rounding step; `px` keeps the rounded bytes for the counters.
+            fpx.resize(static_cast<size_t>(w) * rows * 4);
+            glReadPixels(0, wy0, w, rows, GL_RGBA, GL_FLOAT, fpx.data());
+            for (size_t i = 0; i < fpx.size(); i += 4) {
+                for (int c = 0; c < 4; ++c) {
+                    px[i + c] = static_cast<uint8_t>(std::lround(
+                        std::clamp(fpx[i + c], 0.0f, 1.0f) * 255.0f));
+                }
+            }
+        } else {
+            glReadPixels(0, wy0, w, rows, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        }
 
         const uint8_t bpt = static_cast<uint8_t>(bytes_per_texel(fb.siz));
         for (int i = 0; i < rows; ++i) {
@@ -1799,6 +3068,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             const int gy = h - 1 - (wy0 + i);
             uint8_t* dst = rdram_ + address + static_cast<uint32_t>(gy) * pitch;
             const uint8_t* src = px.data() + static_cast<size_t>(i) * w * 4;
+            const float* fsrc = fb.fp ? fpx.data() + static_cast<size_t>(i) * w * 4
+                                      : nullptr;
             for (int x = 0; x < w; ++x) {
                 const uint8_t* t = src + x * 4;
                 const uint32_t off = static_cast<uint32_t>(x) * bpt;
@@ -1809,10 +3080,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     dst[(off + 3) ^ 3] = t[3];
                 } else {
                     // RT64 Float4ToRGBA16 with the dither value 0; the alpha bit
-                    // is the coverage test `(round(a*255) % 8) & 4`.
-                    const uint16_t v = static_cast<uint16_t>(
-                        ((t[0] >> 3) << 11) | ((t[1] >> 3) << 6) | ((t[2] >> 3) << 1) |
-                        (((t[3] % 8) & 4) ? 1 : 0));
+                    // is the coverage test `(round(a*255) % 8) & 4` in the
+                    // standard format and `(round(a*65535) % 8) & 4` in the
+                    // high-precision one (`usesHDR`). The float source is the
+                    // latter's exact input; the byte source is the former's.
+                    uint16_t v;
+                    if (fsrc != nullptr) {
+                        const float* f = fsrc + x * 4;
+                        v = float4_to_rgba16(f[0], f[1], f[2], f[3]);
+                    } else {
+                        v = static_cast<uint16_t>(
+                            ((t[0] >> 3) << 11) | ((t[1] >> 3) << 6) | ((t[2] >> 3) << 1) |
+                            (((t[3] % 8) & 4) ? 1 : 0));
+                    }
                     dst[off ^ 2] = static_cast<uint8_t>(v & 0xFF);
                     dst[(off ^ 2) + 1] = static_cast<uint8_t>(v >> 8);
                 }
@@ -1884,18 +3164,55 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         // The guest rows this draw covers. Window row 0 is the image's *bottom*
-        // row (`upload_framebuffer` flips), so guest row = height - 1 - wy; the
-        // main thread computes the same window rows in flush_commands.
+        // row (`upload_framebuffer` flips), and `ndc_yf` maps guest row y to
+        // `1 - 2y/H`, so the guest edge a vertex sits on is
+        // `(1 - pos) / 2 * height`: the y mirror of the column inverse below,
+        // and not `height - 1 - wy`. That extra `- 1` subtracted one from the
+        // recorded rows (session 155): a fill of rows 100..163 was recorded as
+        // 99..163, so a load in row 99 was reported. A vertex marks an edge and
+        // the lower-right corner is exclusive, so the first row covered is the
+        // top edge and the last is the bottom edge minus one. `std::lround`
+        // recovers a rect's authored integer exactly; a triangle's fractional
+        // edge is rounded to the nearest row. Every draw that writes a colour
+        // image here is a rect or a fill.
         int row_min = 1 << 30, row_max = -1;
         for (int i = 0; i < cmd.vertex_count; ++i) {
-            const int wy = static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
-                                            static_cast<float>(cmd.fb_height_px));
-            const int gy = cmd.fb_height_px - 1 - wy;
-            row_min = std::min(row_min, std::max(gy, 0));
-            row_max = std::max(row_max, std::min(gy, static_cast<int>(cmd.fb_height_px) - 1));
+            const double edge = (1.0 - static_cast<double>(cmd.pos[i * 2 + 1])) * 0.5 *
+                                static_cast<double>(cmd.fb_height_px);
+            const int e = static_cast<int>(std::lround(edge));
+            const int top = std::max(std::min(e, static_cast<int>(cmd.fb_height_px) - 1), 0);
+            const int bottom = std::min(e - 1, static_cast<int>(cmd.fb_height_px) - 1);
+            row_min = std::min(row_min, top);
+            if (bottom >= 0) {
+                row_max = std::max(row_max, bottom);
+            }
         }
         if (row_max < row_min) {
             return;
+        }
+        // The byte columns those rows were drawn across. NDC x is
+        // `2*x/width - 1` (`ndc_xf`), so the inverse is `(pos + 1) / 2 * width`
+        // and it is not flipped the way y is. A draw's x extent is the min/max
+        // over its vertices: exact for a rect, a bounding box for a triangle
+        // list. `col_max` is one past the last byte. The column range is what
+        // tells a load that reads a drawn row from a load that reads a drawn
+        // pixel; a test with only the rows reports the first as the second.
+        const uint8_t bpt = static_cast<uint8_t>(bytes_per_texel(cmd.fb_siz));
+        int col_min = 1 << 30, col_max = -1;
+        if (cmd.fb_width_px >= 1 && bpt > 0) {
+            for (int i = 0; i < cmd.vertex_count; ++i) {
+                const int wx = static_cast<int>((cmd.pos[i * 2] + 1.0f) * 0.5f *
+                                                static_cast<float>(cmd.fb_width_px));
+                const int cx = std::min(std::max(wx, 0),
+                                        static_cast<int>(cmd.fb_width_px) - 1) * bpt;
+                col_min = std::min(col_min, cx);
+                col_max = std::max(col_max, cx + bpt);
+            }
+            col_max = std::min(col_max, static_cast<int>(cmd.fb_row_bytes));
+        }
+        if (col_max < col_min) {
+            col_min = 0;
+            col_max = -1;   // unknown: the column test below is skipped
         }
         std::lock_guard<std::mutex> lock(fbtex_mutex_);
         drop_written_after_writeback();
@@ -1906,6 +3223,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (r.address == cmd.fb_address) {
                 r.row_min = std::min(r.row_min, row_min);
                 r.row_max = std::max(r.row_max, row_max);
+                if (col_max < 0 || r.col_max < 0) {
+                    r.col_min = 0;
+                    r.col_max = -1;   // one draw's columns unknown: keep no bound
+                } else {
+                    r.col_min = std::min(r.col_min, col_min);
+                    r.col_max = std::max(r.col_max, col_max);
+                }
                 return;   // one entry per image is enough
             }
         }
@@ -1922,54 +3246,104 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         r.siz = cmd.fb_siz;
         r.row_min = row_min;
         r.row_max = row_max;
+        r.col_min = col_max < 0 ? 0 : col_min;
+        r.col_max = col_max;
         fb_written_.push_back(r);
     }
 
     // The image a tile decodes covers rows y0..y0+height at `stride` bytes each,
-    // starting at `address`. True when that range overlaps rows a draw actually
-    // wrote in a colour image whose pixels are not in RDRAM yet: the decode read
-    // stale bytes. `fb_written_` is capped at 64 images, which is far above the
-    // handful a display list batch writes (a game writing more would drop the
-    // ones past the cap, and that direction loses a report rather than inventing
-    // one).
+    // starting at `address`. True when that range overlaps rows and columns a
+    // draw actually wrote in a colour image whose pixels are not in RDRAM yet:
+    // the decode read stale bytes. `fb_written_` is capped at 64 images, which is
+    // far above the handful a display list batch writes (a game writing more
+    // would drop the ones past the cap, and that direction loses a report rather
+    // than inventing one).
+    //
+    // The rect's own columns are `x0 .. x0+w` texels, not the whole `stride`:
+    // the TMEM load reads byte `address + ty*stride + tx*bpp`, so a 32-texel
+    // RGBA16 load out of a 640-byte-pitch image reads 64 bytes of each row,
+    // not 640. A test that used the stride for the rect's width claimed columns
+    // the load never read (session 154).
     bool note_fb_texture(uint32_t address, int stride, int y0, int height, int w, int h,
-                         int tex_fmt, int tex_siz) {
+                         int x0, int tex_fmt, int tex_siz) {
         if (address == 0 || stride <= 0 || height <= 0) {
             return false;
+        }
+        // The rect's byte columns: `bytes_per_texel` is 0 for a 4-bit image,
+        // whose two texels share a byte (the case RT64's `siz == 4b` handles).
+        const int bpp = bytes_per_texel(static_cast<uint8_t>(tex_siz));
+        int col_lo = (bpp > 0) ? x0 * bpp : x0 / 2;
+        int col_hi = (bpp > 0) ? (x0 + w) * bpp : (x0 + w + 1) / 2;
+        if (col_hi > stride) {
+            col_hi = stride;   // a rect cannot read past its own row
+        }
+        if (col_lo < 0) {
+            col_lo = 0;
         }
         std::lock_guard<std::mutex> lock(fbtex_mutex_);
         drop_written_after_writeback();
         if (fb_written_.empty()) {
             return false;
         }
-        const uint64_t begin = address + static_cast<uint64_t>(y0) * stride;
-        const uint64_t end = address + static_cast<uint64_t>(y0 + height) * stride;
+        const uint64_t first = address + static_cast<uint64_t>(y0) * stride + col_lo;
+        const uint64_t last = address + static_cast<uint64_t>(y0 + height - 1) * stride + col_hi;
         for (const FbWrittenRange& r : fb_written_) {
-            if (begin >= r.end || r.begin >= end) {
+            if (first >= r.end || last <= r.begin) {
                 continue;   // bytes are outside this image
             }
             // Which of the image's rows those bytes fall in. A load whose bytes
             // land only in rows the game never drew reads RDRAM correctly: the
             // image is up to one row taller than what was rendered and the heap
             // past it holds the game's own textures.
-            const uint64_t lo = std::max<uint64_t>(begin, r.begin) - r.begin;
-            const uint64_t hi = std::min<uint64_t>(end, r.end) - 1 - r.begin;
+            const uint64_t lo = std::max<uint64_t>(first, r.begin) - r.begin;
+            const uint64_t hi = std::min<uint64_t>(last, r.end) - 1 - r.begin;
             const int row_lo = static_cast<int>(lo / r.pitch);
             const int row_hi = static_cast<int>(hi / r.pitch);
             if (row_hi < r.row_min || r.row_max < row_lo) {
-                continue;   // no byte the draw wrote is in this range
+                continue;   // no row the draw wrote is in this range
+            }
+            // The columns. The rect's column offset is relative to its own row
+            // start, which is `(address - r.begin) mod pitch` into the image's
+            // row. The test is only meaningful when every rect row has that
+            // same offset, i.e. the image's pitch divides the stride; otherwise
+            // it keeps the row-only answer (over-report, never under-report).
+            int load_col_lo = col_lo, load_col_hi = col_hi;
+            bool col_tested = false;
+            if (r.col_max >= 0 && r.pitch > 0 && (stride % static_cast<int>(r.pitch)) == 0) {
+                col_tested = true;
+                const int64_t delta = static_cast<int64_t>(address) - static_cast<int64_t>(r.begin);
+                const int base_col = static_cast<int>(
+                    (delta % static_cast<int64_t>(r.pitch) + r.pitch) % r.pitch);
+                load_col_lo += base_col;
+                load_col_hi += base_col;
+                if (load_col_hi <= static_cast<int>(r.pitch) &&
+                    (load_col_hi <= r.col_min || r.col_max <= load_col_lo)) {
+                    continue;   // drawn rows, outside every drawn column
+                }
             }
             ++fbtex_hits_;
-            const uint64_t key =
-                (static_cast<uint64_t>(address) << 24) | static_cast<uint64_t>(r.address);
+            // One line per distinct (texture address, image, rect origin): the
+            // same image loaded at two rects is two findings, and the first 24
+            // are logged.
+            uint64_t key = static_cast<uint64_t>(address);
+            key = key * 31 + r.address;
+            key = key * 31 + static_cast<uint32_t>(x0);
+            key = key * 31 + static_cast<uint32_t>(y0);
+            char drawn_cols[32];
+            if (col_tested) {
+                snprintf(drawn_cols, sizeof(drawn_cols), "%d,%d)", r.col_min, r.col_max);
+            } else {
+                snprintf(drawn_cols, sizeof(drawn_cols), "?)");
+            }
             if (fbtex_logged_.size() < 24 && fbtex_logged_.insert(key).second) {
                 OGRE_MILESTONE("GFX-FBTEX",
                                "load tex=0x%06X rect=%dx%d stride=%d fmt=%d siz=%d reads "
                                "colour image 0x%06X pitch=%u h=%d siz=%u rows=[%d,%d] drawn "
-                               "rows=[%d,%d] by an earlier draw in this batch; the decode read "
-                               "RDRAM, not the rendered pixels", address, w, h, stride, tex_fmt,
-                               tex_siz, r.address, r.pitch, r.height, (unsigned)r.siz, row_lo,
-                               row_hi, r.row_min, r.row_max);
+                               "rows=[%d,%d] cols=[%d,%d) drawn cols=[%s by an earlier draw "
+                               "in this batch; the load read RDRAM, not the rendered pixels",
+                               address, w, h, stride, tex_fmt, tex_siz, r.address, r.pitch,
+                               r.height, (unsigned)r.siz, row_lo, row_hi, r.row_min, r.row_max,
+                               load_col_lo, load_col_hi, drawn_cols);
             }
             return true;
         }
@@ -1981,18 +3355,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // browser main thread calls this (from flush_commands' present path), so the
     // DOM calls are legal.
     //
-    // The CSS box has to be a whole multiple of the drawing buffer. A canvas
-    // whose CSS box does not match its buffer is scaled to the box by the
-    // browser, and `image-rendering: pixelated` makes that a nearest-neighbour
-    // resample, not a display-only stretch: the publisher still's VI mode is
-    // 640x476 while index.html pinned a 640x480 box, so the frame on screen was
-    // the 476-row buffer resampled 476 -> 480. Measured against RT64's own
-    // 640x480 render target for the same still, the captured canvas is that
-    // resample exactly (`docs/proofs/web-publishers-atlus-lutmode-fix.png`:
-    // canvas row `Y` = target row `floor((Y + 0.5) * 476 / 480)`, mean abs
-    // 0.87/0.84/0.75 per channel, 99.6% of channel samples exact), which is what
-    // the session-147 "about one row low" difference was. A 320x240 buffer keeps
-    // the 2x upscale index.html had, so the title screen's capture is unchanged.
+    // The buffer is the VI's visible area (`present_framebuffer`), so the box is
+    // that area at 1x or 2x. The CSS box has to be a whole multiple of the
+    // drawing buffer. A canvas whose CSS box does not match its buffer is scaled
+    // to the box by the browser, and `image-rendering: pixelated` makes that a
+    // nearest-neighbour resample, not a display-only stretch: the publisher
+    // still's VI mode is 640x476 and index.html had pinned a 640x480 box, so the
+    // frame on screen was the 476-row buffer resampled 476 -> 480. Session 148
+    // measured the captured canvas as exactly that resample (`docs/proofs/
+    // web-publishers-atlus-css-box-fix.png`: canvas row `Y` = target row
+    // `floor((Y + 0.5) * 476 / 480)`, mean abs 0.87/0.84/0.75 per channel, 99.6%
+    // of channel samples exact), which is what the session-147 "about one row
+    // low" difference was.
     static int css_scale_for(int height) {
         return std::max(1, std::min(2, kCanvasCssHeight / std::max(1, height)));
     }
@@ -2016,8 +3390,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             present_tex_ = 0;
         }
         OGRE_MILESTONE("GFX-PRESENT",
-                       "canvas resized to %dx%d (css %dx%d, x%d) for the VI mode", width,
-                       height, width * scale, height * scale, scale);
+                       "canvas resized to %dx%d (css %dx%d, x%d) for the VI's visible area",
+                       width, height, width * scale, height * scale, scale);
     }
 
     // Draws `tex` over `frac_w` x `frac_h` of the canvas with the COPY combiner
@@ -2029,22 +3403,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // image. Texture v = 1 is guest row 0 (`upload_framebuffer` flips), so the
     // visible rows are the *high* end of v.
     //
-    // `frac_w`/`frac_h` are the visible size over the canvas size. RT64's
-    // `VIRenderer::getViewportAndScissor` draws the VI's visible area into a
-    // viewport of `visibleFramebufferSize` SD pixels anchored at the window's
-    // top-left, so the last column and row of a 320x240 window are never written
-    // (`removeBlackBorders` shrinks the window to the visible size instead). The
-    // canvas is the VI's own size, so the same fraction of it is written here and
-    // the leftover column and row keep whatever the canvas already held. Drawing
-    // the visible area over the *whole* canvas instead stretched 319x239 to
-    // 320x240 and shifted the sampled texel by up to one column and row over the
-    // right and bottom halves of every frame.
+    // `frac_w`/`frac_h` are the destination rectangle as a fraction of the
+    // canvas. `present_framebuffer` sizes the canvas to the visible area, so they
+    // are 1.0 for every present and the blit writes every canvas pixel. RT64's
+    // `VIRenderer::getViewportAndScissor` draws the visible area into a viewport
+    // of `visibleFramebufferSize` SD pixels anchored at the window's top-left and
+    // leaves the rest of the window alone; the canvas here *is* that area, which
+    // is RT64's `removeBlackBorders` case. Stretching the visible area over a
+    // larger canvas instead was measured in session 146: it moved the sampled
+    // texel by up to one column and row over the right and bottom halves of every
+    // frame.
     void blit_to_canvas(GLuint tex, float u_max = 1.0f, float v_min = 0.0f,
                         float frac_w = 1.0f, float frac_h = 1.0f) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, canvas_width_, canvas_height_);
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_BLEND);
+        // The canvas has no depth attachment; the last RDP draw may have left
+        // GL_DEPTH_TEST enabled for its colour image.
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
         glUseProgram(program_);
         glBindVertexArray(vao_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -2053,10 +3431,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         };
         seti("u_cycle", 0);
         seti("u_debug_mode", 0);
+        seti("u_zclip", 0);
         seti("u_tex0", 0);
         seti("u_use_tex", 1);
-        glUniform2f(glGetUniformLocation(program_, "u_uv_scale"), 1.0f, 1.0f);
-        glUniform2f(glGetUniformLocation(program_, "u_uv_origin"), 0.0f, 0.0f);
+        // The present path samples with normalized UVs, so it uses the GL
+        // sampler at the framebuffer texture's own (point) filter; the shader
+        // sampler's texel-space uniforms do not apply.
+        seti("u_texf", 0);
+        glUniform2f(glGetUniformLocation(program_, "u_tsize0"), 1.0f, 1.0f);
+        glUniform2f(glGetUniformLocation(program_, "u_torig0"), 0.0f, 0.0f);
+        glUniform2i(glGetUniformLocation(program_, "u_tcm0"), 2, 2);
+        glUniform2i(glGetUniformLocation(program_, "u_tmask0"), 0, 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex);
         // The destination rectangle: NDC spans the visible fraction of the canvas
@@ -2065,14 +3450,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const float fh = std::clamp(frac_h, 0.0f, 1.0f);
         const float x0 = -1.0f, x1 = -1.0f + 2.0f * fw;
         const float yt = 1.0f, yb = 1.0f - 2.0f * fh;
-        // (x, y, u, v, rgba) per vertex; two triangles covering the rectangle.
-        const float quad[6 * 8] = {
-            x0, yb, 0,     v_min, 1, 1, 1, 1,
-            x1, yb, u_max, v_min, 1, 1, 1, 1,
-            x1, yt, u_max, 1,     1, 1, 1, 1,
-            x0, yb, 0,     v_min, 1, 1, 1, 1,
-            x1, yt, u_max, 1,     1, 1, 1, 1,
-            x0, yt, 0,     1,     1, 1, 1, 1,
+        // (x, y, u, v, rgba, w, ndc z) per vertex; two triangles covering the
+        // rectangle. w = 1 and z = 0 (the middle of the depth range) as a
+        // rectangle would carry, though this draw never tests depth.
+        const float quad[6 * 10] = {
+            x0, yb, 0,     v_min, 1, 1, 1, 1, 1, 0,
+            x1, yb, u_max, v_min, 1, 1, 1, 1, 1, 0,
+            x1, yt, u_max, 1,     1, 1, 1, 1, 1, 0,
+            x0, yb, 0,     v_min, 1, 1, 1, 1, 1, 0,
+            x1, yt, u_max, 1,     1, 1, 1, 1, 1, 0,
+            x0, yt, 0,     1,     1, 1, 1, 1, 1, 0,
         };
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_DYNAMIC_DRAW);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -2106,28 +3493,33 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // the draws went straight to the canvas (no colour image was ever set), the
     // canvas already holds the frame and nothing is blitted over it.
     void present_framebuffer(uint32_t address) {
-        // The canvas follows the VI's scanout size. A 640x480 mode (the world map)
-        // presents 1:1 at 640x480 instead of being halved into a 320x240 drawing
-        // buffer; the element's CSS size stays what index.html set, so a 320x240
-        // mode keeps its 2x pixelated upscale and a 640x480 one is pixel-exact.
+        // The canvas is the VI's *visible* area, which is the area RT64's
+        // presenter writes (`visibleFramebufferSize`, the framebuffer minus the
+        // overscan crop). RT64 anchors that area at the window's top-left and
+        // leaves the window's last column and row untouched; the drawing buffer
+        // here is sized to the area itself, so the 1:1 blit below covers every
+        // pixel of it and no column or row is left holding an older frame's
+        // contents or the page background. Session 148 measured the alternative
+        // (a VI-sized buffer with an unwritten last column and row): the
+        // publisher still's whole-frame difference was -0.87/-0.84/-0.75 per
+        // channel and its last column and last row differed from RT64's target
+        // by 222 and 223 levels on average.
+        //
+        // A 640x475 mode (the publisher stills) presents 1:1; a 319x239 mode (the
+        // title) at the 2x pixelated CSS upscale. `css_scale_for` keeps the box a
+        // whole multiple of the buffer.
         const ViSize vi = vi_size();
-        if (vi.width > 0 && vi.height > 0) {
-            resize_canvas(vi.width, vi.height);
-        }
         const ViSize visible = visible_framebuffer_size(vi);
-
         const bool have_visible = (visible.width > 0 && visible.height > 0);
-        // The destination geometry: the visible area is written into the canvas
-        // 1:1 from its top-left (RT64's viewport), so a 320x240 VI into a 320x240
-        // canvas leaves the last column and row of the canvas alone.
-        const float present_frac_w = (have_visible && canvas_width_ > 0)
-                                         ? static_cast<float>(visible.width) /
-                                               static_cast<float>(canvas_width_)
-                                         : 1.0f;
-        const float present_frac_h = (have_visible && canvas_height_ > 0)
-                                         ? static_cast<float>(visible.height) /
-                                               static_cast<float>(canvas_height_)
-                                         : 1.0f;
+        resize_canvas(have_visible ? visible.width : vi.width,
+                      have_visible ? visible.height : vi.height);
+
+        // The destination is the whole canvas: buffer and visible area are the
+        // same size, so the quad covers it. A present that carries no visible
+        // size (the first one, before the VI mode is known) still writes all of
+        // the canvas it was given.
+        const float present_frac_w = 1.0f;
+        const float present_frac_h = 1.0f;
         uint32_t key = address;
         auto it = gl_framebuffers_.find(key);
         if (it == gl_framebuffers_.end() || it->second.tex == 0) {
@@ -2190,7 +3582,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         tmp.width = canvas_width_;
         tmp.height = canvas_height_;
         tmp.siz = siz;
-        tmp.row_bytes = static_cast<uint32_t>(canvas_width_) << siz >> 1;
+        // The guest framebuffer's row pitch is the VI's scanout width, not the
+        // canvas's: the canvas is the visible area, one column narrower than the
+        // buffer the VI scans out. Reading the canvas's width as the pitch would
+        // take the last texel of every row from the next row's first byte.
+        const int pitch_width = (vi.width > 0) ? vi.width : canvas_width_;
+        tmp.row_bytes = static_cast<uint32_t>(pitch_width) << siz >> 1;
         upload_framebuffer(tmp, address);
         blit_to_canvas(present_tex_, 1.0f, 0.0f, present_frac_w, present_frac_h);
     }
@@ -2234,14 +3631,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glBindTexture(GL_TEXTURE_2D, tex);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, up.width, up.height, 0, GL_RGBA,
                              GL_UNSIGNED_BYTE, up.pixels.data());
+                // The shader sampler reads this texture with texelFetch and
+                // filters in fp32 itself, so the GL sampler stays point. The
+                // wrap modes are only the `OGRE_TEXF=gl` path's; that path sets
+                // them again per draw, because the filter mode is draw state
+                // (OTHERMODE_H) and a texture can be used by both a bilerp and a
+                // point draw.
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
                                 up.clamp_s ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
                                 up.clamp_t ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                                up.bilerp ? GL_LINEAR : GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                                up.bilerp ? GL_LINEAR : GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
                 if (tex_logged_ < 6) {
                     ++tex_logged_;
                     size_t nz = 0; uint64_t sum = 0;
@@ -2327,6 +3728,45 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (bound_fb == nullptr) {
                 canvas_dirty_ = true;
             }
+            // Attach this draw's depth image. The buffer belongs to
+            // G_SETZIMG's address, not to the colour image, so two colour images
+            // that name the same depth image share one depth buffer, as they do
+            // in RT64. The attach is skipped when the right buffer is already
+            // there, so a frame that stays in one colour image pays one compare.
+            if (bound_fb != nullptr) {
+                const GLuint want_depth = depth_target_for(cmd, bound_fb->width,
+                                                           bound_fb->height);
+                if (bound_fb->depth_rb != want_depth) {
+                    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                              GL_RENDERBUFFER, want_depth);
+                    bound_fb->depth_rb = want_depth;
+                }
+                if (depth_needs_clear_.erase(want_depth) != 0) {
+                    // The one-time clear to the far value, on the first draw that
+                    // uses a new depth image, so GL_LESS passes everywhere there.
+                    // RT64 clears its depth target when it creates it as well and
+                    // otherwise keeps the contents.
+                    glDepthMask(GL_TRUE);
+                    glClearDepthf(1.0f);
+                    glClear(GL_DEPTH_BUFFER_BIT);
+                }
+                // One-shot: the depth attachment is on the framebuffer this draw
+                // uses. A colour-only framebuffer makes GL_DEPTH_TEST a no-op,
+                // and every depth measurement would then be meaningless.
+                if (cmd.depth_test && !depth_verified_) {
+                    depth_verified_ = true;
+                    GLint obj = 0;
+                    glGetFramebufferAttachmentParameteriv(
+                        GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &obj);
+                    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                    OGRE_MILESTONE("GFX-DEPTH",
+                                   "first depth-tested draw: depthRenderbuffer=%d status=0x%04X "
+                                   "colour=0x%06X depth image=0x%06X",
+                                   static_cast<int>(obj), static_cast<unsigned>(st),
+                                   cmd.fb_address, cmd.zimg_address);
+                }
+            }
             if (vert_logged_ < 6) {
                 ++vert_logged_;
                 char vbuf2[640];
@@ -2400,6 +3840,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             seti("u_force_blend", cmd.force_blend ? 1 : 0);
             seti("u_blend_approx", cmd.blend_approx);
             seti("u_combiner_cycles", cmd.combiner_cycles);
+            // Alpha compare and coverage. `u_cvg_range` is the attachment's
+            // step count: RT64 uses 65535 when the render target is the
+            // high-precision (RGBA16F) colour buffer and 255 otherwise.
+            seti("u_ac", cmd.acmp);
+            // RT64's alpha-dither seeds: the frame count and the draw's index
+            // (see the `dither_init_rand` port). Only G_AC_DITHER reads them.
+            glUniform1ui(glGetUniformLocation(program_, "u_dither_frame"), present_requests_);
+            glUniform1ui(glGetUniformLocation(program_, "u_dither_instance"), flushed_cmds_);
+            seti("u_cvg_x_alpha", cmd.cvg_x_alpha ? 1 : 0);
+            seti("u_cvg_dst", cmd.cvg_dst);
+            seti("u_alpha_blend", cmd.alpha_blend ? 1 : 0);
+            glUniform1f(glGetUniformLocation(program_, "u_cvg_range"),
+                        hp_fb_ ? 65535.0f : 255.0f);
             seti("u_bp0", cmd.bp[0]); seti("u_bm0", cmd.bm[0]);
             seti("u_ba0", cmd.ba[0]); seti("u_bb0", cmd.bb[0]);
             seti("u_bp1", cmd.bp[1]); seti("u_bm1", cmd.bm[1]);
@@ -2411,6 +3864,35 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             glUniform4fv(glGetUniformLocation(program_, "u_blend_color"), 1, cmd.blend_color);
             glUniform1f(glGetUniformLocation(program_, "u_k4"), cmd.k4);
             glUniform1f(glGetUniformLocation(program_, "u_k5"), cmd.k5);
+            glUniform3fv(glGetUniformLocation(program_, "u_key_center"), 1, cmd.key_center);
+            glUniform3fv(glGetUniformLocation(program_, "u_key_scale"), 1, cmd.key_scale);
+
+            // One-shot: a draw whose evaluated combiner mux reads KEY_CENTER (B)
+            // or KEY_SCALE (C) states itself and the key registers it reads, so
+            // a screen that exercises the chroma key reports it instead of
+            // needing a guess. `ck_key` is `G_CK_KEY`, OTHERMODE_H bit 8
+            // (`shared/rt64_f3d_defines.h:28-30`, `G_MDSFT_COMBKEY`).
+            if (!key_logged_) {
+                const int mux_count = (cmd.cycle == 2) ? 2 : 1;
+                bool uses_key = false;
+                for (int m = 0; m < mux_count; ++m) {
+                    if (cmd.cb[m] == CSEL_KEY_CENTER || cmd.cc[m] == CSEL_KEY_SCALE) {
+                        uses_key = true;
+                    }
+                }
+                if (uses_key) {
+                    key_logged_ = true;
+                    OGRE_MILESTONE("GFX-KEY",
+                                   "at cmd %u a draw reads a key input: "
+                                   "center=(%.4f %.4f %.4f) scale=(%.4f %.4f %.4f) "
+                                   "ck_key=%d omh=0x%06X cycle=%d",
+                                   flushed_cmds_, cmd.key_center[0], cmd.key_center[1],
+                                   cmd.key_center[2], cmd.key_scale[0], cmd.key_scale[1],
+                                   cmd.key_scale[2],
+                                   ((cmd.othermode_h >> 8) & 1u) != 0 ? 1 : 0,
+                                   cmd.othermode_h, cmd.cycle);
+                }
+            }
 
             if (cmd.textured) {
                 // TEXEL0's and TEXEL1's tile images are separate GL textures,
@@ -2423,14 +3905,92 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key));
                 glUniform1i(glGetUniformLocation(program_, "u_tex0"), 0);
-                glUniform2f(glGetUniformLocation(program_, "u_uv_scale"), cmd.tex_scale[0], cmd.tex_scale[1]);
-                glUniform2f(glGetUniformLocation(program_, "u_uv_origin"), cmd.tex_origin[0], cmd.tex_origin[1]);
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key1));
                 glUniform1i(glGetUniformLocation(program_, "u_tex1"), 1);
-                glUniform2f(glGetUniformLocation(program_, "u_uv_scale1"), cmd.tex_scale1[0], cmd.tex_scale1[1]);
-                glUniform2f(glGetUniformLocation(program_, "u_uv_origin1"), cmd.tex_origin1[0], cmd.tex_origin1[1]);
+                if (texf_ == 0) {
+                    // The GL sampler decides filtering per texture object, not
+                    // per draw, so it is set here from this draw's G_TF_* while
+                    // each unit is bound.
+                    const GLint filt = (cmd.tex_filter != 0) ? GL_LINEAR : GL_NEAREST;
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+                    glActiveTexture(GL_TEXTURE0);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+                }
                 glActiveTexture(GL_TEXTURE0);
+                // The RDP sampler state (RT64 RDPTile per unit). The shader
+                // samples with texelFetch and filters in fp32; `u_texf` selects
+                // the GL fixed-function sampler instead, for the A/B.
+                glUniform2f(glGetUniformLocation(program_, "u_tsize0"),
+                            cmd.tex_size[0][0], cmd.tex_size[0][1]);
+                glUniform2f(glGetUniformLocation(program_, "u_tsize1"),
+                            cmd.tex_size[1][0], cmd.tex_size[1][1]);
+                glUniform2f(glGetUniformLocation(program_, "u_torig0"),
+                            cmd.tex_origin[0], cmd.tex_origin[1]);
+                glUniform2f(glGetUniformLocation(program_, "u_torig1"),
+                            cmd.tex_origin1[0], cmd.tex_origin1[1]);
+                glUniform2i(glGetUniformLocation(program_, "u_tcm0"),
+                            cmd.tex_cms[0], cmd.tex_cmt[0]);
+                glUniform2i(glGetUniformLocation(program_, "u_tcm1"),
+                            cmd.tex_cms[1], cmd.tex_cmt[1]);
+                glUniform2i(glGetUniformLocation(program_, "u_tmask0"),
+                            cmd.tex_masks[0], cmd.tex_maskt[0]);
+                glUniform2i(glGetUniformLocation(program_, "u_tmask1"),
+                            cmd.tex_masks[1], cmd.tex_maskt[1]);
+                glUniform2f(glGetUniformLocation(program_, "u_tshift0"),
+                            cmd.tex_shift[0][0], cmd.tex_shift[0][1]);
+                glUniform2f(glGetUniformLocation(program_, "u_tshift1"),
+                            cmd.tex_shift[1][0], cmd.tex_shift[1][1]);
+                glUniform1i(glGetUniformLocation(program_, "u_tex_filter"), cmd.tex_filter);
+                glUniform1i(glGetUniformLocation(program_, "u_texf"), texf_);
+                glUniform1i(glGetUniformLocation(program_, "u_tex_persp"),
+                            cmd.tex_persp ? 1 : 0);
+                ++samp_draws_;
+                if (cmd.tex_filter == 0) {
+                    ++samp_point_;
+                } else if (cmd.tex_filter == 3) {
+                    ++samp_average_;
+                } else {
+                    ++samp_bilerp_;
+                }
+                if (cmd.tex_masks[0] > 0 || cmd.tex_maskt[0] > 0 || cmd.tex_masks[1] > 0 ||
+                    cmd.tex_maskt[1] > 0) {
+                    ++samp_masked_;
+                }
+                if (cmd.tex_shifts[0] != 0 || cmd.tex_shiftt[0] != 0 ||
+                    cmd.tex_shifts[1] != 0 || cmd.tex_shiftt[1] != 0) {
+                    ++samp_shifted_;
+                }
+                if (cmd.kind == 0 &&
+                    (std::fabs(cmd.w[0] - cmd.w[1]) > 1e-4f ||
+                     std::fabs(cmd.w[1] - cmd.w[2]) > 1e-4f)) {
+                    ++samp_persp_;
+                }
+                if (!cmd.tex_persp) {
+                    ++samp_nonpersp_;
+                }
+                // G_TP family census: one line per distinct (kind, OTHERMODE_H)
+                // a textured draw carries, with the G_TP_PERSP reading. It names
+                // the families a screen uses, so a claim about the halving rule
+                // is measured per family (`changes=` is the two readings of bit
+                // 10, the pre-session-174 field, against bit 19).
+                {
+                    const uint32_t key = (static_cast<uint32_t>(cmd.kind) << 24) |
+                                         (cmd.othermode_h & 0xFFFFFFu);
+                    if (tp_seen_.count(key) == 0 && tp_seen_.size() < 24) {
+                        tp_seen_.insert(key);
+                        const bool old_tp =
+                            (cmd.kind != 0) || ((cmd.othermode_h >> 10) & 1u) != 0;
+                        const bool new_tp = cmd.tex_persp;
+                        OGRE_MILESTONE("GFX-TP",
+                                       "family kind=%d omh=0x%06X old_persp=%d "
+                                       "new_persp=%d changes=%d",
+                                       cmd.kind, cmd.othermode_h, old_tp ? 1 : 0,
+                                       new_tp ? 1 : 0, (old_tp != new_tp) ? 1 : 0);
+                    }
+                }
 
                 // Which image each sampler actually got, and where the first
                 // vertex lands in it. A sprite whose decoded pair is clean but
@@ -2447,7 +4007,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     OGRE_MILESTONE("GFX-UV",
                                    "k0=0x%llX/%d/id%u k1=0x%llX/%d/id%u "
                                    "scl0=(%.4f %.4f) scl1=(%.4f %.4f) org1=(%.1f %.1f) "
-                                   "v0=(%.1f %.1f) -> uv0=(%.3f %.3f) uv1=(%.3f %.3f) e=%X",
+                                   "v0=(%.1f %.1f) -> uv0=(%.3f %.3f) uv1=(%.3f %.3f) e=%X "
+                                   "filt=%d size0=%.0fx%.0f cm0=(%d,%d) mask0=(%d,%d) "
+                                   "cm1=(%d,%d) mask1=(%d,%d)",
                                    (unsigned long long)cmd.tex_key, f0 ? 1 : 0, lookup(cmd.tex_key),
                                    (unsigned long long)cmd.tex_key1, f1 ? 1 : 0, lookup(cmd.tex_key1),
                                    cmd.tex_scale[0], cmd.tex_scale[1],
@@ -2457,7 +4019,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                    (sv - cmd.tex_origin[1]) * cmd.tex_scale[1],
                                    (su - cmd.tex_origin1[0]) * cmd.tex_scale1[0],
                                    (sv - cmd.tex_origin1[1]) * cmd.tex_scale1[1],
-                                   glGetError());
+                                   glGetError(),
+                                   cmd.tex_filter, cmd.tex_size[0][0], cmd.tex_size[0][1],
+                                   cmd.tex_cms[0], cmd.tex_cmt[0],
+                                   cmd.tex_masks[0], cmd.tex_maskt[0],
+                                   cmd.tex_cms[1], cmd.tex_cmt[1],
+                                   cmd.tex_masks[1], cmd.tex_maskt[1]);
                 }
             }
 
@@ -2491,21 +4058,53 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glDisable(GL_BLEND);
             }
 
-            // Interleave pos/uv/shade into the vertex buffer.
-            float vbuf[6 * 8];
+            // Depth. RT64's pipeline flags (render/rt64_framebuffer_renderer.cpp
+            // :1729-1730) are `zCmp && !copy && zMode != ZMODE_DEC` for the test
+            // and `zUpd && !copy` for the write, with `LESS` as the function
+            // (render/rt64_raster_shader.cpp:317) and depth enabled whenever
+            // either flag is set - a write-only draw gets `ALWAYS` there
+            // (`depthFunction = c.zCmp ? LESS : ALWAYS`), which is what GL needs
+            // too, because GL writes no depth while GL_DEPTH_TEST is disabled.
+            // The canvas has no depth attachment (attrs.depth is off for the
+            // default framebuffer), so a draw that targets it never tests depth.
+            if (bound_fb != nullptr && bound_fb->depth_rb != 0) {
+                if (cmd.depth_test || cmd.depth_write) {
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthFunc(cmd.depth_test ? GL_LESS : GL_ALWAYS);
+                    glDepthMask(cmd.depth_write ? GL_TRUE : GL_FALSE);
+                } else {
+                    glDisable(GL_DEPTH_TEST);
+                    glDepthMask(GL_FALSE);
+                }
+            } else {
+                glDisable(GL_DEPTH_TEST);
+                glDepthMask(GL_FALSE);
+            }
+            seti("u_zclip", (cmd.kind == 0 && !cmd.z_source_prim) ? 1 : 0);
+
+            // Interleave pos/uv/shade/w/z into the vertex buffer.
+            float vbuf[6 * 10];
             const int count = cmd.vertex_count;
             for (int i = 0; i < count; ++i) {
-                vbuf[i * 8 + 0] = cmd.pos[i * 2 + 0];
-                vbuf[i * 8 + 1] = cmd.pos[i * 2 + 1];
-                vbuf[i * 8 + 2] = cmd.uv[i * 2 + 0];
-                vbuf[i * 8 + 3] = cmd.uv[i * 2 + 1];
-                vbuf[i * 8 + 4] = cmd.shade[i * 4 + 0];
-                vbuf[i * 8 + 5] = cmd.shade[i * 4 + 1];
-                vbuf[i * 8 + 6] = cmd.shade[i * 4 + 2];
-                vbuf[i * 8 + 7] = cmd.shade[i * 4 + 3];
+                vbuf[i * 10 + 0] = cmd.pos[i * 2 + 0];
+                vbuf[i * 10 + 1] = cmd.pos[i * 2 + 1];
+                vbuf[i * 10 + 2] = cmd.uv[i * 2 + 0];
+                vbuf[i * 10 + 3] = cmd.uv[i * 2 + 1];
+                vbuf[i * 10 + 4] = cmd.shade[i * 4 + 0];
+                vbuf[i * 10 + 5] = cmd.shade[i * 4 + 1];
+                vbuf[i * 10 + 6] = cmd.shade[i * 4 + 2];
+                vbuf[i * 10 + 7] = cmd.shade[i * 4 + 3];
+                vbuf[i * 10 + 8] = (cmd.w[i] > 0.0f) ? cmd.w[i] : 1.0f;
+                vbuf[i * 10 + 9] = cmd.z[i];
             }
-            glBufferData(GL_ARRAY_BUFFER, count * 8 * sizeof(float), vbuf, GL_DYNAMIC_DRAW);
+            glBufferData(GL_ARRAY_BUFFER, count * 10 * sizeof(float), vbuf, GL_DYNAMIC_DRAW);
             glDrawArrays(GL_TRIANGLES, 0, count);
+            if (cmd.depth_probe) {
+                note_depth_probe(cmd, bound_fb);
+            }
+            if (cmd.ac_probe != 0) {
+                note_ac_probe(cmd, bound_fb);
+            }
 
             // Remember which rows this draw touched: the readback copies only
             // the band that was drawn into. Window row 0 is NDC y = -1, and it
@@ -2546,10 +4145,36 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             present_framebuffer(present_address);
         }
 
+        // Sampler census: which G_TF_* rules and masks the screens exercised.
+        // Printed on the first batch that carries a textured draw and every 120
+        // after it, so a run says whether any draw is bilinear at all.
+        if (samp_draws_ > 0 && (samp_logged_at_ == 0 || samp_draws_ - samp_logged_at_ >= 400)) {
+            samp_logged_at_ = samp_draws_;
+            OGRE_MILESTONE("GFX-SAMPLER",
+                           "textured draws=%u point=%u bilerp=%u average=%u masked=%u shifted=%u "
+                           "persp=%u nonpersp=%u",
+                           samp_draws_, samp_point_, samp_bilerp_, samp_average_, samp_masked_,
+                           samp_shifted_, samp_persp_, samp_nonpersp_);
+        }
+
         // Framebuffer writeback. The game's CPU reads a colour image out of
-        // RDRAM after ogre_sync_framebuffers(), which waits on sync_done_; the
-        // present path also writes back so RDRAM tracks the last frame.
-        if (present || sync_pending) {
+        // RDRAM after ogre_sync_framebuffers(), which waits on sync_done_, so
+        // that request is the one point at which the guest is blocked on this
+        // thread and the pixels it is about to read must be in RDRAM.
+        //
+        // The present path used to write every framebuffer back as well ("so
+        // RDRAM tracks the last frame"). That is not what the reference
+        // renderer does, and it wrote a colour image over live heap memory:
+        // scene 0x12 renders a 320x240 image at guest 0x80228080
+        // (0x228080..0x24D880), and the sprite part cache's block at
+        // 0x80243E10 lies inside it, so the writeback put 16-bit pixels over
+        // the block's allocator header at 0x80243DF0. The next cache release
+        // (the scene-enter `func_801792DC`) read 0xFFFDFFFD as a tree link and
+        // stored through it (`func_80071950`, memory access out of bounds).
+        // RT64 writes a framebuffer back when the workload that drew it retires
+        // and at the game's own readback request; it never writes every
+        // framebuffer on every present (session 170).
+        if (sync_pending) {
             readback_all_framebuffers();
             // The pixels a recorded draw put into a colour image are in RDRAM
             // again, so the gfx thread's framebuffer-as-texture ranges are stale.
@@ -2618,6 +4243,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.cimg_width = last_cimg_width_;
         st.cimg_siz = last_cimg_siz_;
         st.cimg_fmt = last_cimg_fmt_;
+        st.zimg_address = last_zimg_address_;
+        st.zimg_width = last_zimg_width_;
+        st.zimg_siz = last_zimg_siz_;
+        st.zimg_fmt = last_zimg_fmt_;
         // Which GBI owns this display list. Hashing the ucode text is what
         // decides whether 0xDA/0xDC are G_MTX/G_MOVEMEM (F3DEX2) or the njpeg
         // macroblock draw and its matrix (S2DEX2).
@@ -2832,6 +4461,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 if (fb.tex != 0) glDeleteTextures(1, &fb.tex);
             }
             gl_framebuffers_.clear();
+            for (auto& [key, d] : depth_targets_) {
+                if (d.rb != 0) glDeleteRenderbuffers(1, &d.rb);
+            }
+            depth_targets_.clear();
+            depth_needs_clear_.clear();
             if (present_tex_ != 0) {
                 glDeleteTextures(1, &present_tex_);
                 present_tex_ = 0;
@@ -2888,6 +4522,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     int canvas_width_ = 320;
     int canvas_height_ = 240;
     bool gl_ready_ = false;
+    // Colour images attach an RGBA16F texture when the context exposes
+    // EXT_color_buffer_float (see ensure_gl), RGBA8 otherwise.
+    bool hp_fb_ = false;
+    // Texture sampler: 0 = GL fixed-function, 1 = shader bilinear, 2 = RT64's
+    // three-point filter (the default; see ensure_gl and the fragment shader).
+    int texf_ = 2;
     GLuint program_ = 0;
     GLuint vao_ = 0, vbo_ = 0;
     GLuint white_tex_ = 0;   // 1x1 RGBA white, bound for unloaded texture units
@@ -2898,6 +4538,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // extent of everything queued (nothing is visible outside [-1, 1]).
     std::atomic<unsigned> draws_recorded_{0};
     unsigned tris_rejected_ = 0;
+    // Shading culling census (see note_shading_census): triangles the
+    // screen-space test dropped, and how many lit/unlit triangles were
+    // evaluated. Counters, not per-draw work.
+    unsigned tris_culled_ = 0;
+    unsigned lit_draws_ = 0, unlit_draws_ = 0;
     float ndc_min_[2] = {1e9f, 1e9f};
     float ndc_max_[2] = {-1e9f, -1e9f};
     bool logged_first_flush_ = false;
@@ -2915,11 +4560,58 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // story's letterbox fill is the *fourth* fill of its display list, and a cap
     // of three hid exactly the fill whose colour decode matters (session 149).
     unsigned rect_logged_ = 0;
+    // How many repaired fog draws have stated their sampler state (see
+    // GFX-FOG-DRAW). Bounded: the title's three groups repeat every list.
+    unsigned fog_draw_logged_ = 0;
+    // Sampler census: textured draws by G_TF_* filter and how many sample a
+    // masked (wrapping/mirroring) tile. A run states which sampling rules the
+    // screens actually use, so a claim about filtering is measured, not
+    // assumed.
+    unsigned samp_point_ = 0, samp_bilerp_ = 0, samp_average_ = 0, samp_masked_ = 0;
+    // Draws whose tile asks for a G_TX shift (RT64 `ShiftScaleMap`, applied in
+    // the sampler). A screen with a nonzero `shifted=` count is the screen that
+    // exercises the multiply.
+    unsigned samp_shifted_ = 0;
+    // Textured triangle draws whose vertex w's differ (perspective mattered) and
+    // draws whose OTHERMODE_H has G_TP_PERSP clear (the sampler's halving rule).
+    unsigned samp_persp_ = 0, samp_nonpersp_ = 0;
+    // Distinct (kind, OTHERMODE_H) families the G_TP census has printed.
+    std::set<uint32_t> tp_seen_;
+    // One-shot: a draw whose combiner reads a KEY_CENTER/KEY_SCALE input, and
+    // the first vertex that took the per-vertex fog alpha arm.
+    bool key_logged_ = false;
+    bool fog_logged_ = false;
+    // The textured-draw total the census last printed. The report is emitted on
+    // the first textured batch and every 400 textured draws after that, so a
+    // long screen (the tutorial's dialogue box arrives hundreds of draws into
+    // the run) still reports itself; a flush-count cadence can miss it.
+    unsigned samp_logged_at_ = 0;
+    unsigned samp_draws_ = 0;
+    // S2DEX2 opcode census. The njpeg backdrops are the only S2DEX2 lists this
+    // game submits, and the opcode byte decides whether a command draws: the
+    // renderer decodes 0x01/0x02/0xDA (object rectangles) and 0xDC (the object
+    // matrix). 0x05/0x06/0x07 are S2DEX2's G_OBJ_LOADTXTR / G_OBJ_LDTX_SPRITE /
+    // G_OBJ_LDTX_RECT (`tools/RT64/src/gbi/rt64_gbi_s2dex2.h`) and collide with
+    // F3DEX2's TRI1/TRI2/QUAD, which the F3DEX2 switch below does draw from a
+    // vertex buffer an S2DEX2 list never fills; 0x09/0x0A/0x0B (G_BG_1CYC /
+    // G_BG_COPY / G_OBJ_RENDERMODE) have no arm at all. The counters are
+    // cumulative from the first S2DEX2 command of the run.
+    uint32_t s2d_op_counts_[256] = {};
+    unsigned s2d_total_ = 0;
+    bool s2d_first_printed_ = false;
+    unsigned s2d_next_print_ = 0;   // cumulative total at which to print again
     // OGRE_TEX_TRACE: one line per G_TEXRECT with the image it samples and the
     // colour it decodes to. Bounded, like every other diagnostic here.
     bool trace_ = false;
     uint32_t trace_draws_ = 0;
     uint32_t trace_tluts_ = 0;
+    // OGRE_TLUT_TRACE: the palette-destination check. The decoder keys a CI
+    // table by the tile's `palette` field and assumes the load wrote TMEM 0x100,
+    // which is RT64's fixed palette base (`RDP_TMEM_PALETTE` 0x800 in bytes);
+    // a load anywhere else is reported once per destination. See the note on
+    // `tlut_` above and `docs/HANDOFF-2026-10-17-session160.md`.
+    bool tlut_trace_ = false;
+    std::set<uint64_t> tlut_dest_seen_;
     static constexpr uint32_t kTraceMaxDraws = 1500;
     unsigned wide_logged_ = 0;
     unsigned wide_task_ = 0;   // task whose wide draws the log above covers
@@ -2941,10 +4633,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // assembly). Each colour image gets a GL framebuffer object keyed by its
     // guest address, created lazily on first use.
     std::map<uint32_t, GlFramebuffer> gl_framebuffers_;
-    // Framebuffer-as-texture diagnostic. `decode_texture_rect` reads RDRAM on the
+    // Framebuffer-as-texture diagnostic. The TMEM load reads RDRAM on the
     // gfx thread, while the pixels a recorded draw put into a colour image are
     // still in a GL framebuffer until the main thread writes them back, so a
-    // G_LOADTILE whose source range lies inside such an image decodes stale
+    // G_LOADTILE whose source range lies inside such an image copies stale
     // bytes. `fb_written_` holds the byte range of every colour image a recorded
     // draw has written since the last writeback; a decode that overlaps one is a
     // framebuffer-as-texture load the renderer does not implement ([GFX-FBTEX]).
@@ -2966,6 +4658,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // as framebuffer-as-texture when RDRAM is in fact the right source.
         int row_min = 1 << 30;
         int row_max = -1;
+        // The byte columns (0..pitch) those rows were drawn across. Rows alone
+        // over-report a load whose rect sits in a drawn row but outside every
+        // drawn column; `col_max` one past the last byte and `-1` means no
+        // draw into this image reported a usable x extent.
+        int col_min = 1 << 30;
+        int col_max = -1;
     };
     std::vector<FbWrittenRange> fb_written_;
     mutable std::mutex fbtex_mutex_;   // guards fb_written_ and fbtex_logged_
@@ -2979,6 +4677,37 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     uint16_t last_cimg_width_ = 0;
     uint8_t last_cimg_siz_ = 0, last_cimg_fmt_ = 0;
     std::set<uint64_t> cimg_seen_;   // distinct G_SETCIMG configurations (gfx thread)
+    // The RDP's depth image, kept across display lists the same way
+    // (RenderState::zimg_*).
+    uint32_t last_zimg_address_ = 0;
+    uint16_t last_zimg_width_ = 0;
+    uint8_t last_zimg_siz_ = 0, last_zimg_fmt_ = 0;
+    std::set<uint64_t> zimg_seen_;   // distinct G_SETZIMG configurations (gfx thread)
+    // Main thread: the one-off `[GFX-DEPTH] target` line.
+    bool depth_target_logged_ = false;
+    // Main thread: the depth renderbuffers, keyed by the depth image
+    // (depth_target_key) rather than by the colour image. `depth_needs_clear_`
+    // holds the renderbuffers that have not had their one-time clear yet.
+    std::map<uint64_t, GlDepthTarget> depth_targets_;
+    std::set<GLuint> depth_needs_clear_;
+    unsigned depth_target_seq_ = 0;
+    unsigned depth_targets_logged_ = 0;
+    // OGRE_DEPTH: the depth test/write switch (see record_state).
+    bool depth_enabled_ = false;
+    // Main thread: the one-shot `[GFX-DEPTH] first depth-tested draw` check.
+    bool depth_verified_ = false;
+    // Main thread: the synthetic depth control's readback (debug flag bit 7).
+    bool depth_probe_pending_ = false;
+    // Gfx thread: the `[GFX-DEPTH]` census counters. They live with the other
+    // permanent diagnostics, are incremented per recorded draw, and print on
+    // the first depth draw and every 400 after it.
+    unsigned depth_draws_ = 0, depth_zcmp_ = 0, depth_zupd_ = 0, depth_prim_ = 0,
+             depth_dec_ = 0, depth_dec_logged_ = 0;
+    unsigned depth_logged_at_ = 0;
+    // Gfx thread: the distinct (colour image, depth image) pairs, with the draw
+    // number each first appeared on ([GFX-DEPTH] pair lines).
+    std::map<std::pair<uint32_t, uint32_t>, unsigned> depth_pairs_;
+    uint32_t depth_censused_fb_ = 0, depth_censused_z_ = 0xFFFFFFFFu;
     // The RDP's TMEM palette, which outlives a display list and a task exactly
     // the way the colour image does. RT64 holds one `RDP::TMEM` for the whole
     // run (`rt64_rdp.cpp` clears it in the constructor only, and `RDP::reset()`
@@ -2988,6 +4717,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // and the whole title scene issues no G_LOADTLUT at all.
     uint16_t tlut_[256]{};
     bool tlut_valid_ = false;
+    // The RDP's TMEM: 4 KiB, persistent for the run the way RT64's
+    // `RDP::TMEM` is (it is cleared in the constructor only, `RDP::reset()`
+    // does not touch it). Every load command copies its source into it with
+    // RT64's byte layout (`loadWord`), and a draw decodes its tile out of it at
+    // `tmem << 3` with `line << 3` as the row stride. The previous model
+    // decoded straight from RDRAM with the `SETTIMG` width as the row stride,
+    // which is only the same bytes when the load wrote the rows there
+    // contiguously; a G_LOADBLOCK followed by a tile whose `line` differs from
+    // that width decoded the wrong rows. The gfx thread is the only reader and
+    // writer.
+    uint8_t tmem_[4096]{};
+    uint64_t tmem_generation_ = 0;   // bumped by every write (image cache key)
     // How many of the 256 entries are non-zero. A LOADTLUT that runs before the
     // game's palette DMA lands fills the table with zeros without failing, and
     // that is otherwise invisible in the log.
@@ -3077,6 +4818,45 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return false;
         }
 
+        // RT64's high-precision colour buffer (`internalColorFormat`, which
+        // defaults to Automatic and resolves through the device's `preferHDR`).
+        // WebGL2 has no 16-bit UNORM colour attachment without
+        // `EXT_texture_norm16`; RGBA16F is the closest renderable format, and
+        // its precision over 8 bits is what keeps a stack of translucent draws
+        // from quantizing at every blend. `OGRE_HPFB=0` forces the RGBA8
+        // attachment for an A/B (`?OGRE_HPFB=0` on the page).
+        const char* hpfb_env = getenv("OGRE_HPFB");
+        hp_fb_ = (hpfb_env == nullptr || hpfb_env[0] != '0') &&
+                 emscripten_webgl_enable_extension(canvas_handle_, "EXT_color_buffer_float");
+        OGRE_MILESTONE("RENDERER", "colour attachment: %s%s",
+                       hp_fb_ ? "RGBA16F" : "RGBA8",
+                       hp_fb_ ? " (EXT_color_buffer_float)"
+                              : " (EXT_color_buffer_float unavailable or OGRE_HPFB=0)");
+
+        // Texture sampling. The RDP's own rules are RT64's sampler port (see
+        // the fragment shader): manual bilinear on integer texels, the
+        // tile-window clamp, the mask wrap/mirror, and RT64's default
+        // three-point filter instead of true bilinear. `OGRE_TEXF=gl` restores
+        // the GL fixed-function sampler, and `OGRE_TEXF=1` (or `bilinear`) runs
+        // the same shader sampler with true bilinear, so the filtering rule
+        // can be A/B'd without touching anything else.
+        {
+            const char* texf_env = getenv("OGRE_TEXF");
+            if (texf_env == nullptr || texf_env[0] == '\0' || strcmp(texf_env, "rt64") == 0) {
+                texf_ = 2;
+            } else if (strcmp(texf_env, "gl") == 0) {
+                texf_ = 0;
+            } else if (strcmp(texf_env, "1") == 0 || strcmp(texf_env, "bilinear") == 0) {
+                texf_ = 1;
+            } else {
+                fprintf(stderr, "[web-renderer] unknown OGRE_TEXF=%s; using rt64\n", texf_env);
+                texf_ = 2;
+            }
+            static const char* const names[] = {"GL fixed-function", "shader bilinear",
+                                                "RT64 3-point"};
+            OGRE_MILESTONE("RENDERER", "texture sampler: %s", names[texf_]);
+        }
+
         GLuint vs = compile_shader(GL_VERTEX_SHADER, kVertexShaderSrc);
         GLuint fs = compile_shader(GL_FRAGMENT_SHADER, kFragmentShaderSrc);
         program_ = glCreateProgram();
@@ -3098,12 +4878,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glGenBuffers(1, &vbo_);
         glBindVertexArray(vao_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        // Stride 10: xy, uv, rgba, w, NDC z (the vertex shader's locations
+        // 0..4; see DrawCmd::z and transform_vertex).
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)0);
         glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(2 * sizeof(float)));
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(2 * sizeof(float)));
         glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(4 * sizeof(float)));
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(4 * sizeof(float)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(9 * sizeof(float)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(8 * sizeof(float)));
 
         // 1x1 white fallback: a tile that was never loaded must sample white,
         // because TEXEL0/TEXEL1 are often only one of the two in use.
@@ -3125,8 +4911,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // inferred.
         {
             static const char* const names[] = {
-                "u_tex0", "u_tex1", "u_uv_scale", "u_uv_origin",
-                "u_uv_scale1", "u_uv_origin1", "u_prim", "u_env", "u_cycle",
+                "u_tex0", "u_tex1", "u_tsize0", "u_torig0",
+                "u_tcm0", "u_tmask0", "u_tex_filter", "u_texf", "u_tex_persp",
+                "u_tsize1", "u_torig1", "u_tcm1", "u_tmask1",
+                "u_prim", "u_env", "u_cycle",
             };
             char buf[256];
             int o = 0;
@@ -3206,7 +4994,74 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         static constexpr uint32_t kLoadRing = 20;
         gbi::DlCommand load_ring[kLoadRing];
         uint32_t load_ring_count = 0;
+        // OGRE_FOG repairs applied to this list (fog_repair_display_list's
+        // count), so a draw that samples a repaired masked tile can state its
+        // sampler state once per list.
+        uint32_t fog_repaired = 0;
     };
+
+    // [GFX-S2D-CENSUS]: the opcode bytes an S2DEX2 list actually carries. Printed
+    // at the end of the first S2DEX2 task and every 200 S2DEX2 commands after it.
+    // `undecoded=` lists the opcodes that were seen and that the S2DEX2 arm of
+    // exec_command does not decode (so they either fall through to the F3DEX2
+    // switch or do nothing).
+    void print_s2d_census(unsigned task) {
+        static constexpr uint8_t kNamed[] = {0x01, 0x02, 0x04, 0x05, 0x06, 0x07,
+                                             0x08, 0x09, 0x0A, 0x0B, 0xDA, 0xDC, 0xE4};
+        char counts[160];
+        int o = 0;
+        for (uint8_t op : kNamed) {
+            o += snprintf(counts + o, sizeof(counts) - static_cast<size_t>(o), " %02X=%u", op,
+                          s2d_op_counts_[op]);
+        }
+        // Any other opcode that appeared, capped so the 384-byte milestone
+        // message cannot truncate the undecoded list.
+        char other[80];
+        int oo = 0;
+        for (int op = 0; op < 256; ++op) {
+            if (s2d_op_counts_[op] == 0) {
+                continue;
+            }
+            bool named = false;
+            for (uint8_t n : kNamed) {
+                if (n == static_cast<uint8_t>(op)) {
+                    named = true;
+                    break;
+                }
+            }
+            if (named) {
+                continue;
+            }
+            if (oo + 12 >= static_cast<int>(sizeof(other))) {
+                oo += snprintf(other + oo, sizeof(other) - static_cast<size_t>(oo), " ...");
+                break;
+            }
+            oo += snprintf(other + oo, sizeof(other) - static_cast<size_t>(oo), " %02X=%u", op,
+                           s2d_op_counts_[op]);
+        }
+        char undecoded[80];
+        int u = 0;
+        for (int op = 0; op < 256; ++op) {
+            if (s2d_op_counts_[op] == 0) {
+                continue;
+            }
+            const bool decoded = (op == S2D_OBJ_RECTANGLE || op == S2D_OBJ_SPRITE ||
+                                  op == S2D_OBJ_RECTANGLE_R || op == S2D_OBJ_MOVEMEM);
+            if (decoded) {
+                continue;
+            }
+            if (u + 8 >= static_cast<int>(sizeof(undecoded))) {
+                u += snprintf(undecoded + u, sizeof(undecoded) - static_cast<size_t>(u), " ..");
+                break;
+            }
+            u += snprintf(undecoded + u, sizeof(undecoded) - static_cast<size_t>(u), "%s%02X",
+                          u ? "," : "", op);
+        }
+        OGRE_MILESTONE("GFX-S2D-CENSUS",
+                       "task %u: cmds=%u%s others=[%s] undecoded=[%s]",
+                       task, s2d_total_, counts, other[0] ? other + 1 : "",
+                       undecoded[0] ? undecoded : "none");
+    }
 
     void execute_dl(uint8_t* rdram, uint32_t dl_offset, RenderState& st, ExecCtx& ctx) {
         ctx.self = this;
@@ -3271,8 +5126,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         };
 
+        // OGRE_FOG: repair the stale-tile fog pieces in the submitted list
+        // before the walker reaches them (the native does this before RT64
+        // parses the list). OGRE_FOG=0 turns it off.
+        ctx.fog_repaired = fog_repair_display_list(rdram, dl_offset, ctx.trace_task);
+
         gbi::walk_dl(rdram, dl_offset, visitor, &ctx);
         last_dl_cmds_ = ctx.cmd_index;
+        // The first S2DEX2 task reports the whole shape of its list, then the
+        // per-200 cadence in exec_command takes over (print_s2d_census).
+        if (st.gbi == GbiKind::S2DEX2 && !s2d_first_printed_ && s2d_total_ > 0) {
+            s2d_first_printed_ = true;
+            s2d_next_print_ = s2d_total_ + 200;
+            print_s2d_census(ctx.trace_task);
+        }
         if (!ctx.order.empty() && (task_count_.load() <= 4 || (task_count_.load() % 4) == 0)) {
             OGRE_MILESTONE("GFX-ORDER",
                            "task %u quad0=%.4fx%.4f uv=[%.1f..%.1f, %.1f..%.1f] "
@@ -3313,6 +5180,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         RenderState& st = *ctx->st;
         const uint32_t w0 = c.w0, w1 = c.w1;
         const uint8_t op = c.op;
+
+        // [GFX-S2D-CENSUS]: count every opcode byte of an S2DEX2 list (see
+        // print_s2d_census). The first task reports its whole list at the end of
+        // execute_dl, so the per-200 cadence only starts after that.
+        if (st.gbi == GbiKind::S2DEX2) {
+            ++s2d_op_counts_[op];
+            ++s2d_total_;
+            if (s2d_first_printed_ && s2d_total_ >= s2d_next_print_) {
+                s2d_next_print_ = s2d_total_ + 200;
+                print_s2d_census(ctx->trace_task);
+            }
+        }
 
         // Remember the texture-setup commands so dump_tex_state() can print the
         // exact recipe that filled TMEM for this draw.
@@ -3609,8 +5488,34 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 break;
             }
 
-            case gbi::OP_SETZIMG:
+            case gbi::OP_SETZIMG: {
+                // RT64 GBI_RDP::setDepthImage: the RDP's depth image is the
+                // same word shape as G_SETCIMG (fmt bits 21-23, siz bits 19-20,
+                // width = bits 0-11 + 1) with the address in w1 masked to the
+                // 24-bit RDRAM window. The RDP keeps it across display lists,
+                // like the colour image (send_dl seeds a new task from the last
+                // one).
+                const uint8_t fmt = static_cast<uint8_t>(p0(w0, 21, 3));
+                const uint8_t siz = static_cast<uint8_t>(p0(w0, 19, 2));
+                const uint32_t width = p0(w0, 0, 12) + 1;
+                const uint32_t address = w1 & 0x00FFFFFFu;
+                st.zimg_address = address;
+                st.zimg_siz = siz;
+                st.zimg_fmt = fmt;
+                st.zimg_width = static_cast<uint16_t>(width);
+                last_zimg_address_ = address;
+                last_zimg_siz_ = siz;
+                last_zimg_fmt_ = fmt;
+                last_zimg_width_ = st.zimg_width;
+                const uint64_t zimg_key = (static_cast<uint64_t>(address) << 24) |
+                                          (width << 4) | (siz << 2) | fmt;
+                if (zimg_seen_.size() < 8 && zimg_seen_.insert(zimg_key).second) {
+                    OGRE_MILESTONE("GFX-ZIMG",
+                                   "SETZIMG addr=0x%06X fmt=%u siz=%u width=%u",
+                                   address, (unsigned)fmt, (unsigned)siz, width);
+                }
                 break;
+            }
 
             case gbi::OP_SETTIMG: {
                 st.timg_fmt = static_cast<uint8_t>(p0(w0, 21, 3));
@@ -3654,6 +5559,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // G_SETTILE/G_SETTILESIZE that follow (see note_tile_load).
             case gbi::OP_LOADTILE:
             case gbi::OP_LOADBLOCK: {
+                // The command's own rect and the last SETTIMG/SETTILE decide
+                // what lands in TMEM (RT64 `RDP::loadTile`/`loadBlock`); the
+                // render tile that samples it is configured afterwards.
+                tmem_load_command(st, op == gbi::OP_LOADBLOCK, false, w0, w1);
                 note_tile_load(st, static_cast<int>(p0(w1, 24, 3)));
                 break;
             }
@@ -3661,6 +5570,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             case gbi::OP_LOADTLUT: {
                 const int tile = static_cast<int>(p0(w1, 24, 3));
                 TileState& t = st.tiles[tile];
+                // The palette lands in TMEM at the load tile's `tmem << 3`
+                // (RT64 `loadTLUTOperation`), and the CI decode reads it from
+                // there. `tlut_` stays as the diagnostics' copy.
+                tmem_load_command(st, false, true, w0, w1);
                 // Number of 16-bit TLUT entries: lrs is 10.2 fixed -> entries.
                 const uint16_t count = static_cast<uint16_t>((p0(w1, 12, 12) >> 2) + 1);
                 const uint32_t bank = static_cast<uint32_t>(t.palette) * 16;
@@ -3677,6 +5590,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     }
                 }
                 ++tlut_generation_;
+                if (tlut_trace_) {
+                    // The one-line report a future screen needs if it loads a
+                    // palette somewhere other than the assumed destination.
+                    // RT64 writes the load at `loadTile.tmem << 3` and samples
+                    // CI4 at TMEM 0x800 + (palette << 7) (16 entries of 8 bytes
+                    // per bank) and CI8 at 0x800 + (index << 3)
+                    // (`TextureDecoder.hlsli`, `sampleTMEMWithConvert`), so a
+                    // load at tmem 0x100 is the destination the fixed base
+                    // samples.
+                    const uint64_t dest = (static_cast<uint64_t>(t.tmem) << 4) | t.palette;
+                    if (tlut_dest_seen_.insert(dest).second) {
+                        const bool assumed = (t.tmem == 0x100 && t.palette == 0);
+                        OGRE_MILESTONE("GFX-TLUT",
+                                       "load dest tmem=0x%X palette=%u entries=%u bytes=%u "
+                                       "addr=0x%06X: %s",
+                                       (unsigned)t.tmem, (unsigned)t.palette, (unsigned)count,
+                                       (unsigned)count * 2u, base,
+                                       assumed ? "the assumed destination"
+                                               : "NOT the assumed dest (tmem=0x100 palette=0); "
+                                                 "the decoder banks CI tables by the tile's "
+                                                 "palette field only");
+                    }
+                }
                 if (trace_) {
                     ++trace_tluts_;
                     if (trace_tluts_ <= 8) {
@@ -3808,16 +5744,96 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint8_t index = static_cast<uint8_t>(p0(w0, 0, 8));
                 if (index == gbi::MV_VIEWPORT) {
                     set_viewport(ctx, st, resolve_address(ctx->segments, w1));
+                } else if (index == gbi::MV_LIGHT) {
+                    // RT64 GBI_F3DEX2::moveMem (gbi/rt64_gbi_f3dex2.cpp:48-61):
+                    // `offset = p0(8, 8) * 8`, `index = offset / 24`; slots 0
+                    // and 1 are the lookat X/Y vectors (texgen) and slots >= 2
+                    // are lights. RSP_MAX_LIGHTS + 1 slots, RT64 stores 16 bytes
+                    // per light; this keeps 24 so the slot stride matches.
+                    const uint32_t offset = p0(w0, 8, 8) * 8;
+                    const int slot = static_cast<int>(offset / 24);
+                    if (slot >= 2 && slot - 2 < RenderState::kMaxLights) {
+                        const uint32_t addr = resolve_address(ctx->segments, w1);
+                        uint8_t* dst = st.lights[slot - 2];
+                        for (int k = 0; k < RenderState::kLightStride; ++k) {
+                            dst[k] = n64b(rdram_, static_cast<int>(addr) + k);
+                        }
+                    }
+                    // Slots 0/1 (lookat) are not stored: this renderer has no
+                    // G_TEXTURE_GEN path, so nothing reads them.
                 }
                 break;
             }
 
             case gbi::OP_MOVEWORD: {
-                // The RSP keeps only the segment base's high byte; segmented
-                // addresses then resolve as (base << 24) | offset. Storing the
-                // full base made every segmented matrix/vertex address resolve
-                // to garbage.
-                gbi::set_segment_from_moveword(ctx->segments, w0, w1);
+                // RT64 GBI_F3DEX2::moveWord (gbi/rt64_gbi_f3dex2.cpp:64-94)
+                // dispatches on p0(16, 8); only the segment write was handled
+                // here before.
+                const uint8_t type = static_cast<uint8_t>(p0(w0, 16, 8));
+                if (type == gbi::MW_NUMLIGHT) {
+                    // `setLightCount(w1 / 24)`; the +1 ambient slot is why the
+                    // count is clamped below kMaxLights.
+                    st.num_lights = static_cast<int>(w1 / 24);
+                    if (st.num_lights < 0) st.num_lights = 0;
+                    if (st.num_lights > RenderState::kMaxLights - 1) {
+                        st.num_lights = RenderState::kMaxLights - 1;
+                    }
+                } else if (type == gbi::MW_LIGHTCOL) {
+                    // `setLightColor(p0(0, 16) / 24, w1)`: RT64 sets the light's
+                    // two 32-bit colour words to the packed value
+                    // (tools/RT64/src/hle/rt64_rsp.cpp:938). A word in the
+                    // runtime's image reads back as its big-endian byte order,
+                    // so logical bytes 0..3 (and 4..7) are w1's bytes 3,2,1,0
+                    // and byte 0 becomes the light's red channel.
+                    const int li = static_cast<int>(p0(w0, 0, 16) / 24);
+                    if (li >= 0 && li < RenderState::kMaxLights) {
+                        for (int k = 0; k < 4; ++k) {
+                            const uint8_t b = static_cast<uint8_t>((w1 >> (24 - 8 * k)) & 0xFFu);
+                            st.lights[li][k] = b;
+                            st.lights[li][4 + k] = b;
+                        }
+                    }
+                } else if (type == gbi::MW_FOG) {
+                    // `setFog((int16_t)p1(16, 16), (int16_t)p1(0, 16))`.
+                    st.fog_mul = static_cast<int16_t>(p0(w1, 16, 16));
+                    st.fog_offset = static_cast<int16_t>(p0(w1, 0, 16));
+                } else {
+                    // The RSP keeps only the segment base's high byte; segmented
+                    // addresses then resolve as (base << 24) | offset. Storing
+                    // the full base made every segmented matrix/vertex address
+                    // resolve to garbage.
+                    gbi::set_segment_from_moveword(ctx->segments, w0, w1);
+                }
+                break;
+            }
+
+            case gbi::OP_SETPRIMDEPTH: {
+                // RT64 RDP::setPrimDepth (hle/rt64_rdp.cpp:1160): the high
+                // halfword is the 15-bit screen depth, the low halfword the
+                // 16-bit decal delta. `primDepth.x` is 0..1 in the RDP's screen
+                // depth space, which is the same space as the viewport
+                // transform's output z (see transform_vertex).
+                st.prim_depth = static_cast<float>((w1 >> 16) & 0x7FFFu) / 32767.0f;
+                st.prim_depth_dz = static_cast<float>(w1 & 0xFFFFu) / 65535.0f;
+                break;
+            }
+
+            case gbi::OP_SETKEYR: {
+                // RT64 GBI_RDP::setKeyR (gbi/rt64_gbi_rdp.cpp:154-159):
+                // cR = p1(8,8), sR = p1(0,8), wR = p1(16,12) (width ignored).
+                st.key_center[0] = static_cast<float>(p0(w1, 8, 8)) / 255.0f;
+                st.key_scale[0] = static_cast<float>(p0(w1, 0, 8)) / 255.0f;
+                break;
+            }
+
+            case gbi::OP_SETKEYGB: {
+                // RT64 GBI_RDP::setKeyGB (gbi/rt64_gbi_rdp.cpp:161-169):
+                // cG = p1(24,8), sG = p1(16,8), cB = p1(8,8), sB = p1(0,8);
+                // the widths p0(12,12)/p0(0,12) are ignored.
+                st.key_center[1] = static_cast<float>(p0(w1, 24, 8)) / 255.0f;
+                st.key_center[2] = static_cast<float>(p0(w1, 8, 8)) / 255.0f;
+                st.key_scale[1] = static_cast<float>(p0(w1, 16, 8)) / 255.0f;
+                st.key_scale[2] = static_cast<float>(p0(w1, 0, 8)) / 255.0f;
                 break;
             }
 
@@ -3833,9 +5849,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             case gbi::OP_RDPPIPESYNC:
             case gbi::OP_RDPTILESYNC:
             case gbi::OP_RDPFULLSYNC:
-            case gbi::OP_SETKEYGB:
-            case gbi::OP_SETKEYR:
-            case gbi::OP_SETPRIMDEPTH:
             case gbi::OP_DL:
             case gbi::OP_ENDDL:
             default:
@@ -3934,6 +5947,177 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
     }
 
+    // ----- TMEM (gfx thread) --------------------------------------------------
+
+    // RT64 `RDP::loadWord`: one 64-bit TMEM word from the 32-bit-granular
+    // source. A TLUT word reads two source bytes, RGBA32 splits a source
+    // word's low and high halves into TMEM's two halves, and every other
+    // format copies eight bytes.
+    void tmem_store_word(uint32_t tmem_addr, uint32_t tmem_xor, uint32_t tex_addr,
+                         bool rgba32, bool tlut) {
+        const uint32_t offset_mask = tlut ? 0x1u : 0x7u;
+        auto src = [&](uint32_t i) {
+            return n64b(rdram_, static_cast<int>(tex_addr + (i & offset_mask)));
+        };
+        if (rgba32) {
+            tmem_[(tmem_addr + 0) ^ tmem_xor] = src(0);
+            tmem_[(tmem_addr + 1) ^ tmem_xor] = src(1);
+            tmem_[(tmem_addr + 2) ^ tmem_xor] = src(4);
+            tmem_[(tmem_addr + 3) ^ tmem_xor] = src(5);
+            tmem_[((tmem_addr + 0) ^ tmem_xor) | 0x800u] = src(2);
+            tmem_[((tmem_addr + 1) ^ tmem_xor) | 0x800u] = src(3);
+            tmem_[((tmem_addr + 2) ^ tmem_xor) | 0x800u] = src(6);
+            tmem_[((tmem_addr + 3) ^ tmem_xor) | 0x800u] = src(7);
+        } else {
+            for (uint32_t i = 0; i < 8; ++i) {
+                tmem_[(tmem_addr + i) ^ tmem_xor] = src(i);
+            }
+        }
+    }
+
+    // RT64 `RDP::loadToTMEMCommon`'s non-deferred arm (the GPU tile-copy path
+    // is not modelled). `block`/`dxt_increment` reproduce a LOADBLOCK's early
+    // row advance.
+    void tmem_copy(uint32_t tex_start, uint32_t tex_stride, uint32_t tmem_start,
+                   uint32_t tmem_stride, uint32_t words_per_row, uint32_t rows, bool rgba32,
+                   bool tlut, uint32_t dxt_increment, bool block) {
+        const uint32_t tmem_mask = rgba32 ? 0x7FFu : 0xFFFu;
+        const uint32_t tmem_advance = rgba32 ? 4u : 8u;
+        const uint32_t texture_advance = tlut ? 2u : 8u;
+        uint32_t tex_row = tex_start;
+        uint32_t tmem_row = tmem_start & tmem_mask;
+        uint32_t tmem_xor = 0;
+        uint32_t dxt_counter = 0;
+        for (uint32_t row = 0; row < rows; ++row) {
+            uint32_t tex_addr = tex_row;
+            uint32_t tmem_addr = tmem_row;
+            for (uint32_t w = 0; w < words_per_row; ++w) {
+                tmem_store_word(tmem_addr, tmem_xor, tex_addr, rgba32, tlut);
+                // RT64 `loadWordStep`: a block advances a row once per 0x800
+                // of `dxt`, then every word advances by the texel size.
+                if (block) {
+                    dxt_counter += dxt_increment;
+                    while (dxt_counter >= 0x800u) {
+                        tmem_addr = (tmem_addr + tmem_stride) & tmem_mask;
+                        dxt_counter -= 0x800u;
+                        tmem_xor ^= 4u;
+                    }
+                }
+                tex_addr += texture_advance;
+                tmem_addr = (tmem_addr + tmem_advance) & tmem_mask;
+            }
+            tmem_row = (tmem_row + tmem_stride) & tmem_mask;
+            tex_row += tex_stride;
+            tmem_xor ^= 4u;
+        }
+    }
+
+    // RT64 `RDP::loadYUVTileToTMEM`: a YUV16 tile is de-interleaved into the
+    // luma plane in TMEM's upper half and the U/V pairs in the lower half.
+    void tmem_load_yuv(uint32_t tex_start, uint32_t tex_stride, uint32_t tmem_start,
+                       uint32_t tmem_stride, uint32_t rows) {
+        const uint32_t words_per_row = tmem_stride / 2;
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t row_base = (tmem_start + row * tmem_stride) & 0xFFFu;
+            const uint32_t row_xor = ((row & 1) != 0) ? 4u : 0u;
+            for (uint32_t w = 0; w < words_per_row; ++w) {
+                const uint32_t word = tex_start + row * tex_stride + w * 4;
+                const uint8_t y_even = n64b(rdram_, static_cast<int>(word) + 2);
+                const uint8_t y_odd = n64b(rdram_, static_cast<int>(word) + 0);
+                const uint8_t uu = n64b(rdram_, static_cast<int>(word) + 3);
+                const uint8_t vv = n64b(rdram_, static_cast<int>(word) + 1);
+                const uint32_t luma = (((row_base + w * 2) ^ row_xor) | 0x800u) & 0xFFFu;
+                const uint32_t chroma = ((row_base + w * 2) ^ row_xor) & 0xFFFu;
+                tmem_[luma + 0] = y_even;
+                tmem_[luma + 1] = y_odd;
+                tmem_[chroma + 0] = uu;
+                tmem_[(chroma + 1) & 0xFFFu] = vv;
+            }
+        }
+    }
+
+    // Runs one of G_LOADTILE / G_LOADBLOCK / G_LOADTLUT into TMEM from the
+    // command's own rect and the last G_SETTIMG/G_SETTILE. RT64
+    // `RDP::loadTile`/`loadBlock`/`loadTLUT` are the reference; the load
+    // command's rect replaces the tile's, which the previous model did not do
+    // (it decoded at draw time from the render tile's rect instead).
+    void tmem_load_command(RenderState& st, bool block, bool tlut_load, uint32_t w0,
+                           uint32_t w1) {
+        const int tile = static_cast<int>(p0(w1, 24, 3));
+        TileState& lt = st.tiles[tile & (kMaxTiles - 1)];
+        const uint16_t uls = static_cast<uint16_t>(p0(w0, 12, 12));
+        const uint16_t ult = static_cast<uint16_t>(p0(w0, 0, 12));
+        const uint16_t lrs = static_cast<uint16_t>(p0(w1, 12, 12));
+        const uint16_t lrt = static_cast<uint16_t>(p0(w1, 0, 12));
+        lt.uls = uls;
+        lt.ult = ult;
+        lt.lrs = lrs;
+        lt.lrt = lrt;
+        const uint32_t siz = lt.siz;
+        const bool rgba32 = (lt.fmt == gbi::IM_FMT_RGBA) && (siz == gbi::IM_SIZ_32b);
+        const uint32_t bytes_per_row = static_cast<uint32_t>(st.timg_width) << siz >> 1;
+        const uint32_t tmem_start = static_cast<uint32_t>(lt.tmem) << 3;
+        if (uls > lrs) {
+            return;   // the hardware ignores a reversed load rect
+        }
+        if (block) {
+            // RT64 `loadBlockOperation`: the block is contiguous, and `ult`,
+            // `dxt` are in whole words/texels rather than 10.2 fixed.
+            const uint32_t tex_start = st.timg_address + (static_cast<uint32_t>(uls) << siz >> 1) +
+                                       bytes_per_row * ult;
+            const uint32_t word_count = ((static_cast<uint32_t>(lrs) - uls) >> (4 - siz)) + 1;
+            if (!rgba32 && lt.fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
+                tmem_load_yuv(tex_start, bytes_per_row, tmem_start,
+                              static_cast<uint32_t>(lt.line) << 3, 1);
+            } else {
+                tmem_copy(tex_start, bytes_per_row, tmem_start,
+                          static_cast<uint32_t>(lt.line) << 3, word_count, 1, rgba32, false, lrt,
+                          true);
+            }
+        } else if (tlut_load) {
+            const uint32_t tex_start =
+                st.timg_address + ((static_cast<uint32_t>(uls) >> 2) << siz >> 1) +
+                bytes_per_row * (ult >> 2);
+            const uint32_t rows = 1 + ((lrt >> 2) - (ult >> 2));
+            const uint32_t words_per_row = ((static_cast<uint32_t>(lrs) >> 2) - (uls >> 2)) + 1;
+            tmem_copy(tex_start, bytes_per_row, tmem_start,
+                      static_cast<uint32_t>(lt.line) << 5, words_per_row, rows, rgba32, true, 0,
+                      false);
+        } else {
+            const uint32_t tex_start =
+                st.timg_address + ((static_cast<uint32_t>(uls) >> 2) << siz >> 1) +
+                bytes_per_row * (ult >> 2);
+            const uint32_t rows = 1 + ((lrt >> 2) - (ult >> 2));
+            const uint32_t words_per_row =
+                (((static_cast<uint32_t>(lrs) >> 2) - (uls >> 2)) >> (4 - siz)) + 1;
+            if (!rgba32 && lt.fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
+                tmem_load_yuv(tex_start, bytes_per_row, tmem_start,
+                              static_cast<uint32_t>(lt.line) << 3, rows);
+            } else {
+                tmem_copy(tex_start, bytes_per_row, tmem_start,
+                          static_cast<uint32_t>(lt.line) << 3, words_per_row, rows, rgba32, false,
+                          0, false);
+            }
+        }
+        // Framebuffer-as-texture diagnostic. The load reads RDRAM here, so
+        // this is where its source range can overlap a colour image whose
+        // pixels are still in a GL framebuffer. The rect is the load's own,
+        // not the render tile's sample window (a masked tile can sample many
+        // more rows than the load copied).
+        const int load_x0 = static_cast<int>(uls >> 2);
+        const int load_w = static_cast<int>((lrs >> 2) - (uls >> 2)) + 1;
+        if (block) {
+            note_fb_texture(st.timg_address, static_cast<int>(bytes_per_row), static_cast<int>(ult),
+                            1, load_w, 1, load_x0, st.timg_fmt, st.timg_siz);
+        } else {
+            const int load_rows = static_cast<int>(1 + ((lrt >> 2) - (ult >> 2)));
+            note_fb_texture(st.timg_address, static_cast<int>(bytes_per_row),
+                            static_cast<int>(ult >> 2), load_rows, load_w, load_rows, load_x0,
+                            st.timg_fmt, st.timg_siz);
+        }
+        ++tmem_generation_;
+    }
+
     // Records a LOADTILE/LOADBLOCK as the source for the *next* render tile.
     //
     // G_LOADTILE/LOADBLOCK always name tile 7 (G_TX_LOADTILE) and the F3DEX2
@@ -3981,40 +6165,64 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // express the mask above and used the wrong stride whenever they differ.
     void ensure_tile_image(ExecCtx* ctx, RenderState& st, int tile, int unit = 0) {
         TileState& t = st.tiles[tile & (kMaxTiles - 1)];
-        if (!t.image_source_valid) {
+        // RT64 `State::setupDrawCall`: a tile with `line == 0` samples nothing
+        // (the RDP's row stride is the tile's own field). The image itself is
+        // whatever the last load put in TMEM; that persists across display
+        // lists the way RT64's `RDP::TMEM` does, so a draw does not need a load
+        // in its own list.
+        if (t.line == 0) {
+            t.image_valid = false;
             return;
         }
         const int x0 = t.uls >> 2;
         const int y0 = t.ult >> 2;
-        const int w = (t.lrs >> 2) - x0 + 1;
-        const int h = (t.lrt >> 2) - y0 + 1;
+        // RT64's sample window: the tile's own rect when the axis is clamped,
+        // otherwise the mask, whichever is smaller. A texrect whose tile was
+        // never given a rect (uls/lrt all zero) therefore samples the mask's
+        // size - the title's 64x64 cloud tiles - instead of a single texel.
+        const bool clamp_s = (t.masks == 0) || ((t.cms & 2) != 0);
+        const bool clamp_t = (t.maskt == 0) || ((t.cmt & 2) != 0);
+        const int32_t window_w = clamp_s
+                                     ? std::max((static_cast<int32_t>(t.lrs) -
+                                                 static_cast<int32_t>(t.uls) + 4) / 4, 1)
+                                     : 0xFFFF;
+        const int32_t window_h = clamp_t
+                                     ? std::max((static_cast<int32_t>(t.lrt) -
+                                                 static_cast<int32_t>(t.ult) + 4) / 4, 1)
+                                     : 0xFFFF;
+        const int32_t mask_w = (t.masks > 0) ? (1 << t.masks) : 0xFFFF;
+        const int32_t mask_h = (t.maskt > 0) ? (1 << t.maskt) : 0xFFFF;
+        const int w = std::min(window_w, mask_w);
+        const int h = std::min(window_h, mask_h);
         if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
             t.image_valid = false;
             return;
         }
+        // The RDRAM source the diagnostic below reports (the load's own stride
+        // is the SETTIMG width, which is not what the tile samples from TMEM).
         const int row_bytes = t.image_stride;
-        if (row_bytes <= 0) {
-            t.image_valid = false;
-            return;
-        }
         // A CI image's decoded colour depends on the palette and on the RDP's
-        // 2-bit texture LUT mode as well as on the source bytes, and both
-        // outlive the display list. A G_LOADTLUT in between, or a display list
-        // that switches the LUT mode, makes the same address decode to a
-        // different image, so the key carries the palette generation and the
-        // whole LUT mode. RGBA16 (2) and IA16 (3) decode the same entry to
-        // different colours, so a bool is not enough.
-        const bool indexed = (t.fmt == gbi::IM_FMT_CI);
+        // 2-bit texture LUT mode as well as on the TMEM bytes, and both outlive
+        // the display list. A G_LOADTLUT in between, or a display list that
+        // switches the LUT mode, makes the same tile decode to a different
+        // image, so the key carries the palette generation, the LUT mode and
+        // the TMEM generation (every load shifts the bytes under the tile).
         const uint32_t lut_mode = (st.othermode_h >> 14) & 3u;
-        const uint64_t palette_key =
-            indexed ? (tlut_generation_ * 4 + lut_mode) : 0;
-        const uint64_t key = make_image_key(t, tile, t.image_address, x0, y0, w, h, row_bytes);
+        const bool indexed = (t.fmt == gbi::IM_FMT_CI) && (lut_mode != 0);
+        const uint64_t palette_key = indexed ? (tlut_generation_ * 4 + lut_mode) : 0;
+        uint64_t key = tmem_generation_;
+        auto mix = [&key](uint64_t v) { key = (key ^ v) * 0x00000100000001B3ull; };
+        mix(t.tmem);
+        mix(t.line);
+        mix(t.fmt);
+        mix(t.siz);
+        mix(t.palette);
+        mix(static_cast<uint64_t>(w));
+        mix(static_cast<uint64_t>(h));
+        mix(static_cast<uint64_t>(tile));
         if (t.image_valid && t.image.key == key && t.image.palette == palette_key) {
             return;   // already decoded and queued for this draw
         }
-        // Framebuffer-as-texture diagnostic: this image's source range may still
-        // be on the GPU in a colour image a recorded draw wrote into.
-        note_fb_texture(t.image_address, row_bytes, y0, h, w, h, t.fmt, t.siz);
 
         g_load_seq.fetch_add(1, std::memory_order_relaxed);
         g_load_w.store(static_cast<uint32_t>(w), std::memory_order_relaxed);
@@ -4025,9 +6233,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         g_load_addr.store(t.image_address, std::memory_order_relaxed);
 
         std::vector<uint8_t> pixels;
-        decode_texture_rect(rdram_, t.image_address, t.fmt, t.siz, row_bytes, x0, y0, w, h,
-                            tlut_, tlut_valid_, t.palette, static_cast<int>(lut_mode),
-                            st.convert_k, pixels);
+        decode_tmem_tile(tmem_, t, w, h, static_cast<int>(lut_mode), st.convert_k, pixels);
         g_load_done.fetch_add(1, std::memory_order_relaxed);
         // OGRE_TEX_TRACE: the colour the decoded image holds. The native
         // renderer prints the same number from the RDRAM bytes through the
@@ -4136,24 +6342,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         t.image_valid = true;
     }
 
-    // The image key: content is identified by the source address, the tile's
-    // sampling parameters and the sampled rect. (Frames reuse addresses, so the
-    // bytes are re-decoded and re-uploaded every time the key is queued.)
-    uint64_t make_image_key(const TileState& t, int tile, uint32_t address,
-                            int x0, int y0, int w, int h, int row_bytes) {
-        uint64_t k = address;
-        k = k * 31 + t.fmt;
-        k = k * 31 + t.siz;
-        k = k * 31 + t.line;
-        k = k * 31 + tile;
-        k = k * 31 + static_cast<uint32_t>(x0);
-        k = k * 31 + static_cast<uint32_t>(y0);
-        k = k * 31 + static_cast<uint32_t>(w);
-        k = k * 31 + static_cast<uint32_t>(h);
-        k = k * 31 + static_cast<uint32_t>(row_bytes);
-        k = k * 31 + t.palette;
-        return k;
-    }
 
     // ----- drawing (gfx pthread: record commands) --------------------------------
 
@@ -4221,11 +6409,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         cmd.tex_tc = st.tex_tc;
         cmd.k4 = static_cast<float>(st.convert_k[4] & 0x1FF) / 255.0f;
         cmd.k5 = static_cast<float>(st.convert_k[5] & 0x1FF) / 255.0f;
+        for (int i = 0; i < 3; ++i) {
+            cmd.key_center[i] = st.key_center[i];
+            cmd.key_scale[i] = st.key_scale[i];
+        }
         if (textured) {
             // TEXEL0 = the G_TEXTURE tile, TEXEL1 = the tile above it; each
             // carries the image decoded from its own source and rect.
-            const LoadedImage& i0 = st.tiles[st.active_tile & (kMaxTiles - 1)].image;
-            const LoadedImage& i1 = st.tiles[(st.active_tile + 1) & (kMaxTiles - 1)].image;
+            const int t0 = st.active_tile & (kMaxTiles - 1);
+            const int t1 = (st.active_tile + 1) & (kMaxTiles - 1);
+            const LoadedImage& i0 = st.tiles[t0].image;
+            const LoadedImage& i1 = st.tiles[t1].image;
             cmd.tex_key = i0.key;
             cmd.tex_key1 = i1.key;
             cmd.tex_scale[0] = i0.width ? 1.0f / static_cast<float>(i0.width) : 1.0f;
@@ -4236,7 +6430,32 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             cmd.tex_scale1[1] = i1.height ? 1.0f / static_cast<float>(i1.height) : 1.0f;
             cmd.tex_origin1[0] = static_cast<float>(i1.origin_s);
             cmd.tex_origin1[1] = static_cast<float>(i1.origin_t);
+            // The sampler's tile fields, the way RT64's State::setupDrawCall
+            // builds RDPTile from the RDP's tile: `masks` becomes the wrap size
+            // `1 << masks`, and a tile with no mask is clamped (the RDP treats
+            // mask 0 as clamp). cms/cmt keep the G_TX_* bits.
+            for (int u = 0; u < 2; ++u) {
+                const TileState& ts = st.tiles[u == 0 ? t0 : t1];
+                const LoadedImage& img = u == 0 ? i0 : i1;
+                cmd.tex_size[u][0] = static_cast<float>(std::max(img.width, 1));
+                cmd.tex_size[u][1] = static_cast<float>(std::max(img.height, 1));
+                cmd.tex_cms[u] = ts.cms | ((ts.masks == 0) ? 2 : 0);   // G_TX_CLAMP
+                cmd.tex_cmt[u] = ts.cmt | ((ts.maskt == 0) ? 2 : 0);
+                cmd.tex_masks[u] = (ts.masks > 0) ? (1 << ts.masks) : 0;
+                cmd.tex_maskt[u] = (ts.maskt > 0) ? (1 << ts.maskt) : 0;
+                cmd.tex_shifts[u] = ts.shifts;
+                cmd.tex_shiftt[u] = ts.shiftt;
+                cmd.tex_shift[u][0] = tex_shift_scale(ts.shifts);
+                cmd.tex_shift[u][1] = tex_shift_scale(ts.shiftt);
+            }
+            cmd.tex_filter = static_cast<int>((st.othermode_h >> 12) & 3);   // G_TF_*
         }
+        // G_TP_PERSP applies to triangles only; RT64's rect paths skip the fixup
+        // (`renderFlagRect` in TextureSampler.hlsli:221-223). The bit is
+        // OTHERMODE_H bit 19 (`G_MDSFT_TEXTPERSP`,
+        // shared/rt64_f3d_defines.h:51); bit 10 is not an RDP field, and the
+        // game sets it on rect draws.
+        cmd.tex_persp = (cmd.kind != 0) || ((st.othermode_h >> 19) & 1u) != 0;
         cmd.scissor_on = st.scissor_enabled;
         if (st.scissor_enabled) {
             cmd.sx0 = st.scissor_x0;
@@ -4255,6 +6474,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const bool copy_or_fill = (cyc_type == kCycCopy || cyc_type == kCycFill);
         cmd.alpha_blend = !copy_or_fill && bl.alpha_blend &&
                           (g_debug_flags.load(std::memory_order_relaxed) & 1u) == 0;
+        // RT64 RasterPS's alpha compare and coverage, from OTHERMODE_L:
+        // alphaCompare is bits 0-1, CVG_DST bits 8-9 and CVG_X_ALPHA bit 12.
+        cmd.acmp = static_cast<int>(st.othermode_l & 3u);
+        cmd.cvg_dst = static_cast<int>((st.othermode_l >> 8) & 3u);
+        cmd.cvg_x_alpha = (st.othermode_l & 0x1000u) != 0;
         for (int i = 0; i < 2; ++i) {
             cmd.bp[i] = bl.p[i];
             cmd.bm[i] = bl.m[i];
@@ -4270,38 +6494,67 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         cmd.fb_siz = st.cimg_siz;
         cmd.fb_fmt = st.cimg_fmt;
         cmd.fb_width_px = st.cimg_width;
+        cmd.zimg_address = st.zimg_address;
+        cmd.zimg_width = st.zimg_width;
+        cmd.zimg_siz = st.zimg_siz;
+        cmd.zimg_fmt = st.zimg_fmt;
+        // RDP depth pipeline (RT64 OtherMode::zCmp/zUpd/zMode/zSource and
+        // rasterShader's pipeline flags). COPY bypasses depth entirely. A
+        // ZMODE_DEC draw never runs the hardware depth *test* in RT64 - the
+        // decal tolerance is a fragment-shader test this renderer does not
+        // implement, so only its depth *write* is kept.
+        const uint32_t oml = st.othermode_l;
+        const bool copy_mode = (cyc_type == kCycCopy);
+        cmd.z_mode = static_cast<int>(oml & 0xC00u);
+        // `depth_enabled_` (OGRE_DEPTH) gates the test and the write, not the
+        // decode: with it off the DrawCmd still carries the exact state RT64
+        // would act on, and `[GFX-DEPTH]` still counts it. The mission scene
+        // measures worse with the test on (see the handoff), so the pipeline
+        // ships off until the vertex depth is understood. The synthetic control
+        // (debug flag bit 7) forces it on for its own draws.
+        const bool depth_on = depth_enabled_ ||
+                              (g_debug_flags.load(std::memory_order_relaxed) & 128u) != 0;
+        cmd.depth_test = depth_on && !copy_mode && (oml & 0x10u) != 0 && cmd.z_mode != 0xC00;
+        cmd.depth_write = depth_on && !copy_mode && (oml & 0x20u) != 0;
+        cmd.z_source_prim = !copy_mode && (oml & 0x04u) != 0;
+        cmd.prim_depth = st.prim_depth;
         const float sh = screen_height(st);
         cmd.fb_height_px = static_cast<uint16_t>(
             (sh >= 1.0f && sh <= 1024.0f) ? sh : static_cast<float>(canvas_height_));
     }
 
-    // Queues one triangle list (NDC pos + uv + shade per vertex).
+    // Queues one triangle list (NDC pos + uv + shade + w + NDC z per vertex).
     void queue_triangles(ExecCtx* ctx, DrawCmd& cmd, const float* data, int count) {
         cmd.vertex_count = count;
         if (!ctx->first_quad_done && cmd.kind == 0 && count >= 3) {
             ctx->first_quad_done = true;
             float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
             for (int i = 0; i < count; ++i) {
-                minx = std::min(minx, data[i * 8 + 0]); maxx = std::max(maxx, data[i * 8 + 0]);
-                miny = std::min(miny, data[i * 8 + 1]); maxy = std::max(maxy, data[i * 8 + 1]);
+                minx = std::min(minx, data[i * 10 + 0]); maxx = std::max(maxx, data[i * 10 + 0]);
+                miny = std::min(miny, data[i * 10 + 1]); maxy = std::max(maxy, data[i * 10 + 1]);
             }
             ctx->quad_w = maxx - minx;
             ctx->quad_h = maxy - miny;
         }
+        // A G_ZS_PRIM draw takes its depth from G_SETPRIMDEPTH for the whole
+        // primitive (RT64 RasterVS.hlsl: `ndcPos.z = primDepth.x * ndcPos.w`),
+        // so every vertex's z is replaced here.
         for (int i = 0; i < count; ++i) {
-            cmd.pos[i * 2 + 0] = data[i * 8 + 0];
-            cmd.pos[i * 2 + 1] = data[i * 8 + 1];
-            cmd.uv[i * 2 + 0] = data[i * 8 + 2];
-            cmd.uv[i * 2 + 1] = data[i * 8 + 3];
-            cmd.shade[i * 4 + 0] = data[i * 8 + 4];
-            cmd.shade[i * 4 + 1] = data[i * 8 + 5];
-            cmd.shade[i * 4 + 2] = data[i * 8 + 6];
-            cmd.shade[i * 4 + 3] = data[i * 8 + 7];
+            cmd.pos[i * 2 + 0] = data[i * 10 + 0];
+            cmd.pos[i * 2 + 1] = data[i * 10 + 1];
+            cmd.uv[i * 2 + 0] = data[i * 10 + 2];
+            cmd.uv[i * 2 + 1] = data[i * 10 + 3];
+            cmd.shade[i * 4 + 0] = data[i * 10 + 4];
+            cmd.shade[i * 4 + 1] = data[i * 10 + 5];
+            cmd.shade[i * 4 + 2] = data[i * 10 + 6];
+            cmd.shade[i * 4 + 3] = data[i * 10 + 7];
+            cmd.w[i] = data[i * 10 + 8];
+            cmd.z[i] = cmd.z_source_prim ? (2.0f * cmd.prim_depth - 1.0f) : data[i * 10 + 9];
             // Track the NDC extent of everything queued so far: if the game's
             // geometry lands outside [-1, 1] nothing is visible even though the
             // draw commands exist.
             for (int k = 0; k < 2; ++k) {
-                const float v = data[i * 8 + k];
+                const float v = data[i * 10 + k];
                 if (v < ndc_min_[k]) ndc_min_[k] = v;
                 if (v > ndc_max_[k]) ndc_max_[k] = v;
             }
@@ -4310,15 +6563,102 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // lock. Never lock the renderer mutex here - it was held across the
         // whole DL walk before, which both self-deadlocked (mutex_ is not
         // recursive) and starved the browser main thread's flush.
+        note_depth_census(*ctx->st, cmd);
         note_fb_write(cmd);
         if (ctx->draws.size() < 16384) {
             ctx->draws.push_back(cmd);
         }
     }
 
+    // RT64's per-vertex lighting for one G_LIGHTING draw.
+    // tools/RT64/src/shaders/RSPProcessCS.hlsl:88-108: the ambient term is
+    // `rspLight[lightIndex + lightCount - 1].col`, the loop covers
+    // `lightIndex .. ambientIndex-1`, and `rgb = min(result, 1)`. Directional
+    // lights go through shared/rt64_rsp_light.h:56 `computeDirLight`:
+    //   localDir = normalize(mul(float4(posDir, 0), worldMat))
+    //   result  += max(dot(norm, localDir), 0) * light.col
+    // `worldMat` is RT64's `worldTransforms[]` entry, built in
+    // hle/rt64_rsp.cpp:538 as `mul(modelMatrixStack.back(),
+    // extended.viewProjMatrix)`. `extended.viewProjMatrix` is the identity
+    // unless an RT64 extension set it (this game sets none), so worldMat is the
+    // G_MTX MODELVIEW matrix the browser already keeps.
+    //
+    // Only the directional arm is reachable. RSP::setVertexCommon's
+    // `usesPointLighting` is `curGBI->flags.pointLighting && (geometryMode &
+    // G_POINT_LIGHTING)` (hle/rt64_rsp.cpp:563), and `pointLighting` is false
+    // for every GBI including F3DEX2 (gbi/rt64_gbi.h:39, never assigned), so
+    // `light.kc > 0` never selects `computePosLight`. F3DEX2's point-light arm
+    // is therefore not implemented here; it would need `pointLighting` to be
+    // true first.
+    //
+    // Returns false when the vertex keeps its raw colour, which is RT64's
+    // `else` arm: no G_LIGHTING, or `lightCount == 0`.
+    bool compute_vertex_light(const RenderState& st, const RawVertex& v, float rgb[3]) {
+        if ((st.geometry_mode & kGeomLighting) == 0 || st.num_lights <= 0) {
+            return false;
+        }
+        // RT64 uploads `lightCount + 1` entries, so the ambient index is
+        // num_lights and the loop below must not read past it.
+        const int ambient = std::min(st.num_lights, RenderState::kMaxLights - 1);
+        // With G_LIGHTING the Vtx's four colour bytes are the normal. RT64
+        // reads them through `Buffer<int> srcNorm` (signed bytes) and divides by
+        // 127 (RSPProcessCS.hlsl:57-61); the alpha byte stays the vertex alpha.
+        const float nx = static_cast<int8_t>(v.r) / 127.0f;
+        const float ny = static_cast<int8_t>(v.g) / 127.0f;
+        const float nz = static_cast<int8_t>(v.b) / 127.0f;
+        // Light bytes in N64 order, as n64b copied them at G_MOVEMEM time. The
+        // measured layout of the game's own light data (a mission `[GFX-LIGHT]`
+        // line reads `raw 4D 4D 7F 00 4D 4D 7F 00 FD 99 C5 00` for a lit
+        // terrain draw) is
+        //   col[0..2] = r,g,b, pad at 3, colc[0..2] at 4..6, pad at 7,
+        //   dir[0..2] = x,y,z at 8..10, pad at 11.
+        // That is what RT64's `DirLight` reads through the runtime's reversed
+        // RDRAM image: its `colr/colg/colb` fields at physical bytes 3/2/1 and
+        // `dirx/diry/dirz` at physical bytes 11/10/9 are logical 0/1/2 and
+        // 8/9/10.
+        const uint8_t* amb = st.lights[ambient];
+        float acc[3] = {amb[0] / 255.0f, amb[1] / 255.0f, amb[2] / 255.0f};
+        const Mat4& world = st.modelview_stack.back();
+        for (int i = 0; i < ambient; ++i) {
+            const uint8_t* L = st.lights[i];
+            const float dx = static_cast<int8_t>(L[8]);
+            const float dy = static_cast<int8_t>(L[9]);
+            const float dz = static_cast<int8_t>(L[10]);
+            // Row-vector multiply, as RT64's `mul(float4(dir, 0), worldMat)`.
+            Vec4 d = mul(Vec4{dx, dy, dz, 0.0f}, world);
+            const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+            if (len > 0.0f) {
+                d.x /= len;
+                d.y /= len;
+                d.z /= len;
+            }
+            const float ndotl = std::max(nx * d.x + ny * d.y + nz * d.z, 0.0f);
+            acc[0] += ndotl * (L[0] / 255.0f);
+            acc[1] += ndotl * (L[1] / 255.0f);
+            acc[2] += ndotl * (L[2] / 255.0f);
+        }
+        for (int k = 0; k < 3; ++k) {
+            rgb[k] = std::min(acc[k], 1.0f);
+        }
+        return true;
+    }
+
     // Transforms a raw vertex through the matrix pipeline into NDC.
     // Returns false if the vertex is behind the camera (w <= 0).
-    bool transform_vertex(const RenderState& st, const RawVertex& v, float out[8]) {
+    //
+    // `out` is 10 floats: x, y (NDC), s, t, r, g, b, a, w, z_ndc. The depth is
+    // the RDP's own screen z, transformed the way RT64 transforms it:
+    //   posScreen = tfPos.xyz / float3(w, -w, w) * viewport.scale + translate
+    //   (hle/rt64_rsp.cpp:714, `viewport.scale.z = vscale[3] / 1024`,
+    //   `translate.z = vtrans[3] / 1024` - the same guest words this function
+    //   reads as `view_scale[2]`/`view_trans[2]`, see set_viewport)
+    //   RasterVS.hlsl then does `ndcPos.xyz *= ndcPos.w` for a non-rect draw, so
+    //   the clip-space z is `screen_z * w` and the NDC z is `screen_z`.
+    // GL's NDC z is [-1, 1] and its window depth is `(z_ndc + 1) / 2`, so the
+    // value handed to the shader is `2 * screen_z - 1` and `gl_FragCoord.z`
+    // comes back as the RDP's screen z. Everything downstream (the depth test,
+    // the F3D depth clip at 1022/1024) is stated in that 0..1 space.
+    bool transform_vertex(const RenderState& st, const RawVertex& v, float out[10]) {
         // Modelview then projection (row-vector).
         const Mat4& mv = st.modelview_stack.back();
         Vec4 pos = mul(Vec4{static_cast<float>(v.x), static_cast<float>(v.y),
@@ -4332,17 +6672,35 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // space with the Vp_t scale/translate (screen y points down); the GL
         // framebuffer expects NDC, so the result is converted back.
         const float inv_w = 1.0f / pos.w;
-        float sx, sy;
+        float sx, sy, sz;
         if (st.viewport_set) {
             const float scr_x = pos.x * inv_w * st.view_scale[0] + st.view_trans[0];
             const float scr_y = -pos.y * inv_w * st.view_scale[1] + st.view_trans[1];
             sx = ndc_xf(scr_x, st);
             sy = ndc_yf(scr_y, st);
+            sz = pos.z * inv_w * st.view_scale[2] + st.view_trans[2];
         } else {
             // No viewport seen yet: treat the projection output as NDC.
             sx = pos.x * inv_w;   // [-1, 1] (x)
             sy = -pos.y * inv_w;  // flipped: NDC y up
+            // The z of that NDC, moved into the RDP's 0..1 screen depth.
+            sz = pos.z * inv_w * 0.5f + 0.5f;
         }
+        // RT64's half-pixel screen offset, for the triangle path only.
+        // `tools/RT64/src/render/rt64_framebuffer_renderer.cpp`:
+        // `halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f /
+        // framebuffer.viewport.height }`, assigned as `triangles.screenOffset`
+        // and applied in `tools/RT64/src/shaders/RasterVS.hlsl` as
+        // `ndcPos.xy = (ndcPos.xy * screenScale) + screenOffset * ndcPos.w;`
+        // (`screenScale` is 1 unless the viewport is stretched). That is half a
+        // pixel right and half a pixel down in window space, so a quad whose
+        // vertex lands on a whole pixel samples half a texel nearer the start
+        // of its span. `ndc_yf` maps guest row y to `1 - 2y/H`, so one pixel
+        // down is -1/H. RT64's `renderFlagRect` branch skips only the
+        // screen-to-NDC transform; the browser's rect vertices already carry
+        // the same convention and measure exact against the native target.
+        sx += 1.0f / screen_width(st);
+        sy -= 1.0f / screen_height(st);
         out[0] = sx;
         out[1] = sy;
         // Texture coordinates: s10.5 texels scaled by G_TEXTURE (RT64
@@ -4350,11 +6708,168 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // rectangles - RT64's RDP::drawRect uses uls/32 and lrs/32 directly.
         out[2] = (static_cast<float>(v.s) * st.tex_scale_s) / 32.0f;
         out[3] = (static_cast<float>(v.t) * st.tex_scale_t) / 32.0f;
-        out[4] = v.r / 255.0f;
-        out[5] = v.g / 255.0f;
-        out[6] = v.b / 255.0f;
-        out[7] = v.a / 255.0f;
+        float lit[3] = {0.0f, 0.0f, 0.0f};
+        if (compute_vertex_light(st, v, lit)) {
+            out[4] = lit[0];
+            out[5] = lit[1];
+            out[6] = lit[2];
+        } else {
+            out[4] = v.r / 255.0f;
+            out[5] = v.g / 255.0f;
+            out[6] = v.b / 255.0f;
+        }
+        // Alpha: RT64 replaces it with the fog alpha when G_FOG is set, and with
+        // the vertex colour's own alpha otherwise (`RSPProcessCS.hlsl:70-80`):
+        //   fogAlpha   = max(tfPos.z, 0) / tfPos.w * rspFog.mul + rspFog.offset
+        //   vertexAlpha = clamp(fogAlpha / 255, 0, 1)
+        // `tfPos` is the clip-space position (`mul(mul(viewProjMat, worldMat),
+        // v)`), so `tfPos.z / tfPos.w` is the plain NDC z, not the RDP's screen
+        // z that `sz` above carries (the viewport scale/translate come after).
+        // RT64's `fogIndex > 0` arm is entered for every vertex of a G_FOG
+        // workload; `rspFog` exists from the first G_FOG transform with the last
+        // G_MW_FOG's mul/offset (RSP::setFog, `hle/rt64_rsp.cpp:990-994`, and
+        // the zero default at `:91-92`). The rect paths do not run RSP vertex
+        // processing, so fog applies to triangles only, which is this function.
+        if ((st.geometry_mode & kGeomFog) != 0) {
+            const float ndc_z = pos.z * inv_w;
+            const float fog_alpha =
+                (std::max(ndc_z, 0.0f) * static_cast<float>(st.fog_mul) +
+                 static_cast<float>(st.fog_offset)) / 255.0f;
+            out[7] = std::clamp(fog_alpha, 0.0f, 1.0f);
+            if (!fog_logged_) {
+                fog_logged_ = true;
+                OGRE_MILESTONE("GFX-FOG",
+                               "per-vertex alpha: z/w=%.4f mul=%d offset=%d -> alpha=%.4f",
+                               ndc_z, static_cast<int>(st.fog_mul),
+                               static_cast<int>(st.fog_offset), out[7]);
+            }
+        } else {
+            out[7] = v.a / 255.0f;
+        }
+        // The clip-space w, for perspective-correct interpolation.
+        out[8] = pos.w;
+        // NDC depth (see the header comment): the RDP's 0..1 screen z mapped
+        // onto GL's [-1, 1]. A `G_ZS_PRIM` draw overwrites it with the
+        // primitive depth in draw_tri/queue_triangles, because that is
+        // per-draw state, not per-vertex.
+        out[9] = 2.0f * sz - 1.0f;
         return true;
+    }
+
+    // Permanent shading census: one `[GFX-LIGHT]` line for the first lit draw
+    // and every 400 lit draws after it (and the same for unlit draws, so a
+    // screen with no lighting still states its state). It answers from the log
+    // what a scene's draws do: how many are lit, the light count, whether any
+    // light carries the point-light `kc` byte, and the first draw's normal and
+    // result. Cheap: the light scan runs only on a logged draw.
+    void note_shading_census(const RenderState& st, const RawVertex& v0, const float* data,
+                             const char* what) {
+        const bool lit = (st.geometry_mode & kGeomLighting) != 0 && st.num_lights > 0;
+        unsigned& n = lit ? lit_draws_ : unlit_draws_;
+        ++n;
+        if (n != 1 && (n % 400) != 0) {
+            return;
+        }
+        // RT64 selects computePosLight only when the GBI flag `pointLighting`
+        // is set (hle/rt64_rsp.cpp:563), and it is false for every GBI
+        // (gbi/rt64_gbi.h:39), so every uploaded light is drawn as directional
+        // (`point=0`). The point-light `kc` byte (PosLight::kc) and a
+        // directional light's red channel are both light byte 0, so the stored
+        // bytes cannot tell the two layouts apart; the flag decides.
+        const int point_lights = 0;
+        const uint8_t* L0 = st.lights[0];
+        const int amb = std::min(st.num_lights, RenderState::kMaxLights - 1);
+        const uint8_t* A = st.lights[amb];
+        OGRE_MILESTONE("GFX-LIGHT",
+                       "%s %s=%u lit=%u unlit=%u culled=%u lights=%u point=%d "
+                       "L0=[col %u %u %u dir %d %d %d raw %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X] "
+                       "amb=[col %u %u %u raw %02X %02X %02X %02X] "
+                       "norm=[%.3f %.3f %.3f] shade=[%.3f %.3f %.3f %.3f]",
+                       what, lit ? "lit" : "unlit", n, lit_draws_, unlit_draws_, tris_culled_,
+                       static_cast<unsigned>(st.num_lights), point_lights,
+                       (unsigned)L0[0], (unsigned)L0[1], (unsigned)L0[2],
+                       static_cast<int>(static_cast<int8_t>(L0[8])),
+                       static_cast<int>(static_cast<int8_t>(L0[9])),
+                       static_cast<int>(static_cast<int8_t>(L0[10])),
+                       (unsigned)L0[0], (unsigned)L0[1], (unsigned)L0[2], (unsigned)L0[3],
+                       (unsigned)L0[4], (unsigned)L0[5], (unsigned)L0[6], (unsigned)L0[7],
+                       (unsigned)L0[8], (unsigned)L0[9], (unsigned)L0[10], (unsigned)L0[11],
+                       (unsigned)A[0], (unsigned)A[1], (unsigned)A[2],
+                       (unsigned)A[0], (unsigned)A[1], (unsigned)A[2], (unsigned)A[3],
+                       static_cast<int8_t>(v0.r) / 127.0f,
+                       static_cast<int8_t>(v0.g) / 127.0f,
+                       static_cast<int8_t>(v0.b) / 127.0f,
+                       data[4], data[5], data[6], data[7]);
+    }
+
+    // Permanent depth census: one `[GFX-DEPTH]` line for the first draw whose
+    // state reaches the depth pipeline and every 400 after it. It answers from
+    // the log how much of a scene is depth-tested (zCmp), depth-written (zUpd),
+    // primitive-depth (G_ZS_PRIM) and decal (ZMODE_DEC), and which G_SETZIMG
+    // configurations the display lists named. A ZMODE_DEC draw prints a one-shot
+    // note: RT64 does not depth-*test* those either (the pipeline flag drops
+    // zCmp for ZMODE_DEC, render/rt64_framebuffer_renderer.cpp:1729) and its
+    // decal test is a fragment-shader depth tolerance (`CoplanarDepthTolerance`,
+    // RasterPS.hlsl:90-104) which this renderer does not implement, so a decal
+    // draw keeps only its depth write here.
+    void note_depth_census(const RenderState& st, const DrawCmd& cmd) {
+        ++depth_draws_;
+        // Which colour image a depth image is shared with. RT64 keys the depth
+        // RenderTarget by the depth image and the colour RenderTarget by the
+        // colour image, so a pass that switches CIMG but not ZIMG keeps the
+        // depth contents. This line states whether this game does that: one line
+        // per distinct (colour, depth) pair, with the draw it first appeared on.
+        if (cmd.fb_address != depth_censused_fb_ || cmd.zimg_address != depth_censused_z_) {
+            depth_censused_fb_ = cmd.fb_address;
+            depth_censused_z_ = cmd.zimg_address;
+            auto inserted = depth_pairs_.insert({std::make_pair(cmd.fb_address, cmd.zimg_address),
+                                                 depth_draws_});
+            if (inserted.second && depth_pairs_.size() <= 12) {
+                OGRE_MILESTONE("GFX-DEPTH",
+                               "pair #%zu colour=0x%06X depth=0x%06X first_draw=%u",
+                               depth_pairs_.size(), cmd.fb_address, cmd.zimg_address,
+                               depth_draws_);
+            }
+        }
+        if (cmd.depth_test) ++depth_zcmp_;
+        if (cmd.depth_write) ++depth_zupd_;
+        if (cmd.z_source_prim) ++depth_prim_;
+        if (cmd.z_mode == 0xC00) {
+            ++depth_dec_;
+            if (depth_dec_logged_ < 2) {
+                ++depth_dec_logged_;
+                OGRE_MILESTONE("GFX-DEPTH",
+                               "draw asks for ZMODE_DEC (oml=0x%06X) - the decal depth tolerance "
+                               "is NOT implemented; this draw keeps zCmp=%d zUpd=%d and no decal test",
+                               st.othermode_l, cmd.depth_test ? 1 : 0, cmd.depth_write ? 1 : 0);
+            }
+        }
+        if (depth_draws_ != 1 && (depth_draws_ % 400) != 0) {
+            return;
+        }
+        depth_logged_at_ = depth_draws_;
+        // The window depth (0..1) this draw's vertices span: the number that
+        // decides whether a depth test can order anything. A draw whose whole
+        // range is a hundredth of the buffer cannot separate its surfaces.
+        float zlo = 1e9f, zhi = -1e9f;
+        for (int i = 0; i < cmd.vertex_count; ++i) {
+            const float wz = (cmd.z[i] + 1.0f) * 0.5f;
+            zlo = std::min(zlo, wz);
+            zhi = std::max(zhi, wz);
+        }
+        OGRE_MILESTONE("GFX-DEPTH",
+                       "draws=%u zcmp=%u zupd=%u prim=%u dec=%u zimg_seen=%zu pairs=%zu "
+                       "zimg=[addr=0x%06X fmt=%u siz=%u width=%u] "
+                       "this=[kind=%d test=%d write=%d primz=%.4f zmode=0x%03X "
+                       "wz=%.5f..%.5f vs=%.4f/%.4f]",
+                       depth_draws_, depth_zcmp_, depth_zupd_, depth_prim_, depth_dec_,
+                       zimg_seen_.size(), depth_pairs_.size(), st.zimg_address,
+                       (unsigned)st.zimg_fmt,
+                       (unsigned)st.zimg_siz, (unsigned)st.zimg_width, cmd.kind,
+                       cmd.depth_test ? 1 : 0, cmd.depth_write ? 1 : 0,
+                       static_cast<double>(cmd.prim_depth), (unsigned)cmd.z_mode,
+                       static_cast<double>(zlo), static_cast<double>(zhi),
+                       static_cast<double>(st.view_scale[2]), static_cast<double>(st.view_trans[2]));
     }
 
     void draw_tri(ExecCtx* ctx, RenderState& st, int i0, int i1, int i2) {
@@ -4369,6 +6884,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             ++tris_rejected_;
             return;
         }
+        // RT64 draws nothing at all when both cull bits are set
+        // (hle/rt64_rsp.cpp:1059), before the index swap and the cross product.
+        if ((st.geometry_mode & kGeomCullBoth) == kGeomCullBoth) {
+            ++tris_culled_;
+            return;
+        }
         const RawVertex* v[3] = {&st.vertices[i0], &st.vertices[i1], &st.vertices[i2]};
         {
             int x0 = v[0]->x, x1 = v[0]->x, y0 = v[0]->y, y1 = v[0]->y;
@@ -4379,9 +6900,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             log_wide_draw(st, "tri", x0, y0, x1, y1,
                           texture_available(st) ? "tex=1" : "tex=0");
         }
-        float data[3 * 8];
+        float data[3 * 10];
         for (int i = 0; i < 3; ++i) {
-            if (!transform_vertex(st, *v[i], data + i * 8)) {
+            if (!transform_vertex(st, *v[i], data + i * 10)) {
                 if (tri_reject_logged_ < 2) {
                     ++tri_reject_logged_;
                     const Mat4& mv = st.modelview_stack.back();
@@ -4401,6 +6922,35 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         }
         if (ctx->order.size() < 200) ctx->order += texture_available(st) ? 't' : 'u';
+        // Screen-space backface culling, mirroring RT64 RSP::drawIndexedTri
+        // (tools/RT64/src/hle/rt64_rsp.cpp:1091-1140):
+        //   - `(geometryMode & cullBothMask) == cullBothMask` draws nothing
+        //     (the check at :1059, done at the top of draw_tri);
+        //   - front-face culling alone swaps the first and last index (:1094);
+        //   - U = p1-p0, V = p2-p0, N = cross(V, U), visible = N.z >= 0 (:1132).
+        // RT64's posScreen has y down (RSPProcessCS.hlsl `ndcPos = tfPos.xyz /
+        // float3(w, -w, w)`); out[0..1] here are NDC with y up, so the test uses
+        // (x, -y). The viewport scale/translate are positive and affine, so they
+        // do not change the sign.
+        const uint32_t geom = st.geometry_mode;
+        if (geom & kGeomCullBoth) {
+            if ((geom & kGeomCullBoth) == kGeomCullFront) {
+                for (int k = 0; k < 10; ++k) {
+                    std::swap(data[k], data[20 + k]);
+                }
+            }
+            const float ux = data[10 + 0] - data[0];
+            const float uy = -data[10 + 1] + data[1];
+            const float vx = data[20 + 0] - data[0];
+            const float vy = -data[20 + 1] + data[1];
+            const float nz = vx * uy - vy * ux;
+            if (!(nz >= 0.0f)) {
+                ++tris_culled_;
+                note_shading_census(st, *v[0], data, "culled");
+                return;
+            }
+        }
+        note_shading_census(st, *v[0], data, "drawn");
         // A draw samples TMEM through its render tiles, so decode the two
         // images now (lazily, once per key) and use their rects as the UV basis.
         // This is not gated on G_TEXTURE's `on` field: whether a texel unit is
@@ -4427,10 +6977,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             ctx->u0 = ctx->u1 = data[2];
             ctx->v0 = ctx->v1 = data[3];
             for (int i = 1; i < 3; ++i) {
-                ctx->u0 = std::min(ctx->u0, data[i * 8 + 2]);
-                ctx->u1 = std::max(ctx->u1, data[i * 8 + 2]);
-                ctx->v0 = std::min(ctx->v0, data[i * 8 + 3]);
-                ctx->v1 = std::max(ctx->v1, data[i * 8 + 3]);
+                ctx->u0 = std::min(ctx->u0, data[i * 10 + 2]);
+                ctx->u1 = std::max(ctx->u1, data[i * 10 + 2]);
+                ctx->v0 = std::min(ctx->v0, data[i * 10 + 3]);
+                ctx->v1 = std::max(ctx->v1, data[i * 10 + 3]);
             }
             ctx->iw0 = st.tiles[st.active_tile & (kMaxTiles - 1)].image.width;
             ctx->ih0 = st.tiles[st.active_tile & (kMaxTiles - 1)].image.height;
@@ -4503,19 +7053,36 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // fill color as PRIMITIVE: rgb = (PRIM - 0) * 1 + 0.
         const float x0 = ndc_x(xl, st), x1 = ndc_x(xh + 1, st);
         const float y0 = ndc_y(yl, st), y1 = ndc_y(yh + 1, st);
-        float data[6 * 8];
+        float data[6 * 10];
+        // The four corners this loop names are (x0,y0), (x0,y1), (x1,y1),
+        // (x1,y0): corner 0 is the top-left, and corners increase clockwise,
+        // which is the same order the S2DEX object path uses. The two triangles
+        // must split that loop on its own diagonal, (0,1,2) and (0,2,3).
+        // Emitting (3,0,1) for the second one repeats the first triangle's left
+        // edge, so both triangles cover the left half of the rectangle and the
+        // right half is never written. A `G_FILLRECT` is the game's per-frame
+        // clear, so with that pairing every frame kept the previous frames'
+        // pixels on the right half of the screen: the boot intro (scene `0x09`)
+        // left its soldier ring from every earlier frame on screen as a wedge of
+        // repeated sprites.
+        static const int kQuadTris[6] = {0, 1, 2, 0, 2, 3};
         for (int i = 0; i < 6; ++i) {
-            const int corner = i % 4;
+            const int corner = kQuadTris[i];
             const float px = (corner == 0 || corner == 1) ? x0 : x1;
             const float py = (corner == 0 || corner == 3) ? y0 : y1;
-            data[i * 8 + 0] = px;
-            data[i * 8 + 1] = py;
-            data[i * 8 + 2] = 0;
-            data[i * 8 + 3] = 0;
-            data[i * 8 + 4] = c[0];
-            data[i * 8 + 5] = c[1];
-            data[i * 8 + 6] = c[2];
-            data[i * 8 + 7] = c[3];
+            data[i * 10 + 0] = px;
+            data[i * 10 + 1] = py;
+            data[i * 10 + 2] = 0;
+            data[i * 10 + 3] = 0;
+            data[i * 10 + 4] = c[0];
+            data[i * 10 + 5] = c[1];
+            data[i * 10 + 6] = c[2];
+            data[i * 10 + 7] = c[3];
+            data[i * 10 + 8] = 1.0f;
+            // RT64's rect vertices carry NDC z = 0 (`rectPosFloats`, hle/
+            // rt64_rdp.cpp:1559) and w = 1; a G_ZS_PRIM rect takes the
+            // primitive depth instead (queue_triangles applies that).
+            data[i * 10 + 9] = 0.0f;
         }
 
         // Record the draw with the fill-color combiner override.
@@ -4715,18 +7282,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const float py[4] = {ny0, ny0, ny1, ny1};
         const float uv[4][2] = {{us0, vt0}, {us1, vt0}, {us0, vt1}, {us1, vt1}};
 
-        float data[6 * 8];
+        float data[6 * 10];
         const int idx[6] = {0, 1, 3, 0, 3, 2};
         for (int i = 0; i < 6; ++i) {
             const int c = idx[i];
-            data[i * 8 + 0] = px[c];
-            data[i * 8 + 1] = py[c];
-            data[i * 8 + 2] = uv[c][0];
-            data[i * 8 + 3] = uv[c][1];
-            data[i * 8 + 4] = 1;
-            data[i * 8 + 5] = 1;
-            data[i * 8 + 6] = 1;
-            data[i * 8 + 7] = 1;
+            data[i * 10 + 0] = px[c];
+            data[i * 10 + 1] = py[c];
+            data[i * 10 + 2] = uv[c][0];
+            data[i * 10 + 3] = uv[c][1];
+            data[i * 10 + 4] = 1;
+            data[i * 10 + 5] = 1;
+            data[i * 10 + 6] = 1;
+            data[i * 10 + 7] = 1;
+            data[i * 10 + 8] = 1.0f;
+            // RT64's rect vertices carry NDC z = 0 (rectPosFloats).
+            data[i * 10 + 9] = 0.0f;
         }
 
         DrawCmd cmd;
@@ -4889,23 +7459,44 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const float px[4] = {x0, x1, x0, x1};
         const float py[4] = {y0, y0, y1, y1};
 
-        float data[6 * 8];
+        float data[6 * 10];
         const int idx[6] = {0, 1, 3, 0, 3, 2};
         for (int i = 0; i < 6; ++i) {
             const int c = idx[i];
-            data[i * 8 + 0] = px[c];
-            data[i * 8 + 1] = py[c];
-            data[i * 8 + 2] = uv[c][0];
-            data[i * 8 + 3] = uv[c][1];
-            data[i * 8 + 4] = 1;
-            data[i * 8 + 5] = 1;
-            data[i * 8 + 6] = 1;
-            data[i * 8 + 7] = 1;
+            data[i * 10 + 0] = px[c];
+            data[i * 10 + 1] = py[c];
+            data[i * 10 + 2] = uv[c][0];
+            data[i * 10 + 3] = uv[c][1];
+            data[i * 10 + 4] = 1;
+            data[i * 10 + 5] = 1;
+            data[i * 10 + 6] = 1;
+            data[i * 10 + 7] = 1;
+            data[i * 10 + 8] = 1.0f;
+            // RT64's rect vertices carry NDC z = 0 (rectPosFloats).
+            data[i * 10 + 9] = 0.0f;
         }
 
         DrawCmd cmd;
         cmd.kind = 2;
         record_state(cmd, st, texture_available(st));
+        // A repaired fog group's sampler state: what the repair installed
+        // (size, wrap mask, filter), and the rectangle it drew. The remaining
+        // browser/native difference is on this layer's translucent edge, so a
+        // run states the state that produced it instead of leaving it to
+        // inference from the decoded image alone.
+        if (ctx->fog_repaired > 0 && cmd.textured && cmd.tex_masks[0] > 0 &&
+            fog_draw_logged_ < 8) {
+            ++fog_draw_logged_;
+            OGRE_MILESTONE("GFX-FOG-DRAW",
+                           "rect=(%d,%d)-(%d,%d) size=%.0fx%.0f filt=%d cm=(%d,%d) "
+                           "mask=(%d,%d) s=%.2f..%.2f t=%.2f..%.2f orig=(%.0f,%.0f) key=0x%llX",
+                           xl, yl, xh, yh, cmd.tex_size[0][0], cmd.tex_size[0][1],
+                           cmd.tex_filter, cmd.tex_cms[0], cmd.tex_cmt[0],
+                           cmd.tex_masks[0], cmd.tex_maskt[0],
+                           uv[0][0], uv[1][0], uv[0][1], uv[2][1],
+                           cmd.tex_origin[0], cmd.tex_origin[1],
+                           (unsigned long long)cmd.tex_key);
+        }
         if (rect_logged_ < 8) {
             ++rect_logged_;
             OGRE_MILESTONE("GFX-RECT",
@@ -5102,10 +7693,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
         st.view_scale[0] = static_cast<float>(vscale[0]) / 4.0f;  // x
         st.view_scale[1] = static_cast<float>(vscale[1]) / 4.0f;  // y
-        st.view_scale[2] = static_cast<float>(vscale[2]) / 4.0f;  // z
+        // The depth axis is not 14.2 screen pixels: RT64 divides it by 1024
+        // (`DepthRange`, hle/rt64_rsp.cpp:23; `viewport.scale.z = vp->vscale[3]
+        // / DepthRange` and `translate.z = vp->vtrans[3] / DepthRange`, :908-911).
+        // RT64's struct read is byte-reversed, so its `vscale[3]` is the guest's
+        // third element, which is the value this code holds in `vscale[2]`: the
+        // `[GFX-VP]` line for the mission's own Vp_t
+        // (`0x00186330`, vscale=[640 480 511 0]) shows x, y, z, pad in array
+        // order, and index 2 is the 511. The 511/1024 = 0.499 range is
+        // independent of the /4 the x/y axes use; the old `/ 4` on this axis
+        // gave a z scale of 127.75.
+        st.view_scale[2] = static_cast<float>(vscale[2]) / 1024.0f;   // z
         st.view_trans[0] = static_cast<float>(vtrans[0]) / 4.0f;  // x
         st.view_trans[1] = static_cast<float>(vtrans[1]) / 4.0f;  // y
-        st.view_trans[2] = static_cast<float>(vtrans[2]) / 4.0f;  // z
+        st.view_trans[2] = static_cast<float>(vtrans[2]) / 1024.0f;   // z
         st.viewport_set = true;
         if (ctx->trace_task == 2 && ctx->vp_logged < 4) {
             ctx->vp_logged++;

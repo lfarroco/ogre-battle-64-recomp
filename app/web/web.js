@@ -52,8 +52,177 @@
     });
   })();
 
+  // --- Battery save import (OGRE_SAVE=<relative url>) --------------------------
+  //
+  // The native build's `OGRE_SAVE` installs a 32 KiB SRAM battery image at
+  // `<config>/saves/<game id>.bin` before the runtime reads it (app/src/main.cpp
+  // -> app/src/save_import.cpp). The browser has no local paths, so the page
+  // fetches the image instead and writes it to the same place in the IDBFS mount:
+  // `/ogre/saves/ogrebattle64-us-rev1.bin` (the game id is `ogre::GAME_ID` in
+  // app/src/game.hpp, and pi.cpp's `init_saving` reads exactly that path).
+  //
+  // Two things have to hold for the import to be seen:
+  //
+  //   1. It runs after `FS.syncfs(true)` has loaded the persisted /ogre contents,
+  //      otherwise the load would replace the imported file (or the import would
+  //      be lost), and
+  //   2. it finishes before `ogre_start_boot()` runs, because pi.cpp's
+  //      `read_save_file()` reads the battery while the runtime initialises.
+  //
+  // So the import is started by the storage-ready callback
+  // (`onStorageReady`) and the boot path waits for it (`startBoot` ->
+  // `whenSaveImportSettled`). A fetch failure settles the import as "failed" and
+  // the boot proceeds without a battery, the same way the native `OGRE_SAVE`
+  // reports the problem and boots.
+  //
+  // The URL is resolved from the server root, not from the page: the page is
+  // served from `/app/web/`, so `OGRE_SAVE=assets/escort_suspend.bin` has to mean
+  // `/assets/escort_suspend.bin` (the file the repository serves and the path
+  // the native `OGRE_SAVE` example names). An absolute URL or a leading `/` is
+  // used as written.
+  var SAVE_IMPORT_PATH = "/ogre/saves/ogrebattle64-us-rev1.bin";
+  var saveImport = {
+    spec: urlParam("OGRE_SAVE"),
+    armed: false,
+    storageReady: false,
+    started: false,
+    settled: false,
+    waiters: []
+  };
+  saveImport.armed = !!(saveImport.spec && saveImport.spec.length > 0);
+
+  function settleSaveImport() {
+    if (saveImport.settled) {
+      return;
+    }
+    saveImport.settled = true;
+    var waiters = saveImport.waiters;
+    saveImport.waiters = [];
+    waiters.forEach(function (fn) {
+      try {
+        fn();
+      } catch (e) {
+        log("[web:save] save-import waiter threw: " + e);
+      }
+    });
+  }
+
+  function whenSaveImportSettled(cb) {
+    if (saveImport.settled) {
+      cb();
+      return;
+    }
+    saveImport.waiters.push(cb);
+  }
+
+  function resolveSaveUrl(spec) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(spec) || spec.charAt(0) === "/") {
+      return spec;
+    }
+    return "/" + spec;
+  }
+
+  // FS.mkdirTree is present in current Emscripten; the fallback loop is for an
+  // older glue and for a path that already exists.
+  function ensureDir(path) {
+    try {
+      if (typeof Module.FS.mkdirTree === "function") {
+        Module.FS.mkdirTree(path);
+        return;
+      }
+    } catch (e) {
+      // fall through to the component loop
+    }
+    var parts = path.split("/").filter(function (p) { return p.length > 0; });
+    var cur = "";
+    for (var i = 0; i < parts.length; i++) {
+      cur += "/" + parts[i];
+      try {
+        Module.FS.mkdir(cur);
+      } catch (e) {
+        // already exists
+      }
+    }
+  }
+
+  // Writes `bytes` to the battery path, syncs IDBFS and settles the gate. Used
+  // by the query-string import and by the page's "Load save" file input.
+  function writeBatterySave(bytes, source, done) {
+    if (!moduleReady() || !Module.FS) {
+      log("[web:save] " + source + ": the wasm FS is not ready; no battery written");
+      if (done) {
+        done(false);
+      }
+      return;
+    }
+    try {
+      ensureDir("/ogre/saves");
+      Module.FS.writeFile(SAVE_IMPORT_PATH, bytes);
+    } catch (e) {
+      log("[web:save] " + source + ": write to " + SAVE_IMPORT_PATH + " failed: " + e);
+      if (done) {
+        done(false);
+      }
+      return;
+    }
+    log("[web:save] imported " + source + " (" + bytes.length + " bytes) -> " + SAVE_IMPORT_PATH +
+        (bytes.length === 32768 ? "" : " (warning: expected 32768 bytes)"));
+    // Persist so a later page load boots from the same battery; the game's own
+    // writes go through the same 10 s interval (syncStorage).
+    var synced = false;
+    function finish() {
+      if (synced) {
+        return;
+      }
+      synced = true;
+      if (done) {
+        done(true);
+      }
+    }
+    try {
+      Module.FS.syncfs(false, function (err) {
+        if (err) {
+          log("[web:save] sync failed after import: " + err);
+        }
+        finish();
+      });
+    } catch (e) {
+      log("[web:save] syncfs(false) threw after import: " + e);
+      finish();
+    }
+  }
+
+  // Starts the query-string import once the IDBFS mount has finished loading.
+  // Idempotent: the storage-ready callback and the boot path both call it.
+  function importBatterySave() {
+    if (saveImport.started || !saveImport.armed) {
+      return;
+    }
+    if (!saveImport.storageReady) {
+      return;  // onStorageReady() calls again
+    }
+    saveImport.started = true;
+    var url = resolveSaveUrl(saveImport.spec);
+    log("[web:save] OGRE_SAVE=" + saveImport.spec + ": fetching " + url);
+    fetch(url, { cache: "no-store" }).then(function (resp) {
+      if (!resp.ok) {
+        throw new Error("HTTP " + resp.status);
+      }
+      return resp.arrayBuffer();
+    }).then(function (buffer) {
+      writeBatterySave(new Uint8Array(buffer), saveImport.spec, function () {
+        settleSaveImport();
+      });
+    }).catch(function (err) {
+      log("[web:save] OGRE_SAVE=" + saveImport.spec + ": import failed: " + err +
+          " - booting without it");
+      settleSaveImport();
+    });
+  }
+
   var status = document.getElementById("status");
   var input = document.getElementById("rom-input");
+  var saveInput = document.getElementById("save-input");
   var lastMilestoneLen = 0;
   var pollTimer = null;
   var bootStarted = false;
@@ -179,8 +348,22 @@
   }
   window.setInterval(pollGfxStats, 1000);
 
+  var bootPending = false;
+
   function startBoot() {
-    if (bootStarted) {
+    if (bootStarted || bootPending) {
+      return;
+    }
+    // pi.cpp's `init_saving` -> `read_save_file` runs inside `ogre_start_boot()`,
+    // so an OGRE_SAVE import that is still in flight has to finish first.
+    if (saveImport.armed && !saveImport.settled) {
+      bootPending = true;
+      log("[web:save] boot deferred until the OGRE_SAVE import settles");
+      importBatterySave();  // no-op once started; covers a ROM picked early
+      whenSaveImportSettled(function () {
+        bootPending = false;
+        startBoot();
+      });
       return;
     }
     bootStarted = true;
@@ -226,7 +409,13 @@
   // `OGRE_TAP_BUTTON="start,start,none"` presses Start twice and then stops
   // tapping while the run continues - which is how a route reaches a screen that
   // waits for input (the New Game cathedral does). `OGRE_TAP_MAX=<n>` stops after
+  // `OGRE_TAP_MAX=<n>` stops after
   // n presses, also as natively.
+  //
+  // `OGRE_TAP_SCENE_BUTTON` (below) is the scene-keyed sibling: it presses a
+  // button while a named scene is active instead of at a fixed wall-clock slot,
+  // so a route does not depend on how long the boot or a scene took. When it is
+  // set it replaces the wall-clock schedule.
   var TAP_NAMES = {
     start: BTN.START, a: BTN.A, b: BTN.B, z: BTN.Z, l: BTN.L, r: BTN.R,
     up: BTN.UP, down: BTN.DOWN, left: BTN.LEFT, right: BTN.RIGHT,
@@ -235,11 +424,63 @@
   };
   var TAP_PRESS_MS = 150;
   var tapMask = 0;
-  (function initTapSchedule() {
-    var ms = parseInt(urlParam("OGRE_TAP_MS"), 10);
-    if (!isFinite(ms) || ms <= 0) {
-      return;
+
+  // The scene table `OGRE_SCENE`/`OGRE_TAP_SCENE_BUTTON` names resolve through,
+  // mirrored from `kScenes` in app/src/bank_overlays.cpp. A hex id works for
+  // every scene.
+  var SCENE_NAMES = {
+    "title": 0x0004, "intro": 0x0009, "publishers": 0x000A, "story": 0x000B,
+    "unit-info": 0x000C, "tutorial": 0x0017, "menu": 0x0018, "new-game": 0x0002
+  };
+
+  // The dispatcher's active scene id, learned from the `[scene]` lines the page
+  // already receives (`app/src/bank_overlays.cpp` prints one per scene change,
+  // `[scene] t=<ms> id=0x0004 ...`). `-1` means "not known yet". The native
+  // `OGRE_TAP_SCENE_BUTTON` reads the same id (`ogre::active_scene_id()`,
+  // `D_800E810E`) rather than the log, so the two can disagree by one scene
+  // change at most; the schedule only presses after the line has arrived.
+  var activeSceneId = -1;
+  (function trackActiveScene() {
+    function note(line) {
+      var m = /\[scene\] t=\d+ms id=0x([0-9a-fA-F]{1,4})/.exec(line);
+      if (m) {
+        activeSceneId = parseInt(m[1], 16);
+      }
     }
+    if (window.ogreLog && typeof window.ogreLog.onLine === "function") {
+      window.ogreLog.onLine(function (parts) {
+        for (var i = 0; i < parts.length; i++) {
+          note(parts[i]);
+        }
+      });
+    }
+    if (window.ogreLog && typeof window.ogreLog.text === "function") {
+      String(window.ogreLog.text() || "").split("\n").forEach(note);
+    }
+  })();
+
+  function sceneNameOf(id) {
+    for (var name in SCENE_NAMES) {
+      if (SCENE_NAMES[name] === id) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  function parseSceneSpec(spec, ok) {
+    var s = String(spec || "").trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(SCENE_NAMES, s)) {
+      return SCENE_NAMES[s];
+    }
+    if (/^0x[0-9a-f]{1,4}$/.test(s) || /^[0-9a-f]{1,4}$/.test(s)) {
+      return parseInt(s, 16);
+    }
+    return -1;
+  }
+
+  // Parses `OGRE_TAP_BUTTON`'s comma-separated slots (the wall-clock schedule).
+  function initWallClockTapSchedule(ms) {
     var names = (urlParam("OGRE_TAP_BUTTON") || "start").split(",").map(function (s) {
       return s.trim().toLowerCase();
     });
@@ -269,6 +510,115 @@
         tapMask = 0;
       }, TAP_PRESS_MS);
     }, ms);
+  }
+
+  // `OGRE_TAP_SCENE_BUTTON=<scene>:<buttons>[:<count>],...` — the page's copy of
+  // the native scene-keyed schedule (app/src/sdl_platform.cpp). It replaces the
+  // wall-clock `OGRE_TAP_BUTTON` schedule when it is set, presses for
+  // `TAP_PRESS_MS` once per `OGRE_TAP_MS` while the named scene is active, and
+  // spends at most `<count>` presses per entry (default: unlimited). Entries for
+  // the same scene are consumed in order, and the first entry that still matches
+  // and has presses left wins.
+  function initSceneTapSchedule(ms, spec) {
+    var schedule = [];
+    spec.split(",").forEach(function (entry) {
+      var text = entry.trim();
+      if (!text) {
+        return;
+      }
+      var parts = text.split(":");
+      if (parts.length < 2) {
+        log("[web:input] OGRE_TAP_SCENE_BUTTON: '" + text + "' is not <scene>:<buttons>[:<count>]");
+        return;
+      }
+      var scene = parseSceneSpec(parts[0]);
+      if (scene < 0) {
+        log("[web:input] OGRE_TAP_SCENE_BUTTON: unknown scene '" + parts[0] + "' in '" + text + "'; skipping");
+        return;
+      }
+      var mask = 0;
+      var names = [];
+      var bad = null;
+      parts[1].split("+").forEach(function (raw) {
+        var name = raw.trim().toLowerCase();
+        if (!name) {
+          return;
+        }
+        var bit = TAP_NAMES[name];
+        if (bit === undefined) {
+          bad = name;
+          return;
+        }
+        mask |= bit;
+        names.push(name);
+      });
+      if (bad !== null || names.length === 0) {
+        log("[web:input] OGRE_TAP_SCENE_BUTTON: unrecognised button" +
+            (bad !== null ? " '" + bad + "'" : "") + " in '" + text + "'; skipping");
+        return;
+      }
+      var count = parts.length > 2 ? parseInt(parts[2], 10) : -1;
+      if (!isFinite(count)) {
+        count = -1;
+      }
+      schedule.push({ scene: scene, mask: mask, label: names.join("+"), count: count, used: 0 });
+    });
+    if (!schedule.length) {
+      return;
+    }
+    var described = schedule.map(function (item) {
+      return "0x" + ("000" + item.scene.toString(16)).slice(-4) + ":" + item.label +
+             (item.count >= 0 ? ":" + item.count : "");
+    }).join(", ");
+    log("[web:input] OGRE_TAP_MS=" + ms + " OGRE_TAP_SCENE_BUTTON=" + described +
+        " (scene-keyed; replaces OGRE_TAP_BUTTON)");
+    var timer = window.setInterval(function () {
+      if (activeSceneId < 0) {
+        return;
+      }
+      for (var i = 0; i < schedule.length; i++) {
+        var item = schedule[i];
+        if (item.count >= 0 && item.used >= item.count) {
+          continue;
+        }
+        if (item.scene !== activeSceneId) {
+          continue;
+        }
+        item.used++;
+        tapMask = item.mask;
+        log("[web:input] automation scene tap " + item.used +
+            (item.count >= 0 ? "/" + item.count : "") +
+            " scene=0x" + ("000" + activeSceneId.toString(16)).slice(-4) +
+            " buttons=" + item.label);
+        window.setTimeout(function () {
+          tapMask = 0;
+        }, TAP_PRESS_MS);
+        break;
+      }
+      // Every entry with a count has spent its presses: stop the timer, the same
+      // way the wall-clock schedule stops at OGRE_TAP_MAX.
+      var live = schedule.some(function (item) {
+        return item.count < 0 || item.used < item.count;
+      });
+      if (!live) {
+        window.clearInterval(timer);
+        tapMask = 0;
+        log("[web:input] scene tap schedule done");
+      }
+    }, ms);
+  }
+
+  (function initTapSchedule() {
+    var ms = parseInt(urlParam("OGRE_TAP_MS"), 10);
+    if (!isFinite(ms) || ms <= 0) {
+      return;
+    }
+    var sceneSpec = urlParam("OGRE_TAP_SCENE_BUTTON");
+    if (sceneSpec) {
+      initSceneTapSchedule(ms, sceneSpec);
+      return;
+    }
+    initWallClockTapSchedule(ms);
   })();
 
   function pushInput(controller, buttons, x, y, connected) {
@@ -487,13 +837,40 @@
 
   // --- Persistent storage (IDBFS at /ogre) -------------------------------------
 
+  // Runs once the persisted /ogre contents are loaded (or once it is known that
+  // they cannot be). Order matters: the OGRE_SAVE import is started here so it
+  // overwrites any battery that came out of IndexedDB, and the stored-ROM
+  // auto-start goes through `startBoot`, which waits for the import.
+  function onStorageReady() {
+    if (saveImport.storageReady) {
+      return;
+    }
+    saveImport.storageReady = true;
+    importBatterySave();
+    // If a previously validated ROM is persisted, boot without re-picking.
+    if (moduleReady() && Module.FS && Module.FS.analyzePath &&
+        Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists) {
+      log("[web] Stored ROM found - starting the game with the previously loaded ROM.");
+      whenWasmExportsReady(function () {
+        initWebGL();
+        startBoot();
+      });
+    }
+  }
+
   function mountPersistentStorage() {
     if (!moduleReady() || !Module.FS || typeof Module.FS.mount !== "function") {
+      // No FS to import into; an OGRE_SAVE import cannot run, so let the boot
+      // proceed instead of waiting for a write that will never happen.
+      log("[web:save] the wasm FS is not available; OGRE_SAVE is ignored");
+      settleSaveImport();
+      saveImport.storageReady = true;
       return;
     }
     var IDBFSMod = Module.IDBFS || (typeof IDBFS !== "undefined" ? IDBFS : null);
     if (!IDBFSMod) {
       log("[web:save] IDBFS not linked; save persistence disabled (MEMFS only).");
+      onStorageReady();
       return;
     }
     try {
@@ -506,20 +883,15 @@
       Module.FS.syncfs(true, function (err) {
         if (err) {
           log("[web:save] IDBFS load failed: " + err);
+          onStorageReady();
           return;
         }
         log("[web:save] persistent storage mounted at /ogre");
-        // If a previously validated ROM is persisted, boot without re-picking.
-        if (Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists) {
-          log("[web] Stored ROM found - starting the game with the previously loaded ROM.");
-          whenWasmExportsReady(function () {
-            initWebGL();
-            startBoot();
-          });
-        }
+        onStorageReady();
       });
     } catch (err) {
       log("[web:save] IDBFS mount failed: " + err);
+      onStorageReady();
     }
   }
 
@@ -674,10 +1046,45 @@
     });
   });
 
+  // --- "Load save" file input ---------------------------------------------------
+  //
+  // Optional companion to OGRE_SAVE: pick a 32 KiB battery image and it is
+  // written to the same path through the same writer, then the page reloads. The
+  // reload keeps the image in IDBFS, and the stored ROM auto-starts from it, so
+  // no query string is needed. (OGRE_SAVE re-imports on every page load; this
+  // input is a one-off write.)
+  if (saveInput) {
+    saveInput.addEventListener("change", function () {
+      var file = saveInput.files && saveInput.files[0];
+      if (!file) {
+        return;
+      }
+      if (!moduleReady() || !Module.FS) {
+        log("[web:save] WASM runtime not ready yet; retry in a moment.");
+        return;
+      }
+      log("[web:save] loading save file: " + file.name + " (" + file.size + " bytes)...");
+      file.arrayBuffer().then(function (buffer) {
+        writeBatterySave(new Uint8Array(buffer), file.name, function (ok) {
+          if (ok) {
+            log("[web:save] reloading the page so the runtime reads the imported battery");
+            window.setTimeout(function () { window.location.reload(); }, 250);
+          }
+        });
+      }).catch(function (err) {
+        log("[web:save] failed to read the save file: " + err);
+      });
+    });
+  }
+
   // --- Startup ------------------------------------------------------------------
 
   whenModuleReady(function () {
     log("[web] WASM runtime initialized. Select a ROM to begin (or use the stored one).");
+    if (saveImport.armed) {
+      log("[web:save] OGRE_SAVE=" + saveImport.spec + " -> " + SAVE_IMPORT_PATH +
+          " (imported after the /ogre mount, before the boot)");
+    }
     mountPersistentStorage();
   });
 })();

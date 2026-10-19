@@ -550,7 +550,7 @@ the natural ending (a suspend save in front of the final boss works).
 
 | what | scene | source | status |
 |---|---|---|---|
-| Deneb's dialogue box over the dark blue textured backdrop: `Welcome! / Is this your first time here?` | `0x17` | dev (session 43), proof (`native-tutorial-dialogue.png`) | renders |
+| Deneb's dialogue box over the dark blue textured backdrop: `Welcome! / Is this your first time here?` | `0x17` | dev (session 43), proof (`native-tutorial-dialogue.png`) | renders in the native port; the browser's forced entry matches RT64's target, portrait, text, border and parchment, after the TMEM and coverage ports (session 165; `docs/proofs/web-tutorial-fixed-side-by-side.png`) |
 | the lesson menu after Deneb's dialogue; any entry then runs the scripted sequence `0x17 → 0x02 → 0x0D →` a mission | `0x17` | dev (session 71) | renders |
 | the practice stage: scene `0x03` with `D_80193700 == 1` (descriptor `0x8018F364`, records 2,3,7,8,9,**18**), the tutorial instruction box (`TUTORIAL / These are called the Field`, stronghold and `Use Item` lessons) over the field map | `0x03` | dev (sessions 69/71), proof (`native-tutorial-practice-field.png`, `-command.png`) | renders; bank unit T (session 71) |
 | the lesson that selects `D_80193700 == 0` is the **normal mission** (descriptor `0x8018F350`, records 2,3,7,8,9) | `0x03` | dev (session 71) | renders (sessions 67/68) |

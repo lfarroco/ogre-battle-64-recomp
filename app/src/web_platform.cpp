@@ -18,8 +18,10 @@ namespace ogre {
 // atomics from the input callbacks (osContStartReadData/osContGetReadData),
 // so no DOM/browser code ever runs on the game thread.
 //
-// Slot assignment (parity with the native SDL build): slot 0 is the keyboard
-// (always connected), slots 1-3 are gamepads.
+// Slot assignment (parity with the native SDL build): each connected pad takes
+// the lowest free slot, and slot 0 - N64 controller 1, the only controller this
+// game reads - carries the keyboard and the scripted tap schedule as well
+// (`app/web/web.js`, `updateGamepads`).
 
 namespace {
 
