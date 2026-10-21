@@ -73,6 +73,7 @@ See **Reproduce** in [PLAN.md](PLAN.md). Summary:
 ```sh
 # tools (macOS)
 brew install mips-linux-gnu-binutils cmake
+xcodebuild -downloadComponent MetalToolchain   # RT64's Metal shaders need `metal`
 python3 -m venv tools/venv && tools/venv/bin/pip install 'splat64[mips]'
 git clone --recurse-submodules https://github.com/N64Recomp/N64Recomp.git tools/N64Recomp
 git -C tools/N64Recomp apply ../../patches/n64recomp-ob64.patch

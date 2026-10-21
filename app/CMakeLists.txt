@@ -179,6 +179,14 @@ if (OGRE_USE_RT64)
     add_compile_definitions(HLSL_CPU)
     add_subdirectory(${OGRE_TOOLS}/RT64 ${CMAKE_BINARY_DIR}/RT64)
     target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/RT64/src)
+    # hlslpp's scalar backend (hlsl++/platforms/scalar.h, an RT64 nested
+    # submodule) calls labs() but includes only <math.h> and <stdint.h>. Older
+    # libc++ pulled in <stdlib.h> transitively; the one in Xcode 26 does not, and
+    # rt64_projection.cpp fails with "use of undeclared identifier 'labs'".
+    # Force-include it for RT64 only rather than patching a nested submodule.
+    if (APPLE)
+        target_compile_options(rt64 PRIVATE "SHELL:-include stdlib.h")
+    endif()
     set(OGRE_RENDERER_SOURCES src/renderer.cpp)
 elseif (EMSCRIPTEN)
     # Milestone 7: WebGL2 browser renderer (docs/WEB-PORT.md §16 Option A).
