@@ -2383,6 +2383,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // GL framebuffer (the framebuffer-as-texture gap). Read by ogre_gfx_stats.
     unsigned fbtex_hits() const { return fbtex_hits_.load(std::memory_order_relaxed); }
 
+    // Live GL textures in the tile-image cache, and the total number of uploads.
+    // Both are main-thread state, read by ogre_gfx_stats. The cache is swept at
+    // the end of every flush, so the live count stays at one batch's images
+    // instead of growing by one texture per tile image per display list.
+    size_t texture_cache_size() const { return gl_textures_.size(); }
+    size_t texture_uploads() const { return tex_upload_count_; }
+    size_t texture_released() const { return tex_released_; }
+
     void set_canvas(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE handle, int width, int height) {
         std::lock_guard<std::mutex> lock(mutex_);
         canvas_handle_ = handle;
@@ -4322,6 +4330,40 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         }
 
+        // Drop every tile image this batch did not name. Every draw's texture is
+        // uploaded in the same batch as the draw (ExecCtx::uploaded is per
+        // display list, and the tiles are rebuilt per display list), so a key no
+        // command here referenced cannot be sampled again: a later display list
+        // either reloads the image, which bumps tmem_generation_ and produces a
+        // new key, or reuses this generation's key and queues its own upload.
+        // Without this sweep the cache held one GL texture per tile image per
+        // display list for the whole run, and the page ran out of GPU memory
+        // after a few minutes. The textures named here stay; GL defers the
+        // deletion until the draws already issued stop referencing them.
+        {
+            std::set<uint64_t> used;
+            for (const DrawCmd& cmd : cmds) {
+                if (!cmd.textured) {
+                    continue;
+                }
+                if (cmd.tex_key != 0) {
+                    used.insert(cmd.tex_key);
+                }
+                if (cmd.tex_key1 != 0) {
+                    used.insert(cmd.tex_key1);
+                }
+            }
+            for (auto it = gl_textures_.begin(); it != gl_textures_.end();) {
+                if (used.count(it->first) != 0) {
+                    ++it;
+                    continue;
+                }
+                glDeleteTextures(1, &it->second);
+                it = gl_textures_.erase(it);
+                ++tex_released_;
+            }
+        }
+
         // Presentation: show the VI's scanout buffer on the canvas.
         if (present) {
             present_framebuffer(present_address);
@@ -4986,7 +5028,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     std::vector<DrawCmd> draw_queue_;
     std::vector<TexUpload> tex_upload_queue_;
     size_t tex_upload_count_ = 0;
-    // GL-side texture cache (main thread only): key = tile load key.
+    size_t tex_released_ = 0;   // textures dropped by the per-flush sweep
+    // GL-side texture cache (main thread only): key = tile load key. Holds one
+    // batch's images; entries no batch references are deleted at the end of
+    // flush_commands (see there).
     std::map<uint64_t, GLuint> gl_textures_;
 
     // Debug: the last few decoded images, so a probe can look at exactly what
@@ -8150,7 +8195,9 @@ const char* ogre_gfx_stats() {
         snprintf(buf, sizeof(buf),
                  "%s\nexec: task=%u cmd=%llu @0x%05X op=0x%02X draws=%u flush_ok=%u flush_skip=%u flushed_cmds=%u"
                  "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X"
-                 "\nfbtex: hits=%u (a texture load read a colour image that was still on the GPU)",
+                 "\nfbtex: hits=%u (a texture load read a colour image that was still on the GPU)"
+                 "\ntex: cache=%zu uploads=%zu released=%zu (tile images; the cache is swept "
+                 "after every flush)",
                  ogre::g_stats_snapshot,
                  ogre::g_exec_task.load(std::memory_order_relaxed),
                  (unsigned long long)ogre::g_exec_cmd.load(std::memory_order_relaxed),
@@ -8168,7 +8215,10 @@ const char* ogre_gfx_stats() {
                  ogre::g_load_siz.load(std::memory_order_relaxed),
                  ogre::g_load_timgw.load(std::memory_order_relaxed),
                  ogre::g_load_addr.load(std::memory_order_relaxed),
-                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_hits() : 0u);
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_hits() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_cache_size() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_uploads() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_released() : 0u);
     }
     return buf;
 }

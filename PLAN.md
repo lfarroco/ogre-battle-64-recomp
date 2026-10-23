@@ -54,7 +54,21 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-23-session187.md`.
+`docs/HANDOFF-2026-10-23-session188.md`.
+
+Session 188 fixed a browser freeze after 2–3 minutes with no input. The WebGL
+renderer's tile-image cache keyed each decoded image by `tmem_generation_`,
+which every load command increments, so each display list created a new GL
+texture per tile image and nothing deleted them. The cache is now swept at the
+end of every flush and keeps only the images the batch's draws named. A 150 s
+no-input run went from 5,063 live textures / 20.3 MB to 4 live / 0.9 MB (5,871
+created, 5,867 deleted), and a 232 s run held 7 live / 4.4 MB. A 117 s run with
+hardware ANGLE created and deleted 332k textures and held 8 live / 5.6 MB.
+`ogre_gfx_stats()`
+reports `tex: cache=N uploads=N released=N`. `boot.cjs` measures the launcher
+overlay on the session-187 shell (its canvas PNG includes the overlay), so
+`shots.cjs` is the browser render check. See
+`docs/HANDOFF-2026-10-23-session188.md`.
 
 Session 187 replaced the page's debug dump with a game shell: a slim top bar, a
 bezel around the canvas, a launcher overlay, one curated status line, a controls
