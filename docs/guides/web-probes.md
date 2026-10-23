@@ -66,6 +66,8 @@ nginx and other hosts, and for the package layout.
 node debug/probes/boot.cjs --attempts 10 --secs 45   # render check + pixel counts
 node debug/probes/progress.cjs --attempts 6 --secs 75 # how far the intro gets
 node debug/probes/shots.cjs --shots 8 --gap 1200     # timed screenshot series
+node debug/probes/intro-capture.cjs --seconds 30     # 1 fps series of the opening
+node debug/probes/intro-capture.cjs --seconds 8 --interval-ms 100  # dense series
 node debug/probes/fps.cjs --window 10                # gfx frames/s
 node debug/probes/vi.cjs --window 4000               # VI retrace/swap rate
 node debug/probes/stats.cjs                          # dump renderer counters
@@ -89,6 +91,7 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `boot.cjs` | boot → real display list → canvas pixels (non-black, colorful, top colours) | the game rendered |
 | `progress.cjs` | highest `tasks=` reached over a full time budget, plus any `GFX-ESCAPE`/`GFX-RUNAWAY` bad-walk line | the intro reached `--min-tasks` on some boot with no bad walk |
 | `shots.cjs` | canvas PNG series + per-frame pixel counts | a series was captured |
+| `intro-capture.cjs` | one canvas PNG per `--interval-ms` (default 1000) from the first scene, with `nonBlack / colourful / white` per frame, the frame's scene id, and the scene timeline; retries an idle boot | a series was written (exit 2: the game never drew) |
 | `fps.cjs` | `tasks=` delta over a window | a rate was measured |
 | `vi.cjs` | `[vi-debug] retrace/swap`, `[snap]`, tasks/s | a rate was measured |
 | `stats.cjs` | full `#gfxstats` / `#gfx-status` / milestone dump | (always; read the files) |

@@ -652,13 +652,14 @@ index d7caa12..97d80bc 100644
                      result.tileWidth = tileWidth;
                      result.lineWidth = tileLineWidth;
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..1519428 100644
+index 7de5b69..30d9c84 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
-@@ -4,12 +4,55 @@
+@@ -4,12 +4,65 @@
  
  #include "rt64_present_queue.h"
  
++#include <chrono>
 +#include <cstdio>
 +#include <cstdlib>
 +
@@ -689,7 +690,13 @@ index 7de5b69..1519428 100644
 +    // first n presents so the capture lands after boot; OGRE_CAPTURE_EVERY=<n>
 +    // then keeps only every nth present, so a multi-minute unattended run can be
 +    // sampled as a slideshow (files stay numbered by present index) instead of
-+    // writing one 3 MB PPM per frame.
++    // writing one 3 MB PPM per frame. OGRE_CAPTURE_EVERY_MS=<n> is the
++    // wall-clock sibling: it captures the first present it sees and then one
++    // present every n ms. A present count is not a clock - RT64 presents per VI
++    // field where the game's VI mode asks for it and per frame elsewhere, so a
++    // fixed OGRE_CAPTURE_EVERY runs at 1 Hz in a 320x240 mode and 2 Hz in the
++    // 320x476 one (measured, session 182). Use EVERY_MS when the interval has to
++    // be one second, as `tools/intro_capture.py` does.
 +    struct OgreCaptureState {
 +        std::unique_ptr<RenderBuffer> presentBuffer;
 +        uint32_t presentWidth = 0;
@@ -701,6 +708,9 @@ index 7de5b69..1519428 100644
 +        uint32_t count = 0;
 +        uint32_t after = 0;
 +        uint32_t every = 0;
++        uint32_t everyMs = 0;
++        std::chrono::steady_clock::time_point lastCapture;
++        bool haveCapture = false;
 +        bool afterRead = false;
 +        bool thisFrame = false;
 +        const char *presentPath = nullptr;
@@ -711,7 +721,7 @@ index 7de5b69..1519428 100644
      // PresentQueue
  
      PresentQueue::PresentQueue() {
-@@ -93,6 +136,24 @@ namespace RT64 {
+@@ -93,6 +146,45 @@ namespace RT64 {
      }
  
      void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
@@ -727,16 +737,37 @@ index 7de5b69..1519428 100644
 +                if (const char *everyEnv = getenv("OGRE_CAPTURE_EVERY")) {
 +                    ogreCapture.every = uint32_t(strtoul(everyEnv, nullptr, 10));
 +                }
++                if (const char *everyMsEnv = getenv("OGRE_CAPTURE_EVERY_MS")) {
++                    ogreCapture.everyMs = uint32_t(strtoul(everyMsEnv, nullptr, 10));
++                }
 +            }
 +            ogreCapture.count++;
++            bool due = false;
++            if (ogreCapture.everyMs != 0) {
++                const auto now = std::chrono::steady_clock::now();
++                if (!ogreCapture.haveCapture) {
++                    due = true;
++                }
++                else {
++                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++                                             now - ogreCapture.lastCapture).count();
++                    due = (elapsed >= (int64_t)ogreCapture.everyMs);
++                }
++                if (due) {
++                    ogreCapture.lastCapture = now;
++                    ogreCapture.haveCapture = true;
++                }
++            }
++            else {
++                due = (ogreCapture.every == 0) || ((ogreCapture.count % ogreCapture.every) == 0);
++            }
 +            ogreCapture.thisFrame = ((ogreCapture.presentPath != nullptr) || (ogreCapture.targetPath != nullptr)) &&
-+                                    (ogreCapture.count > ogreCapture.after) &&
-+                                    ((ogreCapture.every == 0) || ((ogreCapture.count % ogreCapture.every) == 0));
++                                    (ogreCapture.count > ogreCapture.after) && due;
 +        }
          FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
-@@ -146,6 +207,14 @@ namespace RT64 {
+@@ -146,6 +238,14 @@ namespace RT64 {
                  viFb = fbManager.find(present.screenVI.fbAddress());
              }
  
@@ -751,7 +782,7 @@ index 7de5b69..1519428 100644
              Framebuffer *presentFb = viFb;
              
              // Show the framebuffer the debugger has requested instead.
-@@ -221,6 +290,46 @@ namespace RT64 {
+@@ -221,6 +321,46 @@ namespace RT64 {
              else {
                  uint32_t fbAddress = present.screenVI.fbAddress();
  
@@ -798,7 +829,7 @@ index 7de5b69..1519428 100644
                  // Use a scratch framebuffer to upload the RAM to the render target.
                  scratchFb.addressStart = fbAddress;
                  scratchFb.width = fbSize.x;
-@@ -254,6 +363,7 @@ namespace RT64 {
+@@ -254,6 +394,7 @@ namespace RT64 {
                  if (!present.paused && (viHistory.top().vi != present.screenVI)) {
                      viHistory.pushVI(present.screenVI, fbSize.x);
                  }
@@ -806,7 +837,7 @@ index 7de5b69..1519428 100644
              }
          }
  
-@@ -266,6 +376,36 @@ namespace RT64 {
+@@ -266,6 +407,36 @@ namespace RT64 {
                  swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
              }
          }
@@ -843,7 +874,7 @@ index 7de5b69..1519428 100644
          
          for (int32_t i = 0; i < framesToPresent; i++) {
              uint32_t frameCountersNextPresented = 0;
-@@ -342,11 +482,97 @@ namespace RT64 {
+@@ -342,11 +513,97 @@ namespace RT64 {
                  }
                  
                  commandList->setFramebuffer(swapChainFramebuffer);
@@ -943,7 +974,7 @@ index 7de5b69..1519428 100644
                  }
  
                  RenderHookDraw *drawHook = GetRenderHookDraw();
-@@ -354,6 +580,28 @@ namespace RT64 {
+@@ -354,6 +611,28 @@ namespace RT64 {
                      drawHook(commandList, swapChainFramebuffer);
                  }
  
@@ -972,7 +1003,7 @@ index 7de5b69..1519428 100644
                  {
                      const std::scoped_lock lock(inspectorMutex);
                      if (inspector != nullptr) {
-@@ -367,6 +615,51 @@ namespace RT64 {
+@@ -367,6 +646,51 @@ namespace RT64 {
                      RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                      ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                      ext.presentGraphicsWorker->wait();
@@ -1500,7 +1531,7 @@ index 84f4e7c..7cb42da 100644
          void loadTLUTOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred);
          void loadTile(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt);
 diff --git a/src/hle/rt64_rdp_tmem.cpp b/src/hle/rt64_rdp_tmem.cpp
-index 6051f4e..0fa2754 100644
+index 6051f4e..d05bb90 100644
 --- a/src/hle/rt64_rdp_tmem.cpp
 +++ b/src/hle/rt64_rdp_tmem.cpp
 @@ -16,6 +16,66 @@
@@ -1585,7 +1616,7 @@ index 6051f4e..0fa2754 100644
          if (hashSet.find(hash) == hashSet.end()) {
              hashSet.insert(hash);
              textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, 0, LoadTile(), false);
-@@ -52,6 +120,25 @@ namespace RT64 {
+@@ -52,6 +120,33 @@ namespace RT64 {
      uint64_t TextureManager::uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut) {
          const uint8_t *TMEM = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
          uint64_t hash = TMEMHasher::hash(TMEM, loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
@@ -1599,9 +1630,17 @@ index 6051f4e..0fa2754 100644
 +            uint32_t px[4][3] = {};
 +            ogreDecodeTMEM(TMEM, loadTile, width, height, tlut, nonZero, mean, px);
 +            const bool cached = (hashSet.find(hash) != hashSet.end());
++            // OGRE diagnostic: `addr`/`timgw` are the RDP's texture image at upload
++            // time. For a deferred tile load they can already be the *next* sub-list's
++            // image, and the CPU TMEM snapshot can be zero: session 184 measured every
++            // upload during the QUEST still as `addr=0x000400 nz=0/3072`, while the
++            // drawn q's are textured. So the address names the image only for a
++            // non-deferred load; the size/format/line fields are always the tile's.
 +            fprintf(stderr,
-+                    "[dec] hash=%016llX fmt=%u siz=%u line=%u tmem=%u %ux%u cached=%d nz=%u/%u mean=%.1f "
++                    "[dec] addr=0x%06X timgw=%u hash=%016llX fmt=%u siz=%u line=%u tmem=%u %ux%u "
++                    "cached=%d nz=%u/%u mean=%.1f "
 +                    "px00=%02X%02X%02X pxmid=%02X%02X%02X pxlast=%02X%02X%02X\n",
++                    (unsigned)state->rdp->texture.address, (unsigned)state->rdp->texture.width,
 +                    (unsigned long long)hash, (unsigned)loadTile.fmt, (unsigned)loadTile.siz,
 +                    (unsigned)loadTile.line, (unsigned)loadTile.tmem, (unsigned)width, (unsigned)height,
 +                    (int)cached, nonZero, (unsigned)(width * height * 3), mean,

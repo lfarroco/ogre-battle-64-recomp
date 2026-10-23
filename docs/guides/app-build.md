@@ -946,6 +946,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_CAPTURE_TARGET=<path>` | same, for the render target the VI renderer sampled (`<path>.<n>.bin`, `R16G16B16A16_UNORM`, 8 bytes/texel). Read it with `tools/rt64_target.py <bin> <png> <w> <h>`; the width and height are not in the file and the format is not `R8G8B8A8`, so reading the first four bytes of a texel gives noise |
 | `OGRE_CAPTURE_AFTER=<n>` | skip the first `n` presents before capturing |
 | `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, capture only every `n`th present — a multi-minute run becomes a slideshow instead of one 3 MB PPM per frame (files stay numbered by present index) |
+| `OGRE_CAPTURE_EVERY_MS=<n>` | capture the first present and then one present every `n` ms of wall time. Use this when the interval has to be a real second: RT64 presents per VI field in the 320x476 mode and per frame in the 320x240 one, so one `OGRE_CAPTURE_EVERY` value is 1 Hz in one scene and 2 Hz in another (measured, session 182). With `OGRE_SPEED=1` the wall clock is the game clock. `tools/intro_capture.py` uses 1000 |
 | `OGRE_SPEED=<n>` | scale the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64), so timed sequences — the attract loop, songs — complete in `1/n` of the wall time. Semantics are unchanged: every timer scales together (audio is off in these runs). `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s. This is the debug spelling of **GAME SPEED**: with the variable unset the runtime takes its starting value from `<config>/settings.cfg`, and `OGRE_SPEED` overrides that file for one run without writing it |
 | `OGRE_WIDESCREEN=off\|on` | debug spelling of **WIDESCREEN**: `on` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`. The retired `missions` and `always` spellings are read as `on`. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
 | `OGRE_DISPLAY_EXPERIMENTS=1` | turn on the two experimental DISPLAY rows, RESOLUTION and MSAA, which are hidden and not applied without it. A set `OGRE_RESOLUTION` or `OGRE_MSAA` enables it too |
@@ -1088,6 +1089,51 @@ Without `OGRE_PRESENT_ALWAYS` a stalled boot never re-presents and the window
 keeps an old black frame even though the render path works, and without
 `OGRE_PRESENT_FBTARGET` an RDP-only fill has no framebuffer in the manager so the
 presenter uploads empty RDRAM instead of the drawn target.
+
+### Capturing the opening, native and in the browser
+
+`tools/intro_capture.py` writes one PNG per second for the first 30 s of the
+game in both renderers, plus a contact sheet and a per-frame pixel report:
+
+```sh
+python3 tools/intro_capture.py              # both, 30 s, 1 fps
+python3 tools/intro_capture.py --mode native
+python3 tools/intro_capture.py --mode web --seconds 40
+python3 tools/intro_capture.py --mode web --seconds 8 --interval-ms 100
+```
+
+`--interval-ms` (minimum 20, default 1000) samples the window more densely; the
+frame count is `seconds * 1000 / interval-ms`. The native side passes it to
+RT64 as `OGRE_CAPTURE_EVERY_MS`, and the browser probe schedules its captures on
+the same absolute millisecond grid. The publisher stills need it: the QUEST hold
+is 1.6-1.9 s long, so a 1 fps series samples it once or twice, and a 100 ms
+series measures every present-like instant of the hold (session 183). A series
+longer than 60 frames is laid out in 12 columns in the contact sheet.
+
+`t = 0` is the first frame of the game's first scene, and not the runtime's
+first (blank) present. The native side runs `build-app/ogrebattle64` with
+`OGRE_SPEED=1 OGRE_NO_AUDIO=1 OGRE_CAPTURE_EVERY_MS=1000` and converts RT64's
+`OGRE_CAPTURE_TARGET` readbacks, so the series is the VI-sampled image rather
+than a window capture. The browser side is `debug/probes/intro-capture.cjs`: it
+boots the wasm build with the GPU backend, captures the canvas in-page with
+`canvas.toDataURL`, and starts `debug/server.py` itself when nothing answers the
+URL.
+
+The report is the point. A capture that is blank, stretched, or taken at the
+wrong moment looks like a rendering bug, and that failure has cost this project
+several sessions. Every frame is reported with `nonBlack / colourful / white`
+counts from a 160x120 sample of the same frame, and the run prints each frame's
+wall time and the scene timeline. `contact-native.png` and `contact-web.png` are
+the whole series as a 6x5 grid.
+
+Measured at `OGRE_SPEED=1` on this machine: the native series starts at the
+first frame of scene `0x09` (about 3 s after launch), reaches the publisher
+stills (`0x0A`) 9 s into the series and holds the QUEST logo at 22-24 s. The GPU
+browser series also starts at its first scene, reaches `0x0A` 15 s in (its intro
+runs longer) and holds the QUEST logo at 24-25 s. Without the GPU backend
+(`--software-gl`) the boot is much slower: one 40 s run presented its first
+non-black frame at 22.8 s and entered scene `0x09` at game time 27.6 s, so a
+30 s window never reaches the publisher stills.
 
 ### Comparing a browser frame with a native capture
 

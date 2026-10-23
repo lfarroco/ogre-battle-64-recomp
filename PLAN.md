@@ -713,9 +713,145 @@ Residuals, each with the reason it is not closed:
   screens whose fills are not full-screen (the attract story's letterbox) have
   not been re-measured since the quad got its second triangle.
 
-See `docs/HANDOFF-2026-10-19-session178.md` for this fix, and
-`docs/HANDOFF-2026-10-18-session176.md` / `-session175.md` for the numbers and the
-screens those rounds did not re-measure.
+- **The QUEST publisher still's q meshes do rasterize, and the reference frame
+  is produced; a normal-speed run presents a white plate with no q colour
+  (session 181).** Session 180 concluded that the q draws rasterize and that the
+  presenting frames have a black plate. The first holds; the second is
+  incomplete, because white-plate frames with q colour exist. The q draws do
+  rasterize, and the renderer *does* produce the reference frame: a colour
+  image read back after a q list is `white=279632, dark=2824` (the wordmark),
+  `coloured=20588`, and the canvas read back right after the blit is
+  `white=275957, coloured=20580`. But in a normal-speed run the QUEST hold
+  presents `white=296537` of 303525 visible pixels, `dark=2192` (the wordmark)
+  and `coloured=0`, i.e. the plate and the wordmark and no q colour. The native
+  sequence was measured with `OGRE_CAPTURE_PRESENT` (`OGRE_CAPTURE_EVERY=2`,
+  window 1366x768): the q's animate in on a black plate (`f.166..182`,
+  `col 0..49766`), the white plate + q's + wordmark is held for about 12 presents
+  (`f.184..194`, `white=716779, col=54320, green=21213`), then black and the
+  title. The browser runs the same list sequence. What differs is which frame
+  the batch presents: with one display list per flush (the probe build's slow
+  main thread) the white+q frame is presented; with two lists batched in one
+  flush (the normal build) the presented target holds no q colour even though the
+  same batch records 756 triangles into it. The native display-list decode
+  (`OGRE_DL_DECODE=all`, this session) gives the q list's exact recipe: `SETTIMG`
+  + `SETTILE t7` + `G_LOADBLOCK 0..0x3FF dxt=0x80` + `SETTILE t0` +
+  `SETTILESIZE 31x31`, `MOVEWORD segment[14]`, `G_DL 0x0E000000`; each q
+  sub-list is `G_VTX` + `G_TRI2`/`G_TRI1` only. Ruled out for the q draws by
+  measurement: NDC bounds (all 756 inside), finite positions and z, viewport
+  640x481, scissor `(0,1,640,480)`, no alpha blend, no alpha compare, zero GL
+  errors on triangle draws, correct FBO binding, and texture keys found (mean
+  114/255). **Session 183 corrects two items in this bullet:** the q draws are
+  depth-tested and depth-written (`OTHERMODE_L 0x00552078` sets bit 4 and bit 5,
+  so `depth_test`/`depth_write` are both true), and the presented frame differed
+  because the depth buffer held stale contents, not because of how many lists
+  were batched. The reference frame in the one-list build and the missing-q frame
+  in the normal build differ by one depth clear (session 183's A/B). See
+  `docs/HANDOFF-2026-10-19-session181.md` and `-session183.md`.
+
+- **The web renderer leaves a framebuffer's own texture bound, and WebGL then
+  drops the next draws into it (session 181).** `upload_framebuffer` binds the
+  colour image's texture to the active sampler unit and does not restore the
+  binding, and `blit_to_canvas` leaves it bound too. The program's samplers are
+  active for every draw, so a following draw into that framebuffer is a WebGL
+  texture-feedback loop: `glDrawArrays` raises `INVALID_OPERATION` (0x0502) and
+  the draw is skipped. A probe counted 86 `kind=1` (fill) and 16 `kind=2`
+  (texrect) dropped draws in one run, e.g. `draw error 0x0502 kind=1
+  fb=2E6840 fbtex=10590 tex0=10590`, which is why the stills' plate fills are
+  dropped. A fix that restores the previous binding is not landed: it did not
+  change the presented QUEST frame, and binding the 1x1 white fallback instead
+  made the stills present black (the fallback changes what untextured draws
+  sample). Land it with an A/B on the plate's RDRAM contents before trusting it.
+
+- **The QUEST publisher still's white plate was a dropped PRIM-only rectangle
+  (session 179).** Scene `0x0A`'s final list clears a 640x480 plate white, the
+  target black, then draws 16 full-screen `G_TEXRECT` bands whose combiner
+  evaluates to PRIM only. The renderer decoded the tile and dropped every
+  rectangle whose tile had no image, and those bands use the preamble's
+  unconfigured tile (`line=0`, zero rect), so all 16 were dropped and the frame
+  kept the black clear; only the CI8 wordmark, which has its own tile, appeared.
+  RT64 has no such test: `RDP::drawTexRect` drops only a non-zero tile with a
+  zero window, and the sampler is never read when the mux does not name
+  TEXEL0/TEXEL1. A rectangle now needs a decoded image only when the evaluated
+  mux reads a texel (`combiner_uses_texture`, mirroring RT64
+  `ColorCombiner::usesTexture`). The plate and the wordmark draw
+  (`docs/proofs/web-publisher-quest-white-background.png`). The three q meshes
+  were a separate fault, fixed in session 183: the still shares `0x2E6840`
+  between its plate colour image and its depth image, and the depth target was
+  not invalidated when the plate wrote that address, so every q fragment failed
+  `GL_LESS` against stale depth. See
+  `docs/HANDOFF-2026-10-19-session179.md`, `-session180.md` and `-session181.md`.
+
+- **The opening can be captured as a 1 fps series in both renderers, and the
+  browser's QUEST hold presents the reference frame at that sampling (session
+  182).** `tools/intro_capture.py` writes one PNG per second from the game's
+  first scene (not the runtime's blank first present), a contact sheet and a
+  per-frame pixel report, natively and in the browser; the browser half is
+  `debug/probes/intro-capture.cjs` and needs the GPU backend, because the
+  software rasterizer's boot is much slower (one 40 s run: first non-black
+  frame at 22.8 s, scene `0x09` at game time 27.6 s), so a 30 s window never
+  reaches the stills. The native cadence needed a new RT64 knob,
+  `OGRE_CAPTURE_EVERY_MS`: a present count is not a clock in this game, because
+  the 320x476 mode presents per VI field and the 320x240 mode per frame, so one
+  `OGRE_CAPTURE_EVERY` value ran at 1 Hz and then at 2 Hz after the title's mode
+  switch. Measured at `OGRE_SPEED=1`: the native series holds the QUEST logo at
+  frames 23-24 (`white=17519, colourful=1281` of the 160x120 sample) and the GPU
+  browser at frames 24-25 (`white=17489, colourful=1309`). Two browser runs
+  produced the reference frame, and the same frames appear with the probe's
+  per-capture `_ogre_gfx_flush` disabled, so the series is not what makes the
+  q colour present. See `docs/HANDOFF-2026-10-19-session182.md`.
+
+- **The QUEST still's three q meshes render, and the cause was the depth image's
+  contents, not the batch boundary (session 183).** Scene `0x0A` uses guest
+  address `0x2E6840` as both the stills' plate colour image and their depth
+  image. The q draws are depth-tested and depth-written: their `OTHERMODE_L` is
+  `0x00552078`, and `cmd.depth_test`/`depth_write` are both true for that word.
+  The renderer keeps one depth renderbuffer per depth image, so the plate's
+  colour fills left the depth contents stale, and every q fragment compared
+  against them and failed `GL_LESS`. The renderer now mirrors RT64
+  `depthFbTypeChanged` (`hle/rt64_state.cpp:1581`, `:1630`): a colour draw whose
+  target address a display list has named with `G_SETZIMG` queues that depth
+  target for a clear, and the clear runs with the scissor disabled so a depth
+  image shared by targets of different sizes is cleared whole. One build and one
+  environment variable (`OGRE_PROBE183_NOINVAL`, removed afterwards) separate the
+  two states: with the invalidation off, the held frame is
+  `white=18797, colourful=0` (the session-181 missing-q frame,
+  `docs/proofs/web-publisher-quest-no-depth-invalidation.png`); with it on,
+  `white=17489, colourful=1309` (`docs/proofs/web-publisher-quest-q-meshes.png`).
+  A 10 Hz capture of both renderers holds the reference frame for the whole
+  still: native `white=17519, colourful=1281` for 1.9 s, browser
+  `white=17489, colourful=1309` for 1.6 s, every 100 ms sample carrying both the
+  plate and the q colour. The browser's final frame is `0.317` mean absolute
+  difference per channel from native's over the 639x475 overlap. Session 181's
+  batch/present explanation is withdrawn. See
+  `docs/HANDOFF-2026-10-19-session183.md`.
+
+- **The QUEST spin's q texture bytes are identical in both renderers; the
+  difference was the geometry-mode mask, not the sampling (session 184, closed
+  in session 185).** Same-moment
+  whole-RDRAM dumps of the forced `publishers` still (`OGRE_RAM_KEY_AT_MS` +
+  `OGRE_RAM_KEY_FULL=1` natively, the same query string read back from the wasm
+  filesystem) give byte-identical `0x400`/`0x1400`/`0x2400` at 12.5, 14.5 and
+  15.5 s, and at the spin `0x400..0x1400` matches 4096 of 4096 bytes: the same
+  4 KB cloud-like environment map, 199 distinct RGB, max `(248,240,224)`. A
+  temporary probe logged the browser's decode of that tile as
+  `32x32 line=8 mean=91,75,35 max=248,240,224`, so its TMEM load and decoder
+  reproduce the guest image; session 183's "brown gradient" is the same decoder
+  at `t=7.5 s`. The spin's sub-list installs lookat vectors and sets
+  `G_TEXTURE_GEN` but clears `G_LIGHTING`, and RT64's `usesTextureGen` requires
+  both, so an implementation of `G_TEXTURE_GEN` plus the `MV_LIGHT` slots 0/1
+  changed no pixel and was reverted. RT64's per-workload framebuffer writeback
+  (`hle/rt64_state.cpp:1655-1670`), which the browser lacks, was also ported;
+  it made the q frames darker and flatter and was reverted. Native has a
+  near-white texel in 24 of 24 sampled spin frames, the browser in 3 of 14, at
+  silhouette IoU up to 0.985. Session 185 closes the item: `w0`'s low 24 bits
+  are a keep mask, so the sub-list keeps `G_LIGHTING` and RT64 does generate
+  the coordinates; the browser now mirrors that and has a channel above 200 in
+  26 of 27 spin frames. See `docs/HANDOFF-2026-10-23-session184.md` and
+  `-session185.md`.
+
+See `docs/HANDOFF-2026-10-19-session179.md` and `-session178.md` for these two
+fixes, and `docs/HANDOFF-2026-10-18-session176.md` / `-session175.md` for the
+numbers and the screens those rounds did not re-measure.
 
 ## Status
 
@@ -2012,6 +2148,49 @@ holds the evidence.
     mouse focus rather than swallowing a click or holding the map and mission
     cursors' motion events. A badge that survives both needs a draw inside RT64's
     frame, or a texture and display list the port submits itself.
+
+19. **Closed (session 183): the browser's q meshes were failing the depth test
+    against stale depth; the depth-image invalidation fixes them.** Scene `0x0A`
+    shares `0x2E6840` between the plate colour image and the depth image, the q
+    draws are depth-tested and depth-written (`OTHERMODE_L 0x00552078`), and the
+    colour fills did not invalidate the depth target, so the q fragments compared
+    against stale depth and failed `GL_LESS`. The renderer now mirrors RT64
+    `depthFbTypeChanged`; the A/B that separates the two states is in
+    `docs/HANDOFF-2026-10-19-session183.md`, and the 10 Hz capture holds the
+    reference frame for the whole still in both renderers. The batch-boundary
+    experiment session 181 named is not needed. This also corrects the
+    "no depth test/write" reading in the session-180/181 bullets.
+
+20. **Closed (session 185): the browser's QUEST q's were flat because
+    `G_GEOMETRYMODE`'s keep mask was inverted, which kept `G_LIGHTING` out of the
+    state and made `G_TEXTURE_GEN` inert.** `OP_GEOMETRYMODE` read the low 24 bits
+    of `w0` as the bits to clear; RT64 reads them as the bits to keep
+    (`GBI_F3DEX2::geometryMode`, `gbi/rt64_gbi_f3dex2.cpp:104-108`, and
+    `RSP::modifyGeometryMode`, `hle/rt64_rsp.cpp:886-890`). The ROM's own reset
+    idiom `D9000000 00000000` (41 sites, and `D9FFFFFF 00000000` never appears)
+    is a reset under the keep rule and a no-op under the inverted one. The q
+    state block at guest `0x801B85B8` (native full-RDRAM dump at 14.5 s) sets
+    `G_LIGHTING` with `D9FFFFFF 00200405` and `D9FFFFFF 00020000`, and the
+    sub-list at `0x3A4790` adds `G_TEXTURE_GEN`: keep rule `0x260405` (both
+    bits), inverted rule `0x040000` (no lighting). RT64's `usesTextureGen` needs
+    both, so native sweeps the 32x32 image with the surface normal while the
+    browser sampled the vertex `s,t` (`G_TEXTURE` `0x07C0` puts that at about
+    1.3 texels). The decoder now uses the keep mask, and `G_TEXTURE_GEN`,
+    `G_TEXTURE_GEN_LINEAR` and the `MV_LIGHT` lookat slots 0/1 are implemented
+    as RT64's `computeTextureGen` (`TextureGen.hlsli:19-33`); the lookat vectors
+    are the per-frame `(1,0,0)`/`(0,1,0)` at `0x803A2B60`/`0x803A2B70`.
+    Measured on 34 s 100 ms captures from a natural boot: frames with a channel
+    above 200 are native 24 of 24 (169-192), the browser 26 of 27 (209-235)
+    after the fix against 6 of 28 before. The fixed pose pair (native 190,
+    browser 234) has mask IoU `0.791`, whole-frame mean absolute difference
+    `2.31`, and mask means native `(80.4,56.5,17.2)` against browser
+    `(80.7,63.5,22.1)`. Session 184's "the sub-list clears `G_LIGHTING`, so
+    neither renderer generates coordinates" is withdrawn, and that is why its
+    `G_TEXTURE_GEN` implementation measured no pixel change. Scene `0x09`
+    against native is unchanged (`10.032` against `10.109`) and the first
+    scene-`0x04` frame is byte-identical to the pre-change build, so the
+    change is neutral outside the stills. See
+    `docs/HANDOFF-2026-10-23-session185.md`.
 
 Parked, not defects:
 

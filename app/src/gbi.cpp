@@ -733,7 +733,10 @@ struct DecodeVisitor {
                 line(c, "%s 0x%08X", opcode_name(c.op), b);
                 return;
             case OP_GEOMETRYMODE:
-                line(c, "GEOMETRYMODE clear=0x%08X set=0x%08X", a & 0xFFFFFF, b);
+                // w0's low 24 bits are the bits to KEEP (RT64
+                // GBI_F3DEX2::geometryMode: `geometryMode &= offMask`), not the
+                // bits to clear (session 185).
+                line(c, "GEOMETRYMODE keep=0x%08X set=0x%08X", a & 0xFFFFFF, b);
                 return;
             case OP_TEXTURE:
                 line(c, "TEXTURE tile=%u level=%u on=%u sc=%u tc=%u", p0(a, 8, 3), p0(a, 11, 3),

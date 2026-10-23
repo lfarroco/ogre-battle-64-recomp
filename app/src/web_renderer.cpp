@@ -323,6 +323,83 @@ inline void format_combiner(const Combiner& cb, int cyc, char* out, size_t n) {
              cb.ra[cyc], cb.rb[cyc], cb.rc[cyc], cb.rd[cyc]);
 }
 
+// RT64 ColorCombiner::usesTexture(otherMode, index, hardwareBugCheck = false).
+// The texture unit a draw actually samples is a property of the mux the
+// hardware evaluates, not of the tile state: a rectangle whose combiner never
+// names TEXEL0/TEXEL1 (a G_CYC_FILL-style solid colour, or the publisher
+// stills' PRIM-only background bands) draws without any texture at all. A tile
+// that was never configured (`line == 0`) still has to be drawn in that case,
+// and dropping it removes whatever the primitive colour paints (session 179:
+// the QUEST still's white background). Copy mode reads TEXEL0; one-cycle mode
+// evaluates the second mux and treats a TEXEL1 reference as TEXEL0 (RT64's
+// "TEXEL1 is not supported in one cycle mode" note); two-cycle mode checks both
+// cycles, with the TEXEL0/TEXEL1 roles swapped on the second.
+inline bool combiner_uses_texture(const Combiner& cb, uint32_t othermode_h, int index) {
+    if (!cb.valid) {
+        return true;   // no combiner yet: keep the old "needs a texture" behaviour
+    }
+    const uint32_t cyc = (othermode_h >> 20) & 3u;
+    if (cyc == kCycCopy) {
+        return index == 0;
+    }
+    auto colour = [&cb](int cycle, int i) -> int {
+        switch (i) {
+            case 0: return cb.ca[cycle];
+            case 1: return cb.cb[cycle];
+            case 2: return cb.cc[cycle];
+            default: return cb.cd[cycle];
+        }
+    };
+    auto alpha = [&cb](int cycle, int i) -> int {
+        switch (i) {
+            case 0: return cb.aa[cycle];
+            case 1: return cb.ab[cycle];
+            case 2: return cb.ac[cycle];
+            default: return cb.ad[cycle];
+        }
+    };
+    if (cyc == kCyc1) {
+        if (index != 0) {
+            return false;
+        }
+        for (int i = 0; i < 4; ++i) {
+            const int s = colour(1, i);
+            if (s == CSEL_TEXEL0 || s == CSEL_TEXEL1 || s == CSEL_TEXEL0_ALPHA ||
+                s == CSEL_TEXEL1_ALPHA) {
+                return true;
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            const int s = alpha(1, i);
+            if (s == ASEL_TEXEL0 || s == ASEL_TEXEL1) {
+                return true;
+            }
+        }
+        return false;
+    }
+    for (int c = 0; c < 2; ++c) {
+        const bool second = (c == 1);
+        const int tex = second ? (index == 0 ? CSEL_TEXEL1 : CSEL_TEXEL0)
+                               : (index == 0 ? CSEL_TEXEL0 : CSEL_TEXEL1);
+        const int tex_alpha = second ? (index == 0 ? CSEL_TEXEL1_ALPHA : CSEL_TEXEL0_ALPHA)
+                                     : (index == 0 ? CSEL_TEXEL0_ALPHA : CSEL_TEXEL1_ALPHA);
+        const int atex = second ? (index == 0 ? ASEL_TEXEL1 : ASEL_TEXEL0)
+                                : (index == 0 ? ASEL_TEXEL0 : ASEL_TEXEL1);
+        for (int i = 0; i < 4; ++i) {
+            const int s = colour(c, i);
+            if (s == tex || s == tex_alpha) {
+                return true;
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (alpha(c, i) == atex) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // ============================================================================
 // RT64 Blender (tools/RT64/src/shared/rt64_blender.h)
 // ============================================================================
@@ -472,6 +549,8 @@ constexpr uint32_t kGeomCullBack = 0x00000400;   // G_CULL_BACK
 constexpr uint32_t kGeomCullBoth = kGeomCullFront | kGeomCullBack;
 constexpr uint32_t kGeomFog = 0x00010000;        // G_FOG
 constexpr uint32_t kGeomLighting = 0x00020000;   // G_LIGHTING
+constexpr uint32_t kGeomTextureGen = 0x00040000;        // G_TEXTURE_GEN
+constexpr uint32_t kGeomTextureGenLinear = 0x00080000;  // G_TEXTURE_GEN_LINEAR
 
 struct RenderState {
     // Matrices (RSP row-vector convention).
@@ -497,6 +576,12 @@ struct RenderState {
     // stored image agree, and are never read.
     uint8_t lights[kMaxLights][kLightStride]{};
     int num_lights = 0;
+    // G_MOVEMEM MV_LIGHT slots 0/1: the texture-generation lookat vectors
+    // (RT64 `RSP::setLookAt`, hle/rt64_rsp.cpp:969-982). RT64 normalizes the
+    // 3-vector at logical bytes 8/9/10 of the slot and keeps it per RSP state;
+    // `computeTextureGen` projects the vertex normal onto it. Slot 0 is X, slot
+    // 1 is Y, and a zero vector stays zero.
+    float lookat[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
     // G_MOVEWORD G_MW_FOG: the fog vector RT64 keeps per RSP state. Stored so
     // the command is decoded where RT64 decodes it; no per-vertex fog alpha is
     // applied (see transform_vertex).
@@ -2745,6 +2830,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // grown rather than recreated when several colour targets of different sizes
     // share one depth image (RT64 asserts depth >= colour).
     GLuint depth_target_for(const DrawCmd& cmd, int width, int height) {
+        if (cmd.zimg_address != 0) {
+            depth_image_addrs_.insert(cmd.zimg_address);
+        }
         GlDepthTarget& d = depth_targets_[depth_target_key(cmd)];
         const int w = std::max(width, 1);
         const int h = std::max(height, 1);
@@ -3728,6 +3816,22 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (bound_fb == nullptr) {
                 canvas_dirty_ = true;
             }
+            // The RDP's depth image is framebuffer memory: a colour write into
+            // the same guest address overwrites the depth contents. RT64 keeps
+            // one Framebuffer per address with a last-write type and rebuilds
+            // the depth target when that address was last written as colour
+            // (hle/rt64_state.cpp:1581 `depthFbTypeChanged`, :1630). Scene 0x0A
+            // shares `0x2E6840` between its plate colour image and its depth
+            // image, so without this the previous still frame's depth survived
+            // and every depth-tested q triangle failed GL_LESS: the QUEST logo
+            // lost its three 3D q meshes (session 183).
+            if (cmd.fb_address != 0 && depth_image_addrs_.count(cmd.fb_address) != 0) {
+                const uint64_t dk = (uint64_t{1} << 32) | cmd.fb_address;
+                auto dit = depth_targets_.find(dk);
+                if (dit != depth_targets_.end() && dit->second.rb != 0) {
+                    depth_needs_clear_.insert(dit->second.rb);
+                }
+            }
             // Attach this draw's depth image. The buffer belongs to
             // G_SETZIMG's address, not to the colour image, so two colour images
             // that name the same depth image share one depth buffer, as they do
@@ -3742,13 +3846,27 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     bound_fb->depth_rb = want_depth;
                 }
                 if (depth_needs_clear_.erase(want_depth) != 0) {
-                    // The one-time clear to the far value, on the first draw that
-                    // uses a new depth image, so GL_LESS passes everywhere there.
-                    // RT64 clears its depth target when it creates it as well and
-                    // otherwise keeps the contents.
+                    // The clear to the far value, on the first draw that uses a
+                    // depth image after it was created or invalidated, so
+                    // GL_LESS passes everywhere there. RT64 clears its depth
+                    // target when it creates it as well and otherwise keeps the
+                    // contents.
+                    //
+                    // The scissor must be off for the clear. This runs inside
+                    // the draw loop before the draw's own scissor is applied, so
+                    // the clear used to inherit whatever rect the previous draw
+                    // left; a depth image shared by a 320x240 screen and a
+                    // 640x480 one (scene 0x0A's stills share `0x2E6840`) was
+                    // only cleared inside that stale rect and the rest kept the
+                    // renderbuffer's zero fill.
+                    const GLboolean scissor_was = glIsEnabled(GL_SCISSOR_TEST);
+                    glDisable(GL_SCISSOR_TEST);
                     glDepthMask(GL_TRUE);
                     glClearDepthf(1.0f);
                     glClear(GL_DEPTH_BUFFER_BIT);
+                    if (scissor_was) {
+                        glEnable(GL_SCISSOR_TEST);
+                    }
                 }
                 // One-shot: the depth attachment is on the framebuffer this draw
                 // uses. A colour-only framebuffer makes GL_DEPTH_TEST a no-op,
@@ -4690,6 +4808,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // holds the renderbuffers that have not had their one-time clear yet.
     std::map<uint64_t, GlDepthTarget> depth_targets_;
     std::set<GLuint> depth_needs_clear_;
+    // Guest addresses a display list has named as a depth image (`G_SETZIMG`).
+    // A colour write into one of them overwrites the RDP's depth contents,
+    // because the hardware has one memory per address.
+    std::set<uint32_t> depth_image_addrs_;
     unsigned depth_target_seq_ = 0;
     unsigned depth_targets_logged_ = 0;
     // OGRE_DEPTH: the depth test/write switch (see record_state).
@@ -5313,9 +5435,22 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
 
             case gbi::OP_GEOMETRYMODE: {
-                const uint32_t off = p0(w0, 0, 24);
+                // RT64 GBI_F3DEX2::geometryMode (gbi/rt64_gbi_f3dex2.cpp:104-108):
+                //   offMask = p0(0, 24); onMask = w1;
+                //   geometryMode &= offMask; geometryMode |= onMask;
+                // The w0 low 24 bits are the bits to KEEP, not the bits to
+                // clear: `gSPClearGeometryMode(word)` passes them as `~word`.
+                // The ROM's own reset idiom is `D9000000 00000000` (41 sites),
+                // which clears every bit under this rule and would be a no-op
+                // under the inverted one; `D9FFFFFF 00000000` never appears.
+                // OB64 also emits `D9FFFFFF 00200404` (ROM `0x80180D90`), which
+                // keeps the current mode and adds G_LIGHTING|G_SHADE|G_CULL_BACK.
+                // Reading w0 as a clear mask wiped G_LIGHTING on every
+                // `gSPSetGeometryMode`, so a sub-list that used that idiom lost
+                // lighting, fog, culling and G_TEXTURE_GEN (session 185).
+                const uint32_t keep = p0(w0, 0, 24);
                 const uint32_t on = w1;
-                st.geometry_mode = (st.geometry_mode & ~off) | on;
+                st.geometry_mode = (st.geometry_mode & keep) | on;
                 break;
             }
 
@@ -5758,9 +5893,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                         for (int k = 0; k < RenderState::kLightStride; ++k) {
                             dst[k] = n64b(rdram_, static_cast<int>(addr) + k);
                         }
+                    } else if (slot < 2) {
+                        // Lookat X (slot 0) and Y (slot 1) for G_TEXTURE_GEN.
+                        // RT64 `RSP::setLookAt` (hle/rt64_rsp.cpp:969-982)
+                        // reads the slot as a `DirLight` and normalizes logical
+                        // bytes 8/9/10 (`dirx/diry/dirz`); a zero vector stays
+                        // zero instead of dividing by zero.
+                        const uint32_t addr = resolve_address(ctx->segments, w1);
+                        float d[3];
+                        for (int k = 0; k < 3; ++k) {
+                            d[k] = static_cast<float>(
+                                static_cast<int8_t>(n64b(rdram_, static_cast<int>(addr) + 8 + k)));
+                        }
+                        const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                        if (len > 0.0f) {
+                            for (int k = 0; k < 3; ++k) {
+                                st.lookat[slot][k] = d[k] / len;
+                            }
+                        } else {
+                            for (int k = 0; k < 3; ++k) {
+                                st.lookat[slot][k] = 0.0f;
+                            }
+                        }
                     }
-                    // Slots 0/1 (lookat) are not stored: this renderer has no
-                    // G_TEXTURE_GEN path, so nothing reads them.
                 }
                 break;
             }
@@ -6706,8 +6861,53 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // Texture coordinates: s10.5 texels scaled by G_TEXTURE (RT64
         // RSP::setVertexCommon). The G_TEXTURE scale must NOT be applied to
         // rectangles - RT64's RDP::drawRect uses uls/32 and lrs/32 directly.
-        out[2] = (static_cast<float>(v.s) * st.tex_scale_s) / 32.0f;
-        out[3] = (static_cast<float>(v.t) * st.tex_scale_t) / 32.0f;
+        //
+        // G_TEXTURE_GEN replaces the vertex's s,t with a projection of its
+        // normal onto the two lookat vectors (RT64 `computeTextureGen`,
+        // shaders/TextureGen.hlsli:19-33). RT64 enables it only when both
+        // G_LIGHTING and G_TEXTURE_GEN are set (`usesTextureGen`,
+        // hle/rt64_rsp.cpp:641-643); the vertex colour bytes are then the
+        // normal, the same bytes `compute_vertex_light` reads. The upload then
+        // carries the raw G_TEXTURE scale as the input UV
+        // (`hle/rt64_rsp.cpp:748-753`) and the shader multiplies it by the
+        // generated coordinate, so `sc / 65536 * coord` is in the same texel
+        // units as the non-texgen arm below. The q meshes of the publisher
+        // stills are drawn this way: a 32x32 environment map swept by the
+        // surface normal, which is the moving highlight native shows and a
+        // fixed patch of the image cannot produce (session 185).
+        const bool texgen = (st.geometry_mode & (kGeomLighting | kGeomTextureGen)) ==
+                            (kGeomLighting | kGeomTextureGen);
+        if (texgen) {
+            const float nx = static_cast<int8_t>(v.r) / 127.0f;
+            const float ny = static_cast<int8_t>(v.g) / 127.0f;
+            const float nz = static_cast<int8_t>(v.b) / 127.0f;
+            const Mat4& world = st.modelview_stack.back();
+            float gen[2];
+            for (int axis = 0; axis < 2; ++axis) {
+                const float* L = st.lookat[axis];
+                // Row-vector multiply, as RT64's
+                // `mul(float4(lookAt.x, 0.0f), worldMatrix)`.
+                Vec4 d = mul(Vec4{L[0], L[1], L[2], 0.0f}, world);
+                const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                if (len > 0.0f) {
+                    d.x /= len;
+                    d.y /= len;
+                    d.z /= len;
+                }
+                float dot = nx * d.x + ny * d.y + nz * d.z;
+                dot = std::clamp(dot, -1.0f, 1.0f);
+                if ((st.geometry_mode & kGeomTextureGenLinear) != 0) {
+                    gen[axis] = std::acos(-dot) * 325.94932f;
+                } else {
+                    gen[axis] = (dot + 1.0f) * 512.0f;
+                }
+            }
+            out[2] = st.tex_scale_s * gen[0];
+            out[3] = st.tex_scale_t * gen[1];
+        } else {
+            out[2] = (static_cast<float>(v.s) * st.tex_scale_s) / 32.0f;
+            out[3] = (static_cast<float>(v.t) * st.tex_scale_t) / 32.0f;
+        }
         float lit[3] = {0.0f, 0.0f, 0.0f};
         if (compute_vertex_light(st, v, lit)) {
             out[4] = lit[0];
@@ -7408,9 +7608,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // synthetic test_draw) has no other place to pick the image up.
         ensure_tile_image(ctx, st, st.active_tile, 0);
         ensure_tile_image(ctx, st, st.active_tile + 1, 1);
-        if (!texture_available(st)) {
-            st.active_tile = saved_tile;
-            return;
+        // Only a rectangle whose combiner reads a texel needs one. RT64
+        // `RDP::drawTexRect` has no "no texture" test at all: the sampler is
+        // simply never read when the mux does not name TEXEL0/TEXEL1, so the
+        // primitive colour is drawn. Dropping every rectangle with an
+        // unconfigured tile removed the publisher stills' PRIM-only background
+        // bands.
+        {
+            const bool needs_texture =
+                combiner_uses_texture(st.combiner, st.othermode_h, 0) ||
+                combiner_uses_texture(st.combiner, st.othermode_h, 1);
+            if (!texture_available(st) && needs_texture) {
+                st.active_tile = saved_tile;
+                return;
+            }
         }
 
         const float us = s0 / 32.0f;

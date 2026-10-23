@@ -25,7 +25,14 @@ cd debug && npm install
 # 4. run a probe
 node debug/probes/boot.cjs --attempts 10 --secs 45
 node debug/probes/progress.cjs --attempts 6 --secs 75   # how far the intro gets
+node debug/probes/intro-capture.cjs --seconds 30        # 1 fps series of the opening
+node debug/probes/intro-capture.cjs --seconds 8 --interval-ms 100  # dense series
 ```
+
+The opening is normally captured through `python3 tools/intro_capture.py`, which
+runs this probe and its native counterpart and writes both series with a
+per-frame pixel report. See
+[app-build.md](../docs/guides/app-build.md#capturing-the-opening-native-and-in-the-browser).
 
 | Path | Purpose |
 |---|---|
@@ -33,7 +40,9 @@ node debug/probes/progress.cjs --attempts 6 --secs 75   # how far the intro gets
 | `lib/harness.cjs` | shared boot / retry / sampling / pixel / output helpers |
 | `probes/textures.cjs` | dump the decoded tile images + `colour x mask` composites |
 | `probes/spritecheck.cjs` | render one sprite and compare it with its textures |
+| `probes/intro-capture.cjs` | one canvas PNG per `--interval-ms` (default 1000) from the first scene, plus per-frame pixel counts |
 | `probes/*.cjs` | the probes (see the guide's table) |
 | `out/` | captured artifacts (gitignored — never commit screenshots) |
+
 Requirements: Node ≥ 18, `npm install` here, `build-wasm/` built, and your own
 ROM at `assets/ogre64.z64` (or `--rom` / `OGRE_ROM`). The ROM is never committed.
