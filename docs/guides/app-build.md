@@ -183,6 +183,13 @@ drives the forced title -> Load Game -> mission route without wall-clock tuning.
 `OGRE_TAP_SCENE`/`OGRE_TAP_NOT_SCENE` remain native-only. Only the tap knobs are
 JS-side; they drive the same `ogre_input_set` the keyboard does.
 
+`OGRE_TEX_TRACE=1` prints the browser's `[GFX-TEXTRACE]` line for each textured
+rectangle, and it takes the native renderer's `OGRE_TEX_TRACE_AFTER_MS` /
+`OGRE_TEX_TRACE_MS` window (milliseconds since the runtime started). Without the
+window a natural boot spends the 1500-line budget on the publisher stills before
+the title, which is why the natural title's texture trace was not visible
+(session 186).
+
 `OGRE_SAVE=<url>` is the page's battery import (session 168): the image is
 fetched, written to `/ogre/saves/ogrebattle64-us-rev1.bin` after the IDBFS load,
 synced and the boot waits for it, so `[save] loaded /ogre/saves/...` appears in

@@ -849,6 +849,32 @@ Residuals, each with the reason it is not closed:
   26 of 27 spin frames. See `docs/HANDOFF-2026-10-23-session184.md` and
   `-session185.md`.
 
+- **The natural title drew noise and then only its upper half: a shared-depth
+  framebuffer and a viewport sized from the colour image (session 186).** The
+  title after scene `0x0A` renders into 320x476 colour images and names the
+  depth image `0x2E6840` that the publisher still created at 640x481. Depth
+  targets were keyed by the `G_SETZIMG` address alone, so the title attached
+  that 640x481 renderbuffer to a 320x476 colour texture; GL reports
+  `GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS` (`status=0x8CD9`), rejects every draw,
+  and the canvas keeps the colour texture's undefined contents (colour stripes
+  over black, `sha256 06bff23c…`). Depth targets are now keyed by
+  `(address, width, height)`, which is also RT64's `RenderTargetKey` shape, and
+  a colour write to a depth-image address invalidates every size-keyed buffer.
+  With that fixed the title showed only its upper half, stretched: its 320x240
+  rects record with `screen=320x240`, but the colour image is 320x476 (an
+  earlier draw grew it) and `glViewport` used the image's full height. The
+  viewport is now per draw (`fb.height - cmd.fb_height_px` at the top), the same
+  mapping as the scissor. The natural title then draws the full prologue scene:
+  the text bands `34..74`, `78`, `87..130` match the native capture's exactly,
+  the cloud and rock fill the frame, the logo follows
+  (`docs/proofs/web-title-prologue-session186.png`,
+  `-web-title-vs-native-session186.png`, `-web-title-logo-session186.png`), and
+  the run advances to `0x0B`; the fixed title animates (220 title frames and
+  198 distinct hashes in a 48 s 100 ms capture). The browser's `OGRE_TEX_TRACE`
+  gained the native renderer's `OGRE_TEX_TRACE_AFTER_MS`/`_MS` window, because
+  the trace budget was previously spent on the publisher stills before the
+  title. See `docs/HANDOFF-2026-10-23-session186.md`.
+
 See `docs/HANDOFF-2026-10-19-session179.md` and `-session178.md` for these two
 fixes, and `docs/HANDOFF-2026-10-18-session176.md` / `-session175.md` for the
 numbers and the screens those rounds did not re-measure.

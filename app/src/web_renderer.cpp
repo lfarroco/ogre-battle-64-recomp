@@ -2277,14 +2277,14 @@ struct GlFramebuffer {
     GLuint tex = 0;
     // The depth attachment currently attached to `fbo`. The renderbuffers
     // belong to `depth_targets_`, keyed by the RDP depth image (G_SETZIMG) and
-    // not by this colour image: RT64 keys its depth RenderTarget by the depth
-    // image's own framebuffer address and width, so one depth buffer serves
-    // every colour image that names it (hle/rt64_state.cpp `getTargetsFromPair`,
-    // `RenderTargetKey(depthFb->addressStart, depthFb->width, depthFb->siz,
-    // Framebuffer::Type::Depth)`; rt64_framebuffer_manager.cpp:171). This field
-    // only records what is attached right now, so a colour-image switch does not
-    // re-attach an unchanged depth buffer. The depth values live on the GPU
-    // only: they are not written back to RDRAM and not uploaded from it.
+    // its size, not by this colour image: RT64 keys its depth RenderTarget by
+    // the depth image's own framebuffer address, width and siz
+    // (`RenderTargetKey(depthFb->addressStart, depthFb->width, depthFb->siz,
+    // Framebuffer::Type::Depth)`), so one depth buffer serves every colour image
+    // that names it at the same size. This field only records what is attached
+    // right now, so a colour-image switch does not re-attach an unchanged depth
+    // buffer. The depth values live on the GPU only: they are not written back
+    // to RDRAM and not uploaded from it.
     GLuint depth_rb = 0;
     // The last G_SETZIMG configuration this target was drawn with, for the
     // `[GFX-DEPTH]` census.
@@ -2321,12 +2321,22 @@ struct GlFramebuffer {
 //
 // The depth image's own `G_SETZIMG` word carries no usable size in this game
 // (width 1, siz 0, fmt 0: the RDP only keeps the address), so the buffer is
-// sized from the colour target that draws into it, taking the largest one seen.
-// RT64 asserts depth >= colour for the same reason.
+// sized from the colour target that draws into it.
+//
+// The size is part of the key. RT64 keys a depth target by the image's address,
+// width and siz, so a 320-wide scene and a 640-wide scene that name the same
+// depth image get two targets there as well. GL requires it regardless: a
+// framebuffer whose colour and depth attachments differ in size is incomplete
+// (`GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS`), and every draw into it is rejected.
+// Scene `0x0A` (the publisher still) creates depth image `0x2E6840` at 640x481;
+// a title frame then names the same image for its 320x476 colour target
+// (session 186), and sharing one grown renderbuffer left the title's whole
+// display list rejected and the canvas showing uninitialised texture bytes.
 struct GlDepthTarget {
     GLuint rb = 0;
     int width = 0;
     int height = 0;
+    uint32_t z_address = 0;    // the address the key was built from (depth image, else colour)
     uint32_t created_at = 0;   // draw sequence at creation, for the census
 };
 
@@ -2342,6 +2352,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         depth_enabled_ = !(depth_env != nullptr && depth_env[0] == '0');
         const char* tex_trace = getenv("OGRE_TEX_TRACE");
         trace_ = tex_trace != nullptr && tex_trace[0] != '\0' && tex_trace[0] != '0';
+        // OGRE_TEX_TRACE_AFTER_MS / OGRE_TEX_TRACE_MS mirror the native
+        // renderer's window (app/src/renderer.cpp:1583): trace only the frames
+        // inside [after, after+ms). Without them a natural boot spends the
+        // trace on the publisher stills and the title arrives thousands of
+        // draws later, past kTraceMaxDraws. Both are wall-clock milliseconds
+        // since the runtime started, the clock ram_key uses.
+        const char* trace_after = getenv("OGRE_TEX_TRACE_AFTER_MS");
+        trace_after_ms_ = (trace_after != nullptr)
+                              ? std::strtoull(trace_after, nullptr, 0)
+                              : 0ull;
+        const char* trace_span = getenv("OGRE_TEX_TRACE_MS");
+        trace_span_ms_ = (trace_span != nullptr) ? std::strtoull(trace_span, nullptr, 0) : 0ull;
         const char* tlut_trace = getenv("OGRE_TLUT_TRACE");
         tlut_trace_ = tlut_trace != nullptr && tlut_trace[0] != '\0' && tlut_trace[0] != '0';
         OGRE_MILESTONE("RENDERER", "webgl2 renderer pending canvas handoff");
@@ -2813,27 +2835,34 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
     }
 
-    // The key of the depth buffer a draw uses. A display list that sent
-    // G_SETZIMG gets one buffer per depth image; one that never did (the boot
-    // blanking lists) gets one per colour image, which is what the renderer did
-    // before the depth image became the key. The high bit keeps the two
-    // namespaces apart: the mission's depth image address (0x3350C0) is also one
-    // of its colour image addresses.
-    static uint64_t depth_target_key(const DrawCmd& cmd) {
-        return cmd.zimg_address != 0 ? ((uint64_t{1} << 32) | cmd.zimg_address)
-                                     : cmd.fb_address;
+    // The key of the depth buffer a draw uses: the depth image address when the
+    // draw set `G_SETZIMG`, else the colour image (the boot blanking lists), plus
+    // the buffer's width and height. The high bit keeps the two address
+    // namespaces apart (the mission's depth image `0x3350C0` is also one of its
+    // colour image addresses); the size keeps a 320-wide pass and a 640-wide pass
+    // of one depth image separate, the same dimensions RT64 puts in its depth
+    // `RenderTargetKey`. Widths and heights are capped at 1024 by
+    // kMaxFramebufferSide, so 11 bits each.
+    static uint64_t depth_target_key(uint32_t address, int width, int height, bool depth) {
+        return (depth ? (uint64_t{1} << 63) : 0) |
+               (static_cast<uint64_t>(address) << 22) |
+               (static_cast<uint64_t>(width & 0x7FF) << 11) |
+               static_cast<uint64_t>(height & 0x7FF);
     }
 
     // The depth renderbuffer for a draw, created (and registered for its
     // one-time clear to the far value) on first use. Sized from the colour
-    // target because this game's G_SETZIMG word carries no usable size, and
-    // grown rather than recreated when several colour targets of different sizes
-    // share one depth image (RT64 asserts depth >= colour).
+    // target because this game's G_SETZIMG word carries no usable size. The
+    // size is part of the key, so the target never spans two sizes; the grow
+    // branch below is a guard.
     GLuint depth_target_for(const DrawCmd& cmd, int width, int height) {
         if (cmd.zimg_address != 0) {
             depth_image_addrs_.insert(cmd.zimg_address);
         }
-        GlDepthTarget& d = depth_targets_[depth_target_key(cmd)];
+        const uint32_t address = cmd.zimg_address != 0 ? cmd.zimg_address : cmd.fb_address;
+        GlDepthTarget& d = depth_targets_[
+            depth_target_key(address, width, height, cmd.zimg_address != 0)];
+        d.z_address = address;
         const int w = std::max(width, 1);
         const int h = std::max(height, 1);
         if (d.rb != 0 && (d.width < w || d.height < h)) {
@@ -3809,8 +3838,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     bound_fb_address = 0;
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, bound_fb != nullptr ? bound_fb->fbo : 0);
-                glViewport(0, 0, bound_fb != nullptr ? bound_fb->width : canvas_width_,
-                           bound_fb != nullptr ? bound_fb->height : canvas_height_);
+            }
+            // The draw's NDC was built against `cmd.fb_height_px` (the
+            // screen height `target_height_px` returned when the draw was
+            // recorded), not against the colour image's tallest height. The
+            // colour image can be taller than the draw's screen: the title's
+            // 320x240 rects go into a 320x476 image that an earlier draw grew,
+            // and a viewport of the image's full height stretched the rects
+            // over all 476 rows, so the presenter's 239-row visible area showed
+            // the top half of the scene at 2x (session 186). Map the NDC into
+            // `cmd.fb_height_px` rows at the top of the image, which is where
+            // the RDP's screen row 0 is and where the scissor already points.
+            if (bound_fb != nullptr) {
+                const int vw = std::clamp(static_cast<int>(cmd.fb_width_px), 1,
+                                          bound_fb->width);
+                const int vh = std::clamp(static_cast<int>(cmd.fb_height_px), 1,
+                                          bound_fb->height);
+                glViewport(0, bound_fb->height - vh, vw, vh);
+            } else {
+                glViewport(0, 0, canvas_width_, canvas_height_);
             }
             const int target_height = bound_fb != nullptr ? bound_fb->height : canvas_height_;
             if (bound_fb == nullptr) {
@@ -3826,10 +3872,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // and every depth-tested q triangle failed GL_LESS: the QUEST logo
             // lost its three 3D q meshes (session 183).
             if (cmd.fb_address != 0 && depth_image_addrs_.count(cmd.fb_address) != 0) {
-                const uint64_t dk = (uint64_t{1} << 32) | cmd.fb_address;
-                auto dit = depth_targets_.find(dk);
-                if (dit != depth_targets_.end() && dit->second.rb != 0) {
-                    depth_needs_clear_.insert(dit->second.rb);
+                // One depth image can now own several size-keyed renderbuffers
+                // (a 320-wide and a 640-wide target for the same address), so
+                // invalidate every one of them.
+                for (auto& [dk, depth] : depth_targets_) {
+                    (void)dk;
+                    if (depth.z_address == cmd.fb_address && depth.rb != 0) {
+                        depth_needs_clear_.insert(depth.rb);
+                    }
                 }
             }
             // Attach this draw's depth image. The buffer belongs to
@@ -3844,6 +3894,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                               GL_RENDERBUFFER, want_depth);
                     bound_fb->depth_rb = want_depth;
+                    // The size is part of the depth key, so a mismatch cannot
+                    // happen by construction. Check once per pair anyway: an
+                    // incomplete framebuffer rejects every draw silently, and
+                    // this is the check that named the title's 640x481 depth /
+                    // 320x476 colour mismatch (session 186).
+                    const GLenum pair_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                    if (pair_status != GL_FRAMEBUFFER_COMPLETE &&
+                        depth_pair_logged_.insert(
+                            (static_cast<uint64_t>(bound_fb->fbo) << 32) | want_depth).second) {
+                        OGRE_MILESTONE("GFX-DEPTH",
+                                       "colour 0x%06X %dx%d with depth 0x%06X: status=0x%04X",
+                                       cmd.fb_address, bound_fb->width, bound_fb->height,
+                                       cmd.zimg_address, static_cast<unsigned>(pair_status));
+                    }
                 }
                 if (depth_needs_clear_.erase(want_depth) != 0) {
                     // The clear to the far value, on the first draw that uses a
@@ -4721,8 +4785,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // OGRE_TEX_TRACE: one line per G_TEXRECT with the image it samples and the
     // colour it decodes to. Bounded, like every other diagnostic here.
     bool trace_ = false;
+    // OGRE_TEX_TRACE_AFTER_MS / _MS: the trace window (see the constructor).
+    // A zero `trace_span_ms_` means "to the end of the run"; a zero
+    // `trace_after_ms_` means "from the start".
+    uint64_t trace_after_ms_ = 0;
+    uint64_t trace_span_ms_ = 0;
     uint32_t trace_draws_ = 0;
     uint32_t trace_tluts_ = 0;
+    // True while the trace window is open. The native renderer's clock is
+    // `ultramodern::trace_millis()` (ram_key.cpp uses the same one); it starts
+    // when the runtime does, not at the first scene.
+    bool trace_active() const {
+        if (!trace_) {
+            return false;
+        }
+        const uint64_t now = ultramodern::trace_millis();
+        if (trace_after_ms_ != 0 && now < trace_after_ms_) {
+            return false;
+        }
+        if (trace_span_ms_ != 0 && now >= trace_after_ms_ + trace_span_ms_) {
+            return false;
+        }
+        return true;
+    }
     // OGRE_TLUT_TRACE: the palette-destination check. The decoder keys a CI
     // table by the tile's `palette` field and assumes the load wrote TMEM 0x100,
     // which is RT64's fixed palette base (`RDP_TMEM_PALETTE` 0x800 in bytes);
@@ -4807,6 +4892,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // (depth_target_key) rather than by the colour image. `depth_needs_clear_`
     // holds the renderbuffers that have not had their one-time clear yet.
     std::map<uint64_t, GlDepthTarget> depth_targets_;
+    // Pairs of (colour FBO, depth renderbuffer) whose completeness was already
+    // reported, so an incomplete pair is logged once.
+    std::set<uint64_t> depth_pair_logged_;
     std::set<GLuint> depth_needs_clear_;
     // Guest addresses a display list has named as a depth image (`G_SETZIMG`).
     // A colour write into one of them overwrites the RDP's depth contents,
@@ -5748,7 +5836,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                                  "palette field only");
                     }
                 }
-                if (trace_) {
+                if (trace_active()) {
                     ++trace_tluts_;
                     if (trace_tluts_ <= 8) {
                         OGRE_MILESTONE("GFX-TEXTRACE",
@@ -6396,7 +6484,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // compared without a screenshot. `opaque` counts the texels whose alpha
         // is high enough to survive RT64's RGBA16 coverage test, which is how a
         // window of transparent texels is told apart from a black one.
-        if (trace_) {
+        if (trace_active()) {
             uint64_t sum = 0;
             unsigned opaque = 0;
             const size_t count = pixels.size() / 4;
@@ -6415,7 +6503,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // Cleared when this call does not compute one, so a later draw never
         // reports an earlier decode's histogram.
         t.image.hist.clear();
-        if (trace_ && trace_draws_ < 8) {
+        if (trace_active() && trace_draws_ < 8) {
             std::map<uint32_t, uint32_t> colhist;
             for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
                 const uint32_t c = (uint32_t(pixels[i]) << 16) | (uint32_t(pixels[i + 1]) << 8) |
@@ -7722,7 +7810,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            (unsigned long long)cmd.tex_key, (unsigned long long)cmd.tex_key1,
                            s0, t0, dsdx, dtdy);
         }
-        if (trace_ && trace_draws_ < kTraceMaxDraws) {
+        if (trace_active() && trace_draws_ < kTraceMaxDraws) {
             ++trace_draws_;
             const TileState& tt = st.tiles[st.active_tile & (kMaxTiles - 1)];
             const int px_w = (xh > xl) ? (xh - xl) : 0;
