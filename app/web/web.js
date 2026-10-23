@@ -204,6 +204,7 @@
     saveImport.started = true;
     var url = resolveSaveUrl(saveImport.spec);
     log("[web:save] OGRE_SAVE=" + saveImport.spec + ": fetching " + url);
+    uiSetStatus("Loading save data…");
     fetch(url, { cache: "no-store" }).then(function (resp) {
       if (!resp.ok) {
         throw new Error("HTTP " + resp.status);
@@ -211,11 +212,13 @@
       return resp.arrayBuffer();
     }).then(function (buffer) {
       writeBatterySave(new Uint8Array(buffer), saveImport.spec, function () {
+        uiSetStatus("Save data loaded.");
         settleSaveImport();
       });
     }).catch(function (err) {
       log("[web:save] OGRE_SAVE=" + saveImport.spec + ": import failed: " + err +
           " - booting without it");
+      uiSetStatus("Save data could not be loaded. Booting without it.");
       settleSaveImport();
     });
   }
@@ -228,6 +231,25 @@
   var bootStarted = false;
   var bootStartTime = 0;
   var audioContext = null;
+
+  // The shell (index.html) owns the chrome, the status pill and the launcher.
+  // These helpers keep the UI calls optional, so a page that embeds web.js
+  // without the shell still runs.
+  function uiSetPhase(phase, label) {
+    if (window.ogreUI) {
+      window.ogreUI.setPhase(phase, label);
+    }
+  }
+  function uiSetStatus(text) {
+    if (window.ogreUI) {
+      window.ogreUI.setStatus(text);
+    }
+  }
+  function uiDismissLauncher() {
+    if (window.ogreUI) {
+      window.ogreUI.dismissLauncher();
+    }
+  }
 
   // --- Audio switch -------------------------------------------------------------
   //
@@ -368,6 +390,9 @@
     }
     bootStarted = true;
     bootStartTime = Date.now();
+    uiSetPhase("loading", "Loading");
+    uiSetStatus("Starting the game…");
+    uiDismissLauncher();
     Module.ccall("ogre_start_boot", "void", [], []);
     log("[web] Boot thread started. Waiting for milestones...");
     if (pollTimer === null) {
@@ -636,7 +661,16 @@
     return mask;
   }
 
+  // A modal dialog owns the keyboard while it is open, so arrow keys can
+  // scroll it instead of being swallowed as D-pad input.
+  function dialogOwnsKeyboard() {
+    return !!(document.querySelector && document.querySelector("dialog[open]"));
+  }
+
   window.addEventListener("keydown", function (e) {
+    if (dialogOwnsKeyboard()) {
+      return;
+    }
     if (KEYMAP[e.code]) {
       e.preventDefault();
     }
@@ -645,6 +679,9 @@
   });
   window.addEventListener("keyup", function (e) {
     pressedKeys.delete(e.code);
+    if (dialogOwnsKeyboard()) {
+      return;
+    }
     pushInput(0, keyboardButtons(), 0, 0, 1);
   });
   window.addEventListener("blur", function () {
@@ -846,16 +883,21 @@
       return;
     }
     saveImport.storageReady = true;
-    importBatterySave();
     // If a previously validated ROM is persisted, boot without re-picking.
-    if (moduleReady() && Module.FS && Module.FS.analyzePath &&
-        Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists) {
+    var storedRom = moduleReady() && Module.FS && Module.FS.analyzePath &&
+        Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists;
+    if (storedRom) {
       log("[web] Stored ROM found - starting the game with the previously loaded ROM.");
+      uiSetStatus("Restoring the previous session…");
       whenWasmExportsReady(function () {
         initWebGL();
         startBoot();
       });
+    } else {
+      uiSetPhase("ready", "Ready");
+      uiSetStatus("Ready. Select a ROM to begin.");
     }
+    importBatterySave();
   }
 
   function mountPersistentStorage() {
@@ -928,12 +970,16 @@
           "graphics: WebGL2 context creation FAILED (no WebGL2?) - the renderer cannot start; " +
           "the workload analyzer keeps running";
         log("[web:gfx] ERROR: emscripten_webgl_create_context returned 0 (WebGL2 unavailable in this browser?)");
+        uiSetPhase("error", "Graphics error");
+        uiSetStatus("WebGL2 is unavailable in this browser.");
         return;
       }
       Module._ogre_gfx_set_canvas(handle, 320, 240);
       gfxStatus.textContent =
         "graphics: WebGL2 context ready (320x240) - renderer takes over once the game submits a display list";
       log("[web:gfx] WebGL2 context handed to the renderer (320x240)");
+      uiSetPhase("loading", "Loading");
+      uiSetStatus("Starting the renderer…");
       // Poll the queued draw commands on the main thread (the gfx pthread only
       // records them; all GL runs here).
       if (!window.__ogreGfxFlushStarted) {
@@ -946,6 +992,8 @@
     } catch (e3) {
       gfxStatus.textContent = "graphics: context handoff failed: " + e3;
       log("[web:gfx] ERROR: context handoff threw: " + e3);
+      uiSetPhase("error", "Graphics error");
+      uiSetStatus("The WebGL2 context could not be created.");
     }
   }
 
@@ -989,6 +1037,16 @@
     if (line !== lastGfxStatusLine) {
       lastGfxStatusLine = line;
       gfxStatus.textContent = line;
+      if (!rendererUp) {
+        uiSetPhase("loading", "Loading");
+        uiSetStatus("Starting the renderer…");
+      } else if (tasks === 0 || !hasDraws) {
+        uiSetPhase("loading", "Loading");
+        uiSetStatus("Waiting for the first frame…");
+      } else {
+        uiSetPhase("playing", "Playing");
+        uiSetStatus("Running");
+      }
     }
   }
 
@@ -1008,6 +1066,8 @@
       var tasks = m ? parseInt(m[1], 10) : 0;
       if (tasks <= 1) {
         bootStallLogged = true;
+        uiSetPhase("stalled", "Still loading");
+        uiSetStatus("Still loading. The first frame can take a while; reload if the screen stays black.");
         log("[web:gfx] Only the boot blanking display list has been submitted after 15s, so the canvas will stay " +
             "black. This is the known idle trajectory: about half of all boots stall before the game builds its " +
             "first real display list. It is a game/runtime pacing issue, not a renderer problem - reload to get a " +
@@ -1026,14 +1086,19 @@
     }
     if (!moduleReady() || !Module.FS) {
       log("[web] WASM runtime not ready yet; retry in a moment.");
+      uiSetStatus("The runtime is still starting. Try again in a moment.");
       return;
     }
     log("[web] Loading ROM: " + file.name + " (" + file.size + " bytes)...");
+    uiSetPhase("loading", "Loading");
+    uiSetStatus("Reading " + file.name + "…");
 
     file.arrayBuffer().then(function (buffer) {
       var bytes = new Uint8Array(buffer);
       Module.FS.writeFile("/rom.z64", bytes);
       log("[web] ROM written to the virtual filesystem. Starting runtime...");
+      uiSetStatus("Starting the game…");
+      uiDismissLauncher();
       initAudio();  // inside the user gesture so autoplay is allowed
       // initWebGL and the boot call wasm exports that the glue publishes a
       // moment after the runtime is up; see whenWasmExportsReady.
@@ -1043,6 +1108,8 @@
       });
     }).catch(function (err) {
       log("[web] Failed to read the ROM file: " + err);
+      uiSetPhase("error", "ROM error");
+      uiSetStatus("Could not read that ROM file.");
     });
   });
 
@@ -1061,18 +1128,24 @@
       }
       if (!moduleReady() || !Module.FS) {
         log("[web:save] WASM runtime not ready yet; retry in a moment.");
+        uiSetStatus("The runtime is still starting. Try again in a moment.");
         return;
       }
       log("[web:save] loading save file: " + file.name + " (" + file.size + " bytes)...");
+      uiSetStatus("Importing save data…");
       file.arrayBuffer().then(function (buffer) {
         writeBatterySave(new Uint8Array(buffer), file.name, function (ok) {
           if (ok) {
+            uiSetStatus("Save data imported. Reloading…");
             log("[web:save] reloading the page so the runtime reads the imported battery");
             window.setTimeout(function () { window.location.reload(); }, 250);
+          } else {
+            uiSetStatus("The save data could not be imported.");
           }
         });
       }).catch(function (err) {
         log("[web:save] failed to read the save file: " + err);
+        uiSetStatus("Could not read that save file.");
       });
     });
   }
@@ -1081,6 +1154,7 @@
 
   whenModuleReady(function () {
     log("[web] WASM runtime initialized. Select a ROM to begin (or use the stored one).");
+    uiSetStatus("Preparing local storage…");
     if (saveImport.armed) {
       log("[web:save] OGRE_SAVE=" + saveImport.spec + " -> " + SAVE_IMPORT_PATH +
           " (imported after the /ogre mount, before the boot)");

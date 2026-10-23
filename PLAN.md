@@ -54,7 +54,16 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-18-session168.md`.
+`docs/HANDOFF-2026-10-23-session187.md`.
+
+Session 187 replaced the page's debug dump with a game shell: a slim top bar, a
+bezel around the canvas, a launcher overlay, one curated status line, a controls
+dialog, fullscreen, and a `?log` drawer. `#rom-input`, `#save-input`,
+`#game-canvas`, `#status`, `#gfxstats` and `#gfx-status` keep their ids and
+contracts; `#gfxstats`/`#gfx-status` are hidden but still updated, and
+`#game-canvas` is `box-sizing: content-box` so the renderer's CSS size stays 1:1
+with the drawing buffer (`docs/proofs/web-ui-launcher-session187.png`,
+`-web-ui-game-session187.png`).
 
 Session 168 gave the browser a battery-save import and the native scene-keyed
 tap route, and reached the 3D mission scene `0x03` from
