@@ -2030,9 +2030,15 @@ holds the evidence.
    apart differ by `7.01/7.03/8.77` in the logo band and `9.78/9.78/10.19` in
    the copyright band, more than the browser-vs-native pair
    (`4.33/4.37/5.39`, `6.09/6.08/6.35`) and with the same signed direction. The
-   decode still runs once per display list, and the Load Game white frame has
-   no surviving capture (session 169's `meanRGB=255` is 85 per channel, not
-   white). See `docs/HANDOFF-2026-10-24-session189.md`.
+   mission `0x03` party sprites also render now: the save route's map field
+   shows the top-left five-character cluster and the bottom pair
+   (`docs/proofs/web-mission-party-session189.png`), against session 176's
+   missing party. The unit sprites' `OTHERMODE_L` has alpha compare none, so
+   the feedback fix is the change that can restore a rejected draw; the pre-189
+   build was not re-run for a one-variable proof. The decode still runs once per
+   display list, and the Load Game white frame has no surviving capture
+   (session 169's `meanRGB=255` is 85 per channel, not white). See
+   `docs/HANDOFF-2026-10-24-session189.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

@@ -10,8 +10,8 @@ RT64's own renderer or starting a WebGPU backend (session 189 question).
 
 ## Result
 
-Four changes are in the tree, and one recorded residual is closed as a
-measurement artefact.
+Four changes are in the tree; one recorded residual is closed as a measurement
+artefact and one screen defect is verified fixed.
 
 1. **`G_CD` colour dither at the RDRAM writeback**, ported from RT64's
    `shared/rt64_framebuffer_pair.cpp:42-44`, `hle/rt64_framebuffer.cpp:231-232`,
@@ -59,6 +59,17 @@ measurement artefact.
    (`4.33/4.37/5.39` and `6.09/6.08/6.35`). The browser is closer to native
    than two native frames a quarter second apart, so session 175's
    `5.32`/`8.49` is fog phase and not a renderer gap (this file, §5).
+
+6. **The mission `0x03` party sprites render.** Session 176's frame-locked pair
+   had the five-character top-left cluster and the bottom pair absent
+   (`26.54` mean abs, browser max 97 against native 255). The same save route,
+   after the feedback fix, draws both clusters on the mission map field
+   (`docs/proofs/web-mission-party-session189.png`), beside the `Losing
+   condition: Death of Prince Yumil` NOTE and the `MISSION` bands. The unit
+   sprites' `OTHERMODE_L` (`0x00504240` pass 1, `0x0C184240` pass 2) has alpha
+   compare none and `CVG_X_ALPHA` clear, so session 177's `u_ac` arms do not
+   apply; the change that can turn a rejected whole draw into a drawn one is
+   this session's feedback fix (this file, §7).
 
 ## Evidence
 
@@ -191,12 +202,53 @@ The audit was a read-only subagent task; its findings are summarized here.
 - The guard removes the stale-vertex fallthrough. Implementing the rest stays
   deferred until a census shows one.
 
+### 7. The mission party sprites render
+
+Session 176's largest residual was the party's character sprites missing from
+the mission map field: the top-left cluster `x18..78 y60..98` measured `26.54`
+mean abs, 735 of 2280 pixels differed by more than 30, and the browser's
+brightest channel there read 97 against native's 255, while the two cursor
+brackets and the terrain were drawn. The field is a pre-rendered njpeg
+background plus 2D part sprites: 14 two-texture quads per unit (TEXEL0 an I4
+mask from an I8 source at TMEM 408, TEXEL1 the RGBA16 colour at TMEM 0), two
+`TRI2` per part, emitted twice per frame
+(`docs/HANDOFF-2026-10-11-session133.md:85-110`).
+
+The same route now draws both clusters. Command:
+
+```
+node debug/probes/atmark.cjs --wait 'id=0x0003' --shots 14 --gap 2000 \
+  --timeout 300 --out /tmp/w189-mission2 \
+  --url 'http://127.0.0.1:8931/app/web/index.html?OGRE_SAVE=assets/escort_suspend.bin&OGRE_SCENE=title&OGRE_SCENE_LOG=1&OGRE_TAP_MS=2000&OGRE_TAP_SCENE_BUTTON=title:start:6,0x12:a:6,0x03:a:30'
+```
+
+`docs/proofs/web-mission-party-session189.png` is shot 2 (2x, 638x479). It shows
+the five-character cluster at 2x `x36..156 y120..196` (native `x18..78
+y60..98`), the two-character bottom party, the `Losing condition: Death of
+Prince Yumil` NOTE, the `MISSION` bands, the river, the road and the castle.
+The same clusters are in native's right panel of
+`docs/proofs/web-mission-framelocked.png`; that proof's browser panel is the
+pre-fix build without them.
+
+The attribution is the feedback fix. The unit-sprite draws carry
+`OTHERMODE_L 0x00504240` (pass 1) and `0x0C184240` (pass 2); bits 0-1 are
+`G_AC_NONE`, and `CVG_X_ALPHA` (0x1000) is clear, so session 177's alpha-compare
+arms are no-ops for this family. Depth on/off mission pairs were bit-identical
+(session 173), and a content-cache miss paints an opaque white quad rather than
+restoring one. `upload_framebuffer` leaving the colour target's texture bound
+rejected a draw into that target with `INVALID_OPERATION`; the party's part
+quads are exactly the first draws into their target after it is uploaded, and
+the fix removes that rejection. The pre-189 build was not re-run for an A/B, so
+this is the mechanism most consistent with the change and the draw state, not a
+one-variable proof.
+
 ## Files changed
 
 | file | change |
 |---|---|
 | `app/src/web_renderer.cpp` | `G_CD` writeback dither; `[GFX-FBREAD]` dither census; `[GFX-DITHER-TEST]` control and flag 10; `upload_framebuffer` unbind; white-unit bind per draw; `[GFX-GLERR]`; content-addressed tile key and upload reuse; `reused=` stats; `[GFX-TEXPROBE]` control and flag 11; S2DEX2 0x03-0x0B guard |
 | `debug/probes/testdraw.cjs` | `--repeat`, `--expect-dither`, `--expect-texcache`; parse `GFX-DITHER-TEST`/`GFX-TEXPROBE`; render gate uses the max `[GFX-AFTER]` and the offscreen controls |
+| `docs/proofs/web-mission-party-session189.png` | the mission map field with both party clusters |
 | `docs/HANDOFF-2026-10-24-session189.md` | this file |
 | `PLAN.md`, `docs/DECISIONS.md`, `docs/STATUS-LOG.md`, `docs/README.md` | status and decision rows |
 
@@ -206,6 +258,9 @@ The audit was a read-only subagent task; its findings are summarized here.
 - Synthetic battery above on the final build.
 - The pre-fix fill read `(0,0,0,0)` / error 502; the fixed fill read the fill
   colour / error 0.
+- The mission route above reached `id=0x0003` and shot 2 of
+  `/tmp/w189-mission2` shows both party clusters
+  (`docs/proofs/web-mission-party-session189.png`).
 - `node --check debug/probes/testdraw.cjs`.
 - `grep -rn "probe189" app/ debug/ RecompiledFuncs/ Bank*Funcs/` is empty. The
   one temporary diagnostic (`[GFX-DITHER-DRAW]`, a pixel read inside the flush)
@@ -243,3 +298,8 @@ code, ROM data or submodule was touched.
   mean is over R+G+B, so 255 is 85 per channel.
 - `0x01`/`0x02`/`0xE4` S2DEX2 remain implemented/logged but unexercised; the
   rest of the opcode set is unimplemented and now guarded.
+- The mission party capture is a visual check at one map-field phase, not a
+  frame-locked numeric pair: `/tmp/w176/nat/t.289.bin` is gone and the note
+  overlay differs. The clusters are present and match native's positions; a
+  fresh frame-locked pair would make the number.
+

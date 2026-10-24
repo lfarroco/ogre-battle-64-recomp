@@ -2584,6 +2584,10 @@ live under `config/` and `patches/` (session 97 moved them).
   residual is closed as fog phase: two native logo frames 0.25 s apart differ
   by `7.01/7.03/8.77` (logo) and `9.78/9.78/10.19` (copyright), more than the
   browser-vs-native pair (`4.33/4.37/5.39`, `6.09/6.08/6.35`) and with the same
-  signed direction. The decode still runs once per display list, and the Load
-  Game white frame has no surviving capture. See
-  `docs/HANDOFF-2026-10-24-session189.md`.
+  signed direction. The mission `0x03` party sprites render now: the save
+  route's map field shows both clusters
+  (`docs/proofs/web-mission-party-session189.png`), against session 176's
+  missing party; the unit sprites' `OTHERMODE_L` has alpha compare none, so the
+  feedback fix is the change that can restore a rejected draw. The decode still
+  runs once per display list, and the Load Game white frame has no surviving
+  capture. See `docs/HANDOFF-2026-10-24-session189.md`.
