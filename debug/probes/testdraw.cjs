@@ -39,6 +39,17 @@
 // requires the renderer's own `[GFX-AC-TEST]` readback of each rectangle to
 // match: `full`, `none` and `partial`.
 //
+// `--flags 1024` (bit 10) is the writeback-dither control: two 320x240 RGBA16
+// images, each filled with 0x214D, one drawn with G_CD_MAGICSQ and one with
+// G_CD_DISABLE. `--expect-dither` requires the renderer's own
+// `[GFX-DITHER-TEST]` readbacks to show the magic-square pattern on the first
+// (both 0x214D and 0x298F present, nothing else) and only 0x214D on the second.
+//
+// `--flags 2048` (bit 11) marks the synthetic list's texture uploads, and
+// `--repeat N` calls test_draw N times without yielding so the lists share one
+// flush batch. `--expect-texcache` requires the renderer's `[GFX-TEXPROBE]`
+// lines to show one upload and N-1 reuses of the same content key.
+//
 // Exit codes: 0 test_draw rendered (and, with --expect-fbtex, the control fired),
 // 2 it did not, 1 fatal.
 
@@ -55,6 +66,9 @@ const expectFbtex = Boolean(opts['expect-fbtex']);
 const expectHits = opts['expect-hits'] === undefined ? null : h.num(opts['expect-hits'], 0);
 const expectDepth = typeof opts['expect-depth'] === 'string' ? opts['expect-depth'] : null;
 const expectAlpha = Boolean(opts['expect-alpha']);
+const expectDither = Boolean(opts['expect-dither']);
+const expectTexcache = Boolean(opts['expect-texcache']);
+const repeat = h.num(opts.repeat, 1);
 
 (async () => {
   const browser = await h.launch(cfg);
@@ -64,20 +78,26 @@ const expectAlpha = Boolean(opts['expect-alpha']);
   // Let the runtime hand the canvas to the renderer and start flushing.
   await h.sleep(warmup);
 
-  const r = await page.evaluate((f) => {
+  // `repeat > 1` calls the synthetic draw several times without yielding, so the
+  // lists land in one flush batch and their identical tile images exercise the
+  // content-addressed cache across display lists (the per-list dedupe would
+  // hide a same-list duplicate).
+  const r = await page.evaluate(({ f, n }) => {
     const has = typeof Module._ogre_gfx_test_draw === 'function';
     if (has && typeof Module._ogre_gfx_debug_flags === 'function') {
       Module._ogre_gfx_debug_flags(f);
     }
     let ret = null;
-    if (has) ret = Module._ogre_gfx_test_draw();
+    for (let i = 0; i < n; ++i) {
+      if (has) ret = Module._ogre_gfx_test_draw();
+    }
     return {
       has,
       ret,
       gfx: document.getElementById('gfxstats').textContent,
       gfxStatus: document.getElementById('gfx-status').textContent,
     };
-  }, flags).catch((e) => ({ err: String(e) }));
+  }, { f: flags, n: repeat }).catch((e) => ({ err: String(e) }));
 
   await h.sleep(settle); // several flush ticks
   const canvas = await h.screenshotCanvas(page, `${prefix}-canvas.png`);
@@ -155,6 +175,65 @@ const expectAlpha = Boolean(opts['expect-alpha']);
       depthOk = got === expectDepth;
     }
   }
+  // The writeback-dither control's two readbacks. `no_dither`/`dithered` count
+  // the expected 16-bit words; `other` must be 0.
+  const ditherLines = [
+    ...new Set(
+      full
+        .split('\n')
+        .filter((l) => l.includes('GFX-DITHER-TEST'))
+        .map((l) => l.replace(/^\[stderr\] /, '').trim())
+    ),
+  ];
+  const dither = {};
+  for (const l of ditherLines) {
+    const m3 = /probe=(\d+) pattern=(\d+) wrote=(\d+) no_dither=(\d+) dithered=(\d+) other=(\d+)/.exec(l);
+    if (m3) {
+      dither[Number(m3[1])] = {
+        pattern: Number(m3[2]),
+        wrote: Number(m3[3]) === 1,
+        noDither: Number(m3[4]),
+        dithered: Number(m3[5]),
+        other: Number(m3[6]),
+      };
+    }
+  }
+  let ditherOk = true;
+  if (expectDither) {
+    const on = dither[1];
+    const off = dither[2];
+    ditherOk = Boolean(on && off &&
+                       on.wrote && on.pattern === 0 && on.noDither > 0 &&
+                       on.dithered > 0 && on.other === 0 &&
+                       off.wrote && off.pattern === 3 && off.noDither > 0 &&
+                       off.dithered === 0 && off.other === 0);
+    if (!ditherOk) {
+      console.log('FAIL: writeback dither control', JSON.stringify(dither));
+    }
+  }
+  // Keep every occurrence (the same key is uploaded once and reused N-1
+  // times); only the `[stderr]` copy is counted, because the page log also
+  // mirrors each line a second time without the prefix.
+  const texProbeLines = full
+    .split('\n')
+    .filter((l) => l.includes('[stderr]') && l.includes('GFX-TEXPROBE'))
+    .map((l) => l.replace(/^\[stderr\] /, '').trim());
+  const texProbe = texProbeLines.map((l) => {
+    const m4 = /key=(0x[0-9A-Fa-f]+) (\d+)x(\d+) result=(\w+)/.exec(l);
+    return m4
+      ? { key: m4[1], w: Number(m4[2]), h: Number(m4[3]), result: m4[4] }
+      : null;
+  }).filter(Boolean);
+  let texcacheOk = true;
+  if (expectTexcache) {
+    const uploads = texProbe.filter((p) => p.result === 'upload').length;
+    const reuses = texProbe.filter((p) => p.result === 'reuse').length;
+    texcacheOk = uploads >= 1 && reuses >= Math.max(0, repeat - 1);
+    if (!texcacheOk) {
+      console.log(`FAIL: texture cache expected 1 upload + ${repeat - 1} reuse, ` +
+                  `read ${uploads} upload / ${reuses} reuse`);
+    }
+  }
 
   h.writeStats(prefix, state);
   h.writeOut(prefix, 'status.txt', state.tail || '');
@@ -170,6 +249,10 @@ const expectAlpha = Boolean(opts['expect-alpha']);
     depthLines,
     acLines,
     acCounts: acCounts.slice(1),
+    ditherLines,
+    dither,
+    texProbeLines,
+    texProbe,
   });
 
   // The screenshot can catch a later game present over the canvas (the boot's
@@ -178,11 +261,21 @@ const expectAlpha = Boolean(opts['expect-alpha']);
   // that carried the synthetic list.
   const afterMatches = [...full.matchAll(/GFX-AFTER\] flush \d+: canvas after batch nonBlack=(\d+)\//g)];
   const afterLast = afterMatches.length ? Number(afterMatches[afterMatches.length - 1][1]) : 0;
-  const rendered = Boolean((px && px.nonBlack > 0) || afterLast > 0);
+  // Several flushes follow the synthetic batch (the game keeps presenting), and
+  // the last `[GFX-AFTER]` is usually a later game frame with nothing on the
+  // canvas. The test drew if any flush after the batch reported content, or if
+  // an offscreen control's own readback proved its target was written.
+  const afterMax = afterMatches.length
+    ? Math.max(...afterMatches.map((m) => Number(m[1])))
+    : 0;
+  const rendered = Boolean((px && px.nonBlack > 0) || afterMax > 0 ||
+                           (expectDither && ditherOk) || (expectDepth && depthOk) ||
+                           (expectAlpha && alphaOk));
 
   const hitsOk = expectHits === null || fbtexHits === expectHits;
   const ok = rendered && (!expectFbtex || fbtexLines.length > 0) && hitsOk && depthOk &&
-             (!expectAlpha || alphaOk);
+             (!expectAlpha || alphaOk) && (!expectDither || ditherOk) &&
+             (!expectTexcache || texcacheOk);
   console.log('test_draw exported=', r && r.has, 'returned=', r && r.ret, 'flags=', flags);
   console.log('canvas pixels:', px ? JSON.stringify(px) : 'n/a', `after-batch nonBlack=${afterLast}`);
   console.log(`fbtex hits=${fbtexHits} lines=${fbtexLines.length}`);
@@ -198,6 +291,18 @@ const expectAlpha = Boolean(opts['expect-alpha']);
     console.log(`alpha control: threshold/full=${acVerdict(1)} threshold/none=${acVerdict(2)} ` +
                 `dither/partial=${acVerdict(3)}`);
     for (const l of acLines.slice(-3)) console.log('  ' + l);
+  }
+  if (expectDither) {
+    const on = dither[1], off = dither[2];
+    console.log(`dither control: magicsq=${on ? `${on.noDither}/${on.dithered}/${on.other}` : 'missing'} ` +
+                `disable=${off ? `${off.noDither}/${off.dithered}/${off.other}` : 'missing'}`);
+    for (const l of ditherLines.slice(-2)) console.log('  ' + l);
+  }
+  if (expectTexcache) {
+    const uploads = texProbe.filter((p) => p.result === 'upload').length;
+    const reuses = texProbe.filter((p) => p.result === 'reuse').length;
+    console.log(`texture cache control: repeat=${repeat} upload=${uploads} reuse=${reuses}`);
+    for (const l of texProbeLines.slice(0, 4)) console.log('  ' + l);
   }
   await decoder.close().catch(() => {});
   await browser.close().catch(() => {});

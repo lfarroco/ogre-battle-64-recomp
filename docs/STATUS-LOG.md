@@ -2564,3 +2564,23 @@ live under `config/` and `patches/` (session 97 moved them).
   are dropped with `INVALID_OPERATION` (0x0502). No code landed; the next
   experiment is the per-list batch boundary. See
   `docs/HANDOFF-2026-10-19-session181.md`.
+
+- **Session 189**: ported RT64's `G_CD` writeback dither, fixed the session-181
+  texture feedback loop, and keyed tile images by content. The dither control
+  (`testdraw.cjs --flags 1024 --expect-dither`) reads
+  `no_dither=67200 dithered=9600 other=0` on a `G_CD_MAGICSQ` target and
+  `no_dither=76800 dithered=0` on `G_CD_DISABLE`; the pre-fix build read
+  `other=76800` on both because the fill was rejected with
+  `INVALID_OPERATION`. `upload_framebuffer` now unbinds the colour target's
+  texture and every draw binds the 1x1 white texture first; the fill reads
+  `(0.129,0.161,0.192)` with error 0, and a new `[GFX-GLERR]` line reports the
+  first GL error of a flush. The tile-image GL key is `XXH3-64` of the decoded
+  RGBA bytes plus size and wrap fields; the upload loop skips a resident key,
+  so `--flags 2048 --repeat 3` measures `upload=1 reuse=2`, and
+  `ogre_gfx_stats()` reports `tex: cache=N uploads=N reused=N released=N`. An
+  S2DEX2 audit found that OB64 uses only `0xDA`/`0xDC`; `0x03`..`0x0B` now
+  return instead of falling into the F3DEX2 triangle arms. `make web` clean;
+  the dither/fbtex/depth/alpha/cache controls pass. The decode still runs once
+  per display list, and the title logo/copyright and Load Game residuals were
+  not re-measured because every later boot was idle. See
+  `docs/HANDOFF-2026-10-24-session189.md`.

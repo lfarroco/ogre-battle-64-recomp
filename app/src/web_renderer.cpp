@@ -30,6 +30,7 @@
 #include "renderer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -171,6 +172,7 @@ struct RawVertex {
 
 struct LoadedImage {
     uint64_t key = 0;                 // GL texture-cache key; 0 = nothing loaded
+    uint64_t decode_key = 0;          // per-list decode cache: TMEM generation + tile
     uint64_t palette = 0;             // palette generation a CI decode used
     int width = 0, height = 0;        // loaded rect size in texels
     int origin_s = 0, origin_t = 0;   // tile uls/ult in texels (UV origin)
@@ -2124,6 +2126,9 @@ struct TexUpload {
     int tile = 0;   // RDP tile the image was loaded into (diagnostics)
     bool clamp_s = true, clamp_t = true;
     bool bilerp = false;
+    // Test-only: set by `test_draw` under debug flag bit 11, so the upload
+    // loop can report whether the same content key was already resident.
+    bool probe = false;
     std::vector<uint8_t> pixels;
 };
 
@@ -2250,22 +2255,81 @@ struct DrawCmd {
     // bit 9) marks its three rectangles 1..3, and the flush counts the target
     // pixels each one drew and logs `[GFX-AC-TEST]`.
     int ac_probe = 0;
+    // Test-only: the writeback-dither control (`test_draw`, debug flag bit 10).
+    // 1 = G_CD_MAGICSQ target, 2 = G_CD_DISABLE target; the flush reads each
+    // target back and logs `[GFX-DITHER-TEST]`.
+    int dither_probe = 0;
 };
 
-// RT64's Float4ToRGBA16 (`src/shaders/Formats.hlsli`) with the dither value 0
-// and the high-precision (`usesHDR`) coverage rule: RGB rounds through 8 bits
-// and keeps 5, the alpha coverage bit is bit 2 of the 16-bit alpha. When the
-// colour image is a 16-bit float target this is the only quantization between
-// the fragment shader and RDRAM; with the 8-bit fallback the caller has the
-// same value already rounded, and the two agree except at a rounding tie.
-inline uint16_t float4_to_rgba16(float r, float g, float b, float a) {
-    auto c5 = [](float v) {
+// RT64's Float4ToRGBA16 (`src/shaders/Formats.hlsli`) and its writeback dither.
+// RGB rounds through 8 bits, the colour-dither value is added (0..7) and the
+// result keeps 5 bits; the alpha coverage bit is bit 2 of the 16-bit alpha. When
+// the colour image is a 16-bit float target this is the only quantization
+// between the fragment shader and RDRAM; with the 8-bit fallback the caller has
+// the same value already rounded, and the two agree except at a rounding tie.
+//
+// `dither` is `DitherPatternValue`'s 0..7 for this pixel. RT64 adds it before
+// the shift (`FbWriteColorCS.hlsl`), so a value whose low three bits cross a
+// 5-bit boundary moves by one 5-bit step and a value that does not is
+// unchanged. A 32-bit image has no dither (`Float4ToRGBA32`).
+inline uint16_t float4_to_rgba16(float r, float g, float b, float a,
+                                 uint32_t dither = 0) {
+    auto c5 = [dither](float v) {
         const long n = std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f);
-        return static_cast<uint16_t>(std::min(n, 255L) >> 3);
+        return static_cast<uint16_t>(
+            std::min(n + static_cast<long>(dither), 255L) >> 3);
     };
     const long cvg = std::lround(std::clamp(a, 0.0f, 1.0f) * 65535.0f) % 8;
     return static_cast<uint16_t>((c5(r) << 11) | (c5(g) << 6) | (c5(b) << 1) |
                                  ((cvg & 0x4) ? 1 : 0));
+}
+
+// RT64's `DitherPatternBayer` / `DitherPatternMagicSquare` and
+// `DitherPatternValue` (`src/shaders/Formats.hlsli`). The coordinate is the
+// framebuffer pixel, so the same guest texel always gets the same value.
+inline uint32_t dither_pattern_value(uint32_t pattern, int x, int y,
+                                     uint32_t random_seed) {
+    static constexpr uint32_t kBayer[16] = {
+        0, 4, 1, 5,
+        4, 0, 5, 1,
+        3, 7, 2, 6,
+        7, 3, 6, 2,
+    };
+    static constexpr uint32_t kMagicSquare[16] = {
+        0, 6, 1, 7,
+        4, 2, 5, 3,
+        3, 5, 2, 4,
+        7, 1, 6, 0,
+    };
+    const uint32_t index = (static_cast<uint32_t>(y) & 3u) * 4u +
+                           (static_cast<uint32_t>(x) & 3u);
+    switch (pattern) {
+        case 0: return kMagicSquare[index];   // G_CD_MAGICSQ
+        case 1: return kBayer[index];         // G_CD_BAYER
+        case 2: return random_seed & 7u;      // G_CD_NOISE
+        default: return 0;                    // G_CD_DISABLE
+    }
+}
+
+// RT64's `initRand` (`src/shaders/Random.hlsli`). Only `G_CD_NOISE` reads it,
+// with the writeback's seed and the guest texel index, as `FbWriteColorCS.hlsl`
+// does; the two patterns OB64 uses are position-only.
+inline uint32_t dither_init_rand(uint32_t v0, uint32_t v1, uint32_t backoff = 16) {
+    uint32_t s0 = 0;
+    for (uint32_t n = 0; n < backoff; ++n) {
+        s0 += 0x9e3779b9u;
+        v0 += ((v1 << 4) + 0xa341316cu) ^ (v1 + s0) ^ ((v1 >> 5) + 0xc8013ea4u);
+        v1 += ((v0 << 4) + 0xad90777du) ^ (v0 + s0) ^ ((v0 >> 5) + 0x7e95761eu);
+    }
+    return v0;
+}
+
+// RT64 `Framebuffer::bestDitherPattern`: the most-used G_CD index, and the first
+// one on a tie. `G_CD_DISABLE` (3) is index 3, so a framebuffer whose draws all
+// disable dithering gets dither value 0.
+inline uint32_t best_dither_pattern(const std::array<uint32_t, 4>& counts) {
+    return static_cast<uint32_t>(
+        std::max_element(counts.begin(), counts.end()) - counts.begin());
 }
 
 // A GL framebuffer object standing in for one RDP colour image. The guest
@@ -2308,6 +2372,12 @@ struct GlFramebuffer {
     // Non-black pixel count from the most recent writeback, so presentation can
     // report how much colour the target it is about to show actually holds.
     uint32_t last_nonblack = 0;
+    // How many of this target's draws used each G_CD mode (OTHERMODE_H bits
+    // 6-7), for RT64 `Framebuffer::bestDitherPattern`. The writeback applies
+    // the most-used pattern, the way RT64 chooses the pattern for its
+    // `FbWriteColorCS`; the counts are cleared after a writeback (RT64 clears
+    // them at the end of a workload).
+    std::array<uint32_t, 4> dither_patterns{};
 };
 
 // One RDP depth image (`G_SETZIMG`) as a GL renderbuffer. RT64's depth
@@ -2389,6 +2459,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // instead of growing by one texture per tile image per display list.
     size_t texture_cache_size() const { return gl_textures_.size(); }
     size_t texture_uploads() const { return tex_upload_count_; }
+    size_t texture_reused() const { return tex_reused_; }
     size_t texture_released() const { return tex_released_; }
 
     void set_canvas(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE handle, int width, int height) {
@@ -2442,6 +2513,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // IA16 texture after it.
         constexpr uint32_t kFbAcOff = 0x00C78000;
         constexpr uint32_t kAcTexOff = 0x00CA0000;
+        // The writeback-dither control (debug flag bit 10) needs two 320x240
+        // RGBA16 targets, one drawn with G_CD_MAGICSQ and one with
+        // G_CD_DISABLE. They sit after the alpha control's target and texture:
+        // 0x00CC0000..0x00CE5800 and 0x00CF0000..0x00D15800.
+        constexpr uint32_t kFbDitherOnOff = 0x00CC0000;
+        constexpr uint32_t kFbDitherOffOff = 0x00CF0000;
 
         auto put32 = [this](uint32_t off, uint32_t v) {
             // rdram stores words byte-reversed (runtime MEM_W convention).
@@ -2736,6 +2813,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 put32(o, 0xF1000000); put32(o + 4, 0x00340034); o += 8;
             }
         }
+        // The writeback-dither control (debug flag bit 10). Two identical
+        // full-image fills, one with G_CD_MAGICSQ (OTHERMODE_H bits 6-7 = 0) and
+        // one with G_CD_DISABLE (3). The fill colour 0x214D decodes to
+        // (33, 41, 49, 255), and each channel's low three bits are 1, so a
+        // dither of 7 moves every channel one 5-bit step (0x214D -> 0x298F)
+        // while every smaller value leaves the word unchanged. The flush reads
+        // both targets back from RDRAM and counts the two words.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 1024u) != 0) {
+            const uint32_t targets[2] = {kFbDitherOnOff, kFbDitherOffOff};
+            const uint32_t othermode_h[2] = {0u, 3u << 6};   // MAGICSQ, DISABLE
+            for (int i = 0; i < 2; ++i) {
+                put32(o, 0xFF000000 | (2u << 19) | (320 - 1));
+                put32(o + 4, targets[i]); o += 8;
+                put32(o, 0xEF000000 | (othermode_h[i] & 0xFFFFFFu));
+                put32(o + 4, 0); o += 8;
+                put32(o, 0xF7000000); put32(o + 4, 0x214D214Du); o += 8;
+                put32(o, 0xF6000000 | ((319 << 2) << 12) | (239 << 2));
+                put32(o + 4, 0); o += 8;
+            }
+        }
         // G_ENDDL
         put32(o, 0xDF000000); put32(o + 4, 0x00000000); o += 8;
 
@@ -2768,6 +2865,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 if (it->fb_address == kFbAcOff && it->kind == 2 && it->textured) {
                     it->ac_probe = next--;
                 }
+            }
+        }
+        // The dither control's two fills carry markers 1 (MAGICSQ) and 2
+        // (DISABLE), and the flush reads each target back (`[GFX-DITHER-TEST]`).
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 1024u) != 0) {
+            for (DrawCmd& d : ctx.draws) {
+                if (d.fb_address == kFbDitherOnOff) {
+                    d.dither_probe = 1;
+                } else if (d.fb_address == kFbDitherOffOff) {
+                    d.dither_probe = 2;
+                }
+            }
+        }
+        // The texture-cache control marks this list's uploads so the flush can
+        // report whether each content key was uploaded or reused.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 2048u) != 0) {
+            for (TexUpload& t : ctx.tex) {
+                t.probe = true;
             }
         }
         {
@@ -2841,6 +2956,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         } else {
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
         }
+        // Do not leave the colour target's own texture bound: the flush binds
+        // this texture to a sampler unit, and WebGL rejects a draw into a
+        // framebuffer whose texture is still attached to a unit the program
+        // samples (a feedback loop, `INVALID_OPERATION`). Session 181 saw fills
+        // dropped this way; the same target's first draw is the one that hits it.
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
 
     // The key of the depth buffer a draw uses: the depth image address when the
@@ -3187,6 +3308,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
 
         const uint8_t bpt = static_cast<uint8_t>(bytes_per_texel(fb.siz));
+        // RT64 picks the most-used G_CD mode for the whole writeback
+        // (`Framebuffer::copyRenderTargetToNative` -> `NativeTarget::copyToNative`
+        // -> `FbWriteColorCS.hlsl`). The seed advances once per copy, including
+        // the depth copy RT64 makes in the same pass; this renderer has no depth
+        // writeback, and only `G_CD_NOISE` reads the seed.
+        const uint32_t dither_pattern = best_dither_pattern(fb.dither_patterns);
+        const uint32_t dither_seed = dither_random_seed_;
         for (int i = 0; i < rows; ++i) {
             // glReadPixels returns row wy0 first; window row wy is guest row
             // height-1-wy (see upload_framebuffer).
@@ -3198,24 +3326,46 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             for (int x = 0; x < w; ++x) {
                 const uint8_t* t = src + x * 4;
                 const uint32_t off = static_cast<uint32_t>(x) * bpt;
+                uint32_t dither = 0;
+                if (fb.siz != gbi::IM_SIZ_32b) {
+                    // `FbWriteColorCS.hlsl`: the seed is
+                    // `initRand(ditherRandomSeed, dstIndex, 16)` with
+                    // `dstIndex = guest_y * write_width + x`, and the pattern
+                    // value is read at the same guest pixel. Only the NOISE
+                    // pattern consumes the seed, so the two table patterns skip
+                    // the 16-round hash.
+                    const uint32_t dst_index =
+                        static_cast<uint32_t>(gy) * static_cast<uint32_t>(w) +
+                        static_cast<uint32_t>(x);
+                    const uint32_t random_seed =
+                        (dither_pattern == 2)
+                            ? dither_init_rand(dither_seed, dst_index, 16)
+                            : 0u;
+                    dither = dither_pattern_value(dither_pattern, x, gy, random_seed);
+                }
                 if (fb.siz == gbi::IM_SIZ_32b) {
                     dst[(off + 0) ^ 3] = t[0];
                     dst[(off + 1) ^ 3] = t[1];
                     dst[(off + 2) ^ 3] = t[2];
                     dst[(off + 3) ^ 3] = t[3];
                 } else {
-                    // RT64 Float4ToRGBA16 with the dither value 0; the alpha bit
-                    // is the coverage test `(round(a*255) % 8) & 4` in the
-                    // standard format and `(round(a*65535) % 8) & 4` in the
-                    // high-precision one (`usesHDR`). The float source is the
-                    // latter's exact input; the byte source is the former's.
+                    // RT64 Float4ToRGBA16 with this pixel's dither value; the
+                    // alpha bit is the coverage test `(round(a*255) % 8) & 4`
+                    // in the standard format and `(round(a*65535) % 8) & 4` in
+                    // the high-precision one (`usesHDR`). The float source is
+                    // the latter's exact input; the byte source is the former's.
                     uint16_t v;
                     if (fsrc != nullptr) {
                         const float* f = fsrc + x * 4;
-                        v = float4_to_rgba16(f[0], f[1], f[2], f[3]);
+                        v = float4_to_rgba16(f[0], f[1], f[2], f[3], dither);
                     } else {
+                        auto c5 = [dither](uint8_t c) {
+                            return static_cast<uint32_t>(
+                                       std::min<unsigned>(c + dither, 255u)) >>
+                                   3;
+                        };
                         v = static_cast<uint16_t>(
-                            ((t[0] >> 3) << 11) | ((t[1] >> 3) << 6) | ((t[2] >> 3) << 1) |
+                            (c5(t[0]) << 11) | (c5(t[1]) << 6) | (c5(t[2]) << 1) |
                             (((t[3] % 8) & 4) ? 1 : 0));
                     }
                     dst[off ^ 2] = static_cast<uint8_t>(v & 0xFF);
@@ -3223,6 +3373,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 }
             }
         }
+        // RT64 clears the counts when the workload that drew these pixels ends
+        // (`FramebufferManager::resetTracking`); the next writeback starts from
+        // the draws that follow. Keep this writeback's counts for the log.
+        const std::array<uint32_t, 4> dither_counts = fb.dither_patterns;
+        fb.dither_patterns.fill(0);
+        ++dither_random_seed_;
         ++framebuffer_readbacks_;
         if (first_row != nullptr) *first_row = h - 1 - wy1;
         if (last_row != nullptr) *last_row = h - 1 - wy0;
@@ -3238,9 +3394,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         fb.last_nonblack = static_cast<uint32_t>(nz);
         if (framebuffer_readbacks_ <= 8 || (framebuffer_readbacks_ % 500) == 0) {
             OGRE_MILESTONE("GFX-FBREAD",
-                           "fb 0x%06X rows=[%d,%d] nonBlack=%zu/%d meanRGB=%llu",
+                           "fb 0x%06X rows=[%d,%d] nonBlack=%zu/%d meanRGB=%llu "
+                           "dither=%d counts=%u/%u/%u/%u seed=%u",
                            address, h - 1 - wy1, h - 1 - wy0, nz, w * rows,
-                           (unsigned long long)(nz ? sum / nz : 0));
+                           (unsigned long long)(nz ? sum / nz : 0),
+                           (int)dither_pattern, dither_counts[0], dither_counts[1],
+                           dither_counts[2], dither_counts[3], dither_seed);
         }
         return true;
     }
@@ -3745,17 +3904,31 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // Texture uploads.
         {
             for (TexUpload& up : tex_upload_queue_) {
-                GLuint tex = 0;
-                auto it = gl_textures_.find(up.key);
-                if (it != gl_textures_.end()) {
-                    tex = it->second;
-                } else {
-                    glGenTextures(1, &tex);
-                    gl_textures_[up.key] = tex;
+                // The key is a hash of the decoded bytes, so a resident texture
+                // with this key already holds exactly these pixels. Skip the
+                // upload instead of re-issuing `glTexImage2D` on every display
+                // list that reloads the same image.
+                if (gl_textures_.find(up.key) != gl_textures_.end()) {
+                    ++tex_reused_;
+                    if (up.probe) {
+                        OGRE_MILESTONE("GFX-TEXPROBE",
+                                       "key=0x%llX %dx%d result=reuse",
+                                       (unsigned long long)up.key, up.width, up.height);
+                    }
+                    continue;
                 }
+                GLuint tex = 0;
+                glGenTextures(1, &tex);
+                gl_textures_[up.key] = tex;
                 glBindTexture(GL_TEXTURE_2D, tex);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, up.width, up.height, 0, GL_RGBA,
                              GL_UNSIGNED_BYTE, up.pixels.data());
+                ++tex_upload_count_;
+                if (up.probe) {
+                    OGRE_MILESTONE("GFX-TEXPROBE",
+                                   "key=0x%llX %dx%d result=upload",
+                                   (unsigned long long)up.key, up.width, up.height);
+                }
                 // The shader sampler reads this texture with texelFetch and
                 // filters in fp32 itself, so the GL sampler stays point. The
                 // wrap modes are only the `OGRE_TEXF=gl` path's; that path sets
@@ -3782,7 +3955,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                    (unsigned long long)(nz ? sum / nz : 0));
                 }
             }
-            tex_upload_count_ += tex_upload_queue_.size();
             tex_upload_queue_.clear();
         }
 
@@ -4084,6 +4256,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 }
             }
 
+            // A draw into a framebuffer must not sample that framebuffer's own
+            // texture. Bind the 1x1 white fallback to both units before every
+            // draw; a textured draw replaces them below. This is the other half
+            // of the feedback-loop fix in upload_framebuffer: GL rejects a draw
+            // whose program samples a texture attached to the bound framebuffer,
+            // and the target's own texture is the one upload_framebuffer left
+            // bound.
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, white_tex_);
+            glUniform1i(glGetUniformLocation(program_, "u_tex0"), 0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, white_tex_);
+            glUniform1i(glGetUniformLocation(program_, "u_tex1"), 1);
+            glActiveTexture(GL_TEXTURE0);
+
             if (cmd.textured) {
                 // TEXEL0's and TEXEL1's tile images are separate GL textures,
                 // each with its own UV transform (the title sprites take their
@@ -4327,6 +4514,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     bound_fb->max_row = std::max(bound_fb->max_row, std::min(wy, target_height - 1));
                 }
                 bound_fb->last_write_seq = ++framebuffer_write_seq_;
+                // RT64 `FramebufferPair::addGameCall` counts the G_CD mode of
+                // every call that contributes to the pair, and the pair's counts
+                // are added to the colour framebuffer. This renderer has no
+                // separate pair, so each draw's OTHERMODE_H bits 6-7 count
+                // straight into the target it drew into.
+                bound_fb->dither_patterns[(cmd.othermode_h >> 6) & 3u]++;
+            }
+        }
+
+        // A WebGL error here means a draw was rejected (the session-181
+        // feedback loop did this silently: the target's own texture was bound,
+        // and every draw into that framebuffer raised INVALID_OPERATION). Report
+        // it once per flush so a future binding mistake is visible.
+        {
+            const GLenum gl_err = glGetError();
+            if (gl_err != GL_NO_ERROR && gl_errors_logged_ < 16) {
+                ++gl_errors_logged_;
+                OGRE_MILESTONE("GFX-GLERR",
+                               "flush %u: draws=%zu first GL error 0x%04X",
+                               flushed_cmds_, cmds.size(), static_cast<unsigned>(gl_err));
             }
         }
 
@@ -4362,6 +4569,60 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 it = gl_textures_.erase(it);
                 ++tex_released_;
             }
+        }
+
+        // Writeback-dither control (`test_draw`, debug flag bit 10). Each marked
+        // fill's target is read back here, with the pattern the batch counted,
+        // and the two expected 16-bit words are counted. `0x214D` is the
+        // no-dither result of the fill colour; `0x298F` is the same pixel after
+        // a dither of 7 (every channel +1 in its 5-bit field). The MAGICSQ
+        // target must show both, the DISABLE target only the first.
+        for (const DrawCmd& cmd : cmds) {
+            if (cmd.dither_probe == 0) {
+                continue;
+            }
+            auto fit = gl_framebuffers_.find(cmd.fb_address);
+            if (fit == gl_framebuffers_.end()) {
+                OGRE_MILESTONE("GFX-DITHER-TEST",
+                               "target=0x%06X pattern=%d: no framebuffer",
+                               cmd.fb_address,
+                               (int)((cmd.othermode_h >> 6) & 3u));
+                continue;
+            }
+            GlFramebuffer& fb = fit->second;
+            const uint32_t pattern = best_dither_pattern(fb.dither_patterns);
+            int first_row = 0, last_row = 0;
+            const bool wrote =
+                readback_framebuffer(fb, cmd.fb_address, &first_row, &last_row);
+            uint32_t no_dither = 0, with_dither = 0, other = 0;
+            uint16_t sample[4] = {};
+            if (wrote) {
+                for (int gy = first_row; gy <= last_row; ++gy) {
+                    const uint8_t* row =
+                        rdram_ + cmd.fb_address + static_cast<uint32_t>(gy) * fb.row_bytes;
+                    for (int x = 0; x < fb.width; ++x) {
+                        const uint16_t v =
+                            n64h(row, static_cast<int>(static_cast<uint32_t>(x) * 2u));
+                        if (gy == first_row && x < 4) {
+                            sample[x] = v;
+                        }
+                        if (v == 0x214D) {
+                            ++no_dither;
+                        } else if (v == 0x298F) {
+                            ++with_dither;
+                        } else {
+                            ++other;
+                        }
+                    }
+                }
+            }
+            OGRE_MILESTONE("GFX-DITHER-TEST",
+                           "target=0x%06X probe=%d pattern=%d wrote=%d "
+                           "no_dither=%u dithered=%u other=%u rows=[%d,%d] "
+                           "sample=%04X %04X %04X %04X",
+                           cmd.fb_address, cmd.dither_probe, (int)pattern, wrote ? 1 : 0,
+                           no_dither, with_dither, other, first_row, last_row,
+                           sample[0], sample[1], sample[2], sample[3]);
         }
 
         // Presentation: show the VI's scanout buffer on the canvas.
@@ -4865,6 +5126,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned framebuffers_logged_ = 0;
     unsigned framebuffer_readbacks_ = 0;
     unsigned flushed_cmds_ = 0;
+    unsigned gl_errors_logged_ = 0;
     unsigned flush_count_ = 0;
     unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
     uint32_t last_task_data_ptr_ = 0;  // raw t.data_ptr of the last task
@@ -5001,6 +5263,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned presents_logged_ = 0;
     unsigned sync_logged_ = 0;
     uint32_t framebuffer_write_seq_ = 0;
+    // RT64 `State::ditherRandomSeed`: advances once per framebuffer writeback.
+    // Only `G_CD_NOISE` consumes it, but the sequence is kept identical so a
+    // screen that uses the pattern matches RT64's writeback.
+    uint32_t dither_random_seed_ = 0;
     unsigned sync_enter_logged_ = 0;
     // Framebuffer sync handshake. The game thread bumps sync_request_ and waits
     // for sync_done_ to catch up; the main thread performs the writeback.
@@ -5027,7 +5293,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // browser main thread (ogre_gfx_flush -> flush_commands).
     std::vector<DrawCmd> draw_queue_;
     std::vector<TexUpload> tex_upload_queue_;
-    size_t tex_upload_count_ = 0;
+    size_t tex_upload_count_ = 0;   // actual glTexImage2D calls
+    size_t tex_reused_ = 0;         // tile images a resident texture already held
     size_t tex_released_ = 0;   // textures dropped by the per-flush sweep
     // GL-side texture cache (main thread only): key = tile load key. Holds one
     // batch's images; entries no batch references are deleted at the end of
@@ -5495,6 +5762,23 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     }
                     return;
                 }
+                case 0x03:  // no S2DEX2 meaning; 0x03 is F3DEX2's G_CULLDL
+                case 0x04:  // G_SELECT_DL
+                case 0x05:  // G_OBJ_LOADTXTR
+                case 0x06:  // G_OBJ_LDTX_SPRITE
+                case 0x07:  // G_OBJ_LDTX_RECT
+                case 0x08:  // G_OBJ_LDTX_RECT_R
+                case 0x09:  // G_BG_1CYC
+                case 0x0A:  // G_BG_COPY
+                case 0x0B:  // G_OBJ_RENDERMODE
+                    // S2DEX2 commands this renderer does not implement. Falling
+                    // through would decode 0x05/0x06/0x07 as F3DEX2
+                    // G_TRI1/G_TRI2/G_QUAD and draw from the stale vertex
+                    // buffer, and 0x03 as G_CULLDL. No OB64 list reaches any of
+                    // them (the S2DEX2 task's only list builder emits 0xDA/0xDC;
+                    // see docs/HANDOFF-2026-10-24-session189.md), so this is a
+                    // guard against a wrong frame, not a reached behaviour.
+                    return;
                 default:
                     break;
             }
@@ -6493,13 +6777,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // 2-bit texture LUT mode as well as on the TMEM bytes, and both outlive
         // the display list. A G_LOADTLUT in between, or a display list that
         // switches the LUT mode, makes the same tile decode to a different
-        // image, so the key carries the palette generation, the LUT mode and
-        // the TMEM generation (every load shifts the bytes under the tile).
+        // image, so the *decode* key carries the palette generation, the LUT
+        // mode and the TMEM generation (every load shifts the bytes under the
+        // tile). It only dedupes a decode within one display list, where
+        // nothing can have changed; the GL key is content-addressed below.
         const uint32_t lut_mode = (st.othermode_h >> 14) & 3u;
         const bool indexed = (t.fmt == gbi::IM_FMT_CI) && (lut_mode != 0);
         const uint64_t palette_key = indexed ? (tlut_generation_ * 4 + lut_mode) : 0;
-        uint64_t key = tmem_generation_;
-        auto mix = [&key](uint64_t v) { key = (key ^ v) * 0x00000100000001B3ull; };
+        uint64_t decode_key = tmem_generation_;
+        auto mix = [&decode_key](uint64_t v) {
+            decode_key = (decode_key ^ v) * 0x00000100000001B3ull;
+        };
         mix(t.tmem);
         mix(t.line);
         mix(t.fmt);
@@ -6508,7 +6796,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         mix(static_cast<uint64_t>(w));
         mix(static_cast<uint64_t>(h));
         mix(static_cast<uint64_t>(tile));
-        if (t.image_valid && t.image.key == key && t.image.palette == palette_key) {
+        // The GL texture object's wrap state is set at creation and is part of
+        // the content key, so a G_SETTILE that changes cms/cmt/masks/maskt
+        // without a new load must also invalidate the per-list decode cache.
+        mix(t.cms);
+        mix(t.cmt);
+        mix(t.masks);
+        mix(t.maskt);
+        if (t.image_valid && t.image.decode_key == decode_key &&
+            t.image.palette == palette_key) {
             return;   // already decoded and queued for this draw
         }
 
@@ -6523,6 +6819,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         std::vector<uint8_t> pixels;
         decode_tmem_tile(tmem_, t, w, h, static_cast<int>(lut_mode), st.convert_k, pixels);
         g_load_done.fetch_add(1, std::memory_order_relaxed);
+
+        // The GL texture is exactly its decoded RGBA8 bytes, its size, and the
+        // wrap modes set on the texture object at creation. Keying on those
+        // makes an unchanged reload of the same image reuse the resident GL
+        // texture, which is the session-188 open item: the old key started from
+        // `tmem_generation_`, so every display list produced a new key even
+        // when the bytes were identical. Palette and YUV differences are in the
+        // decoded bytes; the per-draw tile origin and filter are uniforms, not
+        // texture state, so they stay out.
+        uint64_t content_key = XXH3_64bits(pixels.data(), pixels.size());
+        auto mix_content = [&content_key](uint64_t v) {
+            content_key = (content_key ^ v) * 0x00000100000001B3ull;
+        };
+        mix_content(static_cast<uint64_t>(w));
+        mix_content(static_cast<uint64_t>(h));
+        mix_content(t.cms);
+        mix_content(t.cmt);
+        mix_content(t.masks);
+        mix_content(t.maskt);
+        if (content_key == 0) {
+            content_key = 1;   // 0 means "no texture" to lookup() and the sweep
+        }
         // OGRE_TEX_TRACE: the colour the decoded image holds. The native
         // renderer prints the same number from the RDRAM bytes through the
         // palette (`OGRE_TEX_TRACE_COLOUR`), so two runs of one screen can be
@@ -6573,7 +6891,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         {
             std::lock_guard<std::mutex> lock(debug_mutex_);
             DebugTex dbg;
-            dbg.key = key;
+            dbg.key = content_key;
             dbg.width = w;
             dbg.height = h;
             dbg.tile = tile;
@@ -6591,10 +6909,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
 
         // One upload per key per display list: a sprite's two triangles share it.
-        if (ctx->uploaded.count(key) == 0) {
-            ctx->uploaded.insert(key);
+        if (ctx->uploaded.count(content_key) == 0) {
+            ctx->uploaded.insert(content_key);
             TexUpload up;
-            up.key = key;
+            up.key = content_key;
             up.width = w;
             up.height = h;
             up.tile = tile;
@@ -6621,7 +6939,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         last_tex_masks_ = t.masks;
         last_tex_maskt_ = t.maskt;
 
-        t.image.key = key;
+        t.image.key = content_key;
+        t.image.decode_key = decode_key;
         t.image.palette = palette_key;
         t.image.width = w;
         t.image.height = h;
@@ -8196,8 +8515,8 @@ const char* ogre_gfx_stats() {
                  "%s\nexec: task=%u cmd=%llu @0x%05X op=0x%02X draws=%u flush_ok=%u flush_skip=%u flushed_cmds=%u"
                  "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X"
                  "\nfbtex: hits=%u (a texture load read a colour image that was still on the GPU)"
-                 "\ntex: cache=%zu uploads=%zu released=%zu (tile images; the cache is swept "
-                 "after every flush)",
+                 "\ntex: cache=%zu uploads=%zu reused=%zu released=%zu (tile images; the "
+                 "cache is swept after every flush)",
                  ogre::g_stats_snapshot,
                  ogre::g_exec_task.load(std::memory_order_relaxed),
                  (unsigned long long)ogre::g_exec_cmd.load(std::memory_order_relaxed),
@@ -8218,6 +8537,7 @@ const char* ogre_gfx_stats() {
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_hits() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_cache_size() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_uploads() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_reused() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_released() : 0u);
     }
     return buf;

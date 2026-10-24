@@ -54,7 +54,24 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-23-session188.md`.
+`docs/HANDOFF-2026-10-24-session189.md`.
+
+Session 189 ported four RT64 behaviours into the browser renderer. The RDRAM
+writeback now applies `G_CD` colour dither (`Float4ToRGBA16` plus
+`DitherPatternValue`), choosing the most-used pattern per colour image the way
+RT64's `Framebuffer::bestDitherPattern` does; a synthetic control reads
+`67200`/`9600` undithered/dithered pixels on a `G_CD_MAGICSQ` target and
+`76800`/`0` on `G_CD_DISABLE`. It fixed the session-181 WebGL feedback loop:
+`upload_framebuffer` no longer leaves the target's texture bound, and every draw
+binds the 1x1 white texture before its own, so fills are no longer rejected with
+`INVALID_OPERATION` (the dither fill read `(0,0,0)` with error 502 before and
+its fill colour with error 0 after). Tile images are keyed by an XXH3-64 of the
+decoded RGBA bytes plus the size and wrap fields, so an unchanged reload reuses
+the resident GL texture; `--flags 2048 --repeat 3` measures one upload and two
+reuses, and `ogre_gfx_stats()` reports `tex: cache=N uploads=N reused=N
+released=N`. An S2DEX2 audit found that OB64 uses only `0xDA`/`0xDC`; the
+remaining `0x03`..`0x0B` now return instead of falling into the F3DEX2 triangle
+arms. See `docs/HANDOFF-2026-10-24-session189.md`.
 
 Session 188 fixed a browser freeze after 2–3 minutes with no input. The WebGL
 renderer's tile-image cache keyed each decoded image by `tmem_generation_`,
@@ -65,9 +82,9 @@ no-input run went from 5,063 live textures / 20.3 MB to 4 live / 0.9 MB (5,871
 created, 5,867 deleted), and a 232 s run held 7 live / 4.4 MB. A 117 s run with
 hardware ANGLE created and deleted 332k textures and held 8 live / 5.6 MB.
 `ogre_gfx_stats()`
-reports `tex: cache=N uploads=N released=N`. `boot.cjs` measures the launcher
-overlay on the session-187 shell (its canvas PNG includes the overlay), so
-`shots.cjs` is the browser render check. See
+reports `tex: cache=N uploads=N reused=N released=N`. `boot.cjs` measures the
+launcher overlay on the session-187 shell (its canvas PNG includes the overlay),
+so `shots.cjs` is the browser render check. See
 `docs/HANDOFF-2026-10-23-session188.md`.
 
 Session 187 replaced the page's debug dump with a game shell: a slim top bar, a
@@ -1992,6 +2009,26 @@ holds the evidence.
    `colorful=294108`, whole frame `7.88/7.18/6.91` (`exact=0.3481`), terrain
    `10.30/7.57/4.62/9.48`, with the same intro-phase caveat. See
    `docs/HANDOFF-2026-10-18-session175.md`.
+   **(x) Session 175's `G_CD` decision is revised: the writeback dither is
+   implemented (session 189).** RT64 applies `G_CD` only in its native-format
+   writeback, and the browser writes back for the game's CPU readback (the njpeg
+   assembly) and for `ogre_sync_framebuffers`. The browser now counts each
+   colour image's `OTHERMODE_H` bits 6-7, picks the most-used pattern the way
+   `Framebuffer::bestDitherPattern` does, and adds `DitherPatternValue` to
+   `Float4ToRGBA16` before the 5-bit shift. The synthetic control reads
+   `67200`/`9600` undithered/dithered on a `G_CD_MAGICSQ` target and
+   `76800`/`0` on `G_CD_DISABLE` (`testdraw.cjs --flags 1024 --expect-dither`).
+   The same session fixed the session-181 texture feedback loop: the target's
+   own texture is unbound after `upload_framebuffer`, and a white texture is
+   bound before every draw, so the synthetic fill reads its fill colour with no
+   GL error instead of `(0,0,0)` with `INVALID_OPERATION`. Tile images are now
+   keyed by content (`XXH3-64` of the decoded RGBA bytes plus size and wrap
+   fields); `testdraw.cjs --flags 2048 --repeat 3` measures one upload and two
+   reuses. The S2DEX2 audit found only `0xDA`/`0xDC` used; `0x03`..`0x0B` now
+   return instead of falling into the F3DEX2 triangle arms. The decode still
+   runs once per display list, and the title logo/copyright and Load Game
+   residuals were not re-measured because every later boot was idle. See
+   `docs/HANDOFF-2026-10-24-session189.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and
