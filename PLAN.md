@@ -2025,10 +2025,14 @@ holds the evidence.
    keyed by content (`XXH3-64` of the decoded RGBA bytes plus size and wrap
    fields); `testdraw.cjs --flags 2048 --repeat 3` measures one upload and two
    reuses. The S2DEX2 audit found only `0xDA`/`0xDC` used; `0x03`..`0x0B` now
-   return instead of falling into the F3DEX2 triangle arms. The decode still
-   runs once per display list, and the title logo/copyright and Load Game
-   residuals were not re-measured because every later boot was idle. See
-   `docs/HANDOFF-2026-10-24-session189.md`.
+   return instead of falling into the F3DEX2 triangle arms. The title
+   logo/copyright residual is closed as fog phase: two native logo frames 0.25 s
+   apart differ by `7.01/7.03/8.77` in the logo band and `9.78/9.78/10.19` in
+   the copyright band, more than the browser-vs-native pair
+   (`4.33/4.37/5.39`, `6.09/6.08/6.35`) and with the same signed direction. The
+   decode still runs once per display list, and the Load Game white frame has
+   no surviving capture (session 169's `meanRGB=255` is 85 per channel, not
+   white). See `docs/HANDOFF-2026-10-24-session189.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

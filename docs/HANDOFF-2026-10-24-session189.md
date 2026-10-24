@@ -10,7 +10,8 @@ RT64's own renderer or starting a WebGPU backend (session 189 question).
 
 ## Result
 
-Four changes are in the tree.
+Four changes are in the tree, and one recorded residual is closed as a
+measurement artefact.
 
 1. **`G_CD` colour dither at the RDRAM writeback**, ported from RT64's
    `shared/rt64_framebuffer_pair.cpp:42-44`, `hle/rt64_framebuffer.cpp:231-232`,
@@ -45,12 +46,19 @@ Four changes are in the tree.
    sweep still keeps only the keys the batch names, but a key named by
    consecutive batches now survives and is reused.
 
-4. **S2DEX2 opcode guard.** An audit (`docs/HANDOFF-2026-10-24-session189.md`
-   §5) found that OB64's only S2DEX2 list builder emits `0xDA`/`0xDC`; the
-   implemented `0x01`/`0x02`/`0xE4` are unexercised, and `0x05`/`0x06`/`0x07`
-   used to fall through to the F3DEX2 `TRI1`/`TRI2`/`QUAD` arms. The S2DEX2 arm
-   now returns for `0x03`..`0x0B`, so a future list cannot draw from stale
-   vertices. No reached screen changes.
+4. **S2DEX2 opcode guard.** An audit (this file, §6) found that OB64's only
+   S2DEX2 list builder emits `0xDA`/`0xDC`; the implemented `0x01`/`0x02`/`0xE4`
+   are unexercised, and `0x05`/`0x06`/`0x07` used to fall through to the F3DEX2
+   `TRI1`/`TRI2`/`QUAD` arms. The S2DEX2 arm now returns for `0x03`..`0x0B`, so
+   a future list cannot draw from stale vertices. No reached screen changes.
+
+5. **The title logo/copyright residual is the fog animation phase.** A
+   native-only series shows two native logo frames 0.25 s apart differ by
+   `7.01/7.03/8.77` in the logo band and `9.78/9.78/10.19` in the copyright
+   band, with the same signed pattern as the browser-vs-native pair
+   (`4.33/4.37/5.39` and `6.09/6.08/6.35`). The browser is closer to native
+   than two native frames a quarter second apart, so session 175's
+   `5.32`/`8.49` is fog phase and not a renderer gap (this file, §5).
 
 ## Evidence
 
@@ -127,9 +135,48 @@ the cache was not re-captured: every natural and forced boot in the later part
 of the session landed on the known idle trajectory (`tasks=0`, scene `0x0000`,
 no display list after the boot blanking). The page's own `[web:gfx]` line and
 `docs/HANDOFF-2026-09-11-session21.md` name that as a game/runtime pacing
-stall. It is not a renderer fault, and no post-cache game frame is claimed.
+stall. The host was loaded during those attempts: `uptime` read load averages
+`28.64 20.21 15.40` at 17:35, with Steam, Chrome and Electron processes on the
+machine. A 4-attempt, 80 s natural-title run and a 4-attempt forced-title run
+both failed the same way under that load. It is not a renderer fault, and no
+post-cache game frame is claimed.
 
-### 5. S2DEX2 audit
+### 5. The title logo/copyright residual is the fog animation phase
+
+Session 175 left the title logo band at `5.32` and the copyright band at `8.49`
+mean absolute difference against native, with the clouds at `0.07`. A read-only
+subagent localised the draws to the two `OGRE_FOG`-repaired fog groups
+(`/tmp/p186force10-pagelog.txt:146,171-178`: the logo wrap and the
+bottom-of-screen sweep) and showed a signed, contrast-proportional error. The
+mechanism is the fog overlay's scroll phase, not a renderer difference.
+
+A native-only series measures the phase. `build-app/ogrebattle64` with
+`OGRE_SCENE=title OGRE_SPEED=1 OGRE_CAPTURE_TARGET=/tmp/w189/nat2/t
+OGRE_CAPTURE_EVERY_MS=500 OGRE_EXIT_AFTER_MS=60000` captured the logo page.
+Two frames from that one run, 15 presents (about 0.25 s) apart:
+
+| band | native `t.1078` vs `t.1093` | native `t.1078` vs `t.1186` |
+|---|---|---|
+| logo | `meanAbs [7.01, 7.03, 8.77]`, signed `[+3.90, +1.95, -3.82]` | `[11.40, 11.37, 14.00]`, signed `[+6.57, +3.36, -6.24]` |
+| copyright | `[9.78, 9.78, 10.19]`, signed `[-5.72, -5.44, -6.26]` | `[16.01, 16.01, 16.65]`, signed `[-9.43, -8.95, -10.31]` |
+
+The browser-vs-native pair measured from
+`docs/proofs/web-title-forced-pair-175.png` is smaller than the native's own
+0.25 s difference: logo `[4.33, 4.37, 5.39]`, signed `[+2.32, +1.19, -2.19]`;
+copyright `[6.09, 6.08, 6.35]`, signed `[-2.98, -2.77, -3.16]`. The signed
+direction matches, and the browser/native phase is closer than two native
+frames a quarter second apart. The `5.32`/`8.49` bands are therefore within the
+native's own frame-to-frame fog variation and are not evidence of a renderer
+gap. Numbered rows in `docs/proofs/web-title-forced-pair-175.png` are 2x
+panels: browser at `(0,484)`, native at `(644,484)`, 638x478 each; the
+`320x240` native targets use half those row numbers (logo `55..110`, copyright
+`196..222`).
+
+The same caveat applies to the mission's `7.32` and the tutorial's `0.22`/`0.30`
+(session 174's open item 1): those are different fog/phase or cursor-blink
+moments, not frame-locked pairs.
+
+### 6. S2DEX2 audit
 
 The audit was a read-only subagent task; its findings are summarized here.
 
@@ -176,8 +223,23 @@ code, ROM data or submodule was touched.
   computed from the decoded bytes, so it cannot skip the decode itself; a
   pre-decode TMEM hash (the shape in `tools/RT64/src/common/rt64_tmem_hasher.h`)
   would close that. The GL upload and object churn are closed.
-- The title logo/copyright band residual (session 175's `5.32`/`8.49`) and the
-  Load Game white frame were not re-measured. Every boot in the later part of
-  the session was idle, and no frame-locked pair was produced.
+- The per-flush sweep keeps only the current batch's keys, so a texture used on
+  alternating frames is evicted in the gap and uploaded again. RT64 keeps a
+  texture for a per-frame age window (`render/rt64_texture_cache.cpp:328-375`);
+  a bounded keep window is the next cache improvement, and it needs a byte cap
+  so an animated screen cannot retain every frame's images.
+- The Load Game white frame has no surviving capture. `/tmp/w174` and `/tmp/w175`
+  are gone, nothing under `/tmp` or `debug/out` contains `0x0012` or
+  `0x228080`, and the only Load Game still in the tree
+  (`docs/proofs/web-mission-baseline.png`) is the settled prompt screen. The
+  candidate the code supports is the game's own white plate drawn into the
+  heap colour image at `0x228080` (session 170's dump found `0xFFFD` there),
+  presented as its own frame because the browser presents after every batch.
+  The measurement that separates that from a texture-cache miss or a presenter
+  fault is in the subagent report: a dense capture of the save route comparing
+  `[GFX-AFTER] meanRGB=` (the canvas) against `[GFX-PRESENT] nonBlack=` (the
+  target). No fix is justified before that capture. Session 169's
+  "`meanRGB=255` means a fully white image" is a misreading of the counter; the
+  mean is over R+G+B, so 255 is 85 per channel.
 - `0x01`/`0x02`/`0xE4` S2DEX2 remain implemented/logged but unexercised; the
   rest of the opcode set is unimplemented and now guarded.

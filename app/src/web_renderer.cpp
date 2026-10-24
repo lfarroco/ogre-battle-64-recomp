@@ -3327,7 +3327,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint8_t* t = src + x * 4;
                 const uint32_t off = static_cast<uint32_t>(x) * bpt;
                 uint32_t dither = 0;
-                if (fb.siz != gbi::IM_SIZ_32b) {
+                // RT64 `Float4ToUINT` passes the dither only to
+                // `Float4ToUINT16` (`FbCommon.hlsli:144-154`); the 8-bit and
+                // 32-bit arms ignore it. OB64's colour images are 16-bit.
+                if (fb.siz == gbi::IM_SIZ_16b) {
                     // `FbWriteColorCS.hlsl`: the seed is
                     // `initRand(ditherRandomSeed, dstIndex, 16)` with
                     // `dstIndex = guest_y * write_width + x`, and the pattern

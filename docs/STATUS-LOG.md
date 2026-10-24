@@ -2580,7 +2580,10 @@ live under `config/` and `patches/` (session 97 moved them).
   `ogre_gfx_stats()` reports `tex: cache=N uploads=N reused=N released=N`. An
   S2DEX2 audit found that OB64 uses only `0xDA`/`0xDC`; `0x03`..`0x0B` now
   return instead of falling into the F3DEX2 triangle arms. `make web` clean;
-  the dither/fbtex/depth/alpha/cache controls pass. The decode still runs once
-  per display list, and the title logo/copyright and Load Game residuals were
-  not re-measured because every later boot was idle. See
+  the dither/fbtex/depth/alpha/cache controls pass. The title logo/copyright
+  residual is closed as fog phase: two native logo frames 0.25 s apart differ
+  by `7.01/7.03/8.77` (logo) and `9.78/9.78/10.19` (copyright), more than the
+  browser-vs-native pair (`4.33/4.37/5.39`, `6.09/6.08/6.35`) and with the same
+  signed direction. The decode still runs once per display list, and the Load
+  Game white frame has no surviving capture. See
   `docs/HANDOFF-2026-10-24-session189.md`.
