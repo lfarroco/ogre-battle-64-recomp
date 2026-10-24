@@ -2036,8 +2036,10 @@ holds the evidence.
    missing party. The unit sprites' `OTHERMODE_L` has alpha compare none, so
    the feedback fix is the change that can restore a rejected draw; the pre-189
    build was not re-run for a one-variable proof. The decode still runs once per
-   display list, and the Load Game white frame has no surviving capture
-   (session 169's `meanRGB=255` is 85 per channel, not white). See
+   display list. The Load Game white frame did not reproduce in a 4 Hz capture
+   of the transition: shots 0-2 are the Load Game page, shot 3 the switch, and
+   shots 4-19 the mission map, none white; if it exists it is shorter than
+   250 ms, and session 169's `meanRGB=255` is 85 per channel, not white. See
    `docs/HANDOFF-2026-10-24-session189.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):

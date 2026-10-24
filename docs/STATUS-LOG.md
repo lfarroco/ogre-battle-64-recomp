@@ -2589,5 +2589,6 @@ live under `config/` and `patches/` (session 97 moved them).
   (`docs/proofs/web-mission-party-session189.png`), against session 176's
   missing party; the unit sprites' `OTHERMODE_L` has alpha compare none, so the
   feedback fix is the change that can restore a rejected draw. The decode still
-  runs once per display list, and the Load Game white frame has no surviving
-  capture. See `docs/HANDOFF-2026-10-24-session189.md`.
+  runs once per display list. The Load Game white frame did not reproduce in a
+  4 Hz capture of the transition (20 shots, none white); if it exists it is
+  shorter than 250 ms. See `docs/HANDOFF-2026-10-24-session189.md`.

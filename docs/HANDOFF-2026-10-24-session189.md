@@ -242,6 +242,29 @@ the fix removes that rejection. The pre-189 build was not re-run for an A/B, so
 this is the mechanism most consistent with the change and the draw state, not a
 one-variable proof.
 
+### 8. The Load Game white frame did not reproduce at 4 Hz
+
+Session 175 recorded "the Load Game screen is drawn white in the browser before
+its content arrives" and attributed it to a session-174 item that does not
+contain it. A dense capture of the same transition shows no white frame:
+
+```
+node debug/probes/atmark.cjs --wait 'id=0x0012' --shots 20 --gap 250 \
+  --timeout 240 --out /tmp/w189-loadgame \
+  --url 'http://127.0.0.1:8931/app/web/index.html?OGRE_SAVE=assets/escort_suspend.bin&OGRE_SCENE=title&OGRE_SCENE_LOG=1&OGRE_TAP_MS=4000&OGRE_TAP_SCENE_BUTTON=title:start:6,0x12:a:6'
+```
+
+The 20 shots cover five seconds after the scene-`0x12` marker. Shots 0-2 are the
+title/Load Game page (`nonBlack=304936`, `colorful=292244`), shot 3 is the
+switch (`304964`/`227852`), and shots 4-19 are the mission map field
+(`303208`/`240384`). No shot is white; the lowest `colorful` is `227852` of
+305602 pixels. The white frame, if it exists, is shorter than the 250 ms sample
+interval. The candidate the code supports is still the game's own white plate
+drawn into the heap colour image at `0x228080` (session 170's dump found
+`0xFFFD` there), not a renderer fill, but a 60 Hz in-page capture is needed to
+settle it. No fix was made. Session 169's "`meanRGB=255` means a fully white
+image" is a misreading; the mean is over R+G+B, so 255 is 85 per channel.
+
 ## Files changed
 
 | file | change |
@@ -283,19 +306,15 @@ code, ROM data or submodule was touched.
   texture for a per-frame age window (`render/rt64_texture_cache.cpp:328-375`);
   a bounded keep window is the next cache improvement, and it needs a byte cap
   so an animated screen cannot retain every frame's images.
-- The Load Game white frame has no surviving capture. `/tmp/w174` and `/tmp/w175`
-  are gone, nothing under `/tmp` or `debug/out` contains `0x0012` or
-  `0x228080`, and the only Load Game still in the tree
-  (`docs/proofs/web-mission-baseline.png`) is the settled prompt screen. The
-  candidate the code supports is the game's own white plate drawn into the
-  heap colour image at `0x228080` (session 170's dump found `0xFFFD` there),
-  presented as its own frame because the browser presents after every batch.
-  The measurement that separates that from a texture-cache miss or a presenter
-  fault is in the subagent report: a dense capture of the save route comparing
-  `[GFX-AFTER] meanRGB=` (the canvas) against `[GFX-PRESENT] nonBlack=` (the
-  target). No fix is justified before that capture. Session 169's
-  "`meanRGB=255` means a fully white image" is a misreading of the counter; the
-  mean is over R+G+B, so 255 is 85 per channel.
+- The Load Game white frame was not reproduced in a 4 Hz capture of the
+  transition (§8): shots 0-2 are the Load Game page, shot 3 the switch, shots
+  4-19 the mission map, and none is white. If it exists it is shorter than
+  250 ms. A 60 Hz in-page `canvas.toDataURL` capture around the scene-`0x12`
+  marker is the measurement that would settle it; no fix is justified before
+  that. The candidate the code supports is the game's own white plate at
+  `0x228080` (session 170's `0xFFFD` dump), presented as its own frame. Session
+  169's "`meanRGB=255` means a fully white image" is a misreading of the
+  counter; the mean is over R+G+B, so 255 is 85 per channel.
 - `0x01`/`0x02`/`0xE4` S2DEX2 remain implemented/logged but unexercised; the
   rest of the opcode set is unimplemented and now guarded.
 - The mission party capture is a visual check at one map-field phase, not a
