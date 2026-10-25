@@ -183,6 +183,29 @@ drives the forced title -> Load Game -> mission route without wall-clock tuning.
 `OGRE_TAP_SCENE`/`OGRE_TAP_NOT_SCENE` remain native-only. Only the tap knobs are
 JS-side; they drive the same `ogre_input_set` the keyboard does.
 
+### The browser options overlay
+
+Esc, or the topbar Options button, opens the browser's version of the native Esc
+panel: MAIN, MODS (disabled), CONTROLS, SETTINGS and DEBUG. The `ogreUI` shell
+does not need a second window; the panel is a fixed overlay inside `#stage`, so
+it stays visible when WINDOW enters browser fullscreen. Keyboard and pad drive it
+(Up/Down, Left/Right, Enter/Space, Tab, pad D-pad/A/B, LB/RB switch tab).
+
+GAME SPEED, WIDESCREEN and MOUSE ENABLED are the shared `settings.cfg` values:
+`settings.cpp` is in the wasm target, `main_web.cpp` calls
+`load_settings("/ogre")` before `recomp::start`, and `web_settings.cpp` exports
+the getters/setters (`_ogre_web_settings_*`). CONTROLS is JavaScript because the
+browser input path is JavaScript; its 14 rows persist in localStorage. SOUNDS and
+VOLUME are the page AudioWorklet gain (muted by default, `?audio` starts
+enabled). The DEBUG tab reads `_ogre_web_chaos_frame` and
+`_ogre_web_active_scene`.
+
+WIDESCREEN sets a 16:9 CSS box on `#game-canvas` only while
+`_ogre_web_widescreen_expand` is 1 (mission `0x03`, dialogue `0x0D`, an
+HD-background scene, or `OGRE_WS_SCENES`), and the renderer counter-scales the
+projection x row by 3/4 for that pass. RESOLUTION and MSAA appear only when the
+native `OGRE_DISPLAY_EXPERIMENTS` gate is on, disabled as "NATIVE RENDERER ONLY".
+
 `OGRE_TEX_TRACE=1` prints the browser's `[GFX-TEXTRACE]` line for each textured
 rectangle, and it takes the native renderer's `OGRE_TEX_TRACE_AFTER_MS` /
 `OGRE_TEX_TRACE_MS` window (milliseconds since the runtime started). Without the
@@ -2389,8 +2412,12 @@ Both values are saved at `<config>/settings.cfg` (`sounds = off|on`,
 `volume = <0..100>`). `OGRE_SOUNDS` and `OGRE_VOLUME` override the file for one
 run without writing it, the same rule as `OGRE_SPEED`. A file written before the
 rows existed has neither key and loads as `ON` / `100`, which is what the app did
-before them. The browser build does not read `settings.cfg` and has no settings
-UI, so `app/src/web_platform.cpp` still plays at full volume.
+before them. The browser build also reads `<config>/settings.cfg` for GAME SPEED,
+WIDESCREEN and MOUSE ENABLED (`settings.cpp` is compiled into the wasm target and
+`main_web.cpp` calls `load_settings("/ogre")` before `recomp::start`). Its
+SOUNDS/VOLUME rows are different: the browser's audio path is the page's
+AudioWorklet, which starts muted unless `?audio` is in the URL and takes its gain
+from the overlay (session 191).
 
 Proofs: `native-launcher-settings.png`, `native-launcher-settings-experiments.png`
 and `native-overlay-settings.png` (the tab in the launcher, the same tab with the

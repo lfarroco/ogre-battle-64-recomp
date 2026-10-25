@@ -275,6 +275,8 @@ if (EMSCRIPTEN)
     set(OGRE_APP_SOURCES
         src/main_web.cpp
         src/web_platform.cpp
+        src/web_settings.cpp
+        src/settings.cpp
         src/rsp.cpp
         src/overlays.cpp
         src/bank_overlays.cpp
@@ -483,7 +485,7 @@ if (EMSCRIPTEN)
         "-sUSE_WEBGL2=1"
         "-sMAX_WEBGL_VERSION=2"
         
-        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_ogre_gfx_debug_tex,_ogre_gfx_debug_tex_count,_ogre_gfx_debug_last_tex,_ogre_gfx_debug_flags,_ogre_set_trace_enabled,_ogre_send_prnmi,_malloc,_free,_main"
+        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_web_settings_game_speed,_ogre_web_settings_set_game_speed,_ogre_web_settings_widescreen,_ogre_web_settings_set_widescreen,_ogre_web_settings_mouse,_ogre_web_settings_set_mouse,_ogre_web_settings_display_experiments,_ogre_web_chaos_frame,_ogre_web_active_scene,_ogre_web_widescreen_expand,_ogre_web_mouse_move,_ogre_web_mouse_click,_ogre_web_mouse_leave,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_ogre_gfx_debug_tex,_ogre_gfx_debug_tex_count,_ogre_gfx_debug_last_tex,_ogre_gfx_debug_flags,_ogre_set_trace_enabled,_ogre_send_prnmi,_malloc,_free,_main"
         # Session-16 diagnostic: keep C function names in the wasm so worker
         # crash stacks identify the faulting game/runtime function. Remove
         # before any release (costs size).

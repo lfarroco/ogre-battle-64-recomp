@@ -230,6 +230,7 @@
   var pollTimer = null;
   var bootStarted = false;
   var bootStartTime = 0;
+  var loadedRomName = "";
   var audioContext = null;
 
   // The shell (index.html) owns the chrome, the status pill and the launcher.
@@ -282,7 +283,935 @@
     var m = new RegExp("(^|[?&])" + name + "=([^&]*)(&|$)").exec(window.location.search);
     return m ? decodeURIComponent(m[2]) : null;
   }
-  var audioEnabled = urlFlag("audio") === true;
+  // --- The Esc overlay's settings, bindings and audio --------------------------
+  //
+  // The native build opens a panel over the game (app/src/overlay.cpp) with
+  // MAIN, CONTROLS, SETTINGS and DEBUG. The browser has the same tabs. SETTINGS
+  // reads and writes the shared C++ settings module through the
+  // `_ogre_web_settings_*` exports, so it is the same `settings.cfg` the native
+  // port uses (GAME SPEED, WIDESCREEN, MOUSE ENABLED). CONTROLS has to live in
+  // JavaScript because the browser input path is JavaScript; its bindings are
+  // kept in localStorage. SOUNDS/VOLUME control the page's AudioWorklet, and
+  // WINDOW is the browser's Fullscreen API. DEBUG reads the live Chaos Frame
+  // byte through `_ogre_web_chaos_frame`.
+
+  var WEB_CONTROLS_KEY = "ogre.web.controls.v1";
+  var WEB_AUDIO_KEY = "ogre.web.audio.v1";
+
+  function readStoredJson(key, fallback) {
+    try {
+      var raw = window.localStorage.getItem(key);
+      if (!raw) {
+        return fallback;
+      }
+      var value = JSON.parse(raw);
+      return value === null || value === undefined ? fallback : value;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function writeStoredJson(key, value) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      // Storage can be disabled (private mode, a file:// page). The setting
+      // still applies for this page; only persistence is lost.
+    }
+  }
+
+  // Pad sources use the browser's Standard Gamepad indices, including the two
+  // triggers and Guide, so the CONTROLS tab can bind every button the browser
+  // reports. A right-stick direction is an axis source.
+  var PAD_BUTTON_LABELS = [
+    "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Back", "Start",
+    "L-Stick", "R-Stick", "D-Up", "D-Down", "D-Left", "D-Right", "Guide"
+  ];
+
+  // The same fourteen N64 rows and field descriptions as `input_map.cpp`.
+  var N64_BUTTONS = [
+    { name: "A", bit: 0x8000, field: "Selects the highlighted object.", key: "KeyX", pad: { type: "button", index: 0 } },
+    { name: "B", bit: 0x4000, field: "Cancels a selection.", key: "KeyZ", pad: { type: "button", index: 1 } },
+    { name: "Z", bit: 0x2000, field: "No field action listed.", key: "KeyC", pad: { type: "button", index: 10 } },
+    { name: "START", bit: 0x1000, field: "Pauses the game.", key: "Enter", pad: { type: "button", index: 9 } },
+    { name: "L", bit: 0x0020, field: "No field action listed.", key: "KeyQ", pad: { type: "button", index: 4 } },
+    { name: "R", bit: 0x0010, field: "Brings up the action menu.", key: "KeyE", pad: { type: "button", index: 5 } },
+    { name: "D-UP", bit: 0x0800, field: "Moves the cursor.", key: "ArrowUp", pad: { type: "button", index: 12 } },
+    { name: "D-DOWN", bit: 0x0400, field: "Moves the cursor.", key: "ArrowDown", pad: { type: "button", index: 13 } },
+    { name: "D-LEFT", bit: 0x0200, field: "Moves the cursor.", key: "ArrowLeft", pad: { type: "button", index: 14 } },
+    { name: "D-RIGHT", bit: 0x0100, field: "Moves the cursor.", key: "ArrowRight", pad: { type: "button", index: 15 } },
+    { name: "C-UP", bit: 0x0008, field: "Raises the camera angle.", key: "KeyI", pad: { type: "button", index: 2 } },
+    { name: "C-DOWN", bit: 0x0004, field: "Lowers the camera angle.", key: "KeyK", pad: { type: "button", index: 3 } },
+    { name: "C-LEFT", bit: 0x0002, field: "Toggles the overview map.", key: "KeyJ", pad: { type: "none" } },
+    { name: "C-RIGHT", bit: 0x0001, field: "Toggles scroll modes, and pauses the game while held.", key: "KeyL", pad: { type: "none" } }
+  ];
+
+  var KEY_LABELS = {
+    Enter: "Enter", NumpadEnter: "Num Enter", Space: "Space", Tab: "Tab",
+    ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    Backspace: "Backspace", Delete: "Delete", Escape: "Esc",
+    ShiftLeft: "L-Shift", ShiftRight: "R-Shift", ControlLeft: "L-Ctrl",
+    ControlRight: "R-Ctrl", AltLeft: "L-Alt", AltRight: "R-Alt",
+    Backquote: "`", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]",
+    Backslash: "\\", Semicolon: ";", Quote: "'", Comma: ",", Period: ".",
+    Slash: "/", CapsLock: "Caps", Home: "Home", End: "End", PageUp: "PgUp",
+    PageDown: "PgDn", Insert: "Insert", NumLock: "Num", ScrollLock: "Scroll",
+    PrintScreen: "PrtSc", Pause: "Pause", ContextMenu: "Menu"
+  };
+
+  function keyLabel(code) {
+    if (!code) {
+      return "-";
+    }
+    if (KEY_LABELS[code]) {
+      return KEY_LABELS[code];
+    }
+    if (/^Key[A-Z]$/.test(code)) {
+      return code.slice(3);
+    }
+    if (/^Digit[0-9]$/.test(code)) {
+      return code.slice(5);
+    }
+    if (/^Numpad[0-9]$/.test(code)) {
+      return "Num " + code.slice(6);
+    }
+    var fn = /^F([0-9]{1,2})$/.exec(code);
+    if (fn) {
+      return "F" + fn[1];
+    }
+    return code;
+  }
+
+  function clonePad(pad) {
+    if (!pad || pad.type === "none") {
+      return { type: "none" };
+    }
+    if (pad.type === "axis") {
+      return { type: "axis", axis: pad.axis, dir: pad.dir };
+    }
+    return { type: "button", index: pad.index };
+  }
+
+  function padSourceLabel(pad) {
+    if (!pad || pad.type === "none") {
+      return "-";
+    }
+    if (pad.type === "axis") {
+      if (pad.axis === 3) {
+        return pad.dir < 0 ? "R-Stick Up" : "R-Stick Down";
+      }
+      if (pad.axis === 2) {
+        return pad.dir < 0 ? "R-Stick Left" : "R-Stick Right";
+      }
+      return "-";
+    }
+    var label = PAD_BUTTON_LABELS[pad.index];
+    return label === undefined ? "-" : label;
+  }
+
+  function validPad(pad) {
+    if (!pad || pad.type === "none") {
+      return { type: "none" };
+    }
+    if (pad.type === "button" && Number.isInteger(pad.index) && pad.index >= 0 &&
+        pad.index < PAD_BUTTON_LABELS.length) {
+      return { type: "button", index: pad.index };
+    }
+    if (pad.type === "axis" && (pad.axis === 2 || pad.axis === 3) &&
+        (pad.dir === -1 || pad.dir === 1)) {
+      return { type: "axis", axis: pad.axis, dir: pad.dir };
+    }
+    return { type: "none" };
+  }
+
+  function defaultBindings() {
+    return N64_BUTTONS.map(function (button) {
+      return { key: button.key, pad: clonePad(button.pad) };
+    });
+  }
+
+  function loadBindings() {
+    var stored = readStoredJson(WEB_CONTROLS_KEY, null);
+    var out = defaultBindings();
+    if (!Array.isArray(stored) || stored.length !== N64_BUTTONS.length) {
+      return out;
+    }
+    for (var i = 0; i < out.length; i++) {
+      var row = stored[i];
+      if (!row || typeof row !== "object") {
+        continue;
+      }
+      if (typeof row.key === "string" || row.key === null) {
+        out[i].key = row.key;
+      }
+      if (row.pad !== undefined) {
+        out[i].pad = validPad(row.pad);
+      }
+    }
+    return out;
+  }
+
+  var inputBindings = loadBindings();
+  updateInputHint();
+
+  function saveBindings() {
+    writeStoredJson(WEB_CONTROLS_KEY, inputBindings);
+  }
+
+  function resetBindings() {
+    inputBindings = defaultBindings();
+    saveBindings();
+    updateInputHint();
+  }
+
+  function updateInputHint() {
+    var el = document.getElementById("input-hint");
+    if (!el) {
+      return;
+    }
+    function keyFor(name) {
+      for (var i = 0; i < N64_BUTTONS.length; i++) {
+        if (N64_BUTTONS[i].name === name) {
+          return keyLabel(inputBindings[i].key);
+        }
+      }
+      return "-";
+    }
+    el.textContent = keyFor("A") + " A · " + keyFor("B") + " B · " +
+                     keyFor("START") + " Start · " +
+                     keyFor("D-UP") + "/" + keyFor("D-DOWN") + "/" +
+                     keyFor("D-LEFT") + "/" + keyFor("D-RIGHT") + " Move";
+  }
+
+  var webAudioSettings = readStoredJson(WEB_AUDIO_KEY, {});
+  if (urlFlag("audio") !== null) {
+    webAudioSettings.enabled = urlFlag("audio") === true;
+  }
+  if (typeof webAudioSettings.enabled !== "boolean") {
+    webAudioSettings.enabled = false;
+  }
+  if (typeof webAudioSettings.volume !== "number" || !isFinite(webAudioSettings.volume)) {
+    webAudioSettings.volume = 100;
+  }
+  webAudioSettings.volume = Math.max(0, Math.min(100, Math.round(webAudioSettings.volume)));
+  var audioEnabled = webAudioSettings.enabled;
+  var audioVolume = webAudioSettings.volume;
+
+  function saveAudioSettings() {
+    writeStoredJson(WEB_AUDIO_KEY, { enabled: audioEnabled, volume: audioVolume });
+  }
+
+  // The fullscreen state is the browser's, not a saved native setting: a page
+  // cannot enter fullscreen without a user gesture. The row reflects the live
+  // state and toggling it calls the same button the chrome uses.
+  function browserFullscreen() {
+    return !!document.fullscreenElement;
+  }
+
+  function wasmInt(name, fallback) {
+    if (!moduleReady() || typeof Module[name] !== "function") {
+      return fallback;
+    }
+    try {
+      return Module[name]();
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function settingsGameSpeed() {
+    return wasmInt("_ogre_web_settings_game_speed", 1);
+  }
+  function settingsWidescreen() {
+    return wasmInt("_ogre_web_settings_widescreen", 0) !== 0;
+  }
+  function settingsMouse() {
+    return wasmInt("_ogre_web_settings_mouse", 0) !== 0;
+  }
+  function settingsDisplayExperiments() {
+    return wasmInt("_ogre_web_settings_display_experiments", 0) !== 0;
+  }
+
+  function callWasm(name) {
+    if (!moduleReady() || typeof Module[name] !== "function") {
+      return false;
+    }
+    try {
+      var args = Array.prototype.slice.call(arguments, 1);
+      Module[name].apply(Module, args);
+      return true;
+    } catch (e) {
+      log("[web:options] " + name + " failed: " + e);
+      return false;
+    }
+  }
+
+  function setGameSpeed(value) {
+    callWasm("_ogre_web_settings_set_game_speed", value);
+    syncStorage();
+    updateWidescreenAspect();
+    refreshOptions();
+  }
+  function setWidescreen(on) {
+    callWasm("_ogre_web_settings_set_widescreen", on ? 1 : 0);
+    syncStorage();
+    updateWidescreenAspect();
+    refreshOptions();
+  }
+  function setMouseEnabled(on) {
+    callWasm("_ogre_web_settings_set_mouse", on ? 1 : 0);
+    syncStorage();
+    refreshOptions();
+  }
+
+  // --- The in-game options overlay (Esc) --------------------------------------
+  //
+  // Mirrors the native panel's tabs and rows (app/src/ui.cpp build_rows). The
+  // page owns the rendering and keyboard/pad navigation; the values that live
+  // in the runtime go through the web_settings exports.
+
+  var optionsDialog = document.getElementById("options-dialog");
+  var optionsBody = document.getElementById("options-body");
+  var optionsTabs = document.getElementById("options-tabs");
+  var optionsState = {
+    open: false,
+    tab: "main",
+    selected: 0,
+    capture: -1,
+    rows: [],
+    padPrev: {}
+  };
+
+  function escapeHtml(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function radioTokens(values, labels, current) {
+    var parts = [];
+    for (var i = 0; i < values.length; i++) {
+      var on = current === i;
+      parts.push('<span class="opt is-clickable' + (on ? " is-on" : "") +
+                 '" data-option="' + i + '">' +
+                 (on ? "[x] " : "[ ] ") + escapeHtml(labels[i]) + "</span>");
+    }
+    return parts.join("");
+  }
+
+  function radioRow(label, values, labels, current, setting, desc) {
+    return {
+      kind: "row", label: label, setting: setting, values: values,
+      radioLabels: labels, current: current, desc: desc || ""
+    };
+  }
+
+  function volumeValue(percent) {
+    var cells = 11;
+    var handle = Math.max(0, Math.min(cells - 1, Math.round(percent / 10)));
+    var out = '<span class="options-slider">';
+    for (var i = 0; i < cells; i++) {
+      out += '<span class="cell' + (i === handle ? " is-on" : "") +
+             '" data-option="' + i + '">' + (i === handle ? "|" : "-") + "</span>";
+    }
+    out += '<span class="pct">' + percent + "%</span></span>";
+    return out;
+  }
+
+  function chaosBand(value) {
+    if (value <= 35) return "LOW";
+    if (value <= 64) return "NEUTRAL";
+    return "HIGH";
+  }
+
+  function optionsRows() {
+    var rows = [];
+    var tab = optionsState.tab;
+    if (tab === "main") {
+      rows.push({ kind: "row", label: "Start Game", value: "ALREADY RUNNING", disabled: true });
+      rows.push({
+        kind: "row", label: "ROM",
+        value: loadedRomName || "ROM LOADED",
+        desc: "Use EXIT GAME to return to the launcher and choose a different file."
+      });
+      rows.push({
+        kind: "row", label: "Exit Game",
+        value: "Return to the launcher",
+        desc: "Syncs the battery and reloads the page without auto-starting.",
+        action: "exit"
+      });
+      rows.push({
+        kind: "note",
+        text: "The browser cannot restart the runtime in place, so EXIT GAME " +
+              "returns to the launcher. The selected ROM and save stay in this " +
+              "browser's storage."
+      });
+    } else if (tab === "controls") {
+      rows.push({ kind: "section", label: "KEYBOARD + GAMEPAD TO N64" });
+      for (var i = 0; i < N64_BUTTONS.length; i++) {
+        var capture = optionsState.capture === i;
+        var key = keyLabel(inputBindings[i].key);
+        var pad = padSourceLabel(inputBindings[i].pad);
+        rows.push({
+          kind: "row", label: N64_BUTTONS[i].name, binding: i,
+          value: capture ? "PRESS A KEY OR PAD BUTTON..." : ("KEY " + key + "   PAD " + pad),
+          desc: capture ? "Esc cancels. Backspace clears the key, Delete clears the pad."
+                        : N64_BUTTONS[i].field
+        });
+      }
+      rows.push({
+        kind: "row", label: "Reset bindings to defaults",
+        value: "Restore the default keyboard and gamepad map.",
+        action: "reset-bindings"
+      });
+      rows.push({ kind: "section", label: "L-STICK: N64 ANALOG STICK" });
+      rows.push({ kind: "section", label: "R-STICK: ALSO PRESSES C" });
+      rows.push({
+        kind: "note",
+        text: "Click a row, then press a key or a pad button. Backspace clears " +
+              "the key and Delete clears the pad. The right stick's four " +
+              "directions always press the C buttons in addition to these " +
+              "bindings."
+      });
+    } else if (tab === "settings") {
+      var speedValues = [1, 2, 4, 8];
+      var speed = settingsGameSpeed();
+      var speedIndex = speedValues.indexOf(speed);
+      rows.push(radioRow("GAME SPEED", speedValues,
+                         speedValues.map(String), speedIndex, "speed",
+                         "The emulated clock's multiplier."));
+      rows.push({ kind: "section", label: "DISPLAY" });
+      rows.push(radioRow("WIDESCREEN", [0, 1], ["OFF", "ON"],
+                         settingsWidescreen() ? 1 : 0, "widescreen",
+                         "16:9 view on the mission and dialogue scenes."));
+      if (settingsDisplayExperiments()) {
+        rows.push({
+          kind: "row", label: "RESOLUTION", value: "NATIVE RENDERER ONLY",
+          desc: "The browser renderer has no resolution scale.", disabled: true
+        });
+        rows.push({
+          kind: "row", label: "MSAA", value: "NATIVE RENDERER ONLY",
+          desc: "The browser renderer has no multisample target.", disabled: true
+        });
+      }
+      var fullscreenAvailable = typeof document.documentElement.requestFullscreen === "function";
+      rows.push(radioRow("WINDOW", [0, 1], ["WINDOWED", "FULLSCREEN"],
+                         browserFullscreen() ? 1 : 0, "window",
+                         fullscreenAvailable ? "Browser fullscreen."
+                                             : "Fullscreen is unavailable in this browser."));
+      if (!fullscreenAvailable) {
+        rows[rows.length - 1].disabled = true;
+      }
+      rows.push({ kind: "section", label: "AUDIO" });
+      rows.push(radioRow("SOUNDS", [1, 0], ["ON", "OFF"],
+                         audioEnabled ? 0 : 1, "sound",
+                         "The browser's audio output."));
+      rows.push({
+        kind: "row", label: "VOLUME", slider: true, value: audioVolume,
+        desc: "Output gain for the game audio."
+      });
+      rows.push({ kind: "section", label: "INPUT" });
+      rows.push(radioRow("MOUSE ENABLED", [0, 1], ["OFF", "ON"],
+                         settingsMouse() ? 1 : 0, "mouse",
+                         "The pointer drives the world map and mission cursors."));
+      rows.push({
+        kind: "note",
+        text: "GAME SPEED, WIDESCREEN and MOUSE ENABLED are the same " +
+              "settings.cfg values the native port writes. The browser keeps " +
+              "its own CONTROLS bindings in localStorage."
+      });
+    } else if (tab === "debug") {
+      rows.push({ kind: "section", label: "GAME STATE" });
+      var chaos = wasmInt("_ogre_web_chaos_frame", -1);
+      rows.push({
+        kind: "row", label: "Chaos Frame",
+        value: chaos < 0 ? "GAME NOT RUNNING" : (chaos + "  " + chaosBand(chaos)),
+        desc: chaos < 0 ? "The running game has no RDRAM image yet."
+                        : "0-35 low, 36-64 neutral, 65-100 high."
+      });
+      var scene = wasmInt("_ogre_web_active_scene", 0xFFFF);
+      rows.push({
+        kind: "row", label: "Scene",
+        value: scene === 0xFFFF ? "UNKNOWN" : "0x" + ("000" + scene.toString(16)).slice(-4),
+        desc: "The dispatcher's active scene id (D_800E810E)."
+      });
+    }
+    return rows;
+  }
+
+  function rowSelectable(row) {
+    return row && row.kind === "row" && !row.disabled;
+  }
+
+  function firstSelectable(rows) {
+    for (var i = 0; i < rows.length; i++) {
+      if (rowSelectable(rows[i])) {
+        return i;
+      }
+    }
+    return 0;
+  }
+
+  function clampSelection() {
+    if (!rowSelectable(optionsState.rows[optionsState.selected])) {
+      optionsState.selected = firstSelectable(optionsState.rows);
+    }
+  }
+
+  function renderValue(row) {
+    if (row.radioLabels) {
+      return radioTokens(row.values, row.radioLabels, row.current);
+    }
+    if (row.slider) {
+      return volumeValue(row.value);
+    }
+    return escapeHtml(row.value || "");
+  }
+
+  function renderOptions() {
+    if (!optionsState.open || !optionsBody) {
+      return;
+    }
+    optionsState.rows = optionsRows();
+    clampSelection();
+    var html = [];
+    for (var i = 0; i < optionsState.rows.length; i++) {
+      var row = optionsState.rows[i];
+      if (row.kind === "section") {
+        html.push('<div class="options-row is-section" role="presentation">' +
+                  '<span class="options-label">' + escapeHtml(row.label) + "</span></div>");
+        continue;
+      }
+      if (row.kind === "note") {
+        html.push('<p class="options-note">' + escapeHtml(row.text) + "</p>");
+        continue;
+      }
+      var cls = "options-row";
+      if (rowSelectable(row)) {
+        cls += " is-selectable";
+      }
+      if (row.disabled) {
+        cls += " is-disabled";
+      }
+      if (i === optionsState.selected && rowSelectable(row)) {
+        cls += " is-selected";
+      }
+      html.push('<div class="' + cls + '" role="button" data-row="' + i + '"' +
+                (row.disabled ? ' aria-disabled="true"' : "") + '>' +
+                '<span class="options-label">' + escapeHtml(row.label) + "</span>" +
+                '<span class="options-value">' + renderValue(row));
+      if (row.desc) {
+        html.push('<span class="options-desc">' + escapeHtml(row.desc) + "</span>");
+      }
+      html.push("</span></div>");
+    }
+    optionsBody.innerHTML = html.join("");
+    var tabs = optionsTabs ? optionsTabs.querySelectorAll(".options-tab") : [];
+    for (var t = 0; t < tabs.length; t++) {
+      tabs[t].setAttribute("aria-selected",
+                           tabs[t].getAttribute("data-tab") === optionsState.tab ? "true" : "false");
+    }
+    var hint = document.getElementById("options-hint");
+    if (hint) {
+      hint.textContent = optionsState.capture >= 0
+        ? "PRESS A KEY OR PAD BUTTON · BACKSPACE CLEARS KEY · DELETE CLEARS PAD · ESC CANCELS"
+        : "TAB SWITCHES TAB · UP/DOWN SELECT · LEFT/RIGHT CHANGE · ESC RESUMES THE GAME";
+    }
+  }
+
+  function refreshOptions() {
+    if (optionsState.open) {
+      renderOptions();
+    }
+  }
+
+  function selectTab(tab) {
+    if (tab === "mods") {
+      return;
+    }
+    if (["main", "controls", "settings", "debug"].indexOf(tab) < 0) {
+      return;
+    }
+    optionsState.tab = tab;
+    optionsState.capture = -1;
+    optionsState.rows = optionsRows();
+    optionsState.selected = firstSelectable(optionsState.rows);
+    renderOptions();
+  }
+
+  function openOptions(tab) {
+    if (!optionsDialog) {
+      return;
+    }
+    if (!optionsState.open) {
+      optionsState.open = true;
+      optionsState.capture = -1;
+      optionsState.padPrev = {};
+      pressedKeys.clear();
+      pushInput(0, 0, 0, 0, 1);
+      callWasm("_ogre_web_mouse_leave");
+      optionsDialog.hidden = false;
+      log("[web:options] shown");
+    }
+    selectTab(tab || optionsState.tab || "main");
+    if (typeof optionsDialog.focus === "function") {
+      optionsDialog.focus();
+    }
+    updateWidescreenAspect();
+  }
+
+  function closeOptions() {
+    if (!optionsState.open) {
+      return;
+    }
+    optionsState.open = false;
+    optionsState.capture = -1;
+    if (optionsDialog) {
+      optionsDialog.hidden = true;
+    }
+    pressedKeys.clear();
+    pushInput(0, 0, 0, 0, 1);
+    log("[web:options] hidden");
+  }
+
+  function exitToLauncher() {
+    log("[web:options] exit game -> launcher");
+    closeOptions();
+    syncStorage();
+    window.setTimeout(function () {
+      window.location.href = window.location.pathname + "?menu";
+    }, 120);
+  }
+
+  function selectableIndexFrom(index, delta) {
+    var rows = optionsState.rows;
+    if (!rows.length) {
+      return 0;
+    }
+    var next = index;
+    for (var step = 0; step < rows.length; step++) {
+      next = (next + delta + rows.length) % rows.length;
+      if (rowSelectable(rows[next])) {
+        return next;
+      }
+    }
+    return index;
+  }
+
+  function moveSelection(delta) {
+    optionsState.selected = selectableIndexFrom(optionsState.selected, delta);
+    renderOptions();
+  }
+
+  function setSoundEnabled(on) {
+    audioEnabled = !!on;
+    saveAudioSettings();
+    if (window.ogreAudio) {
+      window.ogreAudio.setEnabled(audioEnabled);
+    }
+    refreshOptions();
+  }
+
+  function setVolumePercent(percent) {
+    audioVolume = Math.max(0, Math.min(100, Math.round(percent)));
+    saveAudioSettings();
+    if (window.ogreAudio) {
+      window.ogreAudio.setVolume(audioVolume);
+    }
+    refreshOptions();
+  }
+
+  function chooseRowOption(index, optionIndex) {
+    var row = optionsState.rows[index];
+    if (!row || row.disabled) {
+      return;
+    }
+    if (row.slider) {
+      setVolumePercent(optionIndex * 10);
+      return;
+    }
+    if (!row.values || optionIndex < 0 || optionIndex >= row.values.length) {
+      return;
+    }
+    var value = row.values[optionIndex];
+    switch (row.setting) {
+      case "speed": setGameSpeed(value); break;
+      case "widescreen": setWidescreen(value !== 0); break;
+      case "window":
+        if (browserFullscreen() !== (value !== 0)) {
+          var button = document.getElementById("fullscreen-btn");
+          if (button) {
+            button.click();
+          }
+        }
+        break;
+      case "sound": setSoundEnabled(value !== 0); break;
+      case "mouse": setMouseEnabled(value !== 0); break;
+      default: break;
+    }
+    renderOptions();
+  }
+
+  function stepRow(index, delta) {
+    var row = optionsState.rows[index];
+    if (!row || row.disabled) {
+      return;
+    }
+    if (row.slider) {
+      setVolumePercent(audioVolume + delta * 5);
+      return;
+    }
+    if (row.values) {
+      var current = row.current >= 0 ? row.current : (delta > 0 ? -1 : row.values.length);
+      var next = (current + delta + row.values.length) % row.values.length;
+      chooseRowOption(index, next);
+    }
+  }
+
+  function activateRow(index) {
+    var row = optionsState.rows[index];
+    if (!row || !rowSelectable(row)) {
+      return;
+    }
+    optionsState.selected = index;
+    if (typeof row.binding === "number") {
+      optionsState.capture = row.binding;
+      renderOptions();
+      return;
+    }
+    if (row.action === "exit") {
+      exitToLauncher();
+      return;
+    }
+    if (row.action === "reset-bindings") {
+      resetBindings();
+      log("[web:options] bindings reset to defaults");
+      renderOptions();
+      return;
+    }
+    if (row.slider) {
+      return;
+    }
+    if (row.values) {
+      stepRow(index, 1);
+    }
+  }
+
+  function optionsKeyDown(e) {
+    if (!optionsState.open) {
+      return;
+    }
+    if (optionsState.capture >= 0) {
+      if (e.code === "Escape") {
+        optionsState.capture = -1;
+      } else if (e.code === "Backspace") {
+        inputBindings[optionsState.capture].key = null;
+        saveBindings();
+        optionsState.capture = -1;
+      } else if (e.code === "Delete") {
+        inputBindings[optionsState.capture].pad = { type: "none" };
+        saveBindings();
+        optionsState.capture = -1;
+      } else if (e.code) {
+        inputBindings[optionsState.capture].key = e.code;
+        saveBindings();
+        optionsState.capture = -1;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      updateInputHint();
+      renderOptions();
+      return;
+    }
+    if (e.code === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeOptions();
+      return;
+    }
+    if (e.code === "Tab") {
+      var order = ["main", "controls", "settings", "debug"];
+      var at = order.indexOf(optionsState.tab);
+      at = (at + (e.shiftKey ? order.length - 1 : 1)) % order.length;
+      selectTab(order[at]);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.code === "ArrowUp") {
+      moveSelection(-1);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.code === "ArrowDown") {
+      moveSelection(1);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.code === "ArrowLeft") {
+      stepRow(optionsState.selected, -1);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.code === "ArrowRight") {
+      stepRow(optionsState.selected, 1);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.code === "Enter" || e.code === "Space") {
+      activateRow(optionsState.selected);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.code === "Home") {
+      optionsState.selected = firstSelectable(optionsState.rows);
+      renderOptions();
+      e.preventDefault();
+      return;
+    }
+    if (e.code === "End") {
+      for (var i = optionsState.rows.length - 1; i >= 0; i--) {
+        if (rowSelectable(optionsState.rows[i])) {
+          optionsState.selected = i;
+          break;
+        }
+      }
+      renderOptions();
+      e.preventDefault();
+    }
+  }
+
+  // The pad drives the panel too, with the native mapping: D-pad moves, A
+  // selects, B is back, LB/RB switch tab, and SELECT opens the panel from the
+  // game (only while no binding uses that button).
+  function optionsPadFrame(pads) {
+    for (var p = 0; p < pads.length; p++) {
+      var pad = pads[p];
+      if (!pad || !pad.connected) {
+        continue;
+      }
+      var previous = optionsState.padPrev[pad.index] || [];
+      var pressed = [];
+      for (var b = 0; b < pad.buttons.length; b++) {
+        pressed[b] = !!pad.buttons[b] && pad.buttons[b].pressed;
+      }
+      function edge(code) {
+        return !!pressed[code] && !previous[code];
+      }
+      if (optionsState.open && optionsState.capture >= 0) {
+        var bound = false;
+        for (var bi = 0; bi < pressed.length; bi++) {
+          if (pressed[bi] && !previous[bi]) {
+            inputBindings[optionsState.capture].pad = { type: "button", index: bi };
+            saveBindings();
+            optionsState.capture = -1;
+            bound = true;
+            break;
+          }
+        }
+        if (bound) {
+          updateInputHint();
+          renderOptions();
+        }
+      } else if (optionsState.open) {
+        if (edge(12)) { moveSelection(-1); }
+        if (edge(13)) { moveSelection(1); }
+        if (edge(14)) { stepRow(optionsState.selected, -1); }
+        if (edge(15)) { stepRow(optionsState.selected, 1); }
+        if (edge(0)) { activateRow(optionsState.selected); }
+        if (edge(1)) { closeOptions(); }
+        if (edge(4)) {
+          var tabs = ["main", "controls", "settings", "debug"];
+          var at = tabs.indexOf(optionsState.tab);
+          selectTab(tabs[(at + tabs.length - 1) % tabs.length]);
+        }
+        if (edge(5)) {
+          var tabsNext = ["main", "controls", "settings", "debug"];
+          var atNext = tabsNext.indexOf(optionsState.tab);
+          selectTab(tabsNext[(atNext + 1) % tabsNext.length]);
+        }
+      } else if (edge(8) && bootStarted) {
+        var backBound = inputBindings.some(function (row) {
+          return row.pad && row.pad.type === "button" && row.pad.index === 8;
+        });
+        if (!backBound) {
+          openOptions("main");
+        }
+      }
+      optionsState.padPrev[pad.index] = pressed;
+    }
+  }
+
+  function updateWidescreenAspect() {
+    var wide = false;
+    if (moduleReady() && settingsWidescreen()) {
+      wide = wasmInt("_ogre_web_widescreen_expand", 0) !== 0;
+    }
+    document.body.classList.toggle("is-widescreen", wide);
+  }
+  window.setInterval(updateWidescreenAspect, 250);
+
+  if (optionsDialog) {
+    window.addEventListener("keydown", optionsKeyDown, true);
+    optionsDialog.addEventListener("click", function (e) {
+      if (e.target === optionsDialog) {
+        closeOptions();
+      }
+    });
+    var optionsClose = document.getElementById("options-close");
+    if (optionsClose) {
+      optionsClose.addEventListener("click", closeOptions);
+    }
+    if (optionsBody) {
+      optionsBody.addEventListener("click", function (e) {
+        var optionEl = e.target.closest ? e.target.closest("[data-option]") : null;
+        var rowEl = e.target.closest ? e.target.closest("[data-row]") : null;
+        if (rowEl) {
+          var index = parseInt(rowEl.getAttribute("data-row"), 10);
+          if (optionEl) {
+            chooseRowOption(index, parseInt(optionEl.getAttribute("data-option"), 10));
+          } else {
+            activateRow(index);
+          }
+          return;
+        }
+      });
+    }
+    if (optionsTabs) {
+      optionsTabs.addEventListener("click", function (e) {
+        var tabButton = e.target.closest ? e.target.closest("[data-tab]") : null;
+        if (tabButton && !tabButton.disabled) {
+          selectTab(tabButton.getAttribute("data-tab"));
+        }
+      });
+    }
+  }
+
+  window.ogreOptions = {
+    open: openOptions,
+    close: closeOptions,
+    refresh: refreshOptions,
+    isOpen: function () { return optionsState.open; },
+    getBindings: function () { return inputBindings.map(function (row) {
+      return { key: row.key, pad: clonePad(row.pad) };
+    }); }
+  };
+
+  window.setInterval(function () {
+    // The DEBUG tab's two readouts are live. Rebuilding the whole panel would
+    // reset the scroll position of the CONTROLS list, so the other tabs redraw
+    // only when a value changes.
+    if (optionsState.open && optionsState.tab === "debug") {
+      renderOptions();
+    }
+  }, 500);
 
   // The log lives in window.ogreLog (index.html), which is a bounded ring buffer
   // and does not touch the DOM unless ?log was passed. Never append to the page
@@ -410,14 +1339,16 @@
     C_UP: 0x0008, C_DOWN: 0x0004, C_LEFT: 0x0002, C_RIGHT: 0x0001
   };
 
-  var KEYMAP = {
-    KeyX: BTN.A, KeyZ: BTN.B, KeyC: BTN.Z, Enter: BTN.START,
-    KeyQ: BTN.L, KeyE: BTN.R,
-    ArrowUp: BTN.UP, ArrowDown: BTN.DOWN, ArrowLeft: BTN.LEFT, ArrowRight: BTN.RIGHT,
-    KeyI: BTN.C_UP, KeyK: BTN.C_DOWN, KeyJ: BTN.C_LEFT, KeyL: BTN.C_RIGHT
-  };
-
   var pressedKeys = new Set();
+
+  function isBoundGameKey(code) {
+    for (var i = 0; i < inputBindings.length; i++) {
+      if (inputBindings[i].key === code) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   // --- Scripted controller 0 (OGRE_TAP_MS / OGRE_TAP_BUTTON) -------------------
   //
@@ -656,7 +1587,11 @@
   function keyboardButtons() {
     var mask = 0;
     pressedKeys.forEach(function (code) {
-      mask |= KEYMAP[code] || 0;
+      for (var i = 0; i < inputBindings.length; i++) {
+        if (inputBindings[i].key && inputBindings[i].key === code) {
+          mask |= N64_BUTTONS[i].bit;
+        }
+      }
     });
     return mask;
   }
@@ -664,14 +1599,26 @@
   // A modal dialog owns the keyboard while it is open, so arrow keys can
   // scroll it instead of being swallowed as D-pad input.
   function dialogOwnsKeyboard() {
+    // The options panel is a normal fixed overlay (not a modal <dialog>): a
+    // modal element lives in the browser's top layer, which is not part of the
+    // element the page puts in fullscreen, so the panel vanished when the
+    // WINDOW row entered fullscreen.
+    if (optionsState && optionsState.open) {
+      return true;
+    }
     return !!(document.querySelector && document.querySelector("dialog[open]"));
   }
 
   window.addEventListener("keydown", function (e) {
+    if (!optionsState.open && bootStarted && e.code === "Escape") {
+      e.preventDefault();
+      openOptions("main");
+      return;
+    }
     if (dialogOwnsKeyboard()) {
       return;
     }
-    if (KEYMAP[e.code]) {
+    if (isBoundGameKey(e.code)) {
       e.preventDefault();
     }
     pressedKeys.add(e.code);
@@ -689,40 +1636,30 @@
     pushInput(0, 0, 0, 0, 1);
   });
 
-  // Standard Gamepad mapping -> N64 bits (parity with sdl_platform.cpp):
-  //   0=A 1=B 2=X 3=Y 4=LB 5=RB 9=Start 10=LeftStick(->Z)
-  //   12-15=D-pad; right stick -> C buttons.
-  var GP_BUTTONS = [
-    BTN.A,                    // 0 A
-    BTN.B,                    // 1 B
-    BTN.C_UP,                 // 2 X
-    BTN.C_DOWN,               // 3 Y
-    BTN.L,                    // 4 LB
-    BTN.R,                    // 5 RB
-    0, 0,                     // 6 LT, 7 RT
-    0,                        // 8 Back (unused)
-    BTN.START,                // 9 Start
-    BTN.Z,                    // 10 LeftStick
-    0                         // 11 RightStick (unused)
-  ];
-  var GP_DPAD = [BTN.UP, BTN.DOWN, BTN.LEFT, BTN.RIGHT];  // buttons 12-15
-
+  // Standard Gamepad mapping through the editable bindings. The CONTROLS tab's
+  // pad column supplies the button indices; the fixed right-stick layer for the
+  // C buttons stays, as it does in the native input path.
   function gamepadState(pad) {
     var buttons = 0;
-    var b = pad.buttons;
-    for (var i = 0; i < GP_BUTTONS.length && i < b.length; i++) {
-      if (GP_BUTTONS[i] && b[i].pressed) {
-        buttons |= GP_BUTTONS[i];
-      }
-    }
-    for (var j = 0; j < 4; j++) {
-      var bi = 12 + j;
-      if (bi < b.length && b[bi].pressed) {
-        buttons |= GP_DPAD[j];
-      }
-    }
+    var b = pad.buttons || [];
     var axes = pad.axes || [];
-    // Right stick -> C buttons (axis 2 = RX, 3 = RY).
+    for (var i = 0; i < inputBindings.length; i++) {
+      var source = inputBindings[i].pad;
+      if (!source || source.type === "none") {
+        continue;
+      }
+      if (source.type === "button") {
+        if (source.index < b.length && b[source.index] && b[source.index].pressed) {
+          buttons |= N64_BUTTONS[i].bit;
+        }
+      } else if (source.type === "axis") {
+        var value = axes[source.axis] || 0;
+        if (source.dir < 0 ? value < -0.5 : value > 0.5) {
+          buttons |= N64_BUTTONS[i].bit;
+        }
+      }
+    }
+    // Right stick -> C buttons (axis 2 = RX, 3 = RY), always on top of the map.
     if (axes.length > 2) {
       if (axes[3] < -0.5) buttons |= BTN.C_UP;
       if (axes[3] > 0.5) buttons |= BTN.C_DOWN;
@@ -793,6 +1730,18 @@
   }
 
   function rafLoop(now) {
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    optionsPadFrame(pads);
+    if (optionsState.open) {
+      // The panel owns the pad while it is up. Slot 0 stays connected with an
+      // idle pad so the game's input poll sees a steady "no buttons" state.
+      pushInput(0, 0, 0, 0, 1);
+      for (var other = 1; other < 4; other++) {
+        pushInput(other, 0, 0, 0, 0);
+      }
+      requestAnimationFrame(rafLoop);
+      return;
+    }
     var slot0Mask = keyboardButtons() | tapMask;
     // The pad pass runs last: it writes slot 0, so a keyboard update first
     // would be overwritten every frame by a connected pad.
@@ -834,24 +1783,33 @@
         statePtr: statePtr,
         ringPtr: ringPtr,
         ringFrames: 32768,  // kAudioRingFrames in app/src/web_platform.cpp
-        muted: !audioEnabled
+        muted: !audioEnabled,
+        gain: audioVolume / 100
       });
       node.connect(audioContext.destination);
       // The worklet keeps draining the ring even while muted, so the game's
       // audio thread sees the same producer/consumer backpressure either way.
       window.ogreAudio = {
         enabled: function () { return audioEnabled; },
+        volume: function () { return audioVolume; },
         setEnabled: function (on) {
           audioEnabled = !!on;
+          saveAudioSettings();
           node.port.postMessage({ type: "mute", muted: !audioEnabled });
           log("[web:audio] " + (audioEnabled ? "unmuted (game audio will play - it screeches until the audio microcode is emulated)"
                                              : "muted"));
+        },
+        setVolume: function (percent) {
+          audioVolume = Math.max(0, Math.min(100, Math.round(percent)));
+          saveAudioSettings();
+          node.port.postMessage({ type: "gain", gain: audioVolume / 100 });
+          log("[web:audio] volume " + audioVolume + "%");
         }
       };
       audioContext.resume().then(function () {
         log("[web:audio] AudioWorklet connected (" + audioContext.sampleRate + " Hz context, state " +
             audioContext.state + "), game audio " +
-            (audioEnabled ? "ENABLED (?audio)" : "MUTED - add ?audio to the URL to hear it"));
+            (audioEnabled ? "ENABLED (overlay or ?audio)" : "MUTED - add ?audio or use SETTINGS > SOUNDS"));
         // Report once the game actually starts queueing samples, so a silent
         // page is distinguishable from a stalled audio path.
         var audioWatch = window.setInterval(function () {
@@ -883,10 +1841,13 @@
       return;
     }
     saveImport.storageReady = true;
+    // EXIT GAME reloads with `?menu`: keep the launcher and do not auto-start
+    // from the stored ROM, so the player can choose it again (or another one).
+    var menuMode = urlFlag("menu") === true;
     // If a previously validated ROM is persisted, boot without re-picking.
     var storedRom = moduleReady() && Module.FS && Module.FS.analyzePath &&
         Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists;
-    if (storedRom) {
+    if (storedRom && !menuMode) {
       log("[web] Stored ROM found - starting the game with the previously loaded ROM.");
       uiSetStatus("Restoring the previous session…");
       whenWasmExportsReady(function () {
@@ -997,6 +1958,61 @@
     }
   }
 
+  // --- Pointer input for the MOUSE ENABLED setting -----------------------------
+  //
+  // The native platform forwards the SDL pointer to map_cursor.cpp and
+  // mission_cursor.cpp; the browser forwards the canvas's pointer events to the
+  // same exports. `draw_w`/`draw_h` are the drawing buffer, except in a
+  // widescreen expand scene where the 4:3 buffer is stretched to the canvas
+  // box: there the 320x240 guest resolution is passed so the mapping covers the
+  // full width instead of the cursor modules' aspect-fit pillarbox.
+  var mouseCanvas = document.getElementById("game-canvas");
+
+  function pointerToFramebuffer(e) {
+    if (!mouseCanvas) {
+      return null;
+    }
+    var rect = mouseCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return null;
+    }
+    var wide = document.body.classList.contains("is-widescreen");
+    return {
+      x: Math.round(e.clientX - rect.left),
+      y: Math.round(e.clientY - rect.top),
+      winW: Math.round(rect.width),
+      winH: Math.round(rect.height),
+      drawW: wide ? 320 : mouseCanvas.width,
+      drawH: wide ? 240 : mouseCanvas.height
+    };
+  }
+
+  function forwardPointerMove(e) {
+    var p = pointerToFramebuffer(e);
+    if (p) {
+      callWasm("_ogre_web_mouse_move", p.x, p.y, p.winW, p.winH, p.drawW, p.drawH);
+    }
+  }
+
+  if (mouseCanvas && mouseCanvas.addEventListener) {
+    mouseCanvas.addEventListener("pointermove", forwardPointerMove);
+    mouseCanvas.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) {
+        return;
+      }
+      var p = pointerToFramebuffer(e);
+      if (p) {
+        callWasm("_ogre_web_mouse_click", p.x, p.y, p.winW, p.winH, p.drawW, p.drawH);
+      }
+    });
+    mouseCanvas.addEventListener("pointerleave", function () {
+      callWasm("_ogre_web_mouse_leave");
+    });
+    mouseCanvas.addEventListener("pointercancel", function () {
+      callWasm("_ogre_web_mouse_leave");
+    });
+  }
+
   // Live #gfx-status line: reflects the actual renderer state instead of
   // staying on the initial "waiting for the WebGL2 context" text forever.
   // Derived from existing exports (ogre_gfx_flush returns 1 once the renderer
@@ -1090,6 +2106,7 @@
       return;
     }
     log("[web] Loading ROM: " + file.name + " (" + file.size + " bytes)...");
+    loadedRomName = file.name;
     uiSetPhase("loading", "Loading");
     uiSetStatus("Reading " + file.name + "…");
 

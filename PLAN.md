@@ -99,6 +99,26 @@ the idle trajectory under host load 16-27 (`[scene] id=0x0000`,
 `block=0x00000000`). The exact entry instant and the `0x12 -> 0x03` transition
 are unrun in the browser. See `docs/HANDOFF-2026-10-25-session190.md`.
 
+Session 191 gave the browser the native Esc overlay's options. The page now has
+MAIN, CONTROLS, SETTINGS and DEBUG tabs (MODS is disabled), opened by Esc or the
+topbar Options button and driven by keyboard or pad; MAIN returns to the
+launcher with `?menu`, CONTROLS rebinds the 14 N64 rows in localStorage,
+SETTINGS carries GAME SPEED, WIDESCREEN, WINDOW (browser fullscreen), SOUNDS,
+VOLUME and MOUSE ENABLED, and DEBUG reads the live Chaos Frame and scene id.
+`settings.cpp` is compiled into the wasm target and `main_web.cpp` calls
+`load_settings("/ogre")` before `recomp::start`, so GAME SPEED, WIDESCREEN and
+MOUSE ENABLED are the shared `settings.cfg` values; `web_settings.cpp` exports
+them plus the Chaos Frame, scene id, widescreen-expansion test and pointer
+forwarding to the two cursor modules. SOUNDS/VOLUME are the page's AudioWorklet
+gain. WIDESCREEN counter-scales the projection x row by 3/4 on the mission and
+dialogue scenes and puts a 16:9 CSS box on the canvas. The final build compiles
+clean and its exports and overlay were measured, but every game run (and a
+rebuilt unmodified HEAD control) landed on the idle trajectory under host load
+11-13, so the final build's game frame and the 3D wide frame are not captured.
+The modal `<dialog>` was replaced by a fixed overlay inside `#stage` because a
+modal top-layer element is not part of the fullscreen element. See
+`docs/HANDOFF-2026-10-25-session191.md`.
+
 Session 188 fixed a browser freeze after 2–3 minutes with no input. The WebGL
 renderer's tile-image cache keyed each decoded image by `tmem_generation_`,
 which every load command increments, so each display list created a new GL
@@ -2338,6 +2358,17 @@ holds the evidence.
     scene-`0x04` frame is byte-identical to the pre-change build, so the
     change is neutral outside the stills. See
     `docs/HANDOFF-2026-10-23-session185.md`.
+
+21. **The browser options overlay is in the page; its final-build game frame and
+    the 3D widescreen frame are unrun.** Esc and the topbar Options button open
+    MAIN, CONTROLS, SETTINGS and DEBUG (MODS disabled). GAME SPEED, WIDESCREEN
+    and MOUSE ENABLED are the shared `settings.cfg` values through
+    `app/src/web_settings.cpp`; CONTROLS is localStorage; SOUNDS/VOLUME are the
+    AudioWorklet. The overlay, exports, bindings, volume, fullscreen and `?menu`
+    routes are measured, but every final-build boot (and a rebuilt unmodified
+    HEAD control) landed on the idle trajectory under host load 11-13, and the
+    wide projection has no frame capture. Re-run on an idle host with the
+    mission/dialogue route. See `docs/HANDOFF-2026-10-25-session191.md`.
 
 Parked, not defects:
 

@@ -65,6 +65,7 @@
 #include "gbi.hpp"
 #include "milestones.hpp"
 #include "bank_overlays.hpp"
+#include "web_settings.hpp"
 #include "ram_key.hpp"
 
 namespace ogre {
@@ -2877,6 +2878,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.othermode_l = 0;
         st.othermode_h = 0;
         st.combiner.decode(0, 0);
+        // The synthetic control carries no game scene, so it is never a wide
+        // pass.
+        widescreen_expand_ = false;
         // execute_dl() records DrawCmds into the execution-local buffer; publish
         // them under a short try_lock. This hook runs on the browser main
         // thread, which must never block on the renderer mutex.
@@ -4842,6 +4846,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // decides whether 0xDA/0xDC are G_MTX/G_MOVEMEM (F3DEX2) or the njpeg
         // macroblock draw and its matrix (S2DEX2).
         st.gbi = identify_gbi(rdram_, task);
+        // The page sets the 16:9 canvas box while WIDESCREEN is on and the
+        // dispatcher is on an expanding scene; the draw commands recorded below
+        // carry the counter-scaled projection for that pass.
+        widescreen_expand_ = ogre::web_widescreen_expand();
 
         // The DL executes on the gfx pthread and only records draw commands;
         // the browser main thread issues the GL in ogre_gfx_flush(). Crucially
@@ -5116,6 +5124,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     int canvas_width_ = 320;
     int canvas_height_ = 240;
     bool gl_ready_ = false;
+    // WIDESCREEN on an expanding scene. The renderer counter-scales the
+    // projection's x row by 3/4 so the 4:3 framebuffer, stretched to 16:9 by the
+    // page's canvas CSS, keeps the game's proportions and shows more world at
+    // the sides. Set once per display list in send_dl (gfx thread), the same
+    // thread transform_vertex runs on.
+    bool widescreen_expand_ = false;
     // Colour images attach an RGBA16F texture when the context exposes
     // EXT_color_buffer_float (see ensure_gl), RGBA8 otherwise.
     bool hp_fb_ = false;
@@ -7546,6 +7560,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                             static_cast<float>(v.z), 1.0f},
                        mv);
         pos = mul(pos, st.projection);
+        // RT64's ProjectionProcessor::adjustProjectionMatrix scales the
+        // projection's x column by 1/aspectRatioScale for an Expand pass. Its
+        // 16:9 window against the game's 4:3 target is 1/(4/3) = 3/4.
+        if (widescreen_expand_) {
+            pos.x *= 0.75f;
+        }
         if (pos.w <= 0.0f) {
             return false;
         }

@@ -29,6 +29,7 @@
 #include "overlays.hpp"
 #include "bank_overlays.hpp"
 #include "web_platform.hpp"
+#include "web_settings.hpp"
 #include "milestones.hpp"
 
 int main() {
@@ -46,6 +47,9 @@ void boot_runtime() {
     recomp::register_config_path("/ogre");
     std::filesystem::create_directories("/ogre");  // ofstream won't create parents
     OGRE_MILESTONE("BOOT", "config path registered (/ogre)");
+    // The player's saved SETTINGS values. Same call the native app makes before
+    // its game starts (app/src/main.cpp); the file is on the IDBFS mount.
+    ogre::web_settings_load();
 
     // --- game registration ----------------------------------------------------
     recomp::GameEntry entry;

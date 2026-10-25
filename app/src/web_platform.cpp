@@ -6,6 +6,9 @@
 #include <cstring>
 #include <string>
 
+#include "map_cursor.hpp"
+#include "mission_cursor.hpp"
+
 namespace ogre {
 
 // ============================================================================
@@ -76,6 +79,21 @@ static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y)
         return false;
     }
     *buttons = c.buttons.load(std::memory_order_relaxed);
+    if (controller_num == 0) {
+        // A left click on a screen the pointer drives arms the game's `A` for a
+        // few polls, and a pointer pushed past a screen's edge holds the
+        // matching direction. Both screens are asked every poll so an armed
+        // click expires on whichever screen is up; see map_cursor.hpp and
+        // mission_cursor.hpp. This is the same routing as the native
+        // `sdl_platform.cpp` get_input.
+        const bool map_click = ogre_map_cursor_take_confirm();
+        const bool mission_click = ogre_mission_cursor_take_confirm();
+        if (map_click || mission_click) {
+            *buttons |= 0x8000u;
+        }
+        *buttons |= ogre_map_cursor_edge_direction();
+        *buttons |= ogre_mission_cursor_edge_direction();
+    }
     *x = c.stick_x.load(std::memory_order_relaxed);
     *y = c.stick_y.load(std::memory_order_relaxed);
     return true;

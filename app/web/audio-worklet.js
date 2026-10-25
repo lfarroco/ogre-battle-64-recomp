@@ -35,6 +35,7 @@ class OgreAudioProcessor extends AudioWorkletProcessor {
     this.readPos = 0;  // absolute float frame position (head/tail space)
     this.ready = false;
     this.muted = true;  // silence unless the page asks for audio (?audio)
+    this.gain = 1;      // the VOLUME row, 0..1
     this.port.onmessage = (event) => {
       const d = event.data;
       if (d && d.type === "init") {
@@ -43,9 +44,12 @@ class OgreAudioProcessor extends AudioWorkletProcessor {
         this.mask = d.ringFrames - 1;
         this.readPos = 0;
         this.muted = d.muted !== false;
+        this.gain = typeof d.gain === "number" ? Math.max(0, Math.min(1, d.gain)) : 1;
         this.ready = true;
       } else if (d && d.type === "mute") {
         this.muted = d.muted !== false;
+      } else if (d && d.type === "gain") {
+        this.gain = typeof d.gain === "number" ? Math.max(0, Math.min(1, d.gain)) : 1;
       }
     };
   }
@@ -105,6 +109,15 @@ class OgreAudioProcessor extends AudioWorkletProcessor {
     if (consumedFrames >= 1) {
       // Free the consumed frames for the producer (whole frames only).
       Atomics.add(state, 1, Math.floor(consumedFrames));
+    }
+
+    if (this.gain !== 1) {
+      // VOLUME row. The ring holds int16 samples, so this is a gain on the
+      // same values the unmuted path writes.
+      for (let i = 0; i < n; i++) {
+        left[i] *= this.gain;
+        right[i] *= this.gain;
+      }
     }
 
     if (this.muted) {

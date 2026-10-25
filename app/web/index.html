@@ -239,6 +239,14 @@
     image-rendering: pixelated;
     outline: none;
   }
+  /* WIDESCREEN=On on a scene the wide view is meant for. The renderer keeps its
+     4:3 drawing buffer and counter-scales the projection, so a 16:9 CSS box
+     stretches the picture the way RT64's Expand aspect does. The class is
+     applied only while `ogre_web_widescreen_expand()` is 1. */
+  body.is-widescreen #game-canvas {
+    width: auto !important;
+    aspect-ratio: 16 / 9;
+  }
 
   .understage {
     display: flex;
@@ -403,61 +411,132 @@
   }
   #log-close[hidden] { display: none; }
 
-  dialog#controls-dialog {
-    width: min(560px, calc(100vw - 32px));
-    padding: 0;
+  /* --------------------------------------------------------- options overlay */
+
+  .options-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.66);
+    backdrop-filter: blur(2px);
+  }
+  .options-overlay[hidden] { display: none; }
+  .options-shell {
+    display: flex;
+    flex-direction: column;
+    width: min(900px, calc(100vw - 32px));
+    max-height: min(88vh, 800px);
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 16px;
     background: linear-gradient(180deg, #14171c, #0b0d10);
     color: var(--text);
     box-shadow: 0 30px 90px rgba(0, 0, 0, 0.85);
+    overflow: hidden;
   }
-  dialog#controls-dialog::backdrop { background: rgba(0, 0, 0, 0.66); backdrop-filter: blur(2px); }
   .dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 22px 24px 0; }
   .dialog-kicker { margin: 0 0 6px; color: var(--gold); font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase; }
   .dialog-title { margin: 0; color: #f1eee7; font-family: var(--font-display); font-size: 22px; font-weight: 500; letter-spacing: 0.02em; }
-  .dialog-body { padding: 18px 24px 24px; }
-  .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
-  .control-group h3 {
-    margin: 0 0 10px;
-    color: var(--muted);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-  }
-  .control-row {
+  .options-tabs {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 5px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    color: #c9c6bf;
-    font-size: 12px;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 14px 18px 0;
+    border-bottom: 1px solid var(--line);
   }
-  .control-row:last-child { border-bottom: 0; }
-  .keys { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
-  kbd {
-    padding: 2px 6px;
-    border: 1px solid #3a3f49;
-    border-bottom-width: 2px;
-    border-radius: 5px;
-    background: #171a20;
-    color: #d9d6cf;
+  .options-tab {
+    padding: 9px 12px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--faint);
     font-family: var(--font-mono);
     font-size: 10.5px;
-    line-height: 1.2;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    cursor: pointer;
   }
-  .dialog-note { margin: 18px 0 0; color: var(--faint); font-size: 11px; line-height: 1.6; }
-  .dialog-note code {
+  .options-tab:hover:not(:disabled) { color: #d7d4cc; }
+  .options-tab[aria-selected="true"] { color: var(--gold-bright); border-bottom-color: var(--gold); }
+  .options-tab:disabled { opacity: 0.4; cursor: not-allowed; }
+  .options-body {
+    flex: 1 1 auto;
+    min-height: 320px;
+    padding: 10px 18px 16px;
+    overflow-y: auto;
+  }
+  .options-row {
+    display: grid;
+    grid-template-columns: minmax(160px, 0.9fr) minmax(0, 1.7fr);
+    gap: 18px;
+    align-items: center;
+    width: 100%;
+    margin: 0;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #c9c6bf;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: left;
+  }
+  .options-row.is-selectable { cursor: pointer; }
+  .options-row.is-selected {
+    background: rgba(201, 162, 74, 0.14);
+    box-shadow: inset 2px 0 0 var(--gold);
+    color: #f4f1ea;
+  }
+  .options-row.is-disabled { color: var(--faint); }
+  .options-row.is-section {
+    padding-top: 16px;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    cursor: default;
+  }
+  .options-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0.04em; }
+  .options-value { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; text-align: right; }
+  .options-value .opt { color: #8f949d; white-space: nowrap; }
+  .options-value .opt.is-on { color: var(--gold-bright); }
+  .options-value .opt.is-clickable { cursor: pointer; }
+  .options-value .opt.is-clickable:hover { color: #fff; }
+  .options-slider { display: inline-flex; align-items: center; gap: 1px; letter-spacing: 0; }
+  .options-slider .cell { padding: 0 1px; color: #6f747d; cursor: pointer; }
+  .options-slider .cell.is-on { color: var(--gold-bright); }
+  .options-slider .pct { margin-left: 8px; color: #c9c6bf; }
+  .options-desc { color: var(--faint); font-size: 10.5px; }
+  .options-note {
+    margin: 12px 10px 0;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--faint);
+    font-size: 10.5px;
+    line-height: 1.6;
+  }
+  .options-note code {
     padding: 1px 5px;
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.05);
     color: #b9b3a5;
     font-family: var(--font-mono);
   }
-  .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .options-foot {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 22px 14px;
+    border-top: 1px solid var(--line);
+  }
+  .options-hint { color: var(--faint); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .options-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
   /* -------------------------------------------------------------- fullscreen */
 
@@ -512,7 +591,10 @@
     .launcher-copy { margin: 8px 0 14px; font-size: 11.5px; line-height: 1.5; }
     .launcher-actions { gap: 8px; }
     .launcher-actions .btn { flex: 1 1 120px; min-width: 0; height: 34px; font-size: 10.5px; }
-    .controls-grid { grid-template-columns: 1fr; gap: 18px; }
+    .options-row { grid-template-columns: 118px minmax(0, 1fr); gap: 10px; font-size: 11px; }
+    .options-row.is-section { padding-top: 12px; }
+    .options-hint { display: none; }
+    .options-body { min-height: 260px; }
     .understage { padding: 8px 2px 0; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -556,12 +638,13 @@
       <span class="status-dot" aria-hidden="true"></span>
       <span id="status-label">Starting</span>
     </span>
-    <button class="btn btn-ghost" id="controls-btn" type="button" title="Controls and notes">
+    <button class="btn btn-ghost" id="options-btn" type="button" title="Options and controls (Esc)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="2.5" y="7" width="19" height="10" rx="3"/>
-        <path d="M7 10.5v3M5.5 12h3M16.5 11h.01M19 13h.01"/>
+        <path d="M4 7h9M17 7h3M4 17h3M11 17h9"/>
+        <circle cx="15" cy="7" r="2"/>
+        <circle cx="9" cy="17" r="2"/>
       </svg>
-      <span class="btn-label">Controls</span>
+      <span class="btn-label">Options</span>
     </button>
     <button class="btn btn-ghost" id="save-btn" type="button" title="Load a 32 KiB battery save">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -622,9 +705,40 @@
 
     <div class="understage">
       <pre id="status" aria-live="polite">Initializing the runtime…</pre>
-      <div class="hint"><b>X</b> A · <b>Z</b> B · <b>Enter</b> Start · <b>Arrows</b> Move</div>
+      <div class="hint" id="input-hint"><b>X</b> A · <b>Z</b> B · <b>Enter</b> Start · <b>Arrows</b> Move</div>
     </div>
   </div>
+
+<div id="options-dialog" class="options-overlay" role="dialog" aria-modal="true" aria-label="Options" tabindex="-1" hidden>
+  <div class="options-shell">
+    <div class="dialog-head">
+      <div>
+        <p class="dialog-kicker">In-game menu</p>
+        <h2 class="dialog-title">Options</h2>
+      </div>
+      <button class="btn btn-icon btn-ghost" id="options-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M6 6l12 12M18 6 6 18"/>
+        </svg>
+      </button>
+    </div>
+    <nav class="options-tabs" id="options-tabs" role="tablist" aria-label="Options tabs">
+      <button class="options-tab" type="button" role="tab" data-tab="main" aria-selected="true">MAIN</button>
+      <button class="options-tab" type="button" role="tab" data-tab="mods" disabled title="Mods are not available in the browser build">MODS</button>
+      <button class="options-tab" type="button" role="tab" data-tab="controls" aria-selected="false">CONTROLS</button>
+      <button class="options-tab" type="button" role="tab" data-tab="settings" aria-selected="false">SETTINGS</button>
+      <button class="options-tab" type="button" role="tab" data-tab="debug" aria-selected="false">DEBUG</button>
+    </nav>
+    <div class="options-body" id="options-body" role="tabpanel"></div>
+    <div class="options-foot">
+      <span class="options-hint" id="options-hint">TAB SWITCHES TAB · UP/DOWN SELECT · LEFT/RIGHT CHANGE · ESC RESUMES THE GAME</span>
+      <div class="options-actions">
+        <button class="btn btn-ghost" id="log-btn" type="button">Developer log</button>
+        <button class="btn btn-secondary" id="reload-btn" type="button">Reload</button>
+      </div>
+    </div>
+  </div>
+</div>
 </main>
 
 <input class="visually-hidden" type="file" id="rom-input" accept=".z64,.n64,.v64,.bin" aria-label="Select ROM">
@@ -634,52 +748,6 @@
 
 <button class="btn btn-ghost" id="log-close" type="button" hidden>Close log</button>
 
-<dialog id="controls-dialog">
-  <div class="dialog-head">
-    <div>
-      <p class="dialog-kicker">Input</p>
-      <h2 class="dialog-title">Controls</h2>
-    </div>
-    <button class="btn btn-icon btn-ghost" id="controls-close" type="button" aria-label="Close">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-        <path d="M6 6l12 12M18 6 6 18"/>
-      </svg>
-    </button>
-  </div>
-  <div class="dialog-body">
-    <div class="controls-grid">
-      <div class="control-group">
-        <h3>Keyboard</h3>
-        <div class="control-row"><span>A</span><span class="keys"><kbd>X</kbd></span></div>
-        <div class="control-row"><span>B</span><span class="keys"><kbd>Z</kbd></span></div>
-        <div class="control-row"><span>Z</span><span class="keys"><kbd>C</kbd></span></div>
-        <div class="control-row"><span>Start</span><span class="keys"><kbd>Enter</kbd></span></div>
-        <div class="control-row"><span>L / R</span><span class="keys"><kbd>Q</kbd><kbd>E</kbd></span></div>
-        <div class="control-row"><span>D-pad</span><span class="keys"><kbd>Arrows</kbd></span></div>
-        <div class="control-row"><span>C buttons</span><span class="keys"><kbd>I</kbd><kbd>K</kbd><kbd>J</kbd><kbd>L</kbd></span></div>
-      </div>
-      <div class="control-group">
-        <h3>Gamepad</h3>
-        <div class="control-row"><span>A / B</span><span class="keys"><kbd>A</kbd><kbd>B</kbd></span></div>
-        <div class="control-row"><span>C up / down</span><span class="keys"><kbd>X</kbd><kbd>Y</kbd></span></div>
-        <div class="control-row"><span>L / R</span><span class="keys"><kbd>LB</kbd><kbd>RB</kbd></span></div>
-        <div class="control-row"><span>Start</span><span class="keys"><kbd>Start</kbd></span></div>
-        <div class="control-row"><span>Z</span><span class="keys"><kbd>Left stick</kbd></span></div>
-        <div class="control-row"><span>D-pad</span><span class="keys"><kbd>D-pad</kbd></span></div>
-        <div class="control-row"><span>C buttons</span><span class="keys"><kbd>Right stick</kbd></span></div>
-      </div>
-    </div>
-    <p class="dialog-note">
-      Game audio is muted while the audio microcode is unemulated. Add
-      <code>?audio</code> to the URL to enable it. The full developer log is
-      available with <code>?log</code> or the button below.
-    </p>
-    <div class="dialog-actions">
-      <button class="btn btn-ghost" id="log-btn" type="button">Developer log</button>
-      <button class="btn btn-secondary" id="reload-btn" type="button">Reload</button>
-    </div>
-  </div>
-</dialog>
 
 <!--
   Path to the Emscripten build output. `ogre-web-config.js` (loaded in the
@@ -891,7 +959,6 @@
     var romInput = document.getElementById("rom-input");
     var saveInput = document.getElementById("save-input");
     var launcher = document.getElementById("launcher");
-    var controlsDialog = document.getElementById("controls-dialog");
 
     function choose(input) {
       if (input) {
@@ -958,42 +1025,23 @@
       }
     });
 
-    var controlsBtn = document.getElementById("controls-btn");
-    var controlsClose = document.getElementById("controls-close");
-    function openControls() {
-      if (!controlsDialog) {
-        return;
-      }
-      if (typeof controlsDialog.showModal === "function") {
-        controlsDialog.showModal();
-      } else {
-        controlsDialog.setAttribute("open", "");
-      }
-    }
-    function closeControls() {
-      if (!controlsDialog) {
-        return;
-      }
-      if (typeof controlsDialog.close === "function") {
-        controlsDialog.close();
-      } else {
-        controlsDialog.removeAttribute("open");
-      }
-    }
-    if (controlsBtn) controlsBtn.addEventListener("click", openControls);
-    if (controlsClose) controlsClose.addEventListener("click", closeControls);
-    if (controlsDialog) {
-      controlsDialog.addEventListener("click", function (e) {
-        // A click on the backdrop targets the dialog element itself.
-        if (e.target === controlsDialog) {
-          closeControls();
+    // The in-game options overlay lives in web.js (window.ogreOptions): it has
+    // to read the wasm settings exports and the game's input state. Esc opens
+    // it from the game; this button opens the same panel from the chrome.
+    var optionsBtn = document.getElementById("options-btn");
+    if (optionsBtn) {
+      optionsBtn.addEventListener("click", function () {
+        if (window.ogreOptions) {
+          window.ogreOptions.open("main");
         }
       });
     }
     var logBtn = document.getElementById("log-btn");
     if (logBtn) {
       logBtn.addEventListener("click", function () {
-        closeControls();
+        if (window.ogreOptions) {
+          window.ogreOptions.close();
+        }
         window.ogreLog.show(true);
       });
     }
@@ -1027,6 +1075,9 @@
         fullscreenBtn.setAttribute("title", active ? "Exit fullscreen" : "Fullscreen");
       }
       updateFullscreenScale();
+      if (window.ogreOptions && window.ogreOptions.isOpen && window.ogreOptions.isOpen()) {
+        window.ogreOptions.refresh();
+      }
     }
     if (fullscreenBtn && stage && stage.requestFullscreen) {
       fullscreenBtn.addEventListener("click", function () {
