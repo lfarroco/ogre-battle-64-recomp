@@ -75,6 +75,9 @@ node debug/probes/diag.cjs                           # hang characterisation
 node debug/probes/logmode.cjs                        # page-log contract smoke test
 node debug/probes/testdraw.cjs                       # synthetic-draw GL isolation
 node debug/probes/testdraw.cjs --flags 32 --expect-fbtex  # framebuffer-as-texture control
+node debug/probes/testdraw.cjs --flags 2048 --repeat 4 --gap 64 --expect-texcache  # tile-cache keep window and decode reuse
+node debug/probes/testdraw.cjs --flags 6144 --repeat 3 --gap 64 --expect-sourcechange  # changed source must miss
+node debug/probes/atmarkfast.cjs --arm 'id=0x0012' --disarm 'id=0x0003' --after 2  # per-flush canvas series
 node debug/probes/fbtex.cjs --scenes 0x04,0x0b --secs 20  # framebuffer-as-texture sweep
 node debug/probes/gamepad.cjs --secs 14               # a pad must reach N64 controller 1
 node debug/probes/textures.cjs --attempts 3 --secs 60 # decoded tile images
@@ -98,7 +101,8 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `diag.cjs` | main-thread heartbeat + `Module.print` rate + wedge forensics | (always; read the files) |
 | `progress.cjs` | `tasks=` high-water mark, `GFX-ESCAPE`/`GFX-RUNAWAY` | (see its own row above) |
 | `logmode.cjs` | default one-line status vs `?log`, `ogreLog` API | the page-log contract holds |
-| `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas; `--flags N` sets `ogre_gfx_debug_flags` first, `--flags 32` adds the framebuffer-as-texture positive control, and `--flags 96` adds the column and row negative controls | the synthetic draw rendered (and, with `--expect-fbtex`, a `[GFX-FBTEX]` line was logged; with `--expect-hits N`, exactly N hits were counted) |
+| `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas; `--flags N` sets `ogre_gfx_debug_flags` first, `--flags 32` adds the framebuffer-as-texture positive control, and `--flags 96` adds the column and row negative controls; `--repeat N` and `--gap MS` exercise the tile caches, and `--flags 4096` changes the source between calls | the synthetic draw rendered (and, with `--expect-fbtex`, a `[GFX-FBTEX]` line was logged; with `--expect-hits N`, exactly N hits were counted; with `--expect-texcache`/`--expect-sourcechange`, the decode and upload counters matched) |
+| `atmarkfast.cjs` | the presented canvas at every `ogre_gfx_flush` (~60 Hz), armed and disarmed by `[scene]` lines, with `mean3`/`meanPC`/`fracW240`/`fracW250` per distinct frame and a sparse 0xFFFD count in the Load Game colour image; `--no-capture` records scene timing only | a series was captured and no frame was white (exit 3: a white frame was captured; exit 2: the arm marker never arrived) |
 | `fbtex.cjs` | every `[GFX-FBTEX]` line and the `fbtex: hits=` counter over scene ids (`--scenes`) or arbitrary query strings (`--queries '...\|\|...'`) | (always; read the files) |
 | `gamepad.cjs` | a synthetic pad's `A` reach into the wasm input slots (`Module._ogre_input_debug(slot)`) and the keyboard sharing slot 0 with it | the pad reached slot 0 (N64 controller 1) and the keyboard's `B` still registered |
 | `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
@@ -162,6 +166,57 @@ bytes the draw did not write, and the `[GFX-FBTEX]` line prints both ranges
 (`cols=[..)` and `drawn cols=[..)`). The rows are exact: `note_fb_write` inverts
 `ndc_yf` as `(1 - pos) / 2 * height` and treats a vertex as an edge, so a fill of
 rows 100..163 is recorded as 100..163.
+
+### The tile-cache controls
+
+`testdraw.cjs --flags 2048` marks the synthetic list's uploads, and the
+renderer prints one `[GFX-TEXPROBE]` line per key with `result=upload|reuse`
+and `decode=hit|miss`. `--repeat 3` calls the synthetic list three times in one
+flush batch and `--expect-texcache` requires one upload, two reuses, one decode
+miss and two decode hits. `--gap 64` yields between calls so each list lands in
+its own flush; the same expectation then tests the age-windowed GL texture
+cache (an entry survives eight flushes) rather than the same-batch path.
+
+`--flags 4096` (with bit 11, so `--flags 6144`) writes a different source texel
+on every call. `--repeat 3 --gap 64 --expect-sourcechange` requires three
+distinct content keys and three decode misses: a source key that omitted a byte
+would serve the first image again and fail here.
+
+The renderer's `#gfxstats` line reports `tex: cache=N bytes=N uploads=N
+reused=N released=N decodes=N decode_hits=N`. Under `OGRE_TEX_TRACE=1`, every
+decode-cache hit is re-decoded and compared, and a difference prints
+`[GFX-TEXCACHE-MISMATCH]` (bounded to 8). A trace run of a natural screen must
+report zero.
+
+### The per-flush canvas series
+
+Playwright's element screenshot costs 0.95-9.5 s with the game running
+(session 176), so `atmark.cjs`'s nominal 250 ms series actually spans tens of
+seconds and cannot see a frame that lasts one present. `atmarkfast.cjs` wraps
+`Module._ogre_gfx_flush` inside the page, reads the default framebuffer with
+`gl.readPixels` after each flush, and keeps one record per distinct frame. It
+arms and disarms on the `[scene]` lines (`OGRE_SCENE_LOG=1` is required) and
+writes `-frames.jsonl`, `-frames.txt`, `-result.json` and a PNG for a flagged
+frame.
+
+The white test is `fracW240 >= 0.90 && meanPC >= 240`, not the renderer's
+`meanRGB` (which is a sum over non-black pixels). The colour matters: guest
+RGBA5551 `0xFFFD` decodes to `(255,255,247)`, so a `min >= 248` test would miss
+it. A flagged frame also gets `gl.getError()` and a sparse count of guest
+halfwords equal to `0xFFFD` at the Load Game colour image
+`0x228080..0x24D880`, read from the wasm heap at the base printed by
+`[debug] wasm calloc(...) -> 0x...`.
+
+```sh
+node debug/probes/atmarkfast.cjs --pre 0 --timeout 120 \
+  --arm 'id=0x0012' --disarm 'id=0x0003' --after 2 --out /tmp/loadgame \
+  --url 'http://127.0.0.1:8931/app/web/index.html?OGRE_SAVE=assets/escort_suspend.bin&OGRE_SCENE=title&OGRE_SCENE_LOG=1&OGRE_TAP_MS=4000&OGRE_TAP_SCENE_BUTTON=title:start:6,0x12:a:6'
+```
+
+Exit 3 means a white frame was captured; the flagged record's `meanPC`, mode
+colour and `rdramWhite` then separate a guest white plate (`(255,255,247)`,
+`rdramWhite > 0`) from the renderer's missing-texture fallback
+(`(255,255,255)`, `rdramWhite = 0`).
 
 ### The browser gamepad check
 

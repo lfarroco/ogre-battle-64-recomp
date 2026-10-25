@@ -47,8 +47,17 @@
 //
 // `--flags 2048` (bit 11) marks the synthetic list's texture uploads, and
 // `--repeat N` calls test_draw N times without yielding so the lists share one
-// flush batch. `--expect-texcache` requires the renderer's `[GFX-TEXPROBE]`
-// lines to show one upload and N-1 reuses of the same content key.
+// flush batch. `--gap MS` yields between calls so each list lands in its own
+// flush and the age-windowed GL texture cache is what keeps the upload.
+// `--expect-texcache` requires the renderer's `[GFX-TEXPROBE]` lines to show
+// one decode miss, one upload, and N-1 decode hits and reuses of the same
+// content key.
+//
+// `--flags 4096` (bit 12) makes each call write a different red texel, so every
+// call has a different source. `--flags 6144 --repeat N --gap 64
+// --expect-sourcechange` (bit 12 plus bit 11 for the probe lines) is the
+// negative control: N distinct content keys, N decode misses, no hit, which is
+// what a source key missing a byte would fail.
 //
 // Exit codes: 0 test_draw rendered (and, with --expect-fbtex, the control fired),
 // 2 it did not, 1 fatal.
@@ -68,7 +77,9 @@ const expectDepth = typeof opts['expect-depth'] === 'string' ? opts['expect-dept
 const expectAlpha = Boolean(opts['expect-alpha']);
 const expectDither = Boolean(opts['expect-dither']);
 const expectTexcache = Boolean(opts['expect-texcache']);
+const expectSourceChange = Boolean(opts['expect-sourcechange']);
 const repeat = h.num(opts.repeat, 1);
+const gap = h.num(opts.gap, 0);
 
 (async () => {
   const browser = await h.launch(cfg);
@@ -81,8 +92,10 @@ const repeat = h.num(opts.repeat, 1);
   // `repeat > 1` calls the synthetic draw several times without yielding, so the
   // lists land in one flush batch and their identical tile images exercise the
   // content-addressed cache across display lists (the per-list dedupe would
-  // hide a same-list duplicate).
-  const r = await page.evaluate(({ f, n }) => {
+  // hide a same-list duplicate). `--gap MS` yields between the calls instead,
+  // so each list lands in its own flush and the same test exercises the
+  // age-windowed GL texture cache rather than the same-batch reuse.
+  const r = await page.evaluate(async ({ f, n, gap }) => {
     const has = typeof Module._ogre_gfx_test_draw === 'function';
     if (has && typeof Module._ogre_gfx_debug_flags === 'function') {
       Module._ogre_gfx_debug_flags(f);
@@ -90,6 +103,9 @@ const repeat = h.num(opts.repeat, 1);
     let ret = null;
     for (let i = 0; i < n; ++i) {
       if (has) ret = Module._ogre_gfx_test_draw();
+      if (gap > 0 && i + 1 < n) {
+        await new Promise((resolve) => setTimeout(resolve, gap));
+      }
     }
     return {
       has,
@@ -97,7 +113,7 @@ const repeat = h.num(opts.repeat, 1);
       gfx: document.getElementById('gfxstats').textContent,
       gfxStatus: document.getElementById('gfx-status').textContent,
     };
-  }, { f: flags, n: repeat }).catch((e) => ({ err: String(e) }));
+  }, { f: flags, n: repeat, gap }).catch((e) => ({ err: String(e) }));
 
   await h.sleep(settle); // several flush ticks
   const canvas = await h.screenshotCanvas(page, `${prefix}-canvas.png`);
@@ -219,19 +235,28 @@ const repeat = h.num(opts.repeat, 1);
     .filter((l) => l.includes('[stderr]') && l.includes('GFX-TEXPROBE'))
     .map((l) => l.replace(/^\[stderr\] /, '').trim());
   const texProbe = texProbeLines.map((l) => {
-    const m4 = /key=(0x[0-9A-Fa-f]+) (\d+)x(\d+) result=(\w+)/.exec(l);
+    const m4 = /key=(0x[0-9A-Fa-f]+) (\d+)x(\d+) result=(\w+)(?: decode=(\w+))?/.exec(l);
     return m4
-      ? { key: m4[1], w: Number(m4[2]), h: Number(m4[3]), result: m4[4] }
+      ? {
+          key: m4[1],
+          w: Number(m4[2]),
+          h: Number(m4[3]),
+          result: m4[4],
+          decode: m4[5] || 'unknown',
+        }
       : null;
   }).filter(Boolean);
   let texcacheOk = true;
   if (expectTexcache) {
     const uploads = texProbe.filter((p) => p.result === 'upload').length;
     const reuses = texProbe.filter((p) => p.result === 'reuse').length;
-    texcacheOk = uploads >= 1 && reuses >= Math.max(0, repeat - 1);
+    const decodeHits = texProbe.filter((p) => p.decode === 'hit').length;
+    texcacheOk = uploads >= 1 && reuses >= Math.max(0, repeat - 1) &&
+                 decodeHits >= Math.max(0, repeat - 1);
     if (!texcacheOk) {
-      console.log(`FAIL: texture cache expected 1 upload + ${repeat - 1} reuse, ` +
-                  `read ${uploads} upload / ${reuses} reuse`);
+      console.log(`FAIL: texture cache expected 1 upload + ${repeat - 1} reuse + ` +
+                  `${repeat - 1} decode hit, read ${uploads} upload / ${reuses} reuse / ` +
+                  `${decodeHits} decode hit`);
     }
   }
 
@@ -272,10 +297,25 @@ const repeat = h.num(opts.repeat, 1);
                            (expectDither && ditherOk) || (expectDepth && depthOk) ||
                            (expectAlpha && alphaOk));
 
+  // Source-change negative control (`--flags 4096 --gap N`): every call writes
+  // a different blue texel, so every call must be a decode miss with its own
+  // content key. A stale hit shows as a repeated key or a decode hit.
+  let sourceOk = true;
+  const sourceKeys = new Set(texProbe.map((p) => p.key));
+  const sourceMisses = texProbe.filter((p) => p.decode === 'miss').length;
+  const sourceHits = texProbe.filter((p) => p.decode === 'hit').length;
+  if (expectSourceChange) {
+    sourceOk = sourceKeys.size >= repeat && sourceMisses >= repeat && sourceHits === 0;
+    if (!sourceOk) {
+      console.log(`FAIL: source-change control expected ${repeat} distinct keys and misses, ` +
+                  `read ${sourceKeys.size} keys / ${sourceMisses} miss / ${sourceHits} hit`);
+    }
+  }
+
   const hitsOk = expectHits === null || fbtexHits === expectHits;
   const ok = rendered && (!expectFbtex || fbtexLines.length > 0) && hitsOk && depthOk &&
              (!expectAlpha || alphaOk) && (!expectDither || ditherOk) &&
-             (!expectTexcache || texcacheOk);
+             (!expectTexcache || texcacheOk) && (!expectSourceChange || sourceOk);
   console.log('test_draw exported=', r && r.has, 'returned=', r && r.ret, 'flags=', flags);
   console.log('canvas pixels:', px ? JSON.stringify(px) : 'n/a', `after-batch nonBlack=${afterLast}`);
   console.log(`fbtex hits=${fbtexHits} lines=${fbtexLines.length}`);
@@ -301,7 +341,14 @@ const repeat = h.num(opts.repeat, 1);
   if (expectTexcache) {
     const uploads = texProbe.filter((p) => p.result === 'upload').length;
     const reuses = texProbe.filter((p) => p.result === 'reuse').length;
-    console.log(`texture cache control: repeat=${repeat} upload=${uploads} reuse=${reuses}`);
+    const decodeHits = texProbe.filter((p) => p.decode === 'hit').length;
+    console.log(`texture cache control: repeat=${repeat} gap=${gap} upload=${uploads} ` +
+                `reuse=${reuses} decode_hit=${decodeHits}`);
+    for (const l of texProbeLines.slice(0, 4)) console.log('  ' + l);
+  }
+  if (expectSourceChange) {
+    console.log(`source-change control: repeat=${repeat} gap=${gap} keys=${sourceKeys.size} ` +
+                `miss=${sourceMisses} hit=${sourceHits}`);
     for (const l of texProbeLines.slice(0, 4)) console.log('  ' + l);
   }
   await decoder.close().catch(() => {});

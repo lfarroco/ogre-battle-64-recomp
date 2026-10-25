@@ -2592,3 +2592,27 @@ live under `config/` and `patches/` (session 97 moved them).
   runs once per display list. The Load Game white frame did not reproduce in a
   4 Hz capture of the transition (20 shots, none white); if it exists it is
   shorter than 250 ms. See `docs/HANDOFF-2026-10-24-session189.md`.
+
+- **Session 190**: split the browser tile cache into two tiers. A pre-decode
+  `tile_source_key` hashes a superset of the TMEM bytes a tile can read (the
+  decoder's `(rgba32 || indexed) ? 0x7FF : 0xFFF` mask, the decoder's byte
+  shift, the 2 KiB palette half for an indexed tile, and `convert_k` only for
+  YUV16), and `decoded_tiles_` keeps the decoded pixels in 16 MiB, so a hit
+  skips `decode_tmem_tile`. The GL texture cache keeps a texture for eight
+  flushes with a 32 MiB / 16 384-entry cap instead of sweeping everything the
+  batch did not name, so an alternating-frame texture survives; an LRU eviction
+  is repaired from the decoded pixels. `testdraw --flags 2048 --repeat 3` gives
+  `upload=1 reuse=2 decode_hit=2`; `--gap 64 --repeat 4` gives
+  `upload=1 reuse=3 decode_hit=3`; `--flags 6144 --repeat 3 --gap 64` changes
+  the source each call and gives `keys=3 miss=3 hit=0`; `OGRE_TEX_TRACE=1`
+  re-decodes every hit and reports 0 `[GFX-TEXCACHE-MISMATCH]`. A natural Load
+  Game run reached scene `0x0012` and reported `decodes=309 hits=952
+  mismatches=0`. The session also withdraws session 189's "4 Hz" Load Game
+  series: `atmark.cjs` waits after a Playwright screenshot that costs 0.95-9.5 s,
+  so its nominal 250 ms series spans tens of seconds. New
+  `debug/probes/atmarkfast.cjs` samples `gl.readPixels` after every flush,
+  armed by `[scene]` lines. The successful run's two distinct frames are the
+  Load Game page (`mean3=120.86`) and a black frame (`mean3=0`), no white; four
+  further attempts landed on the idle trajectory under host load 16-27. The
+  white-frame question and the `0x12 -> 0x03` transition are unrun. See
+  `docs/HANDOFF-2026-10-25-session190.md`.

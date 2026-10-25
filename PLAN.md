@@ -73,6 +73,29 @@ released=N`. An S2DEX2 audit found that OB64 uses only `0xDA`/`0xDC`; the
 remaining `0x03`..`0x0B` now return instead of falling into the F3DEX2 triangle
 arms. See `docs/HANDOFF-2026-10-24-session189.md`.
 
+Session 190 split the browser tile cache into two tiers and measured both.
+`tile_source_key` hashes a superset of the TMEM bytes a tile can read (the
+decoder's own `(rgba32 || indexed) ? 0x7FF : 0xFFF` mask, the decoder's byte
+shift, the 2 KiB palette half for an indexed tile, and `convert_k` only for
+YUV16) before any decode; `decoded_tiles_` keeps the decoded pixels in 16 MiB
+and a hit skips `decode_tmem_tile`. The GL texture cache is now bounded by eight
+flushes, 32 MiB and 16 384 entries instead of sweeping every texture the batch
+did not name, so a texture used on alternating frames survives. `#gfxstats`
+reports `decodes=`/`decode_hits=` and a `[GFX-TEXCACHE]` census every 60
+flushes. Controls: `--flags 2048 --repeat 3` gives one upload, two reuses, one
+decode miss and two hits; `--gap 64 --repeat 4` gives one upload, three reuses
+and three hits across four flushes; `--flags 6144 --repeat 3 --gap 64` changes
+the source each call and gives three distinct keys and three misses. Under
+`OGRE_TEX_TRACE=1` a hit is re-decoded and compared (`[GFX-TEXCACHE-MISMATCH]`,
+0 in the synthetic run). `debug/probes/atmarkfast.cjs` replaces the
+screenshot-cadence series with a per-flush `readPixels` series. One Load Game
+run reached scene `0x12` and recorded the page (`mean3=120.86`) and a later
+black frame (`mean3=0`), with no white frame, then the game stopped submitting
+lists at frame 11; the other attempts landed on the idle trajectory under host
+load 16-27 (`[scene] id=0x0000`, `block=0x00000000`). The exact entry instant
+and the `0x12 -> 0x03` transition are unrun. See
+`docs/HANDOFF-2026-10-25-session190.md`.
+
 Session 188 fixed a browser freeze after 2–3 minutes with no input. The WebGL
 renderer's tile-image cache keyed each decoded image by `tmem_generation_`,
 which every load command increments, so each display list created a new GL
@@ -2041,6 +2064,27 @@ holds the evidence.
    shots 4-19 the mission map, none white; if it exists it is shorter than
    250 ms, and session 169's `meanRGB=255` is 85 per channel, not white. See
    `docs/HANDOFF-2026-10-24-session189.md`.
+   **(x) The session-189 "4 Hz" premise is withdrawn and the tile caches are
+   two-tier (session 190).** `atmark.cjs` waits `--gap` after a Playwright
+   element screenshot, which costs 0.95-9.5 s with the game running, so the 20
+   nominal 250 ms samples span tens of seconds and the transition got one
+   sample. `debug/probes/atmarkfast.cjs` wraps `Module._ogre_gfx_flush`, reads
+   the default framebuffer with `gl.readPixels` after each flush, and arms and
+   disarms from `[scene]` lines. The tile decode is now skipped when a
+   pre-decode TMEM source key matches (`tile_source_key`, 16 MiB decoded
+   cache), and the GL texture cache keeps a texture for eight flushes plus a
+   32 MiB/16 384-entry cap instead of the per-flush sweep. `testdraw.cjs
+   --flags 2048 --repeat 3` measures one upload, two reuses, one decode miss and
+   two decode hits; `--gap 64 --repeat 4` measures the keep window; `--flags
+   6144 --repeat 3 --gap 64` measures three distinct keys and three misses for a
+   changed source; `OGRE_TEX_TRACE=1` re-decodes every hit and reports
+   `[GFX-TEXCACHE-MISMATCH]` (0 in the synthetic run). One Load Game run reached
+   `0x12`: its two distinct frames are the page (`mean3=120.86`) and a later
+   black frame (`mean3=0`), no white, and the game stopped at display list 11.
+   The other attempts landed on the idle trajectory at host load 16-27
+   (`scene 0x0000`, `block=0x00000000`), so the exact entry instant and the
+   `0x12 -> 0x03` transition are still unrun. See
+   `docs/HANDOFF-2026-10-25-session190.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

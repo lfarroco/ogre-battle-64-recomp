@@ -172,8 +172,7 @@ struct RawVertex {
 
 struct LoadedImage {
     uint64_t key = 0;                 // GL texture-cache key; 0 = nothing loaded
-    uint64_t decode_key = 0;          // per-list decode cache: TMEM generation + tile
-    uint64_t palette = 0;             // palette generation a CI decode used
+    uint64_t decode_key = 0;          // source key: TMEM bytes + tile addressing
     int width = 0, height = 0;        // loaded rect size in texels
     int origin_s = 0, origin_t = 0;   // tile uls/ult in texels (UV origin)
     // The decoded colours of the first decodes of a run, packed 0xRRGGBB with
@@ -2129,7 +2128,31 @@ struct TexUpload {
     // Test-only: set by `test_draw` under debug flag bit 11, so the upload
     // loop can report whether the same content key was already resident.
     bool probe = false;
-    std::vector<uint8_t> pixels;
+    // Test-only: this upload reused a decoded-tile cache entry instead of
+    // decoding TMEM again. Read by `[GFX-TEXPROBE]`.
+    bool decode_hit = false;
+    // Shared with the decoded-tile cache so a cache hit does not copy the
+    // pixels. A texture evicted from the GL cache is re-uploaded from here.
+    std::shared_ptr<const std::vector<uint8_t>> pixels;
+};
+
+// One decoded tile image, keyed by a hash of the TMEM bytes and tile fields
+// that produce it. The cache lives on the gfx thread and lets a display list
+// that reloads the same source pixels reuse the previous decode; the content
+// key is still computed from the decoded bytes, so the GL texture is unchanged.
+struct DecodedTile {
+    std::shared_ptr<const std::vector<uint8_t>> pixels;
+    int width = 0, height = 0;
+    uint64_t last_used = 0;
+    size_t bytes = 0;
+};
+
+// A GL tile texture and the flush at which a draw last named it. The age
+// window keeps a texture an alternating-frame screen still needs.
+struct GlTextureEntry {
+    GLuint tex = 0;
+    size_t bytes = 0;
+    uint64_t last_used = 0;
 };
 
 // One queued draw: a triangle list plus the full RDP state needed to render it
@@ -2454,13 +2477,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned fbtex_hits() const { return fbtex_hits_.load(std::memory_order_relaxed); }
 
     // Live GL textures in the tile-image cache, and the total number of uploads.
-    // Both are main-thread state, read by ogre_gfx_stats. The cache is swept at
-    // the end of every flush, so the live count stays at one batch's images
-    // instead of growing by one texture per tile image per display list.
+    // Both are main-thread state, read by ogre_gfx_stats. Entries survive a
+    // bounded age window and byte cap (see flush_commands), so an
+    // alternating-frame screen keeps its textures between batches.
     size_t texture_cache_size() const { return gl_textures_.size(); }
+    size_t texture_cache_bytes() const { return gl_texture_bytes_; }
     size_t texture_uploads() const { return tex_upload_count_; }
     size_t texture_reused() const { return tex_reused_; }
     size_t texture_released() const { return tex_released_; }
+    // Gfx-thread counters: tile decodes and decoded-tile cache hits.
+    size_t texture_decodes() const { return tex_decodes_.load(std::memory_order_relaxed); }
+    size_t texture_decode_hits() const {
+        return tex_decode_hits_.load(std::memory_order_relaxed);
+    }
 
     void set_canvas(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE handle, int width, int height) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2533,6 +2562,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         put32(kTexOff + 2, 0x07C0);
         put32(kTexOff + 4, 0x003E);
         put32(kTexOff + 6, 0xFFFF);
+        // Debug flag bit 12's negative control: every call writes a different
+        // red texel, so a cache keyed by content must miss and produce a new
+        // texture. A false hit shows as N-1 decode hits and one key. The red
+        // word is inside the load's single word per row; the blue/white pair
+        // is not, because the synthetic G_LOADTILE copies one word.
+        if ((g_debug_flags.load(std::memory_order_relaxed) & 4096u) != 0) {
+            put32(kTexOff + 0, 0xF800 ^ (++test_draw_variant_ & 0x1F));
+        }
 
         uint32_t o = kDlOff;
         // G_SETFILLCOLOR dark grey
@@ -3906,31 +3943,53 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         // Texture uploads.
         {
+            ++texture_epoch_;
             for (TexUpload& up : tex_upload_queue_) {
                 // The key is a hash of the decoded bytes, so a resident texture
                 // with this key already holds exactly these pixels. Skip the
                 // upload instead of re-issuing `glTexImage2D` on every display
                 // list that reloads the same image.
-                if (gl_textures_.find(up.key) != gl_textures_.end()) {
+                auto resident = gl_textures_.find(up.key);
+                if (resident != gl_textures_.end()) {
+                    resident->second.last_used = texture_epoch_;
                     ++tex_reused_;
                     if (up.probe) {
                         OGRE_MILESTONE("GFX-TEXPROBE",
-                                       "key=0x%llX %dx%d result=reuse",
+                                       "key=0x%llX %dx%d result=reuse decode=%s",
+                                       (unsigned long long)up.key, up.width, up.height,
+                                       up.decode_hit ? "hit" : "miss");
+                    }
+                    continue;
+                }
+                // A decode-cache hit still carries the decoded bytes (shared
+                // with the cache), so an evicted GL texture can be re-created
+                // from them. An empty pixel list would be a bug in that
+                // contract, not a texture to skip.
+                if (!up.pixels || up.pixels->empty()) {
+                    if (tex_missing_pixels_ < 8) {
+                        ++tex_missing_pixels_;
+                        OGRE_MILESTONE("GFX-TEXCACHE",
+                                       "dropped upload key=0x%llX %dx%d: no pixels",
                                        (unsigned long long)up.key, up.width, up.height);
                     }
                     continue;
                 }
                 GLuint tex = 0;
                 glGenTextures(1, &tex);
-                gl_textures_[up.key] = tex;
+                GlTextureEntry& entry = gl_textures_[up.key];
+                entry.tex = tex;
+                entry.bytes = up.pixels->size();
+                entry.last_used = texture_epoch_;
+                gl_texture_bytes_ += entry.bytes;
                 glBindTexture(GL_TEXTURE_2D, tex);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, up.width, up.height, 0, GL_RGBA,
-                             GL_UNSIGNED_BYTE, up.pixels.data());
+                             GL_UNSIGNED_BYTE, up.pixels->data());
                 ++tex_upload_count_;
                 if (up.probe) {
                     OGRE_MILESTONE("GFX-TEXPROBE",
-                                   "key=0x%llX %dx%d result=upload",
-                                   (unsigned long long)up.key, up.width, up.height);
+                                   "key=0x%llX %dx%d result=upload decode=%s",
+                                   (unsigned long long)up.key, up.width, up.height,
+                                   up.decode_hit ? "hit" : "miss");
                 }
                 // The shader sampler reads this texture with texelFetch and
                 // filters in fp32 itself, so the GL sampler stays point. The
@@ -3947,14 +4006,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 if (tex_logged_ < 6) {
                     ++tex_logged_;
                     size_t nz = 0; uint64_t sum = 0;
-                    for (size_t i = 0; i + 3 < up.pixels.size(); i += 4) {
-                        const unsigned v = up.pixels[i] + up.pixels[i + 1] + up.pixels[i + 2];
+                    for (size_t i = 0; i + 3 < up.pixels->size(); i += 4) {
+                        const unsigned v = (*up.pixels)[i] + (*up.pixels)[i + 1] +
+                                           (*up.pixels)[i + 2];
                         if (v) { ++nz; sum += v; }
                     }
                     OGRE_MILESTONE("GFX-TEX",
                                    "tex %u: %dx%d tile=%d key=0x%llX nonzero=%zu/%zu avgRGB=%llu",
                                    tex_logged_, up.width, up.height, up.tile,
-                                   (unsigned long long)up.key, nz, up.pixels.size() / 4,
+                                   (unsigned long long)up.key, nz, up.pixels->size() / 4,
                                    (unsigned long long)(nz ? sum / nz : 0));
                 }
             }
@@ -4280,7 +4340,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 // colour from tile 1 and their alpha mask from tile 0).
                 auto lookup = [this](uint64_t key) -> GLuint {
                     auto it = gl_textures_.find(key);
-                    return (key != 0 && it != gl_textures_.end()) ? it->second : white_tex_;
+                    return (key != 0 && it != gl_textures_.end()) ? it->second.tex : white_tex_;
                 };
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key));
@@ -4540,40 +4600,83 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         }
 
-        // Drop every tile image this batch did not name. Every draw's texture is
-        // uploaded in the same batch as the draw (ExecCtx::uploaded is per
-        // display list, and the tiles are rebuilt per display list), so a key no
-        // command here referenced cannot be sampled again: a later display list
-        // either reloads the image, which bumps tmem_generation_ and produces a
-        // new key, or reuses this generation's key and queues its own upload.
-        // Without this sweep the cache held one GL texture per tile image per
-        // display list for the whole run, and the page ran out of GPU memory
-        // after a few minutes. The textures named here stay; GL defers the
-        // deletion until the draws already issued stop referencing them.
-        {
-            std::set<uint64_t> used;
-            for (const DrawCmd& cmd : cmds) {
-                if (!cmd.textured) {
-                    continue;
-                }
-                if (cmd.tex_key != 0) {
-                    used.insert(cmd.tex_key);
-                }
-                if (cmd.tex_key1 != 0) {
-                    used.insert(cmd.tex_key1);
-                }
+        // Mark every texture key the batch named, so the eviction below never
+        // drops one a draw just used even if its upload was skipped.
+        for (const DrawCmd& cmd : cmds) {
+            if (!cmd.textured) {
+                continue;
             }
-            for (auto it = gl_textures_.begin(); it != gl_textures_.end();) {
-                if (used.count(it->first) != 0) {
-                    ++it;
-                    continue;
+            for (uint64_t key : {cmd.tex_key, cmd.tex_key1}) {
+                auto it = gl_textures_.find(key);
+                if (it != gl_textures_.end()) {
+                    it->second.last_used = texture_epoch_;
                 }
-                glDeleteTextures(1, &it->second);
-                it = gl_textures_.erase(it);
-                ++tex_released_;
             }
         }
 
+        // Age out tile images instead of keeping only this batch's. A screen
+        // that alternates two texture sets uses each key every other frame, and
+        // the old per-flush sweep deleted it in the gap, so it was re-uploaded
+        // every time. An entry now survives kTextureKeepFlushes after the flush
+        // that last named it, and the cache is additionally bounded by
+        // kTextureCacheBytes. Eviction is least-recently-used, but an entry
+        // named by the batch just drawn is never a victim: GL defers the
+        // deletion until the draws issued here stop referencing it, and the
+        // byte cap can therefore be exceeded for one batch. The decoded-tile
+        // cache still holds the pixels, so a texture evicted here is re-created
+        // from them rather than from a new decode.
+        {
+            for (auto it = gl_textures_.begin(); it != gl_textures_.end();) {
+                if (texture_epoch_ - it->second.last_used > kTextureKeepFlushes) {
+                    gl_texture_bytes_ -= it->second.bytes;
+                    glDeleteTextures(1, &it->second.tex);
+                    it = gl_textures_.erase(it);
+                    ++tex_released_;
+                } else {
+                    ++it;
+                }
+            }
+            // The cap can need many victims at once (an animated screen produces
+            // one new image per tile per frame). Sort the candidates once rather
+            // than rescanning the map for every victim.
+            if (gl_texture_bytes_ > kTextureCacheBytes ||
+                gl_textures_.size() > kTextureMaxEntries) {
+                std::vector<std::pair<uint64_t, uint64_t>> lru;   // last_used, key
+                lru.reserve(gl_textures_.size());
+                for (const auto& [key, e] : gl_textures_) {
+                    if (e.last_used != texture_epoch_) {
+                        lru.emplace_back(e.last_used, key);
+                    }
+                }
+                std::sort(lru.begin(), lru.end());
+                for (const auto& entry : lru) {
+                    if (gl_texture_bytes_ <= kTextureCacheBytes &&
+                        gl_textures_.size() <= kTextureMaxEntries) {
+                        break;
+                    }
+                    auto it = gl_textures_.find(entry.second);
+                    if (it == gl_textures_.end()) {
+                        continue;
+                    }
+                    gl_texture_bytes_ -= it->second.bytes;
+                    glDeleteTextures(1, &it->second.tex);
+                    gl_textures_.erase(it);
+                    ++tex_released_;
+                }
+            }
+        }
+        // One cache census per minute of flushes, so a run's log answers
+        // whether the caches plateau without a separate probe.
+        if (flush_count_ > 0 && (flush_count_ % 60) == 0) {
+            OGRE_MILESTONE("GFX-TEXCACHE",
+                           "flush %u: live=%zu bytes=%zu/%zu uploads=%zu reused=%zu "
+                           "released=%zu decodes=%zu hits=%zu mismatches=%u",
+                           flush_count_, gl_textures_.size(), gl_texture_bytes_,
+                           kTextureCacheBytes, tex_upload_count_, tex_reused_, tex_released_,
+                           tex_decodes_.load(std::memory_order_relaxed),
+                           tex_decode_hits_.load(std::memory_order_relaxed),
+                           texcache_mismatches_.load(std::memory_order_relaxed));
+        }
         // Writeback-dither control (`test_draw`, debug flag bit 10). Each marked
         // fill's target is read back here, with the pattern the batch counted,
         // and the two expected 16-bit words are counted. `0x214D` is the
@@ -4940,10 +5043,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (program_ != 0) {
                 glDeleteProgram(program_);
             }
-            for (auto& [key, tex] : gl_textures_) {
-                glDeleteTextures(1, &tex);
+            for (auto& [key, entry] : gl_textures_) {
+                glDeleteTextures(1, &entry.tex);
             }
             gl_textures_.clear();
+            gl_texture_bytes_ = 0;
+            decoded_tiles_.clear();
+            decoded_bytes_ = 0;
             for (auto& [addr, fb] : gl_framebuffers_) {
                 if (fb.fbo != 0) glDeleteFramebuffers(1, &fb.fbo);
                 if (fb.tex != 0) glDeleteTextures(1, &fb.tex);
@@ -5298,11 +5404,30 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     std::vector<TexUpload> tex_upload_queue_;
     size_t tex_upload_count_ = 0;   // actual glTexImage2D calls
     size_t tex_reused_ = 0;         // tile images a resident texture already held
-    size_t tex_released_ = 0;   // textures dropped by the per-flush sweep
-    // GL-side texture cache (main thread only): key = tile load key. Holds one
-    // batch's images; entries no batch references are deleted at the end of
-    // flush_commands (see there).
-    std::map<uint64_t, GLuint> gl_textures_;
+    size_t tex_released_ = 0;   // textures dropped by the age/byte eviction
+    unsigned tex_missing_pixels_ = 0;   // uploads dropped for want of pixels
+    uint32_t test_draw_variant_ = 0;    // test_draw source-change control
+    // GL-side texture cache (main thread only): key = tile content key. Entries
+    // live for at least kTextureKeepFlushes and until kTextureCacheBytes is
+    // exceeded, so a texture used on alternating frames is not re-uploaded.
+    std::map<uint64_t, GlTextureEntry> gl_textures_;
+    size_t gl_texture_bytes_ = 0;
+    uint64_t texture_epoch_ = 0;   // bumped once per flush, for the age test
+    static constexpr uint64_t kTextureKeepFlushes = 8;
+    static constexpr size_t kTextureCacheBytes = 32u << 20;
+    static constexpr size_t kTextureMaxEntries = 16384;
+
+    // Gfx-thread decoded-tile cache. Keyed by the TMEM bytes and the tile fields
+    // that decide the decode, so an unchanged source is not decoded again when
+    // a later display list reloads it. Entries are bounded by bytes, not by a
+    // flush count: the upload queue holds a shared reference until it drains.
+    std::map<uint64_t, DecodedTile> decoded_tiles_;
+    size_t decoded_bytes_ = 0;
+    uint64_t decode_epoch_ = 0;
+    static constexpr size_t kDecodeCacheBytes = 16u << 20;
+    std::atomic<size_t> tex_decodes_{0};
+    std::atomic<size_t> tex_decode_hits_{0};
+    std::atomic<unsigned> texcache_mismatches_{0};   // trace-only source-key audit
 
     // Debug: the last few decoded images, so a probe can look at exactly what
     // the renderer sampled (see ogre_gfx_debug_tex). Written on the gfx thread
@@ -6734,6 +6859,128 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         t.image_valid = false;   // the sampled rect is not known until G_SETTILESIZE
     }
 
+    // Hashes `len` bytes starting at `base`, wrapping at TMEM's 4 KiB boundary.
+    // `or_address` selects the upper half for formats that read both halves.
+    static uint64_t hash_tmem_bytes(const uint8_t* tmem, uint32_t base, uint32_t len,
+                                    uint32_t mask, uint32_t or_address, uint64_t seed) {
+        base &= mask;
+        while (len > 0) {
+            const uint32_t part = std::min<uint32_t>(len, (mask + 1) - base);
+            seed = XXH3_64bits_withSeed(tmem + (base | or_address), part, seed);
+            len -= part;
+            base = 0;
+        }
+        return seed;
+    }
+
+    // The bytes decode_tmem_tile can read for this tile, hashed before the
+    // decode. A tile reads `line << 3` bytes per row and `row_bytes` bytes
+    // inside one row; when the row stride is wider than the sampled row, each
+    // row is hashed on its own so an unrelated load elsewhere in TMEM does not
+    // invalidate this tile. The fields that decide the addressing are mixed in
+    // after the bytes; the GL wrap fields are not decode inputs and stay out.
+    uint64_t tile_source_key(const RenderState& st, const TileState& t, int w, int h,
+                             uint32_t lut_mode) {
+        const bool rgba32 = (t.fmt == gbi::IM_FMT_RGBA) && (t.siz == gbi::IM_SIZ_32b);
+        const bool indexed = (t.fmt == gbi::IM_FMT_CI) && (lut_mode != 0);
+        const bool yuv16 = (t.fmt == gbi::IM_FMT_YUV) && (t.siz == gbi::IM_SIZ_16b);
+        // Must match decode_tmem_tile's own mask. A CI tile is masked to the
+        // lower half there, so hashing with 0xFFF would read different bytes
+        // from an address at or above 0x800 and could serve a stale decode.
+        const uint32_t mask = (rgba32 || indexed) ? 0x7FFu : 0xFFFu;
+        const uint32_t address = static_cast<uint32_t>(t.tmem) << 3;
+        const uint32_t stride = static_cast<uint32_t>(t.line) << 3;
+        // The decoder's own byte shift; I32 is 3 (4 bytes per texel), and
+        // RGBA32 is forced to 2 because its four channels live in two halves.
+        const uint32_t shift = rgba32 ? 2u : t.siz;
+        // Worst-case byte offset decode_tmem_tile can touch in one row, plus
+        // the 4-byte slack the odd-row word swap and the YUV chroma pair need.
+        uint32_t row_bytes =
+            ((static_cast<uint32_t>(w) - 1) << shift >> 1) + 1u + (shift >= 2 ? 1u : 0u);
+        row_bytes = std::min<uint32_t>(row_bytes + 4u, 4096u);
+        const bool both_halves = (t.siz == gbi::IM_SIZ_32b) || yuv16;
+
+        uint64_t key = 0x9E3779B97F4A7C15ull;
+        const uint32_t rows = static_cast<uint32_t>(h);
+        const uint32_t region = mask + 1;
+        const uint32_t total = stride * (rows - 1) + row_bytes;
+        if (stride >= region || total >= region) {
+            // The tile's own footprint already spans TMEM, so hashing the whole
+            // 4 KiB changes nothing but avoids a needless row loop.
+            key = hash_tmem_bytes(tmem_, 0, 4096, 0xFFF, 0, key);
+        } else if (stride <= row_bytes) {
+            // Rows are packed; one contiguous span covers every sampled byte.
+            key = hash_tmem_bytes(tmem_, address, total, mask, 0, key);
+            if (both_halves) {
+                key = hash_tmem_bytes(tmem_, address, total, mask, 0x800u, key);
+            }
+        } else {
+            for (uint32_t y = 0; y < rows; ++y) {
+                const uint32_t at = address + y * stride;
+                key = hash_tmem_bytes(tmem_, at, row_bytes, mask, 0, key);
+                if (both_halves) {
+                    key = hash_tmem_bytes(tmem_, at, row_bytes, mask, 0x800u, key);
+                }
+            }
+        }
+        // A CI tile's colours come from the palette in TMEM's upper half. Hash
+        // the whole half; it is 2 KiB and changes only on a TLUT load.
+        if (indexed) {
+            key = hash_tmem_bytes(tmem_, 0x800u, 0x800u, 0xFFFu, 0, key);
+        }
+
+        auto mix = [&key](uint64_t v) {
+            key = (key ^ v) * 0x00000100000001B3ull;
+        };
+        mix(t.tmem);
+        mix(t.line);
+        mix(t.fmt);
+        mix(t.siz);
+        mix(t.palette);
+        mix(static_cast<uint64_t>(w));
+        mix(static_cast<uint64_t>(h));
+        mix(lut_mode);
+        if (yuv16) {
+            for (int i = 0; i < 6; ++i) {
+                mix(static_cast<uint32_t>(st.convert_k[i]));
+            }
+        }
+        return key;
+    }
+
+    // Stores a decode and evicts least-recently-used entries over the byte cap.
+    // The upload queue holds its own shared reference, so an evicted entry's
+    // pixels stay alive until the batch that named them has been drawn.
+    void cache_decoded_tile(uint64_t source_key,
+                            std::shared_ptr<const std::vector<uint8_t>> pixels, int w, int h) {
+        auto [it, inserted] = decoded_tiles_.try_emplace(source_key);
+        DecodedTile& e = it->second;
+        decoded_bytes_ -= e.bytes;
+        e.pixels = std::move(pixels);
+        e.width = w;
+        e.height = h;
+        e.last_used = ++decode_epoch_;
+        e.bytes = e.pixels->size();
+        decoded_bytes_ += e.bytes;
+        while (decoded_bytes_ > kDecodeCacheBytes && decoded_tiles_.size() > 1) {
+            auto victim = decoded_tiles_.end();
+            for (auto c = decoded_tiles_.begin(); c != decoded_tiles_.end(); ++c) {
+                if (c->first == source_key) {
+                    continue;
+                }
+                if (victim == decoded_tiles_.end() ||
+                    c->second.last_used < victim->second.last_used) {
+                    victim = c;
+                }
+            }
+            if (victim == decoded_tiles_.end()) {
+                break;
+            }
+            decoded_bytes_ -= victim->second.bytes;
+            decoded_tiles_.erase(victim);
+        }
+    }
+
     // Decodes (and uploads, once per key) the image a tile samples, using the
     // tile's own format/size, its rect, and its `line` as the row stride.
     // Replaces "decode the load rect with the load's format", which could not
@@ -6776,38 +7023,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // The RDRAM source the diagnostic below reports (the load's own stride
         // is the SETTIMG width, which is not what the tile samples from TMEM).
         const int row_bytes = t.image_stride;
-        // A CI image's decoded colour depends on the palette and on the RDP's
-        // 2-bit texture LUT mode as well as on the TMEM bytes, and both outlive
-        // the display list. A G_LOADTLUT in between, or a display list that
-        // switches the LUT mode, makes the same tile decode to a different
-        // image, so the *decode* key carries the palette generation, the LUT
-        // mode and the TMEM generation (every load shifts the bytes under the
-        // tile). It only dedupes a decode within one display list, where
-        // nothing can have changed; the GL key is content-addressed below.
+        // The source key covers the bytes decode_tmem_tile reads and the fields
+        // that decide which bytes those are. It is computed before decoding, so
+        // a display list that reloads the same bytes can reuse the previous
+        // decode. The GL content key is still computed from the decoded pixels
+        // below, so the texture the draw samples is unchanged.
         const uint32_t lut_mode = (st.othermode_h >> 14) & 3u;
-        const bool indexed = (t.fmt == gbi::IM_FMT_CI) && (lut_mode != 0);
-        const uint64_t palette_key = indexed ? (tlut_generation_ * 4 + lut_mode) : 0;
-        uint64_t decode_key = tmem_generation_;
-        auto mix = [&decode_key](uint64_t v) {
-            decode_key = (decode_key ^ v) * 0x00000100000001B3ull;
-        };
-        mix(t.tmem);
-        mix(t.line);
-        mix(t.fmt);
-        mix(t.siz);
-        mix(t.palette);
-        mix(static_cast<uint64_t>(w));
-        mix(static_cast<uint64_t>(h));
-        mix(static_cast<uint64_t>(tile));
-        // The GL texture object's wrap state is set at creation and is part of
-        // the content key, so a G_SETTILE that changes cms/cmt/masks/maskt
-        // without a new load must also invalidate the per-list decode cache.
-        mix(t.cms);
-        mix(t.cmt);
-        mix(t.masks);
-        mix(t.maskt);
-        if (t.image_valid && t.image.decode_key == decode_key &&
-            t.image.palette == palette_key) {
+        const uint64_t source_key = tile_source_key(st, t, w, h, lut_mode);
+        if (t.image_valid && t.image.decode_key == source_key) {
             return;   // already decoded and queued for this draw
         }
 
@@ -6819,8 +7042,52 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         g_load_timgw.store(static_cast<uint32_t>(row_bytes), std::memory_order_relaxed);
         g_load_addr.store(t.image_address, std::memory_order_relaxed);
 
-        std::vector<uint8_t> pixels;
-        decode_tmem_tile(tmem_, t, w, h, static_cast<int>(lut_mode), st.convert_k, pixels);
+        // Reuse the decode when the source key matches; otherwise decode TMEM
+        // and cache the result. `pixels` is shared from here on, so a cache hit
+        // costs one XXH3 pass over the decoded bytes (for the content key) and
+        // no copy. The decoded-tile hash is the load's own marker in the
+        // `[GFX-TEXPROBE]` control; `g_load_done` stays a decode counter.
+        std::shared_ptr<const std::vector<uint8_t>> pixels;
+        auto cached = decoded_tiles_.find(source_key);
+        const bool decode_hit = (cached != decoded_tiles_.end());
+        if (decode_hit) {
+            DecodedTile& e = cached->second;
+            e.last_used = ++decode_epoch_;
+            pixels = e.pixels;
+            ++tex_decode_hits_;
+            // Trace-only audit of the source key: re-decode the same tile and
+            // compare. A mismatch means the key omitted an input, and the fresh
+            // decode replaces the cached one so the frame is still correct.
+            if (trace_active()) {
+                std::vector<uint8_t> scratch;
+                decode_tmem_tile(tmem_, t, w, h, static_cast<int>(lut_mode), st.convert_k,
+                                 scratch);
+                if (scratch.size() != pixels->size() ||
+                    std::memcmp(scratch.data(), pixels->data(), scratch.size()) != 0) {
+                    const unsigned mismatches =
+                        texcache_mismatches_.load(std::memory_order_relaxed);
+                    if (mismatches < 8) {
+                        OGRE_MILESTONE("GFX-TEXCACHE-MISMATCH",
+                                       "key=0x%llX %dx%d fmt=%d siz=%d line=%d tmem=%u "
+                                       "cached=%zuB fresh=%zuB",
+                                       (unsigned long long)source_key, w, h, (int)t.fmt,
+                                       (int)t.siz, (int)t.line, (unsigned)t.tmem,
+                                       pixels->size(), scratch.size());
+                    }
+                    texcache_mismatches_.fetch_add(1, std::memory_order_relaxed);
+                    pixels = std::make_shared<const std::vector<uint8_t>>(std::move(scratch));
+                    decoded_bytes_ -= e.bytes;
+                    e.pixels = pixels;
+                    e.bytes = pixels->size();
+                    decoded_bytes_ += e.bytes;
+                }
+            }
+        } else {
+            auto decoded = std::make_shared<std::vector<uint8_t>>();
+            decode_tmem_tile(tmem_, t, w, h, static_cast<int>(lut_mode), st.convert_k, *decoded);
+            pixels = decoded;
+            ++tex_decodes_;
+        }
         g_load_done.fetch_add(1, std::memory_order_relaxed);
 
         // The GL texture is exactly its decoded RGBA8 bytes, its size, and the
@@ -6831,7 +7098,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // when the bytes were identical. Palette and YUV differences are in the
         // decoded bytes; the per-draw tile origin and filter are uniforms, not
         // texture state, so they stay out.
-        uint64_t content_key = XXH3_64bits(pixels.data(), pixels.size());
+        uint64_t content_key = XXH3_64bits(pixels->data(), pixels->size());
         auto mix_content = [&content_key](uint64_t v) {
             content_key = (content_key ^ v) * 0x00000100000001B3ull;
         };
@@ -6844,6 +7111,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (content_key == 0) {
             content_key = 1;   // 0 means "no texture" to lookup() and the sweep
         }
+        if (!decode_hit) {
+            cache_decoded_tile(source_key, pixels, w, h);
+        }
         // OGRE_TEX_TRACE: the colour the decoded image holds. The native
         // renderer prints the same number from the RDRAM bytes through the
         // palette (`OGRE_TEX_TRACE_COLOUR`), so two runs of one screen can be
@@ -6853,10 +7123,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (trace_active()) {
             uint64_t sum = 0;
             unsigned opaque = 0;
-            const size_t count = pixels.size() / 4;
+            const size_t count = pixels->size() / 4;
             for (size_t i = 0; i < count; ++i) {
-                sum += pixels[i * 4 + 0] + pixels[i * 4 + 1] + pixels[i * 4 + 2];
-                if (pixels[i * 4 + 3] >= 128) {
+                sum += (*pixels)[i * 4 + 0] + (*pixels)[i * 4 + 1] + (*pixels)[i * 4 + 2];
+                if ((*pixels)[i * 4 + 3] >= 128) {
                     ++opaque;
                 }
             }
@@ -6871,9 +7141,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         t.image.hist.clear();
         if (trace_active() && trace_draws_ < 8) {
             std::map<uint32_t, uint32_t> colhist;
-            for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
-                const uint32_t c = (uint32_t(pixels[i]) << 16) | (uint32_t(pixels[i + 1]) << 8) |
-                                   uint32_t(pixels[i + 2]);
+            for (size_t i = 0; i + 3 < pixels->size(); i += 4) {
+                const uint32_t c = (uint32_t((*pixels)[i]) << 16) |
+                                   (uint32_t((*pixels)[i + 1]) << 8) |
+                                   uint32_t((*pixels)[i + 2]);
                 ++colhist[c];
             }
             for (const auto& kv : colhist) {
@@ -6901,7 +7172,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             dbg.fmt = t.fmt;
             dbg.siz = t.siz;
             dbg.line = t.line;
-            dbg.pixels = pixels;
+            dbg.pixels = *pixels;
             // Keep a whole frame's loads (12 sprites x mask+colour) so a probe
             // can compare the first rendered sprite with its own texture pair.
             if (debug_tex_.size() >= 24) {
@@ -6922,17 +7193,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             up.clamp_s = (t.cms != 0) || (t.masks == 0);
             up.clamp_t = (t.cmt != 0) || (t.maskt == 0);
             up.bilerp = ((st.othermode_h >> 12) & 3) == 2;  // G_TF_BILERP
+            up.decode_hit = decode_hit;
             up.pixels = pixels;
             ctx->tex.push_back(std::move(up));
         }
 
         // Diagnostics: remember the decoded texel (0,0) and the tile's addressing
         // so the texrect path can report what a dsdx=dtdy=0 rect samples.
-        if (pixels.size() >= 4) {
-            last_tex_rgba_[0] = pixels[0];
-            last_tex_rgba_[1] = pixels[1];
-            last_tex_rgba_[2] = pixels[2];
-            last_tex_rgba_[3] = pixels[3];
+        if (pixels->size() >= 4) {
+            last_tex_rgba_[0] = (*pixels)[0];
+            last_tex_rgba_[1] = (*pixels)[1];
+            last_tex_rgba_[2] = (*pixels)[2];
+            last_tex_rgba_[3] = (*pixels)[3];
         }
         last_tex_fmt_ = t.fmt;
         last_tex_siz_ = t.siz;
@@ -6943,8 +7215,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         last_tex_maskt_ = t.maskt;
 
         t.image.key = content_key;
-        t.image.decode_key = decode_key;
-        t.image.palette = palette_key;
+        t.image.decode_key = source_key;
         t.image.width = w;
         t.image.height = h;
         t.image.origin_s = x0;
@@ -8518,8 +8789,8 @@ const char* ogre_gfx_stats() {
                  "%s\nexec: task=%u cmd=%llu @0x%05X op=0x%02X draws=%u flush_ok=%u flush_skip=%u flushed_cmds=%u"
                  "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X"
                  "\nfbtex: hits=%u (a texture load read a colour image that was still on the GPU)"
-                 "\ntex: cache=%zu uploads=%zu reused=%zu released=%zu (tile images; the "
-                 "cache is swept after every flush)",
+                 "\ntex: cache=%zu bytes=%zu uploads=%zu reused=%zu released=%zu "
+                 "decodes=%zu decode_hits=%zu (tile images; age and byte bounded)",
                  ogre::g_stats_snapshot,
                  ogre::g_exec_task.load(std::memory_order_relaxed),
                  (unsigned long long)ogre::g_exec_cmd.load(std::memory_order_relaxed),
@@ -8539,9 +8810,12 @@ const char* ogre_gfx_stats() {
                  ogre::g_load_addr.load(std::memory_order_relaxed),
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_hits() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_cache_size() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_cache_bytes() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_uploads() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_reused() : 0u,
-                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_released() : 0u);
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_released() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_decodes() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_decode_hits() : 0u);
     }
     return buf;
 }

@@ -5087,3 +5087,88 @@ Two smaller decisions:
   16 texrects per run with `INVALID_OPERATION` 0x0502 and must be fixed with an
   A/B on the plate's RDRAM contents; binding the 1x1 white fallback instead
   makes the stills present black.
+
+## Decision 173 — the browser tile cache is two-tier: a pre-decode TMEM source key, then an age- and byte-bounded GL cache
+
+Session 188 fixed the unbounded GL texture growth by sweeping every texture the
+batch did not name. That sweep deleted a texture used on alternating frames in
+the gap, and the decode still ran once per display list because the GL content
+key is computed from the decoded bytes. Session 189 left both as open items.
+Session 190 closes them with two caches joined only by the content key.
+
+**Gfx thread.** `tile_source_key` hashes the TMEM bytes a tile can read and the
+fields that decide which bytes those are, before any decode. `decoded_tiles_`
+maps that key to the decoded pixels (a `shared_ptr<const vector<uint8_t>>`),
+bounded by 16 MiB and evicted least-recently-used. A hit skips
+`decode_tmem_tile`; the upload still carries the shared pixels, because the gfx
+thread cannot know whether the main thread still holds the GL texture. The
+content key is recomputed from those pixels plus the wrap fields, so a tile that
+changes only `cms`/`cmt`/`masks`/`maskt` cannot reuse the wrong content key.
+
+**Main thread.** `gl_textures_` maps the content key to a texture with its byte
+size and the flush that last named it. An entry survives eight flushes
+(`kTextureKeepFlushes = 8`, the RT64 floor `WORKLOAD_QUEUE_SIZE * 2`) and the
+cache is capped at 32 MiB and 16 384 entries. Eviction is LRU, but a key the
+current batch named is never a victim. A GL eviction is repaired from the
+decoded-tile pixels without another decode.
+
+**The source key must hash a superset of what the decoder reads.** A superset
+costs a false miss; a subset serves a stale image. The mask is the decoder's own
+`(rgba32 || indexed) ? 0x7FF : 0xFFF`; the per-row byte count comes from the
+decoder's shift (I32 is 3, not 2); an indexed tile also hashes the 2 KiB palette
+half at 0x800, because a `G_LOADTILE` into the palette region bumps only
+`tmem_generation_`; and `convert_k[0..5]` is mixed only for YUV16. `tile_source_key`
+and `decode_tmem_tile` are the two places that must agree, so a change to one
+needs the other.
+
+The alternative, mirroring GL residency on the gfx thread, was rejected: if the
+mirror says "resident" and the main thread ages the entry out before the flush,
+the draw binds no texture and falls back to the 1x1 white texture.
+
+**Measurement.** `testdraw.cjs --flags 2048 --repeat 3 --expect-texcache`
+requires one upload, two reuses, one decode miss and two decode hits.
+`--gap 64` puts each list in its own flush and tests the keep window.
+`--flags 6144 --repeat 3 --gap 64 --expect-sourcechange` changes one source
+texel per call and requires three distinct keys and three misses, the negative
+control for a key missing a byte. Under `OGRE_TEX_TRACE=1`, a cache hit is
+re-decoded and compared, and a difference prints `[GFX-TEXCACHE-MISMATCH]`.
+`#gfxstats` carries `decodes=` and `decode_hits=`, and a `[GFX-TEXCACHE]` census
+every 60 flushes reports the cache's live count and byte total.
+
+## Decision 174 — the Load Game white-frame series is measured per flush, and the 4 Hz series was not 4 Hz
+
+Session 189 §8 concluded that the Load Game white frame "did not reproduce at
+4 Hz" and that it must last less than 250 ms. The premise is wrong. `atmark.cjs`
+waits `--gap` *after* each shot, and one shot is a Playwright element screenshot
+of the running canvas, measured at 0.95-9.5 s (session 176). The 20 nominal
+250 ms samples therefore span tens of seconds, and the scene transition got one
+sample. The conclusion does not follow from the data.
+
+The measurement is now `debug/probes/atmarkfast.cjs`. It wraps the page's
+`Module._ogre_gfx_flush`, coalesces the page's two calls per 16 ms tick, reads
+the default framebuffer with `gl.readPixels`, and keeps one record per distinct
+frame. It arms and disarms from `[scene]` lines through `ogreLog.onLine` instead
+of polling. The white test is `fracW240 >= 0.90 && meanPC >= 240`; the name
+`meanRGB` is not reused, because the renderer's field is a sum over non-black
+pixels and session 189's own correction of that field is the reason. Guest
+RGBA5551 `0xFFFD` expands to `(255,255,247)`, so a `min >= 248` test would miss
+the game's own plate; a whole-canvas `(255,255,255)` frame points at the 1x1
+white fallback instead.
+
+A flagged frame also records `gl.getError()` and a sparse count of `0xFFFD` in
+the Load Game colour image at `0x228080..0x24D880`, read through the wasm heap
+base printed by `[debug] wasm calloc(...)`. A guest white plate therefore has
+`rdramWhite > 0`; the renderer's fallback does not.
+
+One browser run reached scene `0x12` and captured two distinct frames: the Load
+Game page (`319x239 mean3=120.86 nonBlack=68357 colorful=48515`) at `t=40.432 s`
+and an all-black frame (`mean3=0`) at `t=45.913 s`. No frame was white and none
+was in the candidate band. The game then stopped submitting display lists
+(frame 11 at 43.87 s was the last), so the `0x12 -> 0x03` transition is not in
+the series. The other attempts landed on the known idle trajectory: the first
+`[scene]` line is `id=0x0000`, the scene-state block at `0x800C4BBC` is null,
+and `[scene-trace]` reports `forced=0x0004 pending=0x0004 block=0x00000000`
+while the dispatcher never consumes the pending word. The host load average was
+16-27 for those attempts, and session 189 §4 recorded the same failure at load
+28. The exact entry instant and the transition are unrun, not disproved; re-run
+the command in `docs/guides/web-probes.md` on an idle machine.
