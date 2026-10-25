@@ -17,10 +17,13 @@
 // runtime's gfx pthread are proxied to the main thread by Emscripten.
 //
 // Known prototype limitations (documented in WEB-PORT-REPORT.md §10):
-//   - A `G_LOADTILE` whose source lies inside a colour image the RDP has already
-//     rendered still reads RDRAM, not the rendered target (RT64's tile copy has
-//     no equivalent here). The njpeg backdrop does not need it: its assembly is a
-//     CPU copy, which `ogre_sync_framebuffers()` makes possible.
+//   - A `G_LOADTILE` whose source lies inside a colour image the RDP has drawn
+//     reads RDRAM. A framebuffer-source copy exists behind `OGRE_FBTEX=1`, but
+//     it is not enabled: the GPU copy is only authoritative once RDRAM changes
+//     are re-uploaded into it and the framebuffer is written back at the end of
+//     every workload (RT64's `checkRAM`/`uploadRAM` plus its per-workload
+//     writeback), which this renderer does not do yet. The scene-0x03 briefing
+//     is the A/B that shows it (session 193).
 //   - TEXEL1/second-texture combiners fall back to TEXEL0.
 //   - LOADBLOCK dxt (arbitrary texel spacing) is approximated.
 //   - No lighting/texgen (OB64's title content is unlit 2D).
@@ -101,6 +104,9 @@ char g_stats_snapshot[4096];
 //           fill rect (the clear) is deliberately NOT skipped - dropping both
 //           just makes frames accumulate again, which is the bug this
 //           diagnostic was used to find.
+//   bit 13 = disable the framebuffer-as-texture source copy, so a texture load
+//           whose source is a drawn colour image reads RDRAM (the pre-session-193
+//           path). The live A/B for that copy.
 //   bit 5 = `ogre_gfx_test_draw` also renders into a colour image and loads a
 //           tile back out of that same address, the positive control for the
 //           `[GFX-FBTEX]` diagnostic (see `fb_written_`);
@@ -176,6 +182,9 @@ struct LoadedImage {
     uint64_t decode_key = 0;          // source key: TMEM bytes + tile addressing
     int width = 0, height = 0;        // loaded rect size in texels
     int origin_s = 0, origin_t = 0;   // tile uls/ult in texels (UV origin)
+    // OGRE_TEXWINCLAMP: the tile rect in texels the sampler bounds a wrapped
+    // coordinate to (0 = no bound, the default). See ensure_tile_image.
+    int win_w = 0, win_h = 0;
     // The decoded colours of the first decodes of a run, packed 0xRRGGBB with
     // their texel counts. Filled only while `OGRE_TEX_TRACE` is on and for the
     // first few loads, so a draw's decode is answerable from the log.
@@ -531,7 +540,17 @@ inline float tex_shift_scale(uint32_t shift) {
 }
 
 // Rendering state carried across a display list.
-enum class GbiKind { F3DEX2, S2DEX2 };
+enum class GbiKind {
+    F3DEX2,
+    // F3DEX2.NoN.fifo 2.08: the mission's 3D ucode. It is opcode-compatible
+    // with F3DEX2 and RT64 maps it to GBIUCode::F3DEX2 with flags.NoN, which
+    // only disables the F3D microcodes' near-depth clip (`depthClipEnabled =
+    // !NoN`, render/rt64_raster_shader.cpp:315). The browser applied that clip
+    // to the mission's terrain and frame geometry because the hash was not in
+    // this table and the fallback chose plain F3DEX2.
+    F3DEX2_NON_FIFO,
+    S2DEX2
+};
 
 // The S2DEX2 opcodes that collide with F3DEX2's, from
 // tools/RT64/src/gbi/rt64_gbi_s2dex2.h. `0xDC`/`0xDA` are F3DEX2's G_MOVEMEM and
@@ -742,6 +761,25 @@ inline uint16_t rd16(const uint8_t* p) {
 inline uint16_t n64h(const uint8_t* p, int off) { return rd16(p + (off ^ 2)); }
 inline uint8_t n64b(const uint8_t* p, int off) { return p[off ^ 3]; }
 
+// Where a TMEM load reads its source bytes. Normally RDRAM. A load whose source
+// is a colour image the RDP has drawn reads a private copy of that image's
+// rendered pixels instead (`WebGLRenderer::fetch_fb_source`), because those
+// pixels are still in a GL framebuffer object. The copy is in the same physical
+// byte order as RDRAM (see n64b), so the same accessor reads both.
+struct LoadSource {
+    const uint8_t* rdram = nullptr;
+    const uint8_t* shadow = nullptr;
+    uint32_t shadow_origin = 0;
+    uint32_t shadow_len = 0;
+    uint8_t byte(uint32_t addr) const {
+        if (shadow != nullptr && addr >= shadow_origin &&
+            (addr - shadow_origin) < shadow_len) {
+            return n64b(shadow, static_cast<int>(addr - shadow_origin));
+        }
+        return n64b(rdram, static_cast<int>(addr));
+    }
+};
+
 // Texture/TLUT reads need the same compensation, at *byte* granularity, and
 // `n64h` is not it: a texture's rows are not 4-byte aligned fields, so the byte
 // rule has to be applied to every byte index. RT64's TMEM load is the reference
@@ -895,6 +933,9 @@ struct GbiTextSegment {
 };
 constexpr GbiTextSegment kGbiTextSegments[] = {
     {0x1390, 0xCF55FAE288BFE48Dull, GbiKind::F3DEX2},
+    // RT64 rt64_gbi.cpp:229, `F3DEX2.NON_FIFO_2_08` (hash and length verified
+    // against the mission's ucode at 0x800A08D0).
+    {0x1390, 0x4C12DAE0534D7135ull, GbiKind::F3DEX2_NON_FIFO},
     {0x18C0, 0x9300F34F3B438634ull, GbiKind::S2DEX2},
 };
 
@@ -1294,6 +1335,10 @@ uniform vec2 u_tsize0, u_tsize1;
 uniform vec2 u_torig0, u_torig1;
 uniform ivec2 u_tcm0, u_tcm1;
 uniform ivec2 u_tmask0, u_tmask1;
+// OGRE_TEXWINCLAMP: the tile's own rect in texels, which a wrapped sample is
+// bounded to (0 = no bound, the default). A 0.5 threshold keeps a 1-texel rect
+// a bound.
+uniform vec2 u_twin0, u_twin1;
 uniform int u_tex_filter;   // OTHERMODE_H G_TF_*: 0 POINT, 2 BILERP, 3 AVERAGE
 uniform int u_texf;         // 0 GL sampler, 1 shader bilinear, 2 RT64 3-point
 uniform int u_tex_persp;    // 0 halves the coordinate (G_TP_NONE, non-rect)
@@ -1358,7 +1403,7 @@ int tex_modulo(int x, int y) {
     return (y != 0) ? x - y * int(floor(float(x) / float(y))) : x;
 }
 
-vec4 sampler_texel(int unit, ivec2 t, vec2 size, ivec2 cm, ivec2 mask) {
+vec4 sampler_texel(int unit, ivec2 t, vec2 size, ivec2 cm, ivec2 mask, vec2 win) {
     ivec2 hi = ivec2(size) - ivec2(1);
     // clampWrapMirrorSample: clamp to the tile window first, then wrap.
     if (cm.x == 2) t.x = clamp(t.x, 0, hi.x);
@@ -1377,6 +1422,11 @@ vec4 sampler_texel(int unit, ivec2 t, vec2 size, ivec2 cm, ivec2 mask) {
             t.y = tex_modulo(t.y, mask.y);
         }
     }
+    // OGRE_TEXWINCLAMP: bound the sample to the tile's own rect. A band drawn
+    // over its own rect samples one row/column past it at the far edge, and the
+    // wrap above then reads the texels TMEM happens to hold there.
+    if (win.x > 0.5) t.x = clamp(t.x, 0, int(win.x) - 1);
+    if (win.y > 0.5) t.y = clamp(t.y, 0, int(win.y) - 1);
     // The GL texture holds the one tile window the game loaded, where RT64
     // holds the whole decoded TMEM area. A coordinate the wrap above sends past
     // this window has no texel here, so it clamps instead of reading out of
@@ -1388,16 +1438,16 @@ vec4 sampler_texel(int unit, ivec2 t, vec2 size, ivec2 cm, ivec2 mask) {
 // sampleTextureLevel's filter selection and weight arithmetic. `uv` is the
 // interpolated texel coordinate, `origin` the tile's uls/ult in texels.
 vec4 sample_unit(int unit, vec2 uv, vec2 size, vec2 origin, ivec2 cm, ivec2 mask,
-                 bool filtering) {
+                 vec2 win, bool filtering) {
     vec2 local = round(uv * 128.0) / 128.0 - origin;   // SIMULATE_LOW_PRECISION
     ivec2 base = ivec2(floor(local));
-    vec4 s00 = sampler_texel(unit, base, size, cm, mask);
+    vec4 s00 = sampler_texel(unit, base, size, cm, mask, win);
     if (!filtering) {
         return s00;
     }
-    vec4 s01 = sampler_texel(unit, base + ivec2(0, 1), size, cm, mask);
-    vec4 s10 = sampler_texel(unit, base + ivec2(1, 0), size, cm, mask);
-    vec4 s11 = sampler_texel(unit, base + ivec2(1, 1), size, cm, mask);
+    vec4 s01 = sampler_texel(unit, base + ivec2(0, 1), size, cm, mask, win);
+    vec4 s10 = sampler_texel(unit, base + ivec2(1, 0), size, cm, mask, win);
+    vec4 s11 = sampler_texel(unit, base + ivec2(1, 1), size, cm, mask, win);
     vec2 frac_part = local - floor(local);
     if (u_texf < 2) {
         // True bilinear (`linearFiltering` in RT64, the GL sampler's rule).
@@ -1437,8 +1487,10 @@ vec4 tex_val(int sel, bool second) {
         return use1 ? fixed_texel(1, uv, u_tsize1, u_torig1)
                     : fixed_texel(0, uv, u_tsize0, u_torig0);
     }
-    return use1 ? sample_unit(1, uv, u_tsize1, u_torig1, u_tcm1, u_tmask1, filtering)
-                : sample_unit(0, uv, u_tsize0, u_torig0, u_tcm0, u_tmask0, filtering);
+    return use1 ? sample_unit(1, uv, u_tsize1, u_torig1, u_tcm1, u_tmask1, u_twin1,
+                              filtering)
+                : sample_unit(0, uv, u_tsize0, u_torig0, u_tcm0, u_tmask0, u_twin0,
+                              filtering);
 }
 
 // RT64 ColorCombiner::fromColorInput, sel = CSEL_*.
@@ -1658,12 +1710,14 @@ void main() {
     }
     if (u_debug_mode == 1) {
         // Point-sampled so the probe compares the decoded texel itself.
-        fragColor = vec4(sample_unit(1, v_tex, u_tsize1, u_torig1, u_tcm1, u_tmask1, false).rgb,
+        fragColor = vec4(sample_unit(1, v_tex, u_tsize1, u_torig1, u_tcm1, u_tmask1,
+                                     vec2(0.0), false).rgb,
                          1.0);
         return;
     }
     if (u_debug_mode == 2) {
-        fragColor = vec4(sample_unit(0, v_tex, u_tsize0, u_torig0, u_tcm0, u_tmask0, false).rgb,
+        fragColor = vec4(sample_unit(0, v_tex, u_tsize0, u_torig0, u_tcm0, u_tmask0,
+                                     vec2(0.0), false).rgb,
                          1.0);
         return;
     }
@@ -2226,6 +2280,9 @@ struct DrawCmd {
     int tex_cmt[2] = {2, 2};
     int tex_masks[2] = {0, 0};
     int tex_maskt[2] = {0, 0};
+    // OGRE_TEXWINCLAMP: the tile rect in texels a wrapped sample is bounded to
+    // (0 = no bound). The tile's own rect, not the wrap mask.
+    int tex_win[2][2] = {{0, 0}, {0, 0}};
     // The tile's G_TX shift fields. RT64 scales the interpolated coordinate by
     // `ShiftScaleMap[shifts]`/`[shiftt]` (`hle/rt64_state.cpp:33-51`,
     // `shaders/TextureSampler.hlsli:226`) before the tile origin is
@@ -2267,6 +2324,9 @@ struct DrawCmd {
     bool depth_test = false;
     bool depth_write = false;
     bool z_source_prim = false;   // OTHERMODE_L G_ZS_PRIM (bit 2)
+    // This draw's display list uses F3DEX2.NoN: RT64's `flags.NoN` disables the
+    // F3D near-depth clip, so `u_zclip` must stay 0 for it.
+    bool no_near_clip = false;
     float prim_depth = 0.0f;      // G_SETPRIMDEPTH's 0..1 screen depth
     int z_mode = 0;               // 0 OPA, 0x400 INTER, 0x800 XLU, 0xC00 DEC
     // NDC depth per vertex, alongside pos[]. The clip-space z the vertex shader
@@ -2385,10 +2445,19 @@ struct GlFramebuffer {
     bool fp = false;          // the attachment is RGBA16F, not RGBA8
     bool inited = false;      // the RDRAM content has been uploaded
     // Rows (window coordinates, 0 = bottom) that have been drawn into since the
-    // last writeback. The readback copies only this band: rows the RDP never
+    // last writeback. The writeback copies only this band: rows the RDP never
     // touched still hold what RDRAM held when the target was created.
     int min_row = 1 << 30;
     int max_row = -1;
+    struct FbRect {
+        int x0, y0, x1, y1;
+    };
+    // Exact pixel coverage of this target's rect and fill draws since the last
+    // writeback. A triangle's equivalent rectangle is a bounding box, so it is
+    // not recorded. The framebuffer-as-texture copy takes the GPU's pixels inside
+    // these rects and RDRAM's bytes outside; the writeback still copies the row
+    // band the draws touched.
+    std::vector<FbRect> exact_rects;
     // Monotonic stamp of the last draw into this target. Presentation picks the
     // most recently written framebuffer when the VI origin is contained in more
     // than one (RT64 uses its own lastWriteTimestamp the same way).
@@ -2460,6 +2529,41 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         trace_span_ms_ = (trace_span != nullptr) ? std::strtoull(trace_span, nullptr, 0) : 0ull;
         const char* tlut_trace = getenv("OGRE_TLUT_TRACE");
         tlut_trace_ = tlut_trace != nullptr && tlut_trace[0] != '\0' && tlut_trace[0] != '0';
+        // Framebuffer-as-texture source copy and the RDRAM writeback are each
+        // separately switchable for an A/B: `OGRE_FBTEX=0` makes a texture load
+        // read RDRAM as the renderer did before session 193, and
+        // `OGRE_FBWRITE=0` makes `ogre_sync_framebuffers()` a no-op.
+        // The framebuffer-as-texture copy is opt-in. A same-screen A/B on the
+        // scene-0x03 briefing shows that the GPU copy of colour image 0x228080
+        // is a white fade frame while RDRAM holds the CPU-composed NOTE text:
+        // enabling the copy turns readable text into white bars. RT64's tile
+        // copy is only authoritative because RT64 re-uploads RDRAM into the
+        // framebuffer when the CPU changed it (`checkRAM` + `uploadRAM`) and
+        // writes the framebuffer back at the end of every workload; this
+        // renderer does neither, so RDRAM is the source a load must read.
+        // `OGRE_FBTEX=1` enables the copy for that future work; `=2` publishes
+        // the draws mid-list without the copy; `=3` serves the copy from RDRAM.
+        const char* fbtex_env = getenv("OGRE_FBTEX");
+        fbtex_publish_only_ = (fbtex_env != nullptr && fbtex_env[0] == '2');
+        fbtex_rdram_only_ = (fbtex_env != nullptr && fbtex_env[0] == '3');
+        fbtex_enabled_ = (fbtex_env != nullptr &&
+                          (fbtex_env[0] == '1' || fbtex_env[0] == '2' ||
+                           fbtex_env[0] == '3' ||
+                           (fbtex_env[0] != '0' && fbtex_env[0] != '\0')));
+        const char* fbwrite_env = getenv("OGRE_FBWRITE");
+        fb_writeback_enabled_ = !(fbwrite_env != nullptr && fbwrite_env[0] == '0');
+        // OGRE_FRAME_DUMP=1 writes the mission intro picture strips' source
+        // image and TMEM at the draw that samples them (see dump_frame_source).
+        const char* frame_dump_env = getenv("OGRE_FRAME_DUMP");
+        frame_dump_enabled_ =
+            frame_dump_env != nullptr && frame_dump_env[0] != '\0' && frame_dump_env[0] != '0';
+        // OGRE_TEXWINCLAMP bounds a wrapped texture sample to the tile's own
+        // rect (see ensure_tile_image). Off by default: it removes the mission
+        // intro's band-seam hairlines, and the wrapped-tile screens (the fog
+        // layers, the map's water) are not measured with it on yet.
+        const char* winclamp_env = getenv("OGRE_TEXWINCLAMP");
+        tex_win_clamp_ =
+            winclamp_env != nullptr && winclamp_env[0] != '\0' && winclamp_env[0] != '0';
         OGRE_MILESTONE("RENDERER", "webgl2 renderer pending canvas handoff");
     }
 
@@ -2476,6 +2580,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // Texture loads whose source overlapped a colour image that was still in a
     // GL framebuffer (the framebuffer-as-texture gap). Read by ogre_gfx_stats.
     unsigned fbtex_hits() const { return fbtex_hits_.load(std::memory_order_relaxed); }
+    unsigned fbtex_syncs() const { return fbtex_syncs_.load(std::memory_order_relaxed); }
 
     // Live GL textures in the tile-image cache, and the total number of uploads.
     // Both are main-thread state, read by ogre_gfx_stats. Entries survive a
@@ -2932,9 +3037,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 fprintf(stderr, "[web-renderer] test_draw skipped publish: renderer busy\n");
                 return;
             }
-            for (DrawCmd& d : ctx.draws) draw_queue_.push_back(std::move(d));
-            for (TexUpload& t : ctx.tex) tex_upload_queue_.push_back(std::move(t));
         }
+        publish_exec(ctx);
         fprintf(stderr, "[web-renderer] test_draw: %u bytes of DL recorded\n", o - kDlOff);
     }
 
@@ -3179,8 +3283,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                (unsigned)cmd.zimg_width);
             }
             fb.inited = false;
-            fb.min_row = 1 << 30;
-            fb.max_row = -1;
+            fb.exact_rects.clear();
         }
         // The depth image the display list last named, kept on the target for
         // the census. A zero address means the game never sent G_SETZIMG.
@@ -3422,6 +3525,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // the draws that follow. Keep this writeback's counts for the log.
         const std::array<uint32_t, 4> dither_counts = fb.dither_patterns;
         fb.dither_patterns.fill(0);
+        // The drawn pixels are in RDRAM now, so the GPU copy of these exact
+        // rectangles is no longer needed for a texture source.
+        fb.exact_rects.clear();
         ++dither_random_seed_;
         ++framebuffer_readbacks_;
         if (first_row != nullptr) *first_row = h - 1 - wy1;
@@ -3449,6 +3555,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     void readback_all_framebuffers() {
+        if (!fb_writeback_enabled_) {
+            fb_writeback_pending_ = 0;
+            return;
+        }
         for (auto& [addr, fb] : gl_framebuffers_) {
             int first_row = 0, last_row = 0;
             if (readback_framebuffer(fb, addr, &first_row, &last_row) && sync_logged_ < 6) {
@@ -3592,8 +3702,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // RGBA16 load out of a 640-byte-pitch image reads 64 bytes of each row,
     // not 640. A test that used the stride for the rect's width claimed columns
     // the load never read (session 154).
+    // `out_image` receives the overlapping colour image's guest address.
+    // `report` counts and logs the overlap; the load path calls this once before
+    // the writeback attempt (report=false) and once after a failed one
+    // (report=true), so only loads that actually read stale RDRAM are reported.
     bool note_fb_texture(uint32_t address, int stride, int y0, int height, int w, int h,
-                         int x0, int tex_fmt, int tex_siz) {
+                         int x0, int tex_fmt, int tex_siz, uint32_t* out_image = nullptr,
+                         bool report = true) {
         if (address == 0 || stride <= 0 || height <= 0) {
             return false;
         }
@@ -3649,6 +3764,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     continue;   // drawn rows, outside every drawn column
                 }
             }
+            if (out_image != nullptr) {
+                *out_image = r.address;
+            }
+            if (!report) {
+                return true;
+            }
             ++fbtex_hits_;
             // One line per distinct (texture address, image, rect origin): the
             // same image loaded at two rects is two findings, and the first 24
@@ -3667,8 +3788,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 OGRE_MILESTONE("GFX-FBTEX",
                                "load tex=0x%06X rect=%dx%d stride=%d fmt=%d siz=%d reads "
                                "colour image 0x%06X pitch=%u h=%d siz=%u rows=[%d,%d] drawn "
-                               "rows=[%d,%d] cols=[%d,%d) drawn cols=[%s by an earlier draw "
-                               "in this batch; the load read RDRAM, not the rendered pixels",
+                               "rows=[%d,%d] cols=[%d,%d) drawn cols=[%s by an earlier draw; "
+                               "the load read RDRAM (the GPU copy is off or was refused)",
                                address, w, h, stride, tex_fmt, tex_siz, r.address, r.pitch,
                                r.height, (unsigned)r.siz, row_lo, row_hi, r.row_min, r.row_max,
                                load_col_lo, load_col_hi, drawn_cols);
@@ -3676,6 +3797,72 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return true;
         }
         return false;
+    }
+
+    // OGRE_FRAME_DUMP: writes the bytes behind one draw's texture, so a wrong
+    // pixel is attributed to the game's data or to this renderer's load/decode
+    // instead of inferred. Three files in `OGRE_PREF_DIR` (default /tmp):
+    //
+    //   texsrc-<n>.bin  the 0x2E00-byte image the strip loads read, in the
+    //                   guest's logical byte order (the order `tools/rdram.py`
+    //                   reads), so an offline decode is the same code path
+    //   tmem-<n>.bin    the 4 KiB TMEM the load left, which is what the
+    //                   decoder samples
+    // texdec-<n>.bin    the decoded RGBA8 image this draw samples, from the
+    //                   debug ring entry with the draw's content key
+    //
+    // Called from the draw, in the same display-list walk as the load, so the
+    // source bytes are the ones the load saw. A timed RDRAM dump cannot bracket
+    // this draw: the heap buffer is reused by the screens that follow.
+    void dump_frame_source(const TileState& ft) {
+        if (rdram_ == nullptr) {
+            return;
+        }
+        const char* env_dir = getenv("OGRE_PREF_DIR");
+        const std::string dir =
+            (env_dir != nullptr && env_dir[0] != '\0') ? std::string(env_dir) : std::string("/tmp");
+        const unsigned n = frame_dump_count_++;
+        // The 15 strip loads cover one 92x60 RGBA16 image: 15 * 0x2E0 = 0x2A60
+        // bytes, rounded up to 0x2E00 so the last strip's row stride fits.
+        const uint32_t len = 0x2E00u;
+        if (static_cast<uint64_t>(ft.image_address) + len > gbi::kRdramSize) {
+            return;
+        }
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/texsrc-%u.bin", dir.c_str(), n);
+        if (FILE* f = std::fopen(path, "wb")) {
+            for (uint32_t i = 0; i < len; ++i) {
+                std::fputc(n64b(rdram_, static_cast<int>(ft.image_address + i)), f);
+            }
+            std::fclose(f);
+        }
+        std::snprintf(path, sizeof(path), "%s/tmem-%u.bin", dir.c_str(), n);
+        if (FILE* f = std::fopen(path, "wb")) {
+            std::fwrite(tmem_, 1, sizeof(tmem_), f);
+            std::fclose(f);
+        }
+        bool decoded = false;
+        std::snprintf(path, sizeof(path), "%s/texdec-%u.bin", dir.c_str(), n);
+        {
+            std::lock_guard<std::mutex> lock(debug_mutex_);
+            for (const DebugTex& d : debug_tex_) {
+                if (d.key != ft.image.key || d.pixels.empty()) {
+                    continue;
+                }
+                if (FILE* f = std::fopen(path, "wb")) {
+                    std::fwrite(d.pixels.data(), 1, d.pixels.size(), f);
+                    std::fclose(f);
+                }
+                decoded = true;
+                break;
+            }
+        }
+        OGRE_MILESTONE("GFX-FRAME-DUMP",
+                       "n=%u src=0x%06X len=%u fmt=%u siz=%u line=%u tmem=%u key=0x%llX "
+                       "decoded=%d dir=%s",
+                       n, ft.image_address, len, (unsigned)ft.fmt, (unsigned)ft.siz,
+                       (unsigned)ft.line, (unsigned)ft.tmem,
+                       (unsigned long long)ft.image.key, decoded ? 1 : 0, dir.c_str());
     }
 
     // Resizes the canvas drawing buffer to the size the VI is scanning out, and
@@ -4383,6 +4570,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                             cmd.tex_masks[0], cmd.tex_maskt[0]);
                 glUniform2i(glGetUniformLocation(program_, "u_tmask1"),
                             cmd.tex_masks[1], cmd.tex_maskt[1]);
+                glUniform2f(glGetUniformLocation(program_, "u_twin0"),
+                            static_cast<float>(cmd.tex_win[0][0]),
+                            static_cast<float>(cmd.tex_win[0][1]));
+                glUniform2f(glGetUniformLocation(program_, "u_twin1"),
+                            static_cast<float>(cmd.tex_win[1][0]),
+                            static_cast<float>(cmd.tex_win[1][1]));
                 glUniform2f(glGetUniformLocation(program_, "u_tshift0"),
                             cmd.tex_shift[0][0], cmd.tex_shift[0][1]);
                 glUniform2f(glGetUniformLocation(program_, "u_tshift1"),
@@ -4524,7 +4717,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
             }
-            seti("u_zclip", (cmd.kind == 0 && !cmd.z_source_prim) ? 1 : 0);
+            seti("u_zclip", (cmd.kind == 0 && !cmd.z_source_prim && !cmd.no_near_clip) ? 1 : 0);
 
             // Interleave pos/uv/shade/w/z into the vertex buffer.
             float vbuf[6 * 10];
@@ -4554,6 +4747,48 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // the band that was drawn into. Window row 0 is NDC y = -1, and it
             // is the *bottom* of the image (see upload_framebuffer).
             if (bound_fb != nullptr) {
+                // Exact pixel coverage, for the framebuffer-as-texture copy. A
+                // rect or fill draw's window rectangle is exact; a triangle's is
+                // a bounding box and is not recorded (see exact_rects).
+                if (cmd.kind != 0) {
+                    const int vw = std::clamp(static_cast<int>(cmd.fb_width_px), 1,
+                                              bound_fb->width);
+                    const int vh = std::clamp(static_cast<int>(cmd.fb_height_px), 1,
+                                              bound_fb->height);
+                    const int y_off = bound_fb->height - vh;
+                    float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+                    for (int i = 0; i < count; ++i) {
+                        minx = std::min(minx, cmd.pos[i * 2 + 0]);
+                        maxx = std::max(maxx, cmd.pos[i * 2 + 0]);
+                        miny = std::min(miny, cmd.pos[i * 2 + 1]);
+                        maxy = std::max(maxy, cmd.pos[i * 2 + 1]);
+                    }
+                    auto to_x = [vw](float v) {
+                        return (static_cast<double>(v) + 1.0) * 0.5 * static_cast<double>(vw);
+                    };
+                    auto to_y = [vh, y_off](float v) {
+                        return (static_cast<double>(v) + 1.0) * 0.5 * static_cast<double>(vh) +
+                               static_cast<double>(y_off);
+                    };
+                    GlFramebuffer::FbRect r;
+                    r.x0 = static_cast<int>(std::lround(to_x(minx)));
+                    r.x1 = static_cast<int>(std::lround(to_x(maxx)));
+                    r.y0 = static_cast<int>(std::lround(to_y(miny)));
+                    r.y1 = static_cast<int>(std::lround(to_y(maxy)));
+                    if (cmd.scissor_on) {
+                        r.x0 = std::max(r.x0, cmd.sx0);
+                        r.x1 = std::min(r.x1, cmd.sx1);
+                        r.y0 = std::max(r.y0, target_height - cmd.sy1);
+                        r.y1 = std::min(r.y1, target_height - cmd.sy0);
+                    }
+                    r.x0 = std::clamp(r.x0, 0, bound_fb->width);
+                    r.x1 = std::clamp(r.x1, 0, bound_fb->width);
+                    r.y0 = std::clamp(r.y0, 0, bound_fb->height);
+                    r.y1 = std::clamp(r.y1, 0, bound_fb->height);
+                    if (r.x1 > r.x0 && r.y1 > r.y0) {
+                        bound_fb->exact_rects.push_back(r);
+                    }
+                }
                 for (int i = 0; i < count; ++i) {
                     const int wy = static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
                                                     static_cast<float>(target_height));
@@ -4735,6 +4970,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            sample[0], sample[1], sample[2], sample[3]);
         }
 
+        // A display-list load that reads a colour image the RDP has drawn is
+        // waiting for a private copy of it (see fetch_fb_source). The batch's
+        // draws have executed, so the copy shows their pixels.
+        service_fb_source();
+
         // Presentation: show the VI's scanout buffer on the canvas.
         if (present) {
             present_framebuffer(present_address);
@@ -4863,26 +5103,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const auto exec_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - exec_t0).count();
 
-        // Publish the recorded commands under a short lock.
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (DrawCmd& d : ctx.draws) {
-                if (draw_queue_.size() >= 16384) {
-                    break;
-                }
-                if (d.fb_address != 0) {
-                    // These pixels live in a GL framebuffer object until the
-                    // main thread writes them back (ogre_sync_framebuffers).
-                    fb_writeback_pending_ = 1;
-                }
-                draw_queue_.push_back(std::move(d));
-                ++draws_recorded_;
-            }
-            for (TexUpload& t : ctx.tex) {
-                tex_upload_queue_.push_back(std::move(t));
-            }
-            g_exec_draws.store(draws_recorded_, std::memory_order_relaxed);
-        }
+        // Publish the recorded commands under a short lock. A load that needed
+        // a framebuffer already published the draws before it (see
+        // tmem_load_command), so this is usually what remains after it.
+        publish_exec(ctx);
 
         // Every 8th frame carries a gfx-thread timestamp: the inter-frame delta
         // shows directly whether the game is pacing itself or blocked.
@@ -5045,6 +5269,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
     }
 
+    // Debug: the last framebuffer-source copy, in the guest image's physical
+    // byte layout. `ogre_gfx_debug_fb_source` hands it to a probe.
+    bool debug_fb_source_copy(const uint8_t** data, int* len) {
+        std::lock_guard<std::mutex> lock(fb_source_mutex_);
+        if (!source_cache_valid_ || source_cache_bytes_.empty()) {
+            return false;
+        }
+        *data = source_cache_bytes_.data();
+        *len = static_cast<int>(source_cache_bytes_.size());
+        return true;
+    }
+
     void shutdown() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (gl_ready_) {
@@ -5161,6 +5397,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned txr_logged_ = 0;
     unsigned tex_state_logged_ = 0;
     unsigned tex_state_dump_logged_ = 0;
+    int tex_state_scene_ = -1;
+    unsigned frame_rect_logged_ = 0;
+    // OGRE_FRAME_DUMP=1: for the mission intro's picture strips, write the
+    // source bytes the load read and the TMEM it left, at the moment the draw
+    // that samples them is recorded. A timed RDRAM dump cannot bracket this: the
+    // heap buffer is reused by later screens, so a dump is either too early
+    // (buffer not composed) or too late (buffer reused) (session 194).
+    bool frame_dump_enabled_ = false;
+    unsigned frame_dump_count_ = 0;
+    // OGRE_TEXWINCLAMP: bound a wrapped sample to the tile's own rect. Off by
+    // default; the switch is the A/B for the mission intro's picture strips.
+    bool tex_win_clamp_ = false;
     unsigned mtx_logged_ = 0;
     unsigned draw_mtx_logged_ = 0;
     // How many of the run's first fill/texrect rectangles the GFX-RECT trace has
@@ -5301,6 +5549,53 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     std::atomic<uint32_t> fb_writeback_epoch_{0};
     std::atomic<unsigned> fbtex_hits_{0};
     std::set<uint64_t> fbtex_logged_;
+    // A TMEM load whose source is a colour image the RDP has drawn asks the
+    // browser main thread for a private copy of that image's rendered pixels
+    // (`fetch_fb_source`). The copy never touches RDRAM; the gfx thread reads it
+    // through `LoadSource::shadow`. The request carries the draw count at the
+    // time it was made, so the main thread services it only after executing the
+    // draws that produced the pixels.
+    struct FbSourceRequest {
+        uint32_t image = 0;
+        uint32_t draws = 0;
+        std::vector<uint8_t> bytes;
+        uint32_t rects = 0;         // exact rect draws the copy took from the GPU
+        bool want_bytes = false;   // the gfx thread holds no copy of this image
+        bool hit = false;          // the main thread's cached copy is still exact
+        bool ok = false;
+    };
+    std::mutex fb_source_mutex_;
+    FbSourceRequest fb_source_req_;
+    std::atomic<uint32_t> fb_source_request_{0};
+    std::atomic<uint32_t> fb_source_done_{0};
+    uint32_t fb_source_seq_ = 0;              // gfx thread
+    uint32_t fb_source_cached_image_ = 0;     // gfx thread: image of the copy
+    std::vector<uint8_t> fb_source_bytes_;    // gfx thread: the accepted copy
+    unsigned fb_source_copies_ = 0;           // gfx thread
+    unsigned fb_source_reuses_ = 0;           // gfx thread
+    // Main-thread cache of the last source copy.
+    bool source_cache_valid_ = false;
+    uint32_t source_cache_image_ = 0;
+    uint64_t source_cache_hash_ = 0;
+    uint64_t source_cache_rects_ = 0;
+    std::vector<uint8_t> source_cache_bytes_;
+    unsigned fb_source_builds_ = 0;
+    unsigned fb_source_content_logged_ = 0;
+    unsigned fb_source_errors_ = 0;
+    // A texture load whose source is a colour image the RDP has drawn but not
+    // written back yet: the load path publishes the draws and waits for the main
+    // thread to write the image's drawn rectangles into RDRAM
+    // (`sync_load_source`). The wait is bounded; a page that stops flushing
+    // disables further waits until one happens.
+    // The copy needs a browser-main-thread flush. A loaded host can take
+    // hundreds of milliseconds to schedule one (the port's test runs have seen
+    // 19), and a timeout leaves the load reading stale RDRAM, so the bound is
+    // generous. A page that never flushes is handled by the backoff below.
+    static constexpr int kLoadSyncTimeoutMs = 2000;
+    std::atomic<unsigned> fbtex_syncs_{0};
+    std::atomic<unsigned> fbtex_sync_skips_{0};
+    unsigned fbtex_sync_timeouts_ = 0;
+    uint32_t load_sync_blocked_at_flush_ = 0;   // gfx thread
     // The RDP's colour image, kept across display lists (RenderState::cimg_*).
     uint32_t last_cimg_address_ = 0;
     uint32_t last_cimg_row_bytes_ = 0;
@@ -5331,6 +5626,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned depth_targets_logged_ = 0;
     // OGRE_DEPTH: the depth test/write switch (see record_state).
     bool depth_enabled_ = false;
+    // OGRE_FBTEX=0 / OGRE_FBWRITE=0: the framebuffer-source copy and the RDRAM
+    // writeback switches. Each isolates one half of the framebuffer path.
+    bool fbtex_enabled_ = true;
+    bool fbtex_publish_only_ = false;
+    bool fbtex_rdram_only_ = false;
+    bool fb_writeback_enabled_ = true;
     // Main thread: the one-shot `[GFX-DEPTH] first depth-tested draw` check.
     bool depth_verified_ = false;
     // Main thread: the synthetic depth control's readback (debug flag bit 7).
@@ -5664,6 +5965,293 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         uint32_t fog_repaired = 0;
     };
 
+    // Publishes the draws and texture uploads an in-progress display list has
+    // recorded so far. send_dl() publishes the rest when the walk ends. A
+    // framebuffer-source texture load publishes early: the pixels it has to read
+    // are produced by draws that are still in this context (session 193).
+    void publish_exec(ExecCtx& ctx) {
+        if (ctx.draws.empty() && ctx.tex.empty()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (DrawCmd& d : ctx.draws) {
+            if (draw_queue_.size() >= 16384) {
+                break;
+            }
+            if (d.fb_address != 0) {
+                fb_writeback_pending_ = 1;
+            }
+            draw_queue_.push_back(std::move(d));
+            ++draws_recorded_;
+        }
+        for (TexUpload& t : ctx.tex) {
+            tex_upload_queue_.push_back(std::move(t));
+        }
+        ctx.draws.clear();
+        ctx.tex.clear();
+        g_exec_draws.store(draws_recorded_, std::memory_order_relaxed);
+    }
+
+    // Makes the pixels a colour image holds on the GPU readable from RDRAM, for
+    // a display-list load whose source range is that image. RT64 makes a GPU
+    // tile copy here (`RDP::checkFramebufferOverlap`); this renderer keeps one
+    // source of truth, so it writes the image's drawn rectangles back instead
+    // and the load copies them normally. Runs on the gfx thread: it publishes
+    // the draws recorded so far, then waits for the browser main thread's flush
+    // to execute them and write the rectangles back.
+    //
+    // Returns false when the wait timed out, in which case the load reads RDRAM
+    // as it is (the pre-session-193 behaviour) and `[GFX-FBTEX]` reports it.
+    // Asks the browser main thread for a private copy of one colour image's
+    // rendered pixels, in the guest byte layout, and waits for it. A TMEM load
+    // whose source range is that image then reads the copy instead of RDRAM
+    // (`LoadSource::shadow`). RT64 makes a GPU tile copy for the same reason; it
+    // must not write RDRAM, because the game keeps live heap data inside a
+    // colour image's byte range (the scene-0x12 sprite cache at 0x243E10 lies
+    // inside image 0x228080) and a writeback there corrupts it.
+    //
+    // Runs on the gfx thread. The draws recorded so far are published first, so
+    // the main thread executes the ones that produced these pixels before it
+    // reads them. Returns false when the page did not flush in time, or when the
+    // image's RDRAM changed since its GPU copy was made (the copy is stale).
+    bool fetch_fb_source(ExecCtx* ctx, uint32_t image) {
+        if (image == 0 || emscripten_is_main_runtime_thread()) {
+            return false;
+        }
+        // A page that is not flushing must not stall the display list once per
+        // load. After one timeout, skip the copy until a flush has happened.
+        const uint32_t flushes = g_flush_ok.load(std::memory_order_relaxed);
+        if (load_sync_blocked_at_flush_ != 0 && flushes <= load_sync_blocked_at_flush_) {
+            if (fbtex_sync_skips_++ == 0) {
+                OGRE_MILESTONE("GFX-FBTEX-SYNC",
+                               "no flush since the last timeout; reading RDRAM");
+            }
+            return false;
+        }
+        if (ctx != nullptr) {
+            publish_exec(*ctx);
+        }
+        if (fbtex_publish_only_) {
+            return false;
+        }
+        // A flush is the only thing that can service the request, and a loaded
+        // host can be late to give the browser main thread one. A second
+        // request after a timeout usually hits the cache the first one built, so
+        // the load does not have to read stale RDRAM.
+        uint32_t seq = 0;
+        long long ms = 0;
+        const auto start = std::chrono::steady_clock::now();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            {
+                std::lock_guard<std::mutex> lock(fb_source_mutex_);
+                fb_source_req_.image = image;
+                fb_source_req_.draws = draws_recorded_.load(std::memory_order_relaxed);
+                fb_source_req_.want_bytes = (fb_source_cached_image_ != image);
+                fb_source_req_.hit = false;
+                fb_source_req_.bytes.clear();
+                fb_source_req_.ok = false;
+                seq = ++fb_source_seq_;
+                fb_source_request_.store(seq, std::memory_order_release);
+            }
+            const auto attempt_start = std::chrono::steady_clock::now();
+            while (fb_source_done_.load(std::memory_order_acquire) < seq) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - attempt_start).count();
+                if (elapsed >= kLoadSyncTimeoutMs) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - start).count();
+            if (fb_source_done_.load(std::memory_order_acquire) >= seq) {
+                break;
+            }
+            if (attempt == 1) {
+                load_sync_blocked_at_flush_ = flushes;
+                if (++fbtex_sync_timeouts_ <= 4) {
+                    OGRE_MILESTONE("GFX-FBTEX-SYNC",
+                                   "source 0x%06X: no flush serviced the copy within %lldms "
+                                   "(flushes=%u executed=%u wanted=%u)",
+                                   image, ms, flushes, flushed_cmds_,
+                                   draws_recorded_.load(std::memory_order_relaxed));
+                }
+                return false;
+            }
+        }
+        std::lock_guard<std::mutex> lock(fb_source_mutex_);
+        if (!fb_source_req_.ok) {
+            return false;
+        }
+        if (!fb_source_req_.bytes.empty()) {
+            fb_source_bytes_ = std::move(fb_source_req_.bytes);
+            fb_source_cached_image_ = image;
+            fb_source_req_.bytes.clear();
+            ++fb_source_copies_;
+        } else if (fb_source_cached_image_ == image) {
+            // Unchanged image and the gfx thread still holds the copy.
+            ++fb_source_reuses_;
+        } else {
+            return false;
+        }
+        const unsigned copies = ++fbtex_syncs_;
+        if (copies <= 12 || (copies % 300) == 0) {
+            OGRE_MILESTONE("GFX-FBTEX-SYNC",
+                           "source 0x%06X: copy ready (%zu bytes, %u rect draws, %s) in "
+                           "%lldms (copy %u)",
+                           image, fb_source_bytes_.size(), fb_source_req_.rects,
+                           fb_source_req_.hit ? "cached" : "new", (long long)ms, copies);
+        }
+        return true;
+    }
+
+    // Builds the framebuffer-as-texture source for one colour image: RDRAM's
+    // bytes with the image's rect-drawn pixels replaced by the GPU's. A texture
+    // load that reads this image sees exactly what the RDP has written, without
+    // any writeback to RDRAM. Triangle-drawn areas keep RDRAM's bytes, because
+    // their recorded rectangle is a bounding box rather than exact coverage.
+    bool build_image_source(uint32_t image, std::vector<uint8_t>& out) {
+        if (rdram_ == nullptr) {
+            return false;
+        }
+        auto it = gl_framebuffers_.find(image);
+        if (it == gl_framebuffers_.end() || it->second.fbo == 0) {
+            return false;
+        }
+        GlFramebuffer& fb = it->second;
+        const int w = fb.width, h = fb.height;
+        const uint64_t bytes = static_cast<uint64_t>(fb.row_bytes) * h;
+        if (w <= 0 || h <= 0 || fb.row_bytes == 0 ||
+            static_cast<uint64_t>(image) + bytes > gbi::kRdramSize) {
+            return false;
+        }
+        out.assign(static_cast<size_t>(bytes), 0);
+        std::memcpy(out.data(), rdram_ + image, static_cast<size_t>(bytes));
+        if (fb.exact_rects.empty() || fbtex_rdram_only_) {
+            return true;   // nothing exact to substitute (or the RDRAM control)
+        }
+        static std::vector<uint8_t> px;
+        static std::vector<float> fpx;
+        px.resize(static_cast<size_t>(w) * h * 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        if (fb.fp) {
+            fpx.resize(px.size());
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_FLOAT, fpx.data());
+            for (size_t i = 0; i < fpx.size(); i += 4) {
+                for (int c = 0; c < 4; ++c) {
+                    px[i + c] = static_cast<uint8_t>(std::lround(
+                        std::clamp(fpx[i + c], 0.0f, 1.0f) * 255.0f));
+                }
+            }
+        } else {
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        }
+        const uint8_t bpt = static_cast<uint8_t>(bytes_per_texel(fb.siz));
+        if (fb_source_content_logged_ < 8) {
+            ++fb_source_content_logged_;
+            for (const GlFramebuffer::FbRect& r : fb.exact_rects) {
+                OGRE_MILESTONE("GFX-FBCONTENT",
+                               "image 0x%06X %dx%d: exact rect x=[%d,%d) y=[%d,%d) = GPU "
+                               "pixels",
+                               image, w, h, r.x0, r.x1, r.y0, r.y1);
+            }
+        }
+        for (const GlFramebuffer::FbRect& r : fb.exact_rects) {
+            for (int wy = r.y0; wy < r.y1; ++wy) {
+                if (wy < 0 || wy >= h) {
+                    continue;
+                }
+                // glReadPixels returns window row 0 first; it is the image's
+                // bottom row.
+                const int gy = h - 1 - wy;
+                uint8_t* dst = out.data() + static_cast<uint32_t>(gy) * fb.row_bytes;
+                const uint8_t* src = px.data() + (static_cast<size_t>(wy) * w + r.x0) * 4;
+                const float* fsrc = fb.fp
+                                        ? fpx.data() + (static_cast<size_t>(wy) * w + r.x0) * 4
+                                        : nullptr;
+                for (int x = r.x0; x < r.x1; ++x, src += 4) {
+                    const uint32_t off = static_cast<uint32_t>(x) * bpt;
+                    if (fb.siz == gbi::IM_SIZ_32b) {
+                        dst[(off + 0) ^ 3] = src[0];
+                        dst[(off + 1) ^ 3] = src[1];
+                        dst[(off + 2) ^ 3] = src[2];
+                        dst[(off + 3) ^ 3] = src[3];
+                    } else {
+                        uint16_t v;
+                        if (fsrc != nullptr) {
+                            v = float4_to_rgba16(fsrc[0], fsrc[1], fsrc[2], fsrc[3], 0);
+                            fsrc += 4;
+                        } else {
+                            auto c5 = [](uint8_t c) {
+                                return static_cast<uint32_t>(c) >> 3;
+                            };
+                            v = static_cast<uint16_t>((c5(src[0]) << 11) | (c5(src[1]) << 6) |
+                                                      (c5(src[2]) << 1) |
+                                                      (((src[3] % 8) & 4) ? 1 : 0));
+                        }
+                        dst[off ^ 2] = static_cast<uint8_t>(v & 0xFF);
+                        dst[(off ^ 2) + 1] = static_cast<uint8_t>(v >> 8);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // Browser main thread: services a pending `fetch_fb_source` request. Runs
+    // after the batch's draws have been executed. A request whose draws have not
+    // executed yet is left for the next flush. The copy is cached per image, and
+    // reused while the image's exact rects and RDRAM bytes are unchanged.
+    void service_fb_source() {
+        const uint32_t request = fb_source_request_.load(std::memory_order_acquire);
+        if (request == 0 || request <= fb_source_done_.load(std::memory_order_relaxed)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(fb_source_mutex_);
+        if (request <= fb_source_done_.load(std::memory_order_relaxed)) {
+            return;
+        }
+        FbSourceRequest& r = fb_source_req_;
+        if (flushed_cmds_ < r.draws) {
+            return;   // the draws that produced these pixels are not executed yet
+        }
+        auto it = gl_framebuffers_.find(r.image);
+        if (it != gl_framebuffers_.end() && it->second.fbo != 0) {
+            GlFramebuffer& fb = it->second;
+            const uint64_t bytes = static_cast<uint64_t>(fb.row_bytes) * fb.height;
+            const uint64_t hash = (rdram_ != nullptr)
+                                      ? XXH3_64bits(rdram_ + r.image, static_cast<size_t>(bytes))
+                                      : 0;
+            const uint64_t rects = fb.exact_rects.size();
+            if (source_cache_valid_ && source_cache_image_ == r.image &&
+                source_cache_hash_ == hash && source_cache_rects_ == rects) {
+                r.hit = true;
+                r.ok = true;
+                r.rects = static_cast<uint32_t>(rects);
+                if (r.want_bytes) {
+                    r.bytes = source_cache_bytes_;
+                }
+            } else if (build_image_source(r.image, r.bytes)) {
+                source_cache_image_ = r.image;
+                source_cache_hash_ = hash;
+                source_cache_rects_ = rects;
+                source_cache_valid_ = true;
+                source_cache_bytes_ = r.bytes;
+                r.hit = false;
+                r.ok = true;
+                r.rects = static_cast<uint32_t>(rects);
+                ++fb_source_builds_;
+            } else if (fb_source_errors_ < 8) {
+                ++fb_source_errors_;
+                OGRE_MILESTONE("GFX-FBTEX-SYNC",
+                               "source 0x%06X: no framebuffer copy (%zu bytes, rects=%llu)",
+                               r.image, static_cast<size_t>(bytes),
+                               (unsigned long long)rects);
+            }
+        }
+        fb_source_done_.store(request, std::memory_order_release);
+    }
     // [GFX-S2D-CENSUS]: the opcode bytes an S2DEX2 list actually carries. Printed
     // at the end of the first S2DEX2 task and every 200 S2DEX2 commands after it.
     // `undecoded=` lists the opcodes that were seen and that the S2DEX2 arm of
@@ -6256,7 +6844,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 // The command's own rect and the last SETTIMG/SETTILE decide
                 // what lands in TMEM (RT64 `RDP::loadTile`/`loadBlock`); the
                 // render tile that samples it is configured afterwards.
-                tmem_load_command(st, op == gbi::OP_LOADBLOCK, false, w0, w1);
+                tmem_load_command(ctx, st, op == gbi::OP_LOADBLOCK, false, w0, w1);
                 note_tile_load(st, static_cast<int>(p0(w1, 24, 3)));
                 break;
             }
@@ -6267,7 +6855,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 // The palette lands in TMEM at the load tile's `tmem << 3`
                 // (RT64 `loadTLUTOperation`), and the CI decode reads it from
                 // there. `tlut_` stays as the diagnostics' copy.
-                tmem_load_command(st, false, true, w0, w1);
+                tmem_load_command(ctx, st, false, true, w0, w1);
                 // Number of 16-bit TLUT entries: lrs is 10.2 fixed -> entries.
                 const uint16_t count = static_cast<uint16_t>((p0(w1, 12, 12) >> 2) + 1);
                 const uint32_t bank = static_cast<uint32_t>(t.palette) * 16;
@@ -6584,7 +7172,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // samples - G_TEXTURE, the image (TIMG), every programmed tile's rect and
     // addressing, and the tile loads that filled TMEM. Printed for the first
     // few draws only (each line is a proxied stderr write from the gfx thread).
-    void dump_tex_state(ExecCtx* ctx, const RenderState& st, const char* kind) {
+    void dump_tex_state(ExecCtx* ctx, const RenderState& st, const char* kind,
+                        const float* uv) {
+        // One burst of three for each scene the dispatcher enters, so a screen
+        // reached late in a scripted route states its own tile setup instead of
+        // the title's. Bounded to three lines per scene.
+        const int scene = ogre_web_active_scene();
+        if (scene != tex_state_scene_) {
+            tex_state_scene_ = scene;
+            tex_state_dump_logged_ = 0;
+        }
         if (tex_state_dump_logged_ >= 3) {
             return;
         }
@@ -6604,6 +7201,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                        (st.active_tile + 1) & (kMaxTiles - 1),
                        t1.image.width, t1.image.height, t1.image.origin_s, t1.image.origin_t,
                        t1.image_address);
+        if (uv != nullptr) {
+            OGRE_MILESTONE("GFX-TDSTATE",
+                           "  scene=0x%X uv=[%.1f..%.1f, %.1f..%.1f] comb=%08X/%08X "
+                           "omh=0x%06X oml=0x%08X geom=0x%08X",
+                           static_cast<unsigned>(scene), uv[0], uv[6], uv[1], uv[7],
+                           st.combiner.L, st.combiner.H, st.othermode_h, st.othermode_l,
+                           st.geometry_mode);
+        }
         for (int i = 0; i < kMaxTiles; ++i) {
             const TileState& t = st.tiles[i];
             if (t.line == 0 && t.tmem == 0 && t.uls == 0 && t.ult == 0 && t.lrs == 0 && t.lrt == 0) {
@@ -6667,11 +7272,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // source. A TLUT word reads two source bytes, RGBA32 splits a source
     // word's low and high halves into TMEM's two halves, and every other
     // format copies eight bytes.
-    void tmem_store_word(uint32_t tmem_addr, uint32_t tmem_xor, uint32_t tex_addr,
-                         bool rgba32, bool tlut) {
+    void tmem_store_word(const LoadSource& source, uint32_t tmem_addr, uint32_t tmem_xor,
+                         uint32_t tex_addr, bool rgba32, bool tlut) {
         const uint32_t offset_mask = tlut ? 0x1u : 0x7u;
         auto src = [&](uint32_t i) {
-            return n64b(rdram_, static_cast<int>(tex_addr + (i & offset_mask)));
+            return source.byte(tex_addr + (i & offset_mask));
         };
         if (rgba32) {
             tmem_[(tmem_addr + 0) ^ tmem_xor] = src(0);
@@ -6692,9 +7297,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // RT64 `RDP::loadToTMEMCommon`'s non-deferred arm (the GPU tile-copy path
     // is not modelled). `block`/`dxt_increment` reproduce a LOADBLOCK's early
     // row advance.
-    void tmem_copy(uint32_t tex_start, uint32_t tex_stride, uint32_t tmem_start,
-                   uint32_t tmem_stride, uint32_t words_per_row, uint32_t rows, bool rgba32,
-                   bool tlut, uint32_t dxt_increment, bool block) {
+    void tmem_copy(const LoadSource& source, uint32_t tex_start, uint32_t tex_stride,
+                   uint32_t tmem_start, uint32_t tmem_stride, uint32_t words_per_row,
+                   uint32_t rows, bool rgba32, bool tlut, uint32_t dxt_increment, bool block) {
         const uint32_t tmem_mask = rgba32 ? 0x7FFu : 0xFFFu;
         const uint32_t tmem_advance = rgba32 ? 4u : 8u;
         const uint32_t texture_advance = tlut ? 2u : 8u;
@@ -6706,7 +7311,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             uint32_t tex_addr = tex_row;
             uint32_t tmem_addr = tmem_row;
             for (uint32_t w = 0; w < words_per_row; ++w) {
-                tmem_store_word(tmem_addr, tmem_xor, tex_addr, rgba32, tlut);
+                tmem_store_word(source, tmem_addr, tmem_xor, tex_addr, rgba32, tlut);
                 // RT64 `loadWordStep`: a block advances a row once per 0x800
                 // of `dxt`, then every word advances by the texel size.
                 if (block) {
@@ -6728,18 +7333,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
     // RT64 `RDP::loadYUVTileToTMEM`: a YUV16 tile is de-interleaved into the
     // luma plane in TMEM's upper half and the U/V pairs in the lower half.
-    void tmem_load_yuv(uint32_t tex_start, uint32_t tex_stride, uint32_t tmem_start,
-                       uint32_t tmem_stride, uint32_t rows) {
+    void tmem_load_yuv(const LoadSource& source, uint32_t tex_start, uint32_t tex_stride,
+                       uint32_t tmem_start, uint32_t tmem_stride, uint32_t rows) {
         const uint32_t words_per_row = tmem_stride / 2;
         for (uint32_t row = 0; row < rows; ++row) {
             const uint32_t row_base = (tmem_start + row * tmem_stride) & 0xFFFu;
             const uint32_t row_xor = ((row & 1) != 0) ? 4u : 0u;
             for (uint32_t w = 0; w < words_per_row; ++w) {
                 const uint32_t word = tex_start + row * tex_stride + w * 4;
-                const uint8_t y_even = n64b(rdram_, static_cast<int>(word) + 2);
-                const uint8_t y_odd = n64b(rdram_, static_cast<int>(word) + 0);
-                const uint8_t uu = n64b(rdram_, static_cast<int>(word) + 3);
-                const uint8_t vv = n64b(rdram_, static_cast<int>(word) + 1);
+                const uint8_t y_even = source.byte(word + 2);
+                const uint8_t y_odd = source.byte(word + 0);
+                const uint8_t uu = source.byte(word + 3);
+                const uint8_t vv = source.byte(word + 1);
                 const uint32_t luma = (((row_base + w * 2) ^ row_xor) | 0x800u) & 0xFFFu;
                 const uint32_t chroma = ((row_base + w * 2) ^ row_xor) & 0xFFFu;
                 tmem_[luma + 0] = y_even;
@@ -6755,8 +7360,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // `RDP::loadTile`/`loadBlock`/`loadTLUT` are the reference; the load
     // command's rect replaces the tile's, which the previous model did not do
     // (it decoded at draw time from the render tile's rect instead).
-    void tmem_load_command(RenderState& st, bool block, bool tlut_load, uint32_t w0,
-                           uint32_t w1) {
+    void tmem_load_command(ExecCtx* ctx, RenderState& st, bool block, bool tlut_load,
+                           uint32_t w0, uint32_t w1) {
         const int tile = static_cast<int>(p0(w1, 24, 3));
         TileState& lt = st.tiles[tile & (kMaxTiles - 1)];
         const uint16_t uls = static_cast<uint16_t>(p0(w0, 12, 12));
@@ -6774,6 +7379,46 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (uls > lrs) {
             return;   // the hardware ignores a reversed load rect
         }
+        // The load's own rect in texels: what it copies, and therefore the byte
+        // range whose source may be a colour image the RDP has drawn.
+        const int load_x0 = static_cast<int>(uls >> 2);
+        const int load_w = static_cast<int>((lrs >> 2) - (uls >> 2)) + 1;
+        const int load_y0 = block ? static_cast<int>(ult) : static_cast<int>(ult >> 2);
+        const int load_rows =
+            block ? 1 : static_cast<int>(1 + ((lrt >> 2) - (ult >> 2)));
+        // Framebuffer-as-texture. The copy below reads RDRAM, and the pixels of a
+        // colour image the RDP has drawn are still in a GL framebuffer object
+        // until the main thread writes them back. Detect the overlap first, make
+        // the main thread execute the draws recorded so far and write the
+        // image's drawn rectangles into RDRAM, and only then copy. RT64 makes a
+        // GPU tile copy instead (`RDP::checkFramebufferOverlap`); this renderer
+        // has one source of truth, so the load reads RDRAM in both cases.
+        LoadSource source;
+        source.rdram = rdram_;
+        uint32_t overlap_image = 0;
+        const bool overlaps =
+            fbtex_enabled_ &&
+            (g_debug_flags.load(std::memory_order_relaxed) & 8192u) == 0u &&
+            note_fb_texture(st.timg_address, static_cast<int>(bytes_per_row), load_y0,
+                            load_rows, load_w, load_rows, load_x0, st.timg_fmt, st.timg_siz,
+                            &overlap_image, false);
+        if (overlaps) {
+            // RT64 makes a GPU tile copy here. This renderer asks the main
+            // thread for a private copy of the image's rendered pixels and reads
+            // the load out of that, so RDRAM is never written mid-display-list.
+            if (fetch_fb_source(ctx, overlap_image)) {
+                source.shadow = fb_source_bytes_.data();
+                source.shadow_origin = overlap_image;
+                source.shadow_len = static_cast<uint32_t>(fb_source_bytes_.size());
+            } else {
+                // No copy: the load reads RDRAM, the pre-session path. Count
+                // and log the overlap so a load the copy was meant to serve is
+                // visible.
+                note_fb_texture(st.timg_address, static_cast<int>(bytes_per_row), load_y0,
+                                load_rows, load_w, load_rows, load_x0, st.timg_fmt,
+                                st.timg_siz, &overlap_image, true);
+            }
+        }
         if (block) {
             // RT64 `loadBlockOperation`: the block is contiguous, and `ult`,
             // `dxt` are in whole words/texels rather than 10.2 fixed.
@@ -6781,10 +7426,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                        bytes_per_row * ult;
             const uint32_t word_count = ((static_cast<uint32_t>(lrs) - uls) >> (4 - siz)) + 1;
             if (!rgba32 && lt.fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
-                tmem_load_yuv(tex_start, bytes_per_row, tmem_start,
+                tmem_load_yuv(source, tex_start, bytes_per_row, tmem_start,
                               static_cast<uint32_t>(lt.line) << 3, 1);
             } else {
-                tmem_copy(tex_start, bytes_per_row, tmem_start,
+                tmem_copy(source, tex_start, bytes_per_row, tmem_start,
                           static_cast<uint32_t>(lt.line) << 3, word_count, 1, rgba32, false, lrt,
                           true);
             }
@@ -6794,7 +7439,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 bytes_per_row * (ult >> 2);
             const uint32_t rows = 1 + ((lrt >> 2) - (ult >> 2));
             const uint32_t words_per_row = ((static_cast<uint32_t>(lrs) >> 2) - (uls >> 2)) + 1;
-            tmem_copy(tex_start, bytes_per_row, tmem_start,
+            tmem_copy(source, tex_start, bytes_per_row, tmem_start,
                       static_cast<uint32_t>(lt.line) << 5, words_per_row, rows, rgba32, true, 0,
                       false);
         } else {
@@ -6805,29 +7450,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             const uint32_t words_per_row =
                 (((static_cast<uint32_t>(lrs) >> 2) - (uls >> 2)) >> (4 - siz)) + 1;
             if (!rgba32 && lt.fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
-                tmem_load_yuv(tex_start, bytes_per_row, tmem_start,
+                tmem_load_yuv(source, tex_start, bytes_per_row, tmem_start,
                               static_cast<uint32_t>(lt.line) << 3, rows);
             } else {
-                tmem_copy(tex_start, bytes_per_row, tmem_start,
+                tmem_copy(source, tex_start, bytes_per_row, tmem_start,
                           static_cast<uint32_t>(lt.line) << 3, words_per_row, rows, rgba32, false,
                           0, false);
             }
-        }
-        // Framebuffer-as-texture diagnostic. The load reads RDRAM here, so
-        // this is where its source range can overlap a colour image whose
-        // pixels are still in a GL framebuffer. The rect is the load's own,
-        // not the render tile's sample window (a masked tile can sample many
-        // more rows than the load copied).
-        const int load_x0 = static_cast<int>(uls >> 2);
-        const int load_w = static_cast<int>((lrs >> 2) - (uls >> 2)) + 1;
-        if (block) {
-            note_fb_texture(st.timg_address, static_cast<int>(bytes_per_row), static_cast<int>(ult),
-                            1, load_w, 1, load_x0, st.timg_fmt, st.timg_siz);
-        } else {
-            const int load_rows = static_cast<int>(1 + ((lrt >> 2) - (ult >> 2)));
-            note_fb_texture(st.timg_address, static_cast<int>(bytes_per_row),
-                            static_cast<int>(ult >> 2), load_rows, load_w, load_rows, load_x0,
-                            st.timg_fmt, st.timg_siz);
         }
         ++tmem_generation_;
     }
@@ -7018,14 +7647,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // size - the title's 64x64 cloud tiles - instead of a single texel.
         const bool clamp_s = (t.masks == 0) || ((t.cms & 2) != 0);
         const bool clamp_t = (t.maskt == 0) || ((t.cmt & 2) != 0);
-        const int32_t window_w = clamp_s
-                                     ? std::max((static_cast<int32_t>(t.lrs) -
-                                                 static_cast<int32_t>(t.uls) + 4) / 4, 1)
-                                     : 0xFFFF;
-        const int32_t window_h = clamp_t
-                                     ? std::max((static_cast<int32_t>(t.lrt) -
-                                                 static_cast<int32_t>(t.ult) + 4) / 4, 1)
-                                     : 0xFFFF;
+        // The tile's own rect in texels, whatever the clamp mode. It is the
+        // bound `OGRE_TEXWINCLAMP=1` applies to a wrapped sample.
+        const int32_t rect_w = std::max((static_cast<int32_t>(t.lrs) -
+                                         static_cast<int32_t>(t.uls) + 4) / 4, 1);
+        const int32_t rect_h = std::max((static_cast<int32_t>(t.lrt) -
+                                         static_cast<int32_t>(t.ult) + 4) / 4, 1);
+        const int32_t window_w = clamp_s ? rect_w : 0xFFFF;
+        const int32_t window_h = clamp_t ? rect_h : 0xFFFF;
         const int32_t mask_w = (t.masks > 0) ? (1 << t.masks) : 0xFFFF;
         const int32_t mask_h = (t.maskt > 0) ? (1 << t.maskt) : 0xFFFF;
         const int w = std::min(window_w, mask_w);
@@ -7034,6 +7663,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             t.image_valid = false;
             return;
         }
+        // OGRE_TEXWINCLAMP: the bound the shader's sampler applies to a wrapped
+        // sample. The tile's own rect is what the game authored, and a band
+        // drawn from it samples one row/column past the rect at its far edge
+        // (`w * dsdx / 1024` texels over `w` pixels), where the wrap mask
+        // instead reads whatever TMEM holds there. The mission intro's picture
+        // strips are the A/B (session 194): the texels past the band are a
+        // different image's rows, and their alpha turns the band's transparent
+        // green into visible hairlines. Zero means "no bound" (the default).
+        t.image.win_w = tex_win_clamp_ ? static_cast<int>(std::min<int32_t>(rect_w, w)) : 0;
+        t.image.win_h = tex_win_clamp_ ? static_cast<int>(std::min<int32_t>(rect_h, h)) : 0;
         // The RDRAM source the diagnostic below reports (the load's own stride
         // is the SETTIMG width, which is not what the tile samples from TMEM).
         const int row_bytes = t.image_stride;
@@ -7338,6 +7977,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 cmd.tex_cmt[u] = ts.cmt | ((ts.maskt == 0) ? 2 : 0);
                 cmd.tex_masks[u] = (ts.masks > 0) ? (1 << ts.masks) : 0;
                 cmd.tex_maskt[u] = (ts.maskt > 0) ? (1 << ts.maskt) : 0;
+                cmd.tex_win[u][0] = img.win_w;
+                cmd.tex_win[u][1] = img.win_h;
                 cmd.tex_shifts[u] = ts.shifts;
                 cmd.tex_shiftt[u] = ts.shiftt;
                 cmd.tex_shift[u][0] = tex_shift_scale(ts.shifts);
@@ -7412,6 +8053,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         cmd.depth_test = depth_on && !copy_mode && (oml & 0x10u) != 0 && cmd.z_mode != 0xC00;
         cmd.depth_write = depth_on && !copy_mode && (oml & 0x20u) != 0;
         cmd.z_source_prim = !copy_mode && (oml & 0x04u) != 0;
+        cmd.no_near_clip = (st.gbi == GbiKind::F3DEX2_NON_FIFO);
         cmd.prim_depth = st.prim_depth;
         const float sh = screen_height(st);
         cmd.fb_height_px = static_cast<uint16_t>(
@@ -7936,7 +8578,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         DrawCmd cmd;
         record_state(cmd, st, texture_available(st));
         if (texture_available(st)) {
-            dump_tex_state(ctx, st, "tri");
+            dump_tex_state(ctx, st, "tri", data);
         }
         queue_triangles(ctx, cmd, data, 3);
     }
@@ -8436,6 +9078,39 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         DrawCmd cmd;
         cmd.kind = 2;
         record_state(cmd, st, texture_available(st));
+        // The mission intro's framed illustration is a band of 2D rectangles
+        // (its strips, picture and pin). State them once each so a browser/native
+        // difference on that band can be read from the draw's own tile source,
+        // key and combiner instead of inferred from the decoded ring.
+        if (ogre_web_active_scene() == 3 && frame_rect_logged_ < 40 &&
+            xl >= 85 && xl <= 230 && yl >= 55 && yl <= 155) {
+            ++frame_rect_logged_;
+            const TileState& ft = st.tiles[st.active_tile & (kMaxTiles - 1)];
+            char muxbuf[256];
+            format_combiner(st.combiner, ((st.othermode_h >> 20) & 3) == kCyc2 ? 0 : 1,
+                            muxbuf, sizeof(muxbuf));
+            OGRE_MILESTONE("GFX-FRAME-RECT",
+                           "rect=%d,%d..%d,%d src=0x%06X fmt=%u siz=%u line=%d "
+                           "uls=%u ult=%u lrs=%u lrt=%u mask=%d/%d cm=%d/%d sh=%d/%d "
+                           "s0=%d t0=%d dsdx=%d dtdy=%d key=0x%llX omh=0x%06X oml=0x%08X "
+                           "comb=%08X/%08X mux=[%s] texel0=(%d,%d,%d,%d) textured=%d",
+                           xl, yl, xh, yh, ft.image_address, (unsigned)ft.fmt,
+                           (unsigned)ft.siz, (int)ft.line, (unsigned)ft.uls,
+                           (unsigned)ft.ult, (unsigned)ft.lrs, (unsigned)ft.lrt,
+                           (int)ft.masks, (int)ft.maskt, (int)ft.cms, (int)ft.cmt,
+                           (int)ft.shifts, (int)ft.shiftt, s0, t0, dsdx, dtdy,
+                           (unsigned long long)ft.image.key, st.othermode_h, st.othermode_l,
+                           st.combiner.L, st.combiner.H, muxbuf,
+                           last_tex_rgba_[0], last_tex_rgba_[1], last_tex_rgba_[2],
+                           last_tex_rgba_[3], cmd.textured ? 1 : 0);
+            // The strip signature: an RGBA16 tile 92 texels wide (lrs 364) and
+            // 4 tall (lrt 12), i.e. one 4-row band of the 92x60 picture. The
+            // first two write their source bytes and TMEM.
+            if (frame_dump_enabled_ && frame_dump_count_ < 2 && ft.fmt == gbi::IM_FMT_RGBA &&
+                ft.siz == gbi::IM_SIZ_16b && ft.lrs == 364 && ft.lrt == 12) {
+                dump_frame_source(ft);
+            }
+        }
         // A repaired fog group's sampler state: what the repair installed
         // (size, wrap mask, filter), and the rectangle it drew. The remaining
         // browser/native difference is on this layer's translucent edge, so a
@@ -8808,7 +9483,8 @@ const char* ogre_gfx_stats() {
         snprintf(buf, sizeof(buf),
                  "%s\nexec: task=%u cmd=%llu @0x%05X op=0x%02X draws=%u flush_ok=%u flush_skip=%u flushed_cmds=%u"
                  "\nload: seq=%u done=%u w=%u h=%u fmt=%u siz=%u timgw=%u addr=0x%08X"
-                 "\nfbtex: hits=%u (a texture load read a colour image that was still on the GPU)"
+                 "\nfbtex: hits=%u copies=%u (a texture load overlapped a colour image the "
+                 "RDP had drawn; copies served it from the GPU, OGRE_FBTEX=1)"
                  "\ntex: cache=%zu bytes=%zu uploads=%zu reused=%zu released=%zu "
                  "decodes=%zu decode_hits=%zu (tile images; age and byte bounded)",
                  ogre::g_stats_snapshot,
@@ -8829,6 +9505,7 @@ const char* ogre_gfx_stats() {
                  ogre::g_load_timgw.load(std::memory_order_relaxed),
                  ogre::g_load_addr.load(std::memory_order_relaxed),
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_hits() : 0u,
+                 ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->fbtex_syncs() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_cache_size() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_cache_bytes() : 0u,
                  ogre::g_active_renderer != nullptr ? ogre::g_active_renderer->texture_uploads() : 0u,
@@ -8890,6 +9567,25 @@ const uint8_t* ogre_gfx_debug_tex(int index, int* out_width, int* out_height,
 }
 
 // Debug switches for the probes (bit 0: ignore alpha blending).
+// The last framebuffer-source copy (`OGRE_FBTEX`): returns its pointer and
+// stores its length in `len`. The bytes are the image's physical layout, the
+// same bytes a texture load reads through `LoadSource::shadow`.
+extern "C" EMSCRIPTEN_KEEPALIVE const uint8_t* ogre_gfx_debug_fb_source(int* len) {
+    const uint8_t* data = nullptr;
+    int n = 0;
+    if (ogre::g_active_renderer != nullptr &&
+        ogre::g_active_renderer->debug_fb_source_copy(&data, &n)) {
+        if (len != nullptr) {
+            *len = n;
+        }
+        return data;
+    }
+    if (len != nullptr) {
+        *len = 0;
+    }
+    return nullptr;
+}
+
 void ogre_gfx_debug_flags(unsigned flags) {
     ogre::g_debug_flags.store(flags, std::memory_order_relaxed);
 }

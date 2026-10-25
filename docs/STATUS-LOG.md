@@ -2620,3 +2620,64 @@ live under `config/` and `patches/` (session 97 moved them).
   also has no white frame (highest `meanPC=97.73`, highest `fracW240=0.00445`).
   The browser's exact entry instant and the `0x12 -> 0x03` transition are unrun.
   See `docs/HANDOFF-2026-10-25-session190.md`.
+
+- **Session 192**: the mission's 3D ucode is `F3DEX2.NoN.fifo 2.08`
+  (`ucode=0x800A08D0`, text hash `0x4C12DAE0534D7135`). RT64 maps the hash to
+  `GBIUCode::F3DEX2` with `flags.NoN`; `NoN` only disables the F3D
+  near-depth clip (`depthClipEnabled = !NoN`). The browser printed
+  `[WEB-GBI] unknown ucode` and fell back to plain F3DEX2, so its `u_zclip` still
+  dropped fragments outside `[0, 1022/1024]`. The hash is now in
+  `kGbiTextSegments` as `GbiKind::F3DEX2_NON_FIFO`, a draw from that list carries
+  `no_near_clip`, and `u_zclip` stays 0. The `[WEB-GBI] unknown` line is gone
+  from the mission run. The green lines around the framed target-fort
+  illustration are a separate, unfixed path: the frame art is assembled from
+  `G_TEXRECT`s whose sources are inside colour image `0x228080` (24
+  `[GFX-FBTEX]` loads at scene `0x03`). The browser reads stale RDRAM; RT64 makes
+  a per-tile GPU copy with a `RAMHash` stale-RDRAM guard. A pre-load
+  `sync_framebuffers()` whole-image writeback was tried and crashed in
+  `func_ovlN_801F7C60` (the image's bytes also hold game textures), so it was
+  reverted. A browser whole-RDRAM dump of the same mission renders the same
+  garbage frame with `tools/ogre_frame.py`, against the native dump's gold frame
+  (`docs/proofs/web-mission-intro-rdram-session192.png`,
+  `native-mission-intro-rdram-session192.png`). The mission's field is still
+  flatter and darker than native; its light is blue (`amb=77,77,127`) and it is
+  not explained by the frame's tile copy. New bounded diagnostics: per-scene
+  `[GFX-TDSTATE]` and `[GFX-FRAME-RECT]`. `make web` clean; final wasm
+  `21197859` bytes. See `docs/HANDOFF-2026-10-25-session192.md`.
+
+- **Session 193**: implemented the framebuffer-as-texture copy session 192 asked
+  for, as an opt-in path (`OGRE_FBTEX=1`) that reads a colour image's GPU pixels
+  into a private buffer and never writes RDRAM. A same-screen A/B on the mission
+  briefing shows it must stay off: off, the NOTE and label read correctly; on,
+  they become white bars. The copy of image `0x228080` decodes as a white 320x240
+  frame (`[GFX-FBCONTENT]` seven full-image rect draws), while RDRAM holds the
+  CPU-composed briefing, so the loads were reading the right bytes and session
+  192's premise is corrected. RT64's tile copy depends on its RDRAM re-upload
+  (`checkRAM`/`uploadRAM`) and per-workload writeback, which the browser does not
+  have; that model is the prerequisite for enabling the copy. The green lines
+  around the framed illustration persist with the copy on and off, so they are
+  not stale RDRAM; the next lead is the CI4 decode of the 1-row border strips.
+  A mid-list RDRAM writeback was tried first and reproduced the `func_80071950`
+  heap crash, so it was reverted. `make web` clean; default mission run does not
+  crash. See `docs/HANDOFF-2026-10-25-session193.md`.
+- **Session 194**: continued session 193's green-line item and corrected its
+  lead. The briefing's framed illustration is two RGBA16 images the game
+  composes in RDRAM (an L-shaped 19-band frame of 91x4 rects, `line=23`,
+  `lrs=364 lrt=12`, `mask=7/5`, `cm=0/0`; an 84x67 picture in three blocks,
+  `line=21`; a 20x20 pin), and their transparent texel is `0x07C0`, pure green
+  with alpha 0. RT64's `loadTileOperation` on the dumped source reproduces the
+  dumped TMEM over all 736 bytes the load writes, and the decode reproduces the
+  source texels exactly, so the green is the game's data and not a decode fault.
+  The hairline is the last row of each band: 4 rows over 4 pixels makes the last
+  pixel centre `t=3.5`, whose bilinear taps are rows 3 and 4; row 4 is outside
+  the band and holds the previous occupant of that TMEM base, so the transparent
+  green is mixed with an opaque texel and written at alpha near 0.5. Forcing
+  alpha blending off turns the whole transparent region green, the control for
+  that reading. `OGRE_TEXWINCLAMP=1` bounds a wrapped sample to the tile's rect
+  and removes the band-seam hairlines and the notch stripes, but not the frame's
+  own outline, which is filtered across the boundary between opaque art and the
+  same image's transparent green texels; it stays off by default until the
+  `OGRE_FOG` layers and the map's water are compared with it on. New
+  diagnostics: `OGRE_FRAME_DUMP` (source bytes, TMEM and decoded image at the
+  strip draw), `debug/probes/framedump.cjs` and `debug/probes/stripab.cjs`.
+  `make web` clean. See `docs/HANDOFF-2026-10-25-session194.md`.

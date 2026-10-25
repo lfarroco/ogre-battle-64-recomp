@@ -110,6 +110,8 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `palette.cjs` | a forced scene's canvas plus the `[GFX-TEXTRACE]` lines (decoded colours, TLUT entries) | a frame bright enough by `--min-colorful` was kept |
 | `fills.cjs` | a frame with only the RDP's fill rectangles drawn (`ogre_gfx_debug_flags(2)`), so a `G_FILLRECT` colour is read as pixels; pair it with the page log's `[GFX-RECT] fillrect` lines | a frame was captured |
 | `rdram.cjs` | a guest-RDRAM image (`OGRE_RAM_KEY_AT_MS` + `OGRE_RAM_KEY_FULL=1`), read out of `Module.FS` and written next to the page log for `tools/rdram.py` | the dump appeared and held 8 MiB |
+| `framedump.cjs` | the `OGRE_FRAME_DUMP=1` files (the picture band's source bytes, the TMEM the load left, the decoded image the draw samples) plus the page log and a canvas shot | the files appeared in the wasm filesystem |
+| `stripab.cjs` | one screen, three frames: default, alpha blending off (`ogre_gfx_debug_flags(1)`), and combiner bypassed with TEXEL0 raw (flags 16) | three screenshots were written |
 | `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
 
 ### The framebuffer-as-texture check

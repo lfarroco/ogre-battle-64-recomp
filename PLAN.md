@@ -965,6 +965,27 @@ See `docs/HANDOFF-2026-10-19-session179.md` and `-session178.md` for these two
 fixes, and `docs/HANDOFF-2026-10-18-session176.md` / `-session175.md` for the
 numbers and the screens those rounds did not re-measure.
 
+Session 194 found the mission briefing's green hairlines are a texture band
+sampled one row past its own art. The framed illustration is two RGBA16 images
+the game composes in RDRAM, drawn as `G_TEXRECT`s at `dl=23`: an L-shaped
+frame of 19 rects, each sampling one 92x4 band (`line=23`, `lrs=364 lrt=12`,
+`mask=7/5`, `cm=0/0`), and the 84x67 picture in three blocks (`line=21`).
+Their transparent texel is `0x07C0`, pure green with alpha 0. RT64's
+`loadTileOperation` on the dumped source reproduces the dumped TMEM over all
+736 bytes the load writes, and the decode reproduces the source texels
+exactly, so the green is the game's data and not a decode fault; session 193's
+CI4/1-row lead is withdrawn. A 4-row band drawn over 4 pixels puts the last
+pixel's centre at `t=3.5`, whose bilinear taps are rows 3 and 4; row 4 is
+outside the band and holds the previous occupant of that TMEM base, so the
+transparent green is mixed with an opaque texel and drawn at alpha near 0.5.
+`OGRE_TEXWINCLAMP=1` bounds a wrapped sample to the tile's rect and removes
+the band-seam hairlines and the notch stripes, but not the frame's own green
+outline or the pin's, which are filtered across the boundary between opaque
+art and the same image's transparent green texels. The switch is off until the
+`OGRE_FOG` layers and the map's water are compared with it on. New
+diagnostics: `OGRE_FRAME_DUMP`, `debug/probes/framedump.cjs`,
+`debug/probes/stripab.cjs`. See `docs/HANDOFF-2026-10-25-session194.md`.
+
 ## Status
 
 The game runs end to end. A build boots the publisher stills, the title, the New
@@ -2540,3 +2561,54 @@ be skipped and calls into swappable RAM would bind to the wrong bank. See
 | `docs/guides/app-architecture.md` | app structure, runtime flow, callbacks |
 | `docs/guides/linux-migration.md` | Ubuntu setup |
 | `docs/WEB-PORT*.md` | the browser port (dated 2026-08-29) |
+
+Session 192 identified the mission's 3D ucode as `F3DEX2.NoN.fifo 2.08`
+(`ucode=0x800A08D0`, text hash `0x4C12DAE0534D7135`). RT64's database maps it to
+`GBIUCode::F3DEX2` with `flags.NoN`, which disables only the F3D near-depth clip;
+the browser reported it as unknown and kept the clip. The hash is now
+recognized as `GbiKind::F3DEX2_NON_FIFO` and draws from it carry
+`no_near_clip`, so `u_zclip` stays 0. The green lines around the mission's framed
+target-fort illustration are the missing framebuffer-as-texture tile copy: the
+frame art is built from loads whose sources sit inside colour image `0x228080`,
+and the browser reads stale RDRAM (24 `[GFX-FBTEX]` loads at scene `0x03`). RT64
+makes a per-tile copy with a stale-RDRAM guard. A whole-image writeback was tried
+and crashed the game in `func_ovlN_801F7C60`, because the image's byte range also
+holds game textures; it was reverted. The browser RDRAM dump renders the same
+garbage frame with `tools/ogre_frame.py`, against native's gold frame
+(`docs/proofs/web-mission-intro-rdram-session192.png`,
+`native-mission-intro-rdram-session192.png`). The field's darker, flatter look
+is still open and is not explained by the frame path. See
+`docs/HANDOFF-2026-10-25-session192.md`.
+
+Session 193 implemented that tile copy and corrected the paragraph above. The
+copy exists behind `OGRE_FBTEX=1` and never writes RDRAM: the gfx thread
+publishes the draws so far, the browser main thread reads the colour image's
+framebuffer object into a private buffer in the guest byte layout, and the load
+copies TMEM out of it. A same-screen A/B on the mission briefing shows it must
+not be enabled. With the copy off the NOTE and label read correctly; with it on
+they become white bars. A dump of the copy for `0x228080` decodes as a white
+320x240 frame and `[GFX-FBCONTENT]` shows seven full-image rect draws replacing
+the whole image, while RDRAM at the load time holds the CPU-composed briefing.
+The loads were therefore reading the right bytes. RT64's tile copy is
+authoritative only because RT64 re-uploads RDRAM into the framebuffer when the
+CPU changed it (`checkRAM`/`uploadRAM`) and writes the framebuffer back at the
+end of every workload; the browser has neither, so RDRAM is the source a load
+must read. The green lines around the framed illustration are not stale RDRAM:
+they are present with the copy on and off, so the next lead is the decode and
+sampling of the 1-row border strips. Default behaviour is unchanged from
+session 192 and the mission run does not crash. See `docs/HANDOFF-2026-10-25-session193.md`.
+
+Session 194 withdrew that last lead. The border strips are not CI4 and not
+1-row loads: the illustration is two RGBA16 images (a 19-band frame of 91x4
+rects with `line=23`, an 84x67 picture in three `line=21` blocks) whose
+transparent texel is `0x07C0`, pure green with alpha 0. The load and the decode
+are exact against the source and RT64's `loadTileOperation`, so the green is the
+game's data, and the hairline is the last row of each band: 4 rows over 4 pixels
+puts the last pixel's centre at `t=3.5`, whose bilinear taps are rows 3 and 4,
+and row 4 holds the previous occupant of that TMEM base. `OGRE_TEXWINCLAMP=1`
+bounds a wrapped sample to the tile's rect and removes the band-seam hairlines
+and the notch stripes, but not the frame's own outline, which is filtered across
+the boundary between opaque art and the same image's transparent green texels.
+The switch stays off until the `OGRE_FOG` layers and the map's water are
+compared with it on, and a native RDRAM dump of the same screen is the datum
+that decides the remaining outline. See `docs/HANDOFF-2026-10-25-session194.md`.
