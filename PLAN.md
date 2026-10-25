@@ -91,10 +91,13 @@ the source each call and gives three distinct keys and three misses. Under
 screenshot-cadence series with a per-flush `readPixels` series. One Load Game
 run reached scene `0x12` and recorded the page (`mean3=120.86`) and a later
 black frame (`mean3=0`), with no white frame, then the game stopped submitting
-lists at frame 11; the other attempts landed on the idle trajectory under host
-load 16-27 (`[scene] id=0x0000`, `block=0x00000000`). The exact entry instant
-and the `0x12 -> 0x03` transition are unrun. See
-`docs/HANDOFF-2026-10-25-session190.md`.
+lists at frame 11. A native RT64 run of the same route (`OGRE_MOD_TEST=1`,
+`OGRE_CAPTURE_EVERY_MS=50`) captured 184 targets through the `0x12` entry; the
+highest `meanPC` is 97.73 and the highest `fracW240` is 0.00445, so the game does
+not present a white plate there either. The other browser attempts landed on
+the idle trajectory under host load 16-27 (`[scene] id=0x0000`,
+`block=0x00000000`). The exact entry instant and the `0x12 -> 0x03` transition
+are unrun in the browser. See `docs/HANDOFF-2026-10-25-session190.md`.
 
 Session 188 fixed a browser freeze after 2–3 minutes with no input. The WebGL
 renderer's tile-image cache keyed each decoded image by `tmem_generation_`,
@@ -2081,9 +2084,11 @@ holds the evidence.
    `[GFX-TEXCACHE-MISMATCH]` (0 in the synthetic run). One Load Game run reached
    `0x12`: its two distinct frames are the page (`mean3=120.86`) and a later
    black frame (`mean3=0`), no white, and the game stopped at display list 11.
-   The other attempts landed on the idle trajectory at host load 16-27
-   (`scene 0x0000`, `block=0x00000000`), so the exact entry instant and the
-   `0x12 -> 0x03` transition are still unrun. See
+   The native reference on the same route captured 184 targets through the
+   `0x12` entry and also has no white frame (highest `meanPC=97.73`, highest
+   `fracW240=0.00445`). The other browser attempts landed on the idle trajectory
+   at host load 16-27 (`scene 0x0000`, `block=0x00000000`), so the exact entry
+   instant and the `0x12 -> 0x03` transition are still unrun there. See
    `docs/HANDOFF-2026-10-25-session190.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):

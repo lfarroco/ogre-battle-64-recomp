@@ -5172,3 +5172,12 @@ while the dispatcher never consumes the pending word. The host load average was
 16-27 for those attempts, and session 189 §4 recorded the same failure at load
 28. The exact entry instant and the transition are unrun, not disproved; re-run
 the command in `docs/guides/web-probes.md` on an idle machine.
+
+The native control does not present a white frame either. `OGRE_MOD_TEST=1` (to
+skip the launcher), the same save and route, and `OGRE_CAPTURE_TARGET` every
+50 ms produced 184 `R16G16B16A16_UNORM` 320x240 targets through the `0x12`
+entry. The highest `meanPC` is 97.73, the highest `fracW240` is 0.00445, and no
+frame is white or a candidate. The game's `0x12` entry is the Load Game page and
+a fade to black. So the session-175 "drawn white before its content arrives" is
+not reproduced by a per-present native series. It remains a browser-only report
+with no captured frame in either renderer.

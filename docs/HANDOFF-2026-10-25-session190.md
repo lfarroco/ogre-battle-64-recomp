@@ -48,7 +48,10 @@ series with a per-flush capture.
    frame at `t=45.913 s` (`mean3=0 nonBlack=0`). No frame is white and no frame
    is a candidate (`fracW240 < 0.25`). After the first `A` tap the game submits
    display lists 1-11 and then stops; the mission is not reached, so the
-   `0x12 -> 0x03` transition is not in the series.
+   `0x12 -> 0x03` transition is not in the series. A native RT64 run of the same
+   route captured the `0x12` entry at 20 Hz: 184 target frames, highest
+   `meanPC=97.73` and `fracW240=0.00445`, no white or candidate frame. The game
+   does not present a white plate at `0x12` in the reference renderer either.
 
 5. **The cache works on a natural screen.** The same run's
    `[GFX-TEXCACHE]` census at flush 180 reads
@@ -128,6 +131,28 @@ after the scene line; display list 11 is submitted at 43.87 s, then the game
 stops submitting lists. The page log has no error, and the audio microcode tasks
 continue. The first frame is the Load Game page, not a white plate.
 
+**Native control.** The same save and route on RT64, with the native capture
+knob:
+
+```
+OGRE_NO_AUDIO=1 OGRE_MOD_TEST=1 OGRE_SPEED=1 OGRE_SAVE=assets/escort_suspend.bin \
+OGRE_SCENE=title OGRE_SCENE_LOG=1 OGRE_TAP_MS=4000 \
+OGRE_TAP_SCENE_BUTTON='title:start:6,0x12:a:6' \
+OGRE_CAPTURE_TARGET=/tmp/w190/nat/t OGRE_CAPTURE_EVERY_MS=50 OGRE_EXIT_AFTER_MS=100000 \
+./build-app/ogrebattle64
+```
+
+`OGRE_MOD_TEST=1` skips the launcher; without it the app prints
+`[launcher] waiting for a ROM` and writes no capture. The route reached
+`[scene] t=8906ms id=0x0012` and then hit a bus error after 184 captures
+(`R16G16B16A16_UNORM`, 320x240, 8 bytes per texel). The captures cover the title
+and the `0x12` entry. Measured over all 184 frames: the highest `meanPC` is
+`97.73` (frame 293), the highest `f240` is `0.00445` (frame 314), and no frame
+is white or in the candidate band. The `0x12` entry frames around indices
+290-316 carry the Load Game page (`meanPC` 92-97, `nonBlack` about 75 000), then
+the image fades to black. So the game does not present a white plate at `0x12`
+in the native renderer either.
+
 Six further attempts under host load 16-27 landed on the known idle trajectory
 (`[scene] t=... id=0x0000`, `[scene-trace] ... block=0x00000000`), and the
 scene forcing left `pending=0x0004` for a dispatcher that never ran. Three
@@ -174,12 +199,15 @@ already dirty from an earlier session and is unchanged by this work.
 
 ## Open
 
-- The Load Game white-frame question is still unrun. The route reached `0x12`
-  once and showed the page and then black; the exact entry instant and the
-  transition to `0x03` need a run that reaches them. `atmarkfast.cjs
-  --pre-from 'id=0x0004' --pre 40 --arm 'id=0x0012'` is the command prepared for
-  that; the game stalled after the first `A` in every attempt that reached
-  `0x12`.
+- The Load Game white-frame question is open but narrowed. The native reference
+  presents no white frame at `0x12` (184 target captures at 20 Hz, highest
+  `meanPC=97.73`, highest `fracW240=0.00445`). The browser's one run that
+  reached `0x12` also had no white frame. The browser's exact entry instant and
+  the `0x12 -> 0x03` transition are unrun: the route stalls after the first `A`
+  and the earlier attempts landed on the idle trajectory. `atmarkfast.cjs
+  --pre-from 'id=0x0004' --pre 40 --arm 'id=0x0012'` is the prepared command,
+  but sampling from the title slows the page enough that the title route did
+  not reach `0x12` in three attempts.
 - Why the game submits display lists 1-11 and then stops after the first `A` on
   the Load Game screen is a new question. It is not renderer-side: the flush
   count keeps rising and the audio tasks continue, but no new display list is

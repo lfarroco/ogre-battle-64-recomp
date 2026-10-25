@@ -2612,7 +2612,9 @@ live under `config/` and `patches/` (session 97 moved them).
   so its nominal 250 ms series spans tens of seconds. New
   `debug/probes/atmarkfast.cjs` samples `gl.readPixels` after every flush,
   armed by `[scene]` lines. The successful run's two distinct frames are the
-  Load Game page (`mean3=120.86`) and a black frame (`mean3=0`), no white; four
-  further attempts landed on the idle trajectory under host load 16-27. The
-  white-frame question and the `0x12 -> 0x03` transition are unrun. See
-  `docs/HANDOFF-2026-10-25-session190.md`.
+  Load Game page (`mean3=120.86`) and a black frame (`mean3=0`), no white;
+  other attempts landed on the idle trajectory under host load 16-27. A native
+  RT64 run of the same route captured 184 targets through the `0x12` entry and
+  also has no white frame (highest `meanPC=97.73`, highest `fracW240=0.00445`).
+  The browser's exact entry instant and the `0x12 -> 0x03` transition are unrun.
+  See `docs/HANDOFF-2026-10-25-session190.md`.
