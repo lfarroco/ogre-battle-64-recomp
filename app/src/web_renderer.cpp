@@ -1422,9 +1422,13 @@ vec4 sampler_texel(int unit, ivec2 t, vec2 size, ivec2 cm, ivec2 mask, vec2 win)
             t.y = tex_modulo(t.y, mask.y);
         }
     }
-    // OGRE_TEXWINCLAMP: bound the sample to the tile's own rect. A band drawn
-    // over its own rect samples one row/column past it at the far edge, and the
-    // wrap above then reads the texels TMEM happens to hold there.
+    // OGRE_TEXWINCLAMP: bound the sample to the tile's own rect. A draw whose
+    // coordinate reaches past its rect at the far edge reads the texels TMEM
+    // happens to hold there, and a wrap masks that read to a longer period
+    // instead of refusing it. Session 194 made this the A/B for the mission
+    // briefing's bands; session 195 found the bands were sampled past the rect
+    // only because every rectangle was half a texel low (`OGRE_RECT_HALFPIX`),
+    // so this bound is a diagnostic and not the fix.
     if (win.x > 0.5) t.x = clamp(t.x, 0, int(win.x) - 1);
     if (win.y > 0.5) t.y = clamp(t.y, 0, int(win.y) - 1);
     // The GL texture holds the one tile window the game loaded, where RT64
@@ -2558,12 +2562,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         frame_dump_enabled_ =
             frame_dump_env != nullptr && frame_dump_env[0] != '\0' && frame_dump_env[0] != '0';
         // OGRE_TEXWINCLAMP bounds a wrapped texture sample to the tile's own
-        // rect (see ensure_tile_image). Off by default: it removes the mission
-        // intro's band-seam hairlines, and the wrapped-tile screens (the fog
-        // layers, the map's water) are not measured with it on yet.
+        // rect (see ensure_tile_image). Off by default: it removes the symptom
+        // on the mission intro's bands, and session 195 found the cause (the
+        // half-texel sample offset that `OGRE_RECT_HALFPIX` fixes) while the
+        // wrapped-tile screens (the fog layers, the map's water) remain
+        // unmeasured with it on.
         const char* winclamp_env = getenv("OGRE_TEXWINCLAMP");
         tex_win_clamp_ =
             winclamp_env != nullptr && winclamp_env[0] != '\0' && winclamp_env[0] != '0';
+        // OGRE_RECT_HALFPIX=0 turns off the half-texel alignment of rectangle
+        // draws (on by default; the pre-session-195 behaviour). The switch is
+        // the A/B for the mission briefing's picture strips.
+        const char* halfpix_env = getenv("OGRE_RECT_HALFPIX");
+        rect_halfpix_ = !(halfpix_env != nullptr && halfpix_env[0] == '0');
         OGRE_MILESTONE("RENDERER", "webgl2 renderer pending canvas handoff");
     }
 
@@ -5409,6 +5420,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // OGRE_TEXWINCLAMP: bound a wrapped sample to the tile's own rect. Off by
     // default; the switch is the A/B for the mission intro's picture strips.
     bool tex_win_clamp_ = false;
+    // OGRE_RECT_HALFPIX: shift a rectangle draw's sample coordinate by half a
+    // texel, the way RT64's `halfPixelOffset` does, so pixel `i` of a 1:1
+    // rectangle samples texel `i`. See draw_texrect.
+    bool rect_halfpix_ = true;
     unsigned mtx_logged_ = 0;
     unsigned draw_mtx_logged_ = 0;
     // How many of the run's first fill/texrect rectangles the GFX-RECT trace has
@@ -7664,13 +7679,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         // OGRE_TEXWINCLAMP: the bound the shader's sampler applies to a wrapped
-        // sample. The tile's own rect is what the game authored, and a band
-        // drawn from it samples one row/column past the rect at its far edge
-        // (`w * dsdx / 1024` texels over `w` pixels), where the wrap mask
-        // instead reads whatever TMEM holds there. The mission intro's picture
-        // strips are the A/B (session 194): the texels past the band are a
-        // different image's rows, and their alpha turns the band's transparent
-        // green into visible hairlines. Zero means "no bound" (the default).
+        // sample. The tile's own rect is what the game authored, and a sample
+        // that reaches past it (a coordinate whose step overruns the rect, or
+        // one offset by the renderer's sampling) reads whatever TMEM holds
+        // there, which a wrap mask turns into a longer period rather than a
+        // refusal. Session 194's mission-intro strips are the A/B, and session
+        // 195 found the overrun there was this renderer's half-texel sample
+        // offset, fixed by `OGRE_RECT_HALFPIX`. Zero means "no bound" (the
+        // default, and the faithful behaviour).
         t.image.win_w = tex_win_clamp_ ? static_cast<int>(std::min<int32_t>(rect_w, w)) : 0;
         t.image.win_h = tex_win_clamp_ ? static_cast<int>(std::min<int32_t>(rect_h, h)) : 0;
         // The RDRAM source the diagnostic below reports (the load's own stride
@@ -8240,8 +8256,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // vertex lands on a whole pixel samples half a texel nearer the start
         // of its span. `ndc_yf` maps guest row y to `1 - 2y/H`, so one pixel
         // down is -1/H. RT64's `renderFlagRect` branch skips only the
-        // screen-to-NDC transform; the browser's rect vertices already carry
-        // the same convention and measure exact against the native target.
+        // screen-to-NDC transform, and a rectangle gets the same half pixel
+        // from `screenOffset` there; this renderer gives it to a rectangle in
+        // UV space instead (`OGRE_RECT_HALFPIX`, session 195), because a
+        // rectangle's sample coordinate is interpolated in the same space as
+        // its position.
         sx += 1.0f / screen_width(st);
         sy -= 1.0f / screen_height(st);
         out[0] = sx;
@@ -8868,7 +8887,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const float ny0 = ndc_yf(y0, st), ny1 = ndc_yf(y1, st);
         const float px[4] = {nx0, nx1, nx0, nx1};
         const float py[4] = {ny0, ny0, ny1, ny1};
-        const float uv[4][2] = {{us0, vt0}, {us1, vt0}, {us0, vt1}, {us1, vt1}};
+        float uv[4][2] = {{us0, vt0}, {us1, vt0}, {us0, vt1}, {us1, vt1}};
+        // OGRE_RECT_HALFPIX, as in draw_texrect: RT64 turns an S2DEX object
+        // rectangle into a `drawTexRect` (`rt64_gbi_s2dex.cpp`
+        // `drawObjRectangle`), so it gets the same half-pixel-shifted quad and
+        // pixel `i` samples `i * step` from the sprite's corner. The step comes
+        // from the destination the sprite asked for, not from its scale alone.
+        if (rect_halfpix_) {
+            const float stepu = (x1 != x0) ? (us1 - us0) / (x1 - x0) : 0.0f;
+            const float stepv = (y1 != y0) ? (vt1 - vt0) / (y1 - y0) : 0.0f;
+            for (auto& c : uv) {
+                c[0] -= 0.5f * stepu;
+                c[1] -= 0.5f * stepv;
+            }
+        }
 
         float data[6 * 10];
         const int idx[6] = {0, 1, 3, 0, 3, 2};
@@ -9040,6 +9072,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const float h = static_cast<float>(yh - yl);
 
         // UV at the four corners. TEXRECTFLIP swaps the S/T axes.
+        const float su = ctx->pending_texrect_flip ? dv : du;   // S step per pixel on x
+        const float sv = ctx->pending_texrect_flip ? du : dv;   // T step per pixel on y
         float uv[4][2];
         if (ctx->pending_texrect_flip) {
             uv[0][0] = us;              uv[0][1] = vs;                       // (xl, yl)
@@ -9051,6 +9085,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             uv[1][0] = us + du * w;     uv[1][1] = vs;                       // (xh, yl)
             uv[2][0] = us;              uv[2][1] = vs + dv * h;              // (xl, yh)
             uv[3][0] = us + du * w;     uv[3][1] = vs + dv * h;              // (xh, yh)
+        }
+        // OGRE_RECT_HALFPIX: the corner UVs above are the values at the
+        // rectangle's *edges*, and the rasterizer samples at pixel centres, so
+        // pixel `i` would sample `us + (i + 0.5) * step`. RT64 draws every
+        // rectangle shifted half a pixel right and down (`halfPixelOffset` in
+        // `rt64_framebuffer_renderer.cpp`, `1 / viewport` in NDC), which makes
+        // pixel `i` sample `us + i * step`. Shifting the corner UVs by half a
+        // step is the same sample coordinate and leaves the rectangle's
+        // coverage unchanged. The 1:1 `G_TEXRECT` draws depend on it: a 4-row
+        // band sampled half a texel low reads the row past its own art, and a
+        // sheet's right/bottom edge mixes in the image's transparent surround
+        // (session 195; `docs/HANDOFF-2026-10-25-session195.md`).
+        if (rect_halfpix_) {
+            const float halfu = 0.5f * su;
+            const float halfv = 0.5f * sv;
+            for (auto& c : uv) {
+                c[0] -= halfu;
+                c[1] -= halfv;
+            }
         }
 
         const float x0 = ndc_x(xl, st), x1 = ndc_x(xh, st);

@@ -2681,3 +2681,29 @@ live under `config/` and `patches/` (session 97 moved them).
   diagnostics: `OGRE_FRAME_DUMP` (source bytes, TMEM and decoded image at the
   strip draw), `debug/probes/framedump.cjs` and `debug/probes/stripab.cjs`.
   `make web` clean. See `docs/HANDOFF-2026-10-25-session194.md`.
+- **Session 195**: closed session 194's two open items by finding the cause of the
+  briefing's green lines, which is the browser renderer's rectangle sampling.
+  RT64 draws every rectangle shifted half a pixel right and down
+  (`halfPixelOffset` in `rt64_framebuffer_renderer.cpp`; one pixel in NDC is
+  `2 / viewport`), so pixel `i` of a 1:1 `G_TEXRECT` samples texel `i`. The
+  browser renderer's corner UVs sit on the rectangle's edges and its fragments
+  sample at pixel centres, so pixel `i` sampled `us + (i + 0.5) * step`: every
+  filtered rectangle was half a texel low and right, a 4-row band read the row
+  past its art and an image's right/bottom edge mixed its transparent green
+  surround into the opaque art. `OGRE_RECT_HALFPIX` (on by default; `=0` is the
+  old behaviour) subtracts half a step from the corner UVs of `draw_texrect` and
+  of the S2DEX object rectangle, which is the same sample coordinate as RT64's
+  shifted quad and leaves the rectangle's coverage unchanged. Same screen, one
+  build: 0 green-dominant pixels in the illustration rectangle with the switch
+  on against 398 with it off, the 213 fully opaque samples of the top band exact
+  in 213/213 against 0/213, and the region's mean absolute difference from
+  RT64's own 320x240 framebuffer 2.44 in two on runs against 22.21 and 22.20 in
+  two off runs. The map's upper band also improves (3.02/3.06 against
+  8.06/7.94); the NOTE band and the map's lower band do not move. RT64's
+  framebuffer confirms the convention: 144/213 samples exactly the decoded texel
+  and the other 69 differ by one 5-bit step in one channel (writeback dither).
+  `OGRE_TEXWINCLAMP` stays an off-by-default diagnostic. Session 194's native runs that landed on the map had reused a
+  battery the game had rewritten; a fresh `OGRE_PREF_DIR` and the route
+  `title:start:6,0x12:a:6` reach the briefing. New probe:
+  `debug/probes/rectab.cjs`. `make web` clean. See
+  `docs/HANDOFF-2026-10-25-session195.md`.

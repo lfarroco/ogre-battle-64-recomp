@@ -112,6 +112,7 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `rdram.cjs` | a guest-RDRAM image (`OGRE_RAM_KEY_AT_MS` + `OGRE_RAM_KEY_FULL=1`), read out of `Module.FS` and written next to the page log for `tools/rdram.py` | the dump appeared and held 8 MiB |
 | `framedump.cjs` | the `OGRE_FRAME_DUMP=1` files (the picture band's source bytes, the TMEM the load left, the decoded image the draw samples) plus the page log and a canvas shot | the files appeared in the wasm filesystem |
 | `stripab.cjs` | one screen, three frames: default, alpha blending off (`ogre_gfx_debug_flags(1)`), and combiner bypassed with TEXEL0 raw (flags 16) | three screenshots were written |
+| `rectab.cjs` | the mission briefing's framed illustration, one shot per run, for the `OGRE_RECT_HALFPIX` A/B. The arrival signal is the `[GFX-FRAME-DUMP]` line the strip draw prints (`OGRE_FRAME_DUMP=1`), not a timer, because the browser's boot length varies with host load; the briefing is static, so two runs are the same screen. Run it once with the default and once with `&OGRE_RECT_HALFPIX=0` in `--query` (`--secs` 400 is enough on an idle host, ~100 s) | `FRAME DUMPS 2` and a `<prefix>-briefing.png` |
 | `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
 
 ### The framebuffer-as-texture check

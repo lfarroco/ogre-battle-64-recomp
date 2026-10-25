@@ -986,6 +986,30 @@ art and the same image's transparent green texels. The switch is off until the
 diagnostics: `OGRE_FRAME_DUMP`, `debug/probes/framedump.cjs`,
 `debug/probes/stripab.cjs`. See `docs/HANDOFF-2026-10-25-session194.md`.
 
+Session 195 withdrew session 194's fix and its reading of the cause. The browser
+renderer sampled every rectangle half a texel low and right: its corner UVs sit
+on the rectangle's edges and its fragments sample at pixel centres, while RT64
+draws a rectangle shifted half a pixel right and down (`halfPixelOffset`,
+`src/render/rt64_framebuffer_renderer.cpp`) so that pixel `i` of a 1:1
+`G_TEXRECT` samples texel `i`. `OGRE_RECT_HALFPIX` (on by default) subtracts half
+a step from the corner UVs of `draw_texrect` and of the S2DEX object rectangle,
+which is the same sample coordinate as RT64's shifted quad and leaves the
+rectangle's coverage unchanged. It removes all green from the illustration:
+0 green-dominant pixels in its rectangle against 398 with the switch off, and
+its mean absolute difference from RT64's own 320x240 framebuffer is 2.44 in two
+on runs against 22.21 and 22.20 in two off runs, and the map's upper band
+improves too (3.02/3.06 against 8.06/7.94) while the NOTE band and the map's
+lower band do not move. The frame's own green
+outline and the pin's are gone too, so session 194's open item 1 is closed by the
+same change, and `OGRE_TEXWINCLAMP` is confirmed as a symptom bound that stays off
+by default. RT64's framebuffer confirms the convention: 144 of 213 fully opaque
+band samples equal the decoded texel exactly and the other 69 differ by one
+5-bit step in one channel (the writeback dither); none is a half-texel mixture.
+A native run reaches the briefing with a fresh `OGRE_PREF_DIR` and the route
+`title:start:6,0x12:a:6`; session 194's runs that landed on the map reused a
+battery the game had already rewritten. New probe: `debug/probes/rectab.cjs`.
+See `docs/HANDOFF-2026-10-25-session195.md`.
+
 ## Status
 
 The game runs end to end. A build boots the publisher stills, the title, the New
@@ -2612,3 +2636,17 @@ the boundary between opaque art and the same image's transparent green texels.
 The switch stays off until the `OGRE_FOG` layers and the map's water are
 compared with it on, and a native RDRAM dump of the same screen is the datum
 that decides the remaining outline. See `docs/HANDOFF-2026-10-25-session194.md`.
+
+Session 195 corrected both: the bands are not sampled past their art by the game
+or by the hardware, they were by this renderer. A rectangle's fragments sample
+at pixel centres, so a 1:1 `G_TEXRECT` was half a texel low and right of the
+texel RT64 samples; RT64 shifts every rectangle half a pixel right and down
+(`halfPixelOffset`). `OGRE_RECT_HALFPIX`, on by default, subtracts half a step
+from the corner UVs of `draw_texrect` and of the S2DEX object rectangle. It
+removes the band-seam hairlines, the frame's own green outline and the pin's:
+0 green-dominant pixels in the illustration rectangle against 398 with the
+switch off, and the region's mean absolute difference from RT64's own 320x240
+framebuffer is 2.44 in two on runs against 22.21 and 22.20 in two off runs, and
+the map's upper band improves too (3.02/3.06 against 8.06/7.94).
+`OGRE_TEXWINCLAMP` is a symptom bound, not
+the fix, and stays off. See `docs/HANDOFF-2026-10-25-session195.md`.
