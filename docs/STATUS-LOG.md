@@ -2707,3 +2707,23 @@ live under `config/` and `patches/` (session 97 moved them).
   `title:start:6,0x12:a:6` reach the briefing. New probe:
   `debug/probes/rectab.cjs`. `make web` clean. See
   `docs/HANDOFF-2026-10-25-session195.md`.
+- **Session 196**: withdrew session 195's "the mission field is flatter and
+  darker than native". At the same Castle Dunkweld NOTE screen the browser's
+  static field regions are within 1-3 levels of RT64's mean and their standard
+  deviation and gradient are higher: left field mean `[26.8,28.4,13.3]` against
+  `[26.3,27.8,12.4]`, standard deviation `[16.9,16.0,17.3]` against
+  `[13.9,12.6,13.8]`, mean absolute difference 4.82 (right 5.25, bottom 6.19,
+  top-left 1.20, top-right 2.09). The Castle Burgund briefing reads the same way
+  (left field `[30,32,1]` against `[30,33,3]`). `OGRE_RECT_HALFPIX` changes no
+  pixel on the boot intro or a publisher still: the static holds are
+  byte-identical between the switch-on and switch-off runs
+  (`md5 6ffb91f8…` and `880a77a4…`), so session 195's item 1 is closed for those
+  screens and the briefing. A live switch, debug flag bit 15
+  (`ogre_gfx_debug_flags(32768)`), and `debug/probes/recttoggle.cjs` were added
+  for a same-run A/B; two attempts waited 33 and 36 minutes under host load
+  11-28 without reaching the briefing, so that pair is still to run. The
+  mission's framed illustration is clean on this build
+  (`docs/proofs/web-mission-briefing-illustration-session196.png`), and the
+  field/browser/native side-by-side is
+  `docs/proofs/web-mission-field-vs-native-session196.png`. `make web` clean.
+  See `docs/HANDOFF-2026-10-26-session196.md`.

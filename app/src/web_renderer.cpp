@@ -107,6 +107,10 @@ char g_stats_snapshot[4096];
 //   bit 13 = disable the framebuffer-as-texture source copy, so a texture load
 //           whose source is a drawn colour image reads RDRAM (the pre-session-193
 //           path). The live A/B for that copy.
+//   bit 15 = disable `OGRE_RECT_HALFPIX` for the draws that follow, so one
+//           screen can be compared with and without the half-step corner-UV
+//           shift in a single run. The env switch is read once at construction;
+//           this bit is read per draw.
 //   bit 5 = `ogre_gfx_test_draw` also renders into a colour image and loads a
 //           tile back out of that same address, the positive control for the
 //           `[GFX-FBTEX]` diagnostic (see `fb_written_`);
@@ -572,6 +576,15 @@ constexpr uint32_t kGeomFog = 0x00010000;        // G_FOG
 constexpr uint32_t kGeomLighting = 0x00020000;   // G_LIGHTING
 constexpr uint32_t kGeomTextureGen = 0x00040000;        // G_TEXTURE_GEN
 constexpr uint32_t kGeomTextureGenLinear = 0x00080000;  // G_TEXTURE_GEN_LINEAR
+
+// Debug flag bit 15: the live `OGRE_RECT_HALFPIX=0` A/B. The env switch is the
+// build-wide default; this bit turns the shift off from the next draw on, so a
+// probe can capture both sample coordinates of one screen in one run.
+constexpr uint32_t kDebugRectHalfpixOff = 1u << 15;
+inline bool rect_halfpix_enabled(bool switch_on) {
+    return switch_on &&
+           (g_debug_flags.load(std::memory_order_relaxed) & kDebugRectHalfpixOff) == 0;
+}
 
 struct RenderState {
     // Matrices (RSP row-vector convention).
@@ -8893,7 +8906,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // `drawObjRectangle`), so it gets the same half-pixel-shifted quad and
         // pixel `i` samples `i * step` from the sprite's corner. The step comes
         // from the destination the sprite asked for, not from its scale alone.
-        if (rect_halfpix_) {
+        // Bit 15 of `ogre_gfx_debug_flags` is the live off switch.
+        if (rect_halfpix_enabled(rect_halfpix_)) {
             const float stepu = (x1 != x0) ? (us1 - us0) / (x1 - x0) : 0.0f;
             const float stepv = (y1 != y0) ? (vt1 - vt0) / (y1 - y0) : 0.0f;
             for (auto& c : uv) {
@@ -9097,7 +9111,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // band sampled half a texel low reads the row past its own art, and a
         // sheet's right/bottom edge mixes in the image's transparent surround
         // (session 195; `docs/HANDOFF-2026-10-25-session195.md`).
-        if (rect_halfpix_) {
+        // Bit 15 of `ogre_gfx_debug_flags` is the live off switch.
+        if (rect_halfpix_enabled(rect_halfpix_)) {
             const float halfu = 0.5f * su;
             const float halfv = 0.5f * sv;
             for (auto& c : uv) {
