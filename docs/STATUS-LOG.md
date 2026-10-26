@@ -2747,5 +2747,7 @@ live under `config/` and `patches/` (session 97 moved them).
   (TEXEL1, `G_TEXTURE_GEN`, lighting and LOADBLOCK `dxt` are implemented) and
   found `G_TEXRECTFLIP`'s half-step wrong for non-square flips, copy-mode
   texrect and fractional-rect differences, and the title residual's real range
-  (rows ~81..119). `make web` clean. See
-  `docs/HANDOFF-2026-10-26-session197.md`.
+  (rows ~81..119). A forced-map A/B (`OGRE_SCENE=map`) did not reach
+  scene `0x05` in about nine minutes, and the title force landed on
+  `0x09`/`0x0A` in session 196, so those checks need a played state. `make web`
+  clean. See `docs/HANDOFF-2026-10-26-session197.md`.

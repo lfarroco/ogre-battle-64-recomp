@@ -100,6 +100,10 @@ subagents for the independent audits.
 - **The same screen, three states:** the rect run's on/off pair and the FBTEX
   run's on/off pair are the same Castle Burgund briefing. The illustration is
   clean in both on frames; the copy-on frame has readable NOTE and label text.
+- **The forced-map attempt:** `recttoggle.cjs --wait 'id=0x0005'
+  --settle 4000 --timeout 900 --url '...?OGRE_SCENE=map&OGRE_SCENE_LOG=1'`
+  wrote no screenshot before it was stopped at about nine minutes; no
+  `[scene] id=0x0005` line means the force did not take.
 - **The audits' references:** RT64 `checkRAM`/`uploadRAM` at
   `tools/RT64/src/hle/rt64_framebuffer_manager.cpp:909-964`, the tile-copy hash
   at `hle/rt64_rdp.cpp:177-196`; the flip/copy-mode/fractional differences at
@@ -155,5 +159,10 @@ guard does not make the whole-image copy cheap when it does fire.
    and avoids the white bars, but a copy still costs a whole-image readback
    when RDRAM matches. The RT64 parity model (re-upload on a mismatch) is not
    implemented; it is not needed for any reached screen.
-5. **The world map/title rectangle A/B** was not re-run this session. The GPU
-   launch makes it cheap now; the same probe can be pointed at them.
+5. **The world map/title rectangle A/B** was not completed. The GPU launch
+   makes the probe cheap, but a forced-map attempt
+   (`OGRE_SCENE=map`, `--wait 'id=0x0005'`, `--timeout 900`) wrote no frames in
+   about nine minutes, so the scene force is the blocker, not the rectangle
+   switch. The title has the same force problem: `--scene title` landed on
+   scenes `0x09`/`0x0A` in session 196. Both need a played state or a fixed
+   force before the A/B is meaningful.

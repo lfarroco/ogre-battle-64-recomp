@@ -1049,7 +1049,10 @@ lighting and LOADBLOCK `dxt` are implemented. Open: `G_TEXRECTFLIP`'s half-step
 is `0.5*dv` where its quad interpolates `dv*h/w`, copy-mode texrects and
 fractional rect coordinates do not reproduce RT64's `dsdx >>= 2`/edge pad and
 `vFractionOffset`, and the title residual is rows ~81..119, not the
-session-159 rows 195..232. See `docs/HANDOFF-2026-10-26-session197.md`.
+session-159 rows 195..232. The world map/title A/B still needs a reachable
+state: a forced-map run did not reach scene `0x05`, and `OGRE_SCENE=title`
+landed on `0x09`/`0x0A` in session 196. See
+`docs/HANDOFF-2026-10-26-session197.md`.
 
 ## Status
 
