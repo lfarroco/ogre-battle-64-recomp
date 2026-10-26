@@ -1055,6 +1055,73 @@ the map, `OGRE_SCENE=title` landed on `0x09`/`0x0A` in session 196, and a natura
 title capture landed on the idle trajectory (`id=0x0000`). See
 `docs/HANDOFF-2026-10-26-session197.md`.
 
+Session 198 fixed the browser's mission and tutorial-field frame rate and
+bounded the reported flat grass. The flush loop resolved every uniform with
+`glGetUniformLocation` on every draw; a CDP profile of the mission screen spent
+27% of the main thread in that lookup and its UTF-8 conversion, and 12% in the
+once-per-flush `glGetError` GPU sync. `WebGLRenderer` now keeps a
+`uniform_cache_` (`std::string_view` -> `GLint`) filled once after the program
+links, and the error check is `OGRE_GL_CHECK=1` and off by default. The Castle
+Burgund mission, same save and route, measures **16.78 -> 26.10 fps** in one
+8 s window and **28.94 fps** on a re-run; the tutorial practice field measures
+about 20 fps. The grass defect reproduces on the practice stage (scene `0x0003`
+after the tutorial's `0x17 -> 0x02 -> 0x0D` sequence): TEXEL0 raw turns the grass
+pure white while the cliffs and roads keep their textures, and `OGRE_FOG=0`,
+culling off and the depth clip off each change no pixel. The large `64x64` CI4
+tile at the field is the top-left UI panel (its decoded parchment image matches
+its source), and a second layer of `32x32` RGBA16 tiles blends
+`(TEXEL0 - TEXEL1) * PRIM_A + TEXEL1` with `PRIM_A=0.5`; the grass layer itself
+is not among the logged large draws, so small textured rectangles are the next
+check. See
+`docs/HANDOFF-2026-10-26-session198.md`.
+
+Session 199 measured the mission's remaining frame cost and advanced the grass
+question. A draw merge that emitted consecutive same-state draws as one
+`glDrawArrays` cut the mission's calls from 1 410 777 to 164 198 (8.6 draws per
+call) and changed the rate by nothing: **29.39 fps off, 29.83 fps on** over the
+same 10 s window, with session 198's uniform cache in both (the final binary, that cache only, reads 28.66 fps). A CDP profile of the
+mission spent **87.1% of the main thread idle**, so the remaining 2x against
+RT64 is outside the flush loop (the recompiled game/RSP threads or the GPU); the
+merge was reverted. The practice field's ground at N64 `(12,160)`, 12 s after
+scene `0x0003`, is covered by **five `G_FILLRECT`s and no textured draw**: the
+last fills are `prim=(0.13,0.13,0.00)` and `(0.13,0.16,0.00)`, and the frame
+samples `(34,42,2)`, which is that fill colour. The field's textured 32x64 CI8
+ground tiles (`cmb=FC127E24/FFFFF9FC`, `0x2FB540` and eight others) cover the
+cliffs and roads only; the green ground family (`FC151604`, `0x358F00`,
+`masks=32`, `shifts=13`) draws at the top-left and off-screen
+(`x -201..37`, `y -45..10`). `OGRE_DEPTH=0`, culling off and valid shared
+matrices each change no pixel, so the defect is upstream of the combiner and the
+sampler. Proofs `docs/proofs/web-tutorial-grass-flat-session199.png` and
+`-texel0-session199.png`; see `docs/HANDOFF-2026-10-26-session199.md`.
+
+Session 200 replaced the throwaway route scripts with `debug/probes/scene.cjs`:
+one command boots the build, drives a named route, waits for the `[scene]` line
+and writes a PNG per `ogre_gfx_debug_flags` value plus sampled pixels, the page
+log, the scene timeline and the `tasks=` rate. The routes are data (`title`,
+`mission-briefing`, `tutorial-field`, `tutorial`); a new screen is a `ROUTES`
+entry with `waitScene`/`sleep`/`press`/`pressUntilScene` steps. The field capture
+also gives a cleaner grass repro: at the "Movement & Liberation" lesson N64
+`(12,160)` is `(33,33,0)` normal and pure white in `TEXEL0` raw, an untextured
+fill. See `docs/HANDOFF-2026-10-26-session200.md`.
+
+Session 201 fixed the tutorial practice field's ground, in two steps. A triangle
+that crosses the eye plane was dropped whole: `transform_vertex` returned false
+for a vertex with clip `w <= 0` and `draw_tri` dropped the triangle, so the field's
+76x76-unit ground quad (near corner `w = -1.67`) never drew and the ground was the
+frame's fill. The renderer now cuts such a triangle against `w > 1e-3`
+(`emit_clipped_tri`). The ground then drew but its tile was stretched into straight
+bands, because the vertex shader interpolated the texture coordinate in screen
+space (session 172) while RT64 interpolates it perspective-correctly
+(`hle/rt64_rsp.cpp` stores it undivided, `shaders/RasterVS.hlsl` multiplies the
+position by `w`). The shader now writes `vec4(a_pos * a_w, a_z * a_w, a_w)` by
+default, `OGRE_PERSP=0` restores the old path, and the grass is the noisy texture
+native shows. The mission briefing and the title measure within 1.4 mean absolute
+difference of the screen-space frames. New diagnostics: `OGRE_DRAW_PROBE` (every
+draw covering a pixel), the `[GFX-FAMILY]` census, `OGRE_ONLY_COMB` and a
+`1<<17` alpha view. Proofs
+`docs/proofs/web-tutorial-field-{flat,bands,}-session201.png`; see
+`docs/HANDOFF-2026-10-26-session201.md`.
+
 ## Status
 
 The game runs end to end. A build boots the publisher stills, the title, the New
@@ -2459,6 +2526,27 @@ holds the evidence.
     HEAD control) landed on the idle trajectory under host load 11-13, and the
     wide projection has no frame capture. Re-run on an idle host with the
     mission/dialogue route. See `docs/HANDOFF-2026-10-25-session191.md`.
+
+22. **The tutorial practice stage's ground (sessions 198-201). Closed.** The
+    stage is scene `0x0003`, reached by `tutorial (0x17) -> 0x02 -> 0x0D -> 0x03`.
+    Two browser renderer defects were behind it. A triangle that crosses the eye
+    plane was dropped whole (`transform_vertex` failed on clip `w <= 0`), and the
+    field's ground is one 76x76-unit quad whose near corner is at `w = -1.67`, so
+    both of its triangles were never drawn; the renderer now cuts such triangles
+    against `w > 1e-3` (`emit_clipped_tri`). The ground then drew, but its tile was
+    stretched into bands because the texture coordinate was interpolated in screen
+    space while RT64 interpolates it perspective-correctly; the vertex shader now
+    writes `vec4(a_pos * a_w, a_z * a_w, a_w)` by default, with `OGRE_PERSP=0` as
+    the A/B. The grass is the noisy texture native shows
+    (`docs/proofs/web-tutorial-field-session201.png` against `-flat-session201.png`
+    and `-bands-session201.png`). The FPS side of the same report is closed
+    separately: the uniform-location cache and the `glGetError` gate took the
+    mission from 16.78 to 29.4-29.8 fps, and a draw merge that cut the calls 8.6x
+    changed the rate by nothing. Open from this work: the whole-field overlay
+    (`comb=FCFF99FF`, 64x64 CI8 tile `0x37E5A8`) contributes alpha ~0 across the
+    field, so its mottling never appears, and the scripted `tutorial-field` route
+    is not deterministic. See `docs/HANDOFF-2026-10-26-session201.md`, `-199.md`
+    and `-198.md`.
 
 Parked, not defects:
 

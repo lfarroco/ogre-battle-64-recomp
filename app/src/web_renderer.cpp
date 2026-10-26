@@ -49,7 +49,9 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <emscripten/emscripten.h>
@@ -620,7 +622,7 @@ struct RenderState {
     float lookat[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
     // G_MOVEWORD G_MW_FOG: the fog vector RT64 keeps per RSP state. Stored so
     // the command is decoded where RT64 decodes it; no per-vertex fog alpha is
-    // applied (see transform_vertex).
+    // applied (see project_clip).
     int32_t fog_mul = 0, fog_offset = 0;
 
     // Vertices.
@@ -653,7 +655,7 @@ struct RenderState {
 
     // RSP viewport (Vp_t, G_MOVEMEM MV_VIEWPORT). vscale/vtrans are 14.2
     // fixed-point screen pixels; these hold the already-divided values.
-    // Until the game sends one, transform_vertex() falls back to NDC
+    // Until the game sends one, project_clip() falls back to NDC
     // passthrough so display lists that never set a viewport still draw.
     bool viewport_set = false;
     float view_scale[3] = {1.0f, 1.0f, 1.0f};
@@ -1289,8 +1291,11 @@ const char* kVertexShaderSrc = R"GLSL(#version 300 es
 layout(location = 0) in vec2 a_pos;    // NDC x, y
 layout(location = 1) in vec2 a_uv;   // texel coordinates (s10.5 x G_TEXTURE scale)
 layout(location = 2) in vec4 a_color;
-layout(location = 3) in float a_z;     // NDC z (-1..1); see transform_vertex
+layout(location = 3) in float a_z;     // NDC z (-1..1); see project_clip
 layout(location = 4) in float a_w;     // clip-space w (1 for a rectangle)
+uniform int u_persp;      // 1 = interpolate the texture coordinate the way the
+                          //     hardware does (perspective-correct); 0 = screen
+                          //     space, the port's default (see below)
 out vec2 v_tex;          // the same texel coordinates, for the sampler
 out vec4 v_shade;
 void main() {
@@ -1303,7 +1308,15 @@ void main() {
     // uploaded (attribute 4) because it is RDP state, but the clip position
     // keeps w = 1 and interpolates in screen space, which is what the stored
     // native frame agrees with.
-    gl_Position = vec4(a_pos, a_z, 1.0);
+    //
+    // `OGRE_PERSP=1` restores the hardware's interpolation for the texture
+    // coordinate alone (session 201). The depth path stays the same, because a
+    // clip-space z of `a_z * w` maps back to the same window depth as `a_z`.
+    // A large triangle needs it: scene 0x03's ground is one 76-unit quad whose
+    // corners differ in w by more than 30, and screen-space interpolation
+    // stretches its tile into bands.
+    gl_Position = (u_persp != 0) ? vec4(a_pos * a_w, a_z * a_w, a_w)
+                                 : vec4(a_pos, a_z, 1.0);
     // The tile's origin and size moved into the fragment shader: RT64's
     // sampler works in texel space, and it quantizes the interpolated
     // coordinate to the hardware's 1/128 texel before sampling.
@@ -1404,7 +1417,9 @@ uniform float u_cvg_range;    // 255 for the 8-bit attachment, 65535 for RGBA16F
 // ogre_gfx_debug_flags bits 3-4 by the probes; bypasses the combiner and the
 // blender so the sampled texture can be compared with the decoded image.
 uniform int u_debug_mode;
-
+// Debug: 1 = output the alpha this draw blends with, as grey (set from
+// ogre_gfx_debug_flags bit 17), so an alpha-map texture is visible directly.
+uniform int u_show_alpha;
 // ---------------------------------------------------------------------------
 // RT64 sampler: TextureSampler.hlsli `clampWrapMirrorSample` and
 // `sampleTextureLevel`, restricted to the two fields this renderer has - a
@@ -1825,6 +1840,15 @@ void main() {
     // reads the framebuffer, into the alpha the GL blend mixes with.
     vec4 outc = blender_run(c);
     fragColor = vec4(outc.rgb, (u_alpha_blend != 0) ? outc.a : coverage);
+    // Probe: show the alpha this draw hands to the blender as grey, so a
+    // texture used as an alpha map (the field's ground overlay) can be
+    // compared with the pixels it produces. `ogre_gfx_debug_flags` bit 17.
+    // Red is the combiner's alpha, green the blender's, so a texture whose
+    // texels are transparent is told apart from a blender that writes zero.
+    if (u_show_alpha != 0) {
+        float a = (u_alpha_blend != 0) ? outc.a : coverage;
+        fragColor = vec4(c.a, a, 0.0, 1.0);
+    }
 }
 )GLSL";
 
@@ -2349,7 +2373,7 @@ struct DrawCmd {
     float prim_depth = 0.0f;      // G_SETPRIMDEPTH's 0..1 screen depth
     int z_mode = 0;               // 0 OPA, 0x400 INTER, 0x800 XLU, 0xC00 DEC
     // NDC depth per vertex, alongside pos[]. The clip-space z the vertex shader
-    // writes is `z_ndc * w` (see transform_vertex).
+    // writes is `z_ndc * w` (see project_clip).
     float z[6] = {};
     // Test-only: the synthetic depth control's last triangle asks the flush to
     // read the target's centre pixel back and log `[GFX-DEPTH-TEST]`.
@@ -2540,6 +2564,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // in question.
         const char* depth_env = getenv("OGRE_DEPTH");
         depth_enabled_ = !(depth_env != nullptr && depth_env[0] == '0');
+        // `OGRE_GL_CHECK=1` restores the per-flush `glGetError` guard (the
+        // session-181 feedback-loop diagnostic). It is off by default because
+        // the call is a GPU sync: on the mission field it cost about 12% of the
+        // main thread.
+        const char* gl_check_env = getenv("OGRE_GL_CHECK");
+        gl_check_errors_ =
+            gl_check_env != nullptr && gl_check_env[0] != '\0' && gl_check_env[0] != '0';
         const char* tex_trace = getenv("OGRE_TEX_TRACE");
         trace_ = tex_trace != nullptr && tex_trace[0] != '\0' && tex_trace[0] != '0';
         // OGRE_TEX_TRACE_AFTER_MS / OGRE_TEX_TRACE_MS mirror the native
@@ -2598,6 +2629,42 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // the A/B for the mission briefing's picture strips.
         const char* halfpix_env = getenv("OGRE_RECT_HALFPIX");
         rect_halfpix_ = !(halfpix_env != nullptr && halfpix_env[0] == '0');
+        // OGRE_DRAW_PROBE="x,y" + OGRE_DRAW_PROBE_SCENE=<hex|decimal>: every draw
+        // that covers that target pixel in that scene, in walk order (see
+        // probe_tri / probe_draw). Without the scene gate the boot screens fill
+        // the log before the screen the run wants.
+        const char* probe_env = getenv("OGRE_DRAW_PROBE");
+        if (probe_env != nullptr) {
+            int px = 0, py = 0;
+            if (sscanf(probe_env, "%d,%d", &px, &py) == 2) {
+                probe_on_ = true;
+                probe_x_ = px;
+                probe_y_ = py;
+            }
+        }
+        const char* probe_scene_env = getenv("OGRE_DRAW_PROBE_SCENE");
+        if (probe_scene_env != nullptr) {
+            probe_scene_ = static_cast<int>(std::strtol(probe_scene_env, nullptr, 0));
+        }
+        const char* probe_after_env = getenv("OGRE_DRAW_PROBE_AFTER_TASK");
+        if (probe_after_env != nullptr) {
+            probe_after_task_ = static_cast<unsigned>(std::strtoul(probe_after_env, nullptr, 0));
+        }
+        // OGRE_ONLY_COMB=0x........: draw nothing but the triangles whose
+        // combiner low word is this value, over the normal fills and
+        // rectangles. It shows where one draw family lands on screen.
+        const char* only_comb_env = getenv("OGRE_ONLY_COMB");
+        if (only_comb_env != nullptr) {
+            only_comb_ = static_cast<uint32_t>(std::strtoul(only_comb_env, nullptr, 0));
+        }
+        // Perspective-correct texture-coordinate interpolation, the rule RT64
+        // and the hardware use (`hle/rt64_rsp.cpp` stores the undivided
+        // coordinate and `shaders/RasterVS.hlsl` does `ndcPos.xyz *=
+        // ndcPos.w`). On by default since session 201: scene 0x03's ground is
+        // one 76-unit quad and screen-space interpolation stretched its tile
+        // into bands. `OGRE_PERSP=0` restores the screen-space path for an A/B.
+        const char* persp_env = getenv("OGRE_PERSP");
+        persp_correct_ = !(persp_env != nullptr && persp_env[0] == '0');
         OGRE_MILESTONE("RENDERER", "webgl2 renderer pending canvas handoff");
     }
 
@@ -3999,10 +4066,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glBindVertexArray(vao_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         auto seti = [this](const char* name, int v) {
-            glUniform1i(glGetUniformLocation(program_, name), v);
+            glUniform1i(uloc(name), v);
         };
         seti("u_cycle", 0);
         seti("u_debug_mode", 0);
+        seti("u_persp", 0);
         seti("u_zclip", 0);
         seti("u_tex0", 0);
         seti("u_use_tex", 1);
@@ -4010,10 +4078,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // sampler at the framebuffer texture's own (point) filter; the shader
         // sampler's texel-space uniforms do not apply.
         seti("u_texf", 0);
-        glUniform2f(glGetUniformLocation(program_, "u_tsize0"), 1.0f, 1.0f);
-        glUniform2f(glGetUniformLocation(program_, "u_torig0"), 0.0f, 0.0f);
-        glUniform2i(glGetUniformLocation(program_, "u_tcm0"), 2, 2);
-        glUniform2i(glGetUniformLocation(program_, "u_tmask0"), 0, 0);
+        glUniform2f(uloc("u_tsize0"), 1.0f, 1.0f);
+        glUniform2f(uloc("u_torig0"), 0.0f, 0.0f);
+        glUniform2i(uloc("u_tcm0"), 2, 2);
+        glUniform2i(uloc("u_tmask0"), 0, 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex);
         // The destination rectangle: NDC spans the visible fraction of the canvas
@@ -4311,6 +4379,74 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         g_flush_ok.store(flush_count_, std::memory_order_relaxed);
         g_flush_cmds.store(flushed_cmds_, std::memory_order_relaxed);
 
+        // Family census for the pixel probe: group one flush's draws by
+        // (kind, textured, tile image, combiner) and report each family's
+        // count, screen bbox and how many of its draws are on screen at all.
+        if (probe_on_ && probe_scene_ == ogre_web_active_scene() && probe_family_prints_ < 8 &&
+            !cmds.empty()) {
+            ++probe_family_prints_;
+            struct Fam {
+                unsigned count = 0, onscreen = 0, hits = 0;
+                float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+                uint32_t fb = 0;
+                int w = 0, h = 0;
+                float z0 = 1e9f, z1 = -1e9f;
+                float bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;  // this draw's own bbox
+            };
+            std::map<std::pair<uint64_t, uint64_t>, Fam> fams;
+            for (const DrawCmd& c : cmds) {
+                const std::pair<uint64_t, uint64_t> key{
+                    (static_cast<uint64_t>(c.kind) << 40) |
+                        (static_cast<uint64_t>(c.textured) << 32) | c.comb_L,
+                    c.tex_key};
+                Fam& f = fams[key];
+                ++f.count;
+                f.fb = c.fb_address;
+                f.w = c.fb_width_px;
+                f.h = c.fb_height_px;
+                const float w = static_cast<float>(c.fb_width_px != 0 ? c.fb_width_px : 320);
+                const float h = static_cast<float>(c.fb_height_px != 0 ? c.fb_height_px : 240);
+                float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
+                for (int i = 0; i < c.vertex_count && i < 6; ++i) {
+                    // NDC -> screen pixels, the same mapping probe_tri uses.
+                    const float sx = (c.pos[i * 2 + 0] + 1.0f) * 0.5f * w;
+                    const float sy = (1.0f - c.pos[i * 2 + 1]) * 0.5f * h;
+                    f.x0 = std::min(f.x0, sx); f.x1 = std::max(f.x1, sx);
+                    f.y0 = std::min(f.y0, sy); f.y1 = std::max(f.y1, sy);
+                    f.z0 = std::min(f.z0, c.z[i]); f.z1 = std::max(f.z1, c.z[i]);
+                    bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+                    by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+                }
+                if (f.x1 >= 0.0f && f.x0 < w && f.y1 >= 0.0f && f.y0 < h) ++f.onscreen;
+                if (bx1 >= static_cast<float>(probe_x_) && bx0 <= static_cast<float>(probe_x_) &&
+                    by1 >= static_cast<float>(probe_y_) && by0 <= static_cast<float>(probe_y_)) {
+                    ++f.hits;
+                    f.bx0 = bx0; f.bx1 = bx1; f.by0 = by0; f.by1 = by1;
+                }
+            }
+            std::vector<std::pair<std::pair<uint64_t, uint64_t>, Fam>> order(fams.begin(), fams.end());
+            std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+                return a.second.count > b.second.count;
+            });
+            OGRE_MILESTONE("GFX-FAMILY", "flush %u cmds=%zu families=%zu", flush_count_,
+                           cmds.size(), fams.size());
+            int printed = 0;
+            for (const auto& e : order) {
+                if (printed++ >= 30) break;
+                const Fam& f = e.second;
+                OGRE_MILESTONE("GFX-FAMILY",
+                               "  kind=%d tex=%d combL=%08X key=%016llX fb=0x%06X %dx%d "
+                               "count=%u onscreen=%u hits=%u bbox=[%.0f..%.0f, %.0f..%.0f] "
+                               "z=[%.4f..%.4f] hitbox=[%.1f..%.1f, %.1f..%.1f]",
+                               static_cast<int>((e.first.first >> 40) & 0x3),
+                               static_cast<int>((e.first.first >> 32) & 0x1),
+                               static_cast<uint32_t>(e.first.first & 0xFFFFFFFFu),
+                               static_cast<unsigned long long>(e.first.second), f.fb, f.w, f.h,
+                               f.count, f.onscreen, f.hits, f.x0, f.x1, f.y0, f.y1, f.z0, f.z1,
+                               f.bx0, f.bx1, f.by0, f.by1);
+            }
+        }
+
         // Which GL framebuffer the current draw targets (null = the canvas).
         uint32_t bound_fb_address = 0;
         GlFramebuffer* bound_fb = nullptr;
@@ -4500,7 +4636,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
             // Combiner uniforms.
             auto seti = [this](const char* name, int v) {
-                glUniform1i(glGetUniformLocation(program_, name), v);
+                glUniform1i(uloc(name), v);
             };
             seti("u_ca0", cmd.ca[0]); seti("u_cb0", cmd.cb[0]); seti("u_cc0", cmd.cc[0]); seti("u_cd0", cmd.cd[0]);
             seti("u_aa0", cmd.aa[0]); seti("u_ab0", cmd.ab[0]); seti("u_ac0", cmd.ac[0]); seti("u_ad0", cmd.ad[0]);
@@ -4509,6 +4645,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             seti("u_cycle", cmd.cycle);
             seti("u_debug_mode",
                  static_cast<int>((g_debug_flags.load(std::memory_order_relaxed) >> 3) & 3));
+            seti("u_show_alpha",
+                 (g_debug_flags.load(std::memory_order_relaxed) & 131072u) != 0 ? 1 : 0);
+            seti("u_persp", persp_correct_ ? 1 : 0);
             // Blender (render mode) uniforms.
             seti("u_force_blend", cmd.force_blend ? 1 : 0);
             seti("u_blend_approx", cmd.blend_approx);
@@ -4519,26 +4658,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             seti("u_ac", cmd.acmp);
             // RT64's alpha-dither seeds: the frame count and the draw's index
             // (see the `dither_init_rand` port). Only G_AC_DITHER reads them.
-            glUniform1ui(glGetUniformLocation(program_, "u_dither_frame"), present_requests_);
-            glUniform1ui(glGetUniformLocation(program_, "u_dither_instance"), flushed_cmds_);
+            glUniform1ui(uloc("u_dither_frame"), present_requests_);
+            glUniform1ui(uloc("u_dither_instance"), flushed_cmds_);
             seti("u_cvg_x_alpha", cmd.cvg_x_alpha ? 1 : 0);
             seti("u_cvg_dst", cmd.cvg_dst);
             seti("u_alpha_blend", cmd.alpha_blend ? 1 : 0);
-            glUniform1f(glGetUniformLocation(program_, "u_cvg_range"),
+            glUniform1f(uloc("u_cvg_range"),
                         hp_fb_ ? 65535.0f : 255.0f);
             seti("u_bp0", cmd.bp[0]); seti("u_bm0", cmd.bm[0]);
             seti("u_ba0", cmd.ba[0]); seti("u_bb0", cmd.bb[0]);
             seti("u_bp1", cmd.bp[1]); seti("u_bm1", cmd.bm[1]);
             seti("u_ba1", cmd.ba[1]); seti("u_bb1", cmd.bb[1]);
 
-            glUniform4fv(glGetUniformLocation(program_, "u_prim"), 1, cmd.prim);
-            glUniform4fv(glGetUniformLocation(program_, "u_env"), 1, cmd.env);
-            glUniform4fv(glGetUniformLocation(program_, "u_fog_color"), 1, cmd.fog);
-            glUniform4fv(glGetUniformLocation(program_, "u_blend_color"), 1, cmd.blend_color);
-            glUniform1f(glGetUniformLocation(program_, "u_k4"), cmd.k4);
-            glUniform1f(glGetUniformLocation(program_, "u_k5"), cmd.k5);
-            glUniform3fv(glGetUniformLocation(program_, "u_key_center"), 1, cmd.key_center);
-            glUniform3fv(glGetUniformLocation(program_, "u_key_scale"), 1, cmd.key_scale);
+            glUniform4fv(uloc("u_prim"), 1, cmd.prim);
+            glUniform4fv(uloc("u_env"), 1, cmd.env);
+            glUniform4fv(uloc("u_fog_color"), 1, cmd.fog);
+            glUniform4fv(uloc("u_blend_color"), 1, cmd.blend_color);
+            glUniform1f(uloc("u_k4"), cmd.k4);
+            glUniform1f(uloc("u_k5"), cmd.k5);
+            glUniform3fv(uloc("u_key_center"), 1, cmd.key_center);
+            glUniform3fv(uloc("u_key_scale"), 1, cmd.key_scale);
 
             // One-shot: a draw whose evaluated combiner mux reads KEY_CENTER (B)
             // or KEY_SCALE (C) states itself and the key registers it reads, so
@@ -4576,10 +4715,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // bound.
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, white_tex_);
-            glUniform1i(glGetUniformLocation(program_, "u_tex0"), 0);
+            glUniform1i(uloc("u_tex0"), 0);
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, white_tex_);
-            glUniform1i(glGetUniformLocation(program_, "u_tex1"), 1);
+            glUniform1i(uloc("u_tex1"), 1);
             glActiveTexture(GL_TEXTURE0);
 
             if (cmd.textured) {
@@ -4592,10 +4731,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 };
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key));
-                glUniform1i(glGetUniformLocation(program_, "u_tex0"), 0);
+                glUniform1i(uloc("u_tex0"), 0);
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(GL_TEXTURE_2D, lookup(cmd.tex_key1));
-                glUniform1i(glGetUniformLocation(program_, "u_tex1"), 1);
+                glUniform1i(uloc("u_tex1"), 1);
                 if (texf_ == 0) {
                     // The GL sampler decides filtering per texture object, not
                     // per draw, so it is set here from this draw's G_TF_* while
@@ -4611,35 +4750,35 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 // The RDP sampler state (RT64 RDPTile per unit). The shader
                 // samples with texelFetch and filters in fp32; `u_texf` selects
                 // the GL fixed-function sampler instead, for the A/B.
-                glUniform2f(glGetUniformLocation(program_, "u_tsize0"),
+                glUniform2f(uloc("u_tsize0"),
                             cmd.tex_size[0][0], cmd.tex_size[0][1]);
-                glUniform2f(glGetUniformLocation(program_, "u_tsize1"),
+                glUniform2f(uloc("u_tsize1"),
                             cmd.tex_size[1][0], cmd.tex_size[1][1]);
-                glUniform2f(glGetUniformLocation(program_, "u_torig0"),
+                glUniform2f(uloc("u_torig0"),
                             cmd.tex_origin[0], cmd.tex_origin[1]);
-                glUniform2f(glGetUniformLocation(program_, "u_torig1"),
+                glUniform2f(uloc("u_torig1"),
                             cmd.tex_origin1[0], cmd.tex_origin1[1]);
-                glUniform2i(glGetUniformLocation(program_, "u_tcm0"),
+                glUniform2i(uloc("u_tcm0"),
                             cmd.tex_cms[0], cmd.tex_cmt[0]);
-                glUniform2i(glGetUniformLocation(program_, "u_tcm1"),
+                glUniform2i(uloc("u_tcm1"),
                             cmd.tex_cms[1], cmd.tex_cmt[1]);
-                glUniform2i(glGetUniformLocation(program_, "u_tmask0"),
+                glUniform2i(uloc("u_tmask0"),
                             cmd.tex_masks[0], cmd.tex_maskt[0]);
-                glUniform2i(glGetUniformLocation(program_, "u_tmask1"),
+                glUniform2i(uloc("u_tmask1"),
                             cmd.tex_masks[1], cmd.tex_maskt[1]);
-                glUniform2f(glGetUniformLocation(program_, "u_twin0"),
+                glUniform2f(uloc("u_twin0"),
                             static_cast<float>(cmd.tex_win[0][0]),
                             static_cast<float>(cmd.tex_win[0][1]));
-                glUniform2f(glGetUniformLocation(program_, "u_twin1"),
+                glUniform2f(uloc("u_twin1"),
                             static_cast<float>(cmd.tex_win[1][0]),
                             static_cast<float>(cmd.tex_win[1][1]));
-                glUniform2f(glGetUniformLocation(program_, "u_tshift0"),
+                glUniform2f(uloc("u_tshift0"),
                             cmd.tex_shift[0][0], cmd.tex_shift[0][1]);
-                glUniform2f(glGetUniformLocation(program_, "u_tshift1"),
+                glUniform2f(uloc("u_tshift1"),
                             cmd.tex_shift[1][0], cmd.tex_shift[1][1]);
-                glUniform1i(glGetUniformLocation(program_, "u_tex_filter"), cmd.tex_filter);
-                glUniform1i(glGetUniformLocation(program_, "u_texf"), texf_);
-                glUniform1i(glGetUniformLocation(program_, "u_tex_persp"),
+                glUniform1i(uloc("u_tex_filter"), cmd.tex_filter);
+                glUniform1i(uloc("u_texf"), texf_);
+                glUniform1i(uloc("u_tex_persp"),
                             cmd.tex_persp ? 1 : 0);
                 ++samp_draws_;
                 if (cmd.tex_filter == 0) {
@@ -4886,7 +5025,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // feedback loop did this silently: the target's own texture was bound,
         // and every draw into that framebuffer raised INVALID_OPERATION). Report
         // it once per flush so a future binding mistake is visible.
-        {
+        //
+        // `glGetError` synchronises with the GPU, so it runs only under
+        // `OGRE_GL_CHECK=1`. It cost about a tenth of the main thread on the
+        // mission field, where the flush loop is the frame's critical path.
+        if (gl_check_errors_) {
             const GLenum gl_err = glGetError();
             if (gl_err != GL_NO_ERROR && gl_errors_logged_ < 16) {
                 ++gl_errors_logged_;
@@ -5047,6 +5190,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            "persp=%u nonpersp=%u",
                            samp_draws_, samp_point_, samp_bilerp_, samp_average_, samp_masked_,
                            samp_shifted_, samp_persp_, samp_nonpersp_);
+        }
+        if (probe_on_ && probe_scene_ == ogre_web_active_scene()) {
+            OGRE_MILESTONE("GFX-DRAWPROBE",
+                           "summary scene=0x%X total=%u tri_bbox=%u tri_cover=%u "
+                           "tri_cover_drawn=%u rect_cover=%u logged=%u",
+                           static_cast<unsigned>(ogre_web_active_scene()), probe_total_,
+                           probe_tri_bbox_, probe_tri_cover_, probe_tri_cover_drawn_,
+                           probe_rect_cover_, probe_logged_);
         }
 
         // Framebuffer writeback. The game's CPU reads a colour image out of
@@ -5421,7 +5572,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // projection's x row by 3/4 so the 4:3 framebuffer, stretched to 16:9 by the
     // page's canvas CSS, keeps the game's proportions and shows more world at
     // the sides. Set once per display list in send_dl (gfx thread), the same
-    // thread transform_vertex runs on.
+    // thread vertex_clip/project_clip run on.
     bool widescreen_expand_ = false;
     // Colour images attach an RGBA16F texture when the context exposes
     // EXT_color_buffer_float (see ensure_gl), RGBA8 otherwise.
@@ -5432,6 +5583,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     GLuint program_ = 0;
     GLuint vao_ = 0, vbo_ = 0;
     GLuint white_tex_ = 0;   // 1x1 RGBA white, bound for unloaded texture units
+    // Per-draw uniform locations, resolved once after the program links. A
+    // glGetUniformLocation per uniform per draw dominated the mission and
+    // tutorial field's frame time: the mission measured 16.8 fps and the
+    // browser CPU profile spent 27% of the main thread in the lookup and its
+    // UTF-8 conversion. WebGL invalidates the location only when the program is
+    // relinked, which happens once.
+    std::unordered_map<std::string_view, GLint> uniform_cache_;
+    GLint uloc(const char* name) {
+        auto it = uniform_cache_.find(name);
+        if (it != uniform_cache_.end()) {
+            return it->second;
+        }
+        const GLint loc = glGetUniformLocation(program_, name);
+        uniform_cache_.emplace(std::string_view(name), loc);
+        return loc;
+    }
+    // `glGetError` is a pipeline sync: calling it once per flush made every
+    // flush wait for the GPU. It is the feedback-loop guard from session 181, so
+    // it stays available behind `OGRE_GL_CHECK=1`; the default skips it.
+    bool gl_check_errors_ = false;
     std::atomic<unsigned> task_count_{0};
     std::atomic<unsigned> flush_skipped_{0};
     // Diagnostics for the DL -> GL path (session 19): how many DrawCmds were
@@ -5912,13 +6083,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
         glDeleteShader(vs);
         glDeleteShader(fs);
+        uniform_cache_.clear();   // a new program invalidates every location
 
         glGenVertexArrays(1, &vao_);
         glGenBuffers(1, &vbo_);
         glBindVertexArray(vao_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         // Stride 10: xy, uv, rgba, w, NDC z (the vertex shader's locations
-        // 0..4; see DrawCmd::z and transform_vertex).
+        // 0..4; see DrawCmd::z and project_clip).
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)0);
         glEnableVertexAttribArray(1);
@@ -5959,7 +6131,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             int o = 0;
             for (const char* n : names) {
                 o += snprintf(buf + o, sizeof(buf) - o, "%s=%d ",
-                              n, glGetUniformLocation(program_, n));
+                              n, uloc(n));
                 if (o >= static_cast<int>(sizeof(buf)) - 24) break;
             }
             OGRE_MILESTONE("RENDERER", "uniform locations: %s", buf);
@@ -7248,7 +7420,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 // halfword is the 15-bit screen depth, the low halfword the
                 // 16-bit decal delta. `primDepth.x` is 0..1 in the RDP's screen
                 // depth space, which is the same space as the viewport
-                // transform's output z (see transform_vertex).
+                // projected z (see project_clip).
                 st.prim_depth = static_cast<float>((w1 >> 16) & 0x7FFFu) / 32767.0f;
                 st.prim_depth_dz = static_cast<float>(w1 & 0xFFFFu) / 65535.0f;
                 break;
@@ -8331,7 +8503,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // value handed to the shader is `2 * screen_z - 1` and `gl_FragCoord.z`
     // comes back as the RDP's screen z. Everything downstream (the depth test,
     // the F3D depth clip at 1022/1024) is stated in that 0..1 space.
-    bool transform_vertex(const RenderState& st, const RawVertex& v, float out[10]) {
+    // A vertex after modelview*projection: the clip-space position plus the
+    // attributes the rasterizer interpolates. `clip.w <= 0` means the vertex is
+    // at or behind the eye plane; `draw_tri` cuts the triangle against that
+    // plane instead of dropping it (see `emit_clipped_tri`).
+    struct ClipVertex {
+        Vec4 clip{};
+        float u = 0.0f, v = 0.0f;
+        float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+    };
+
+    bool vertex_clip(const RenderState& st, const RawVertex& v, ClipVertex& out) {
         // Modelview then projection (row-vector).
         const Mat4& mv = st.modelview_stack.back();
         Vec4 pos = mul(Vec4{static_cast<float>(v.x), static_cast<float>(v.y),
@@ -8344,47 +8526,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (widescreen_expand_) {
             pos.x *= 0.75f;
         }
-        if (pos.w <= 0.0f) {
-            return false;
-        }
-        // Perspective divide + viewport. The RSP maps clip space to screen
-        // space with the Vp_t scale/translate (screen y points down); the GL
-        // framebuffer expects NDC, so the result is converted back.
-        const float inv_w = 1.0f / pos.w;
-        float sx, sy, sz;
-        if (st.viewport_set) {
-            const float scr_x = pos.x * inv_w * st.view_scale[0] + st.view_trans[0];
-            const float scr_y = -pos.y * inv_w * st.view_scale[1] + st.view_trans[1];
-            sx = ndc_xf(scr_x, st);
-            sy = ndc_yf(scr_y, st);
-            sz = pos.z * inv_w * st.view_scale[2] + st.view_trans[2];
-        } else {
-            // No viewport seen yet: treat the projection output as NDC.
-            sx = pos.x * inv_w;   // [-1, 1] (x)
-            sy = -pos.y * inv_w;  // flipped: NDC y up
-            // The z of that NDC, moved into the RDP's 0..1 screen depth.
-            sz = pos.z * inv_w * 0.5f + 0.5f;
-        }
-        // RT64's half-pixel screen offset, for the triangle path only.
-        // `tools/RT64/src/render/rt64_framebuffer_renderer.cpp`:
-        // `halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f /
-        // framebuffer.viewport.height }`, assigned as `triangles.screenOffset`
-        // and applied in `tools/RT64/src/shaders/RasterVS.hlsl` as
-        // `ndcPos.xy = (ndcPos.xy * screenScale) + screenOffset * ndcPos.w;`
-        // (`screenScale` is 1 unless the viewport is stretched). That is half a
-        // pixel right and half a pixel down in window space, so a quad whose
-        // vertex lands on a whole pixel samples half a texel nearer the start
-        // of its span. `ndc_yf` maps guest row y to `1 - 2y/H`, so one pixel
-        // down is -1/H. RT64's `renderFlagRect` branch skips only the
-        // screen-to-NDC transform, and a rectangle gets the same half pixel
-        // from `screenOffset` there; this renderer gives it to a rectangle in
-        // UV space instead (`OGRE_RECT_HALFPIX`, session 195), because a
-        // rectangle's sample coordinate is interpolated in the same space as
-        // its position.
-        sx += 1.0f / screen_width(st);
-        sy -= 1.0f / screen_height(st);
-        out[0] = sx;
-        out[1] = sy;
+        out.clip = pos;
         // Texture coordinates: s10.5 texels scaled by G_TEXTURE (RT64
         // RSP::setVertexCommon). The G_TEXTURE scale must NOT be applied to
         // rectangles - RT64's RDP::drawRect uses uls/32 and lrs/32 directly.
@@ -8429,21 +8571,21 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     gen[axis] = (dot + 1.0f) * 512.0f;
                 }
             }
-            out[2] = st.tex_scale_s * gen[0];
-            out[3] = st.tex_scale_t * gen[1];
+            out.u = st.tex_scale_s * gen[0];
+            out.v = st.tex_scale_t * gen[1];
         } else {
-            out[2] = (static_cast<float>(v.s) * st.tex_scale_s) / 32.0f;
-            out[3] = (static_cast<float>(v.t) * st.tex_scale_t) / 32.0f;
+            out.u = (static_cast<float>(v.s) * st.tex_scale_s) / 32.0f;
+            out.v = (static_cast<float>(v.t) * st.tex_scale_t) / 32.0f;
         }
         float lit[3] = {0.0f, 0.0f, 0.0f};
         if (compute_vertex_light(st, v, lit)) {
-            out[4] = lit[0];
-            out[5] = lit[1];
-            out[6] = lit[2];
+            out.r = lit[0];
+            out.g = lit[1];
+            out.b = lit[2];
         } else {
-            out[4] = v.r / 255.0f;
-            out[5] = v.g / 255.0f;
-            out[6] = v.b / 255.0f;
+            out.r = v.r / 255.0f;
+            out.g = v.g / 255.0f;
+            out.b = v.b / 255.0f;
         }
         // Alpha: RT64 replaces it with the fog alpha when G_FOG is set, and with
         // the vertex colour's own alpha otherwise (`RSPProcessCS.hlsl:70-80`):
@@ -8451,37 +8593,92 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         //   vertexAlpha = clamp(fogAlpha / 255, 0, 1)
         // `tfPos` is the clip-space position (`mul(mul(viewProjMat, worldMat),
         // v)`), so `tfPos.z / tfPos.w` is the plain NDC z, not the RDP's screen
-        // z that `sz` above carries (the viewport scale/translate come after).
-        // RT64's `fogIndex > 0` arm is entered for every vertex of a G_FOG
-        // workload; `rspFog` exists from the first G_FOG transform with the last
-        // G_MW_FOG's mul/offset (RSP::setFog, `hle/rt64_rsp.cpp:990-994`, and
-        // the zero default at `:91-92`). The rect paths do not run RSP vertex
-        // processing, so fog applies to triangles only, which is this function.
+        // z that `project_clip` produces (the viewport scale/translate come
+        // after). RT64's `fogIndex > 0` arm is entered for every vertex of a
+        // G_FOG workload; `rspFog` exists from the first G_FOG transform with
+        // the last G_MW_FOG's mul/offset (RSP::setFog, `hle/rt64_rsp.cpp:990-994`,
+        // and the zero default at `:91-92`). The rect paths do not run RSP
+        // vertex processing, so fog applies to triangles only, which is this
+        // function.
         if ((st.geometry_mode & kGeomFog) != 0) {
-            const float ndc_z = pos.z * inv_w;
-            const float fog_alpha =
-                (std::max(ndc_z, 0.0f) * static_cast<float>(st.fog_mul) +
-                 static_cast<float>(st.fog_offset)) / 255.0f;
-            out[7] = std::clamp(fog_alpha, 0.0f, 1.0f);
-            if (!fog_logged_) {
-                fog_logged_ = true;
-                OGRE_MILESTONE("GFX-FOG",
-                               "per-vertex alpha: z/w=%.4f mul=%d offset=%d -> alpha=%.4f",
-                               ndc_z, static_cast<int>(st.fog_mul),
-                               static_cast<int>(st.fog_offset), out[7]);
-            }
+            out.a = fog_vertex_alpha(st, pos);
         } else {
-            out[7] = v.a / 255.0f;
+            out.a = v.a / 255.0f;
         }
+        return pos.w > 0.0f;
+    }
+
+    // The alpha RT64's RSP gives a G_FOG vertex (see vertex_clip).
+    float fog_vertex_alpha(const RenderState& st, const Vec4& clip) {
+        if (clip.w == 0.0f) {
+            return 0.0f;
+        }
+        const float ndc_z = clip.z / clip.w;
+        const float fog_alpha =
+            (std::max(ndc_z, 0.0f) * static_cast<float>(st.fog_mul) +
+             static_cast<float>(st.fog_offset)) / 255.0f;
+        if (!fog_logged_) {
+            fog_logged_ = true;
+            OGRE_MILESTONE("GFX-FOG",
+                           "per-vertex alpha: z/w=%.4f mul=%d offset=%d -> alpha=%.4f",
+                           ndc_z, static_cast<int>(st.fog_mul),
+                           static_cast<int>(st.fog_offset), std::clamp(fog_alpha, 0.0f, 1.0f));
+        }
+        return std::clamp(fog_alpha, 0.0f, 1.0f);
+    }
+
+    // Clip-space vertex to the shader's `data` layout.
+    void project_clip(const RenderState& st, const ClipVertex& c, float out[10]) {
+        const float inv_w = 1.0f / c.clip.w;
+        float sx, sy, sz;
+        if (st.viewport_set) {
+            const float scr_x = c.clip.x * inv_w * st.view_scale[0] + st.view_trans[0];
+            const float scr_y = -c.clip.y * inv_w * st.view_scale[1] + st.view_trans[1];
+            sx = ndc_xf(scr_x, st);
+            sy = ndc_yf(scr_y, st);
+            sz = c.clip.z * inv_w * st.view_scale[2] + st.view_trans[2];
+        } else {
+            // No viewport seen yet: treat the projection output as NDC.
+            sx = c.clip.x * inv_w;   // [-1, 1] (x)
+            sy = -c.clip.y * inv_w;  // flipped: NDC y up
+            // The z of that NDC, moved into the RDP's 0..1 screen depth.
+            sz = c.clip.z * inv_w * 0.5f + 0.5f;
+        }
+        // RT64's half-pixel screen offset, for the triangle path only.
+        // `tools/RT64/src/render/rt64_framebuffer_renderer.cpp`:
+        // `halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f /
+        // framebuffer.viewport.height }`, assigned as `triangles.screenOffset`
+        // and applied in `tools/RT64/src/shaders/RasterVS.hlsl` as
+        // `ndcPos.xy = (ndcPos.xy * screenScale) + screenOffset * ndcPos.w;`
+        // (`screenScale` is 1 unless the viewport is stretched). That is half a
+        // pixel right and half a pixel down in window space, so a quad whose
+        // vertex lands on a whole pixel samples half a texel nearer the start
+        // of its span. `ndc_yf` maps guest row y to `1 - 2y/H`, so one pixel
+        // down is -1/H. RT64's `renderFlagRect` branch skips only the
+        // screen-to-NDC transform, and a rectangle gets the same half pixel
+        // from `screenOffset` there; this renderer gives it to a rectangle in
+        // UV space instead (`OGRE_RECT_HALFPIX`, session 195), because a
+        // rectangle's sample coordinate is interpolated in the same space as
+        // its position.
+        sx += 1.0f / screen_width(st);
+        sy -= 1.0f / screen_height(st);
+        out[0] = sx;
+        out[1] = sy;
+        out[2] = c.u;
+        out[3] = c.v;
+        out[4] = c.r;
+        out[5] = c.g;
+        out[6] = c.b;
+        out[7] = c.a;
         // The clip-space w, for perspective-correct interpolation.
-        out[8] = pos.w;
+        out[8] = c.clip.w;
         // NDC depth (see the header comment): the RDP's 0..1 screen z mapped
         // onto GL's [-1, 1]. A `G_ZS_PRIM` draw overwrites it with the
         // primitive depth in draw_tri/queue_triangles, because that is
         // per-draw state, not per-vertex.
         out[9] = 2.0f * sz - 1.0f;
-        return true;
     }
+
 
     // Permanent shading census: one `[GFX-LIGHT]` line for the first lit draw
     // and every 400 lit draws after it (and the same for unlit draws, so a
@@ -8599,12 +8796,140 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                        static_cast<double>(st.view_scale[2]), static_cast<double>(st.view_trans[2]));
     }
 
+    // ----- pixel-covering draw probe (session 201) ----------------------------
+    //
+    // `OGRE_DRAW_PROBE=x,y` (target pixels) with `OGRE_DRAW_PROBE_SCENE=<id>`
+    // reports every draw that covers that pixel in that scene: the draw's
+    // screen span, whether it sampled a tile and which, the tile's rect and
+    // masks, the combiner, and the interpolated UV/shade. It answers "what
+    // paints this pixel, and in which order" from the walk itself.
+    bool probe_on_ = false;
+    int probe_x_ = 0, probe_y_ = 0, probe_scene_ = -1;
+    unsigned probe_tri_bbox_ = 0;        // triangles whose bbox covers the pixel
+    unsigned probe_tri_cover_ = 0;       // ... and whose area contains it
+    unsigned probe_tri_cover_drawn_ = 0; // ... and which the culler kept
+    unsigned probe_rect_cover_ = 0;      // rect/fill draws whose span covers it
+    unsigned probe_logged_ = 0;
+    unsigned probe_total_ = 0;           // every draw the probe saw in its scene
+    unsigned probe_first_ = 0;           // of those, the first few, always logged
+    unsigned probe_family_prints_ = 0;   // flushes whose family census was printed
+    uint32_t only_comb_ = 0;             // OGRE_ONLY_COMB (0 = draw every family)
+    bool persp_correct_ = false;         // OGRE_PERSP (see the vertex shader)
+    // OGRE_DRAW_PROBE_AFTER_TASK: count covering draws from the start but only
+    // log them once the task counter passed this value, so the log holds the
+    // settled screen and not the scene's first frame.
+    unsigned probe_after_task_ = 0;
+
+    void probe_draw(const RenderState& st, const char* what, bool textured,
+                    float x0, float y0, float x1, float y1, const char* extra) {
+        if (!probe_on_ || probe_scene_ != ogre_web_active_scene()) return;
+        ++probe_total_;
+        const bool covers =
+            x1 >= static_cast<float>(probe_x_) && x0 <= static_cast<float>(probe_x_) &&
+            y1 >= static_cast<float>(probe_y_) && y0 <= static_cast<float>(probe_y_);
+        const bool first = probe_first_ < 6;
+        if (!covers && !first) return;
+        if (first) ++probe_first_;
+        if (covers) ++probe_rect_cover_;
+        if (task_count_.load() < probe_after_task_) return;
+        if (probe_logged_ >= 24) return;
+        ++probe_logged_;
+        const TileState& t0 = st.tiles[st.active_tile & (kMaxTiles - 1)];
+        OGRE_MILESTONE("GFX-DRAWPROBE",
+                       "%s tex=%d px=[%.1f..%.1f, %.1f..%.1f] tile=%d line=%d img=%dx%d@0x%06X "
+                       "rect=(%d,%d)-(%d,%d) masks=%d shifts=%d maskt=%d shiftt=%d comb=%08X/%08X "
+                       "prim=[%.2f,%.2f,%.2f,%.2f] %s",
+                       what, textured ? 1 : 0, x0, x1, y0, y1, st.active_tile, t0.line,
+                       t0.image.width, t0.image.height, t0.image_address,
+                       t0.uls, t0.ult, t0.lrs, t0.lrt, t0.masks, t0.shifts, t0.maskt, t0.shiftt,
+                       st.combiner.L, st.combiner.H,
+                       st.prim_color[0], st.prim_color[1], st.prim_color[2], st.prim_color[3],
+                       extra != nullptr ? extra : "");
+    }
+
+    void probe_tri(const RenderState& st, const float* data, bool textured, bool drawn) {
+        if (!probe_on_ || probe_scene_ != ogre_web_active_scene()) return;
+        const float w = static_cast<float>(screen_width(st));
+        const float h = static_cast<float>(screen_height(st));
+        float sx[3], sy[3];
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (int i = 0; i < 3; ++i) {
+            sx[i] = (data[i * 10 + 0] + 1.0f) * 0.5f * w;
+            sy[i] = (1.0f - data[i * 10 + 1]) * 0.5f * h;
+            x0 = std::min(x0, sx[i]); x1 = std::max(x1, sx[i]);
+            y0 = std::min(y0, sy[i]); y1 = std::max(y1, sy[i]);
+        }
+        ++probe_total_;
+        const bool bbox_covers =
+            x1 >= static_cast<float>(probe_x_) && x0 <= static_cast<float>(probe_x_) &&
+            y1 >= static_cast<float>(probe_y_) && y0 <= static_cast<float>(probe_y_);
+        const bool first = probe_first_ < 6;
+        if (!bbox_covers && !first) {
+            return;
+        }
+        if (first) ++probe_first_;
+        if (!bbox_covers) {
+            // Log the first few triangles of the scene whatever their span, so
+            // the log states the coordinate space the walk produces.
+        } else {
+            ++probe_tri_bbox_;
+        }
+        const float px = static_cast<float>(probe_x_) + 0.5f;
+        const float py = static_cast<float>(probe_y_) + 0.5f;
+        auto edge = [&](int a, int b) {
+            return (sx[b] - sx[a]) * (py - sy[a]) - (sy[b] - sy[a]) * (px - sx[a]);
+        };
+        const float e0 = edge(1, 2), e1 = edge(2, 0), e2 = edge(0, 1);
+        const bool inside = (e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
+                            (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f);
+        if (!inside && !first) return;
+        if (inside) {
+            ++probe_tri_cover_;
+            if (drawn) ++probe_tri_cover_drawn_;
+        }
+        if (task_count_.load() < probe_after_task_) return;
+        if (probe_logged_ >= 24) return;
+        ++probe_logged_;
+        const TileState& t0 = st.tiles[st.active_tile & (kMaxTiles - 1)];
+        char mux0[192], mux1[192];
+        const int cyc0 = ((st.othermode_h >> 20) & 3) == kCyc2 ? 0 : 1;
+        format_combiner(st.combiner, cyc0, mux0, sizeof(mux0));
+        format_combiner(st.combiner, 1, mux1, sizeof(mux1));
+        char extra[640];
+        snprintf(extra, sizeof(extra),
+                 "%s uv=[%.3f..%.3f, %.3f..%.3f] shade=[%.2f,%.2f,%.2f,a=%.2f] "
+                 "z=[%.3f..%.3f] cyc=%d fmt=%d siz=%d pal=%d tlut=%d n=%d mean=%.1f opaque=%u "
+                 "mux0=[%s] mux1=[%s]",
+                 drawn ? "drawn" : "culled",
+                 std::min(std::min(data[2], data[12]), data[22]),
+                 std::max(std::max(data[2], data[12]), data[22]),
+                 std::min(std::min(data[3], data[13]), data[23]),
+                 std::max(std::max(data[3], data[13]), data[23]),
+                 data[4], data[5], data[6], data[7],
+                 std::min(std::min(data[9], data[19]), data[29]),
+                 std::max(std::max(data[9], data[19]), data[29]),
+                 static_cast<int>((st.othermode_h >> 20) & 3), (int)t0.fmt, (int)t0.siz,
+                 (int)t0.palette, tlut_valid_ ? 1 : 0, (int)tlut_count_, t0.trace_mean,
+                 t0.trace_opaque, mux0, mux1);
+        OGRE_MILESTONE("GFX-DRAWPROBE",
+                       "tri tex=%d px=[%.1f..%.1f, %.1f..%.1f] tile=%d line=%d img=%dx%d@0x%06X "
+                       "rect=(%d,%d)-(%d,%d) masks=%d shifts=%d comb=%08X/%08X %s",
+                       textured ? 1 : 0, x0, x1, y0, y1, st.active_tile, t0.line,
+                       t0.image.width, t0.image.height, t0.image_address,
+                       t0.uls, t0.ult, t0.lrs, t0.lrt, t0.masks, t0.shifts,
+                       st.combiner.L, st.combiner.H, extra);
+    }
+
     void draw_tri(ExecCtx* ctx, RenderState& st, int i0, int i1, int i2) {
         // Debug: draw only the first sprite of the list (ogre_gfx_debug_flags
         // bit 1), so a probe can compare one rendered sprite with its textures.
         // 3 = the frame's fill rect plus this sprite's two triangles; a lower
         // bound would cut the sprite in half along the quad's diagonal.
         if ((g_debug_flags.load(std::memory_order_relaxed) & 2u) != 0 && ctx->draws.size() >= 3) {
+            return;
+        }
+        // OGRE_ONLY_COMB: the family-isolation view (see the constructor).
+        if (only_comb_ != 0 && st.combiner.L != only_comb_) {
             return;
         }
         if (i0 >= kMaxVertices || i1 >= kMaxVertices || i2 >= kMaxVertices) {
@@ -8627,27 +8952,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             log_wide_draw(st, "tri", x0, y0, x1, y1,
                           texture_available(st) ? "tex=1" : "tex=0");
         }
-        float data[3 * 10];
+        ClipVertex cv[3];
+        bool any_behind = false;
         for (int i = 0; i < 3; ++i) {
-            if (!transform_vertex(st, *v[i], data + i * 10)) {
-                if (tri_reject_logged_ < 2) {
-                    ++tri_reject_logged_;
-                    const Mat4& mv = st.modelview_stack.back();
-                    OGRE_MILESTONE("GFX-REJ",
-                                   "rejected tri v=(%d,%d,%d) mv=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] "
-                                   "proj=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f]",
-                                   v[i]->x, v[i]->y, v[i]->z,
-                                   mv.m[0], mv.m[1], mv.m[2], mv.m[3], mv.m[4], mv.m[5], mv.m[6], mv.m[7],
-                                   mv.m[8], mv.m[9], mv.m[10], mv.m[11], mv.m[12], mv.m[13], mv.m[14], mv.m[15],
-                                   st.projection.m[0], st.projection.m[1], st.projection.m[2], st.projection.m[3],
-                                   st.projection.m[4], st.projection.m[5], st.projection.m[6], st.projection.m[7],
-                                   st.projection.m[8], st.projection.m[9], st.projection.m[10], st.projection.m[11],
-                                   st.projection.m[12], st.projection.m[13], st.projection.m[14], st.projection.m[15]);
-                }
-                ++tris_rejected_;
-                return;  // back-facing / clipped
+            if (!vertex_clip(st, *v[i], cv[i])) {
+                any_behind = true;
             }
         }
+        if (any_behind) {
+            // Hardware clips a triangle that crosses the eye plane; see
+            // emit_clipped_tri.
+            emit_clipped_tri(ctx, st, cv, *v[0]);
+            return;
+        }
+        float data[3 * 10];
+        for (int i = 0; i < 3; ++i) {
+            project_clip(st, cv[i], data + i * 10);
+        }
+        emit_triangle(ctx, st, data, *v[0]);
+    }
+    // Emits one projected screen-space triangle: the backface test, the
+    // diagnostics and the queued draw. `ref` is one of its guest vertices, for
+    // the shading census and the pixel probe.
+    void emit_triangle(ExecCtx* ctx, RenderState& st, float* data, const RawVertex& ref) {
         if (ctx->order.size() < 200) ctx->order += texture_available(st) ? 't' : 'u';
         // Screen-space backface culling, mirroring RT64 RSP::drawIndexedTri
         // (tools/RT64/src/hle/rt64_rsp.cpp:1091-1140):
@@ -8673,11 +9000,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             const float nz = vx * uy - vy * ux;
             if (!(nz >= 0.0f)) {
                 ++tris_culled_;
-                note_shading_census(st, *v[0], data, "culled");
+                probe_tri(st, data, texture_available(st), false);
+                note_shading_census(st, ref, data, "culled");
                 return;
             }
         }
-        note_shading_census(st, *v[0], data, "drawn");
+        probe_tri(st, data, texture_available(st), true);
+        note_shading_census(st, ref, data, "drawn");
         // A draw samples TMEM through its render tiles, so decode the two
         // images now (lazily, once per key) and use their rects as the UV basis.
         // This is not gated on G_TEXTURE's `on` field: whether a texel unit is
@@ -8722,8 +9051,69 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         queue_triangles(ctx, cmd, data, 3);
     }
 
+    // Hardware clips a triangle that crosses the eye plane. This renderer
+    // projects each vertex to NDC on the CPU and cannot divide by a w that is
+    // not positive, so before session 201 it dropped the whole triangle.
+    // Scene 0x03's ground is one 76x76-unit quad whose near corner is at
+    // w = -1.67; both of its triangles were dropped that way and the ground
+    // was the frame's flat fill instead of the textured field. Cut the polygon
+    // against w > kEps and emit the result.
+    void emit_clipped_tri(ExecCtx* ctx, RenderState& st, const ClipVertex in[3],
+                          const RawVertex& ref) {
+        constexpr float kEps = 1e-3f;
+        ClipVertex poly[4];
+        int n = 0;
+        for (int i = 0; i < 3; ++i) {
+            const ClipVertex& a = in[i];
+            const ClipVertex& b = in[(i + 1) % 3];
+            const bool a_in = a.clip.w > kEps;
+            const bool b_in = b.clip.w > kEps;
+            if (a_in) {
+                poly[n++] = a;
+            }
+            if (a_in != b_in) {
+                const float t = (kEps - a.clip.w) / (b.clip.w - a.clip.w);
+                ClipVertex c;
+                c.clip.x = a.clip.x + t * (b.clip.x - a.clip.x);
+                c.clip.y = a.clip.y + t * (b.clip.y - a.clip.y);
+                c.clip.z = a.clip.z + t * (b.clip.z - a.clip.z);
+                c.clip.w = a.clip.w + t * (b.clip.w - a.clip.w);
+                // Attributes interpolate as attr/w in clip space and are
+                // divided by the interpolated 1/w, which is what RT64's
+                // perspective-correct rasterizer does along the cut edge.
+                const float wa = (1.0f - t) / a.clip.w;
+                const float wb = t / b.clip.w;
+                const float wsum = wa + wb;
+                auto mix = [&](float va, float vb) {
+                    return (wsum != 0.0f) ? (va * wa + vb * wb) / wsum : va;
+                };
+                c.u = mix(a.u, b.u);
+                c.v = mix(a.v, b.v);
+                c.r = mix(a.r, b.r);
+                c.g = mix(a.g, b.g);
+                c.b = mix(a.b, b.b);
+                c.a = ((st.geometry_mode & kGeomFog) != 0) ? fog_vertex_alpha(st, c.clip)
+                                                          : mix(a.a, b.a);
+                poly[n++] = c;
+            }
+        }
+        if (n < 3) {
+            ++tris_rejected_;   // the whole triangle is behind the eye
+            return;
+        }
+        float data[3 * 10];
+        for (int i = 0; i + 2 < n; ++i) {
+            project_clip(st, poly[0], data);
+            project_clip(st, poly[i + 1], data + 10);
+            project_clip(st, poly[i + 2], data + 20);
+            emit_triangle(ctx, st, data, ref);
+        }
+    }
+
     void draw_fill_rect(ExecCtx* ctx, RenderState& st, int xl, int yl, int xh, int yh) {
         if (ctx->order.size() < 200) ctx->order += 'F';
+        probe_draw(st, "fill", false, static_cast<float>(xl), static_cast<float>(yl),
+                   static_cast<float>(xh), static_cast<float>(yh), nullptr);
         // The RDP ignores empty/inverted rectangles (RT64 RDP::fillRect and
         // FixedRect::isEmpty). OB64's title DL contains a TEXRECT with
         // xl=319,yl=239,xh=0,yh=0 - decoding that span as a quad produced a
@@ -9149,6 +9539,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // synthetic test_draw) has no other place to pick the image up.
         ensure_tile_image(ctx, st, st.active_tile, 0);
         ensure_tile_image(ctx, st, st.active_tile + 1, 1);
+        probe_draw(st, "texrect", texture_available(st), static_cast<float>(xl),
+                   static_cast<float>(yl), static_cast<float>(xh), static_cast<float>(yh),
+                   nullptr);
         // Only a rectangle whose combiner reads a texel needs one. RT64
         // `RDP::drawTexRect` has no "no texture" test at all: the sampler is
         // simply never read when the mux does not name TEXEL0/TEXEL1, so the
