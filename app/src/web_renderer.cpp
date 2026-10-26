@@ -18,17 +18,19 @@
 //
 // Known prototype limitations (documented in WEB-PORT-REPORT.md §10):
 //   - A `G_LOADTILE` whose source lies inside a colour image the RDP has drawn
-//     reads RDRAM. A framebuffer-source copy exists behind `OGRE_FBTEX=1`, but
-//     it is not enabled: the GPU copy is only authoritative once RDRAM changes
-//     are re-uploaded into it and the framebuffer is written back at the end of
-//     every workload (RT64's `checkRAM`/`uploadRAM` plus its per-workload
-//     writeback), which this renderer does not do yet. The scene-0x03 briefing
-//     is the A/B that shows it (session 193).
-//   - TEXEL1/second-texture combiners fall back to TEXEL0.
-//   - LOADBLOCK dxt (arbitrary texel spacing) is approximated.
-//   - No lighting/texgen (OB64's title content is unlit 2D).
-//   - Presentation blits the whole scanout target; the VI's own view rectangle
-//     (`fldRegs[].origin` and the x/y scale) is not applied.
+//     reads RDRAM by default. `OGRE_FBTEX=1` can serve it from a private shadow
+//     of the image; the shadow refuses the GPU rectangles when RDRAM changed
+//     since the copy (RT64's `checkRAM` test), but the GPU copy itself is not
+//     re-uploaded and the framebuffer is not written back per workload, so the
+//     default stays RDRAM. The scene-0x03 briefing is the A/B (sessions
+//     193-196).
+//   - A one-cycle combiner that reads TEXEL1 uses TEXEL0, which is RT64's own
+//     one-cycle rule; two-cycle draws sample the second tile normally.
+//   - `G_LIGHTING`'s directional arm and `G_TEXTURE_GEN`/`_LINEAR` are
+//     implemented; point lighting and the `ZMODE_DEC` decal tolerance are not.
+//   - Presentation blits the VI's visible area and applies its x/y scale. The
+//     scanout `fldRegs[].origin` selects the containing framebuffer, not a
+//     sampling offset, so sampling starts at that framebuffer's row 0.
 
 #include "renderer.hpp"
 
@@ -2488,6 +2490,14 @@ struct GlFramebuffer {
     // `FbWriteColorCS`; the counts are cleared after a writeback (RT64 clears
     // them at the end of a workload).
     std::array<uint32_t, 4> dither_patterns{};
+    // XXH3-64 of the image's RDRAM bytes at the last upload or writeback. A
+    // different hash at a texture load means the CPU wrote the image after the
+    // GPU copy was made, so the copy's drawn rectangles are stale and the load
+    // must read RDRAM. RT64 compares its `Framebuffer::RAMHash` the same way in
+    // `checkRAM`/`uploadRAM`; this renderer does not re-upload yet, it only
+    // refuses the stale copy (see build_image_source).
+    uint64_t rdram_hash = 0;
+    bool rdram_hash_valid = false;
 };
 
 // One RDP depth image (`G_SETZIMG`) as a GL renderbuffer. RT64's depth
@@ -2551,14 +2561,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // read RDRAM as the renderer did before session 193, and
         // `OGRE_FBWRITE=0` makes `ogre_sync_framebuffers()` a no-op.
         // The framebuffer-as-texture copy is opt-in. A same-screen A/B on the
-        // scene-0x03 briefing shows that the GPU copy of colour image 0x228080
-        // is a white fade frame while RDRAM holds the CPU-composed NOTE text:
-        // enabling the copy turns readable text into white bars. RT64's tile
-        // copy is only authoritative because RT64 re-uploads RDRAM into the
-        // framebuffer when the CPU changed it (`checkRAM` + `uploadRAM`) and
-        // writes the framebuffer back at the end of every workload; this
-        // renderer does neither, so RDRAM is the source a load must read.
-        // `OGRE_FBTEX=1` enables the copy for that future work; `=2` publishes
+        // scene-0x03 briefing showed that the GPU copy of colour image 0x228080
+        // was a white fade frame while RDRAM held the CPU-composed NOTE text,
+        // so enabling the copy turned readable text into white bars (session
+        // 193). `build_image_source` now compares the image's RDRAM hash with
+        // the hash at its last upload or writeback and reads RDRAM when the CPU
+        // changed it, which is RT64's `checkRAM` test. The GPU copy itself is
+        // still not re-uploaded and there is no per-workload writeback, so the
+        // default stays RDRAM. `OGRE_FBTEX=1` enables the copy; `=2` publishes
         // the draws mid-list without the copy; `=3` serves the copy from RDRAM.
         const char* fbtex_env = getenv("OGRE_FBTEX");
         fbtex_publish_only_ = (fbtex_env != nullptr && fbtex_env[0] == '2');
@@ -3131,6 +3141,23 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // samples (a feedback loop, `INVALID_OPERATION`). Session 181 saw fills
         // dropped this way; the same target's first draw is the one that hits it.
         glBindTexture(GL_TEXTURE_2D, 0);
+        fb.rdram_hash = framebuffer_rdram_hash(fb, address);
+        fb.rdram_hash_valid = fb.rdram_hash != 0;
+    }
+
+    // XXH3-64 of a colour image's whole RDRAM range, the value the GPU copy was
+    // made from (`upload_framebuffer`) or last matched (`readback_framebuffer`).
+    // Zero when the range is not addressable; callers check `rdram_hash_valid`.
+    uint64_t framebuffer_rdram_hash(const GlFramebuffer& fb, uint32_t address) {
+        if (rdram_ == nullptr || address == 0 || fb.row_bytes == 0 ||
+            fb.width <= 0 || fb.height <= 0) {
+            return 0;
+        }
+        const uint64_t bytes = static_cast<uint64_t>(fb.row_bytes) * fb.height;
+        if (static_cast<uint64_t>(address) + bytes > gbi::kRdramSize) {
+            return 0;
+        }
+        return XXH3_64bits(rdram_ + address, static_cast<size_t>(bytes));
     }
 
     // The key of the depth buffer a draw uses: the depth image address when the
@@ -3319,6 +3346,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
         if (!fb.inited) {
             upload_framebuffer(fb, cmd.fb_address);
+            publish_fb_ram_state(fb, cmd.fb_address);
             fb.inited = true;
         }
         return fb;
@@ -3552,6 +3580,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // The drawn pixels are in RDRAM now, so the GPU copy of these exact
         // rectangles is no longer needed for a texture source.
         fb.exact_rects.clear();
+        // RDRAM now holds the written rows. It is the reference a later texture
+        // load compares against to tell a CPU write from the RDP's own pixels.
+        fb.rdram_hash = framebuffer_rdram_hash(fb, address);
+        fb.rdram_hash_valid = fb.rdram_hash != 0;
+        publish_fb_ram_state(fb, address);
         ++dither_random_seed_;
         ++framebuffer_readbacks_;
         if (first_row != nullptr) *first_row = h - 1 - wy1;
@@ -5545,7 +5578,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // G_LOADTILE whose source range lies inside such an image copies stale
     // bytes. `fb_written_` holds the byte range of every colour image a recorded
     // draw has written since the last writeback; a decode that overlaps one is a
-    // framebuffer-as-texture load the renderer does not implement ([GFX-FBTEX]).
+    // framebuffer-as-texture load, reported as `[GFX-FBTEX]` and served from the
+    // main thread's shadow when `OGRE_FBTEX=1` (see `fetch_fb_source`).
     // The main thread publishes writebacks through `fb_writeback_epoch_`, and
     // the next check drops the ranges when it sees the epoch move. `fbtex_mutex_`
     // guards the vector (see the diagnostic section below).
@@ -5572,7 +5606,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         int col_max = -1;
     };
     std::vector<FbWrittenRange> fb_written_;
-    mutable std::mutex fbtex_mutex_;   // guards fb_written_ and fbtex_logged_
+    // The image's RDRAM hash at its last GPU upload or writeback, published for
+    // the gfx thread. `fetch_fb_source` compares the current RDRAM against it
+    // before asking the main thread for a copy, so a CPU rewrite costs one hash
+    // and no flush round trip. Guarded by `fbtex_mutex_`.
+    struct FbRamState {
+        uint32_t bytes = 0;
+        uint64_t hash = 0;
+        bool valid = false;
+    };
+    std::map<uint32_t, FbRamState> fb_ram_states_;
+    mutable std::mutex fbtex_mutex_;   // guards fb_written_, fb_ram_states_, fbtex_logged_
     uint32_t fb_written_epoch_seen_ = 0;
     std::atomic<uint32_t> fb_writeback_epoch_{0};
     std::atomic<unsigned> fbtex_hits_{0};
@@ -5610,6 +5654,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned fb_source_builds_ = 0;
     unsigned fb_source_content_logged_ = 0;
     unsigned fb_source_errors_ = 0;
+    unsigned fbtex_stale_logged_ = 0;
     // A texture load whose source is a colour image the RDP has drawn but not
     // written back yet: the load path publishes the draws and waits for the main
     // thread to write the image's drawn rectangles into RDRAM
@@ -5622,6 +5667,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     static constexpr int kLoadSyncTimeoutMs = 2000;
     std::atomic<unsigned> fbtex_syncs_{0};
     std::atomic<unsigned> fbtex_sync_skips_{0};
+    unsigned fbtex_stale_skips_ = 0;   // gfx thread only
     unsigned fbtex_sync_timeouts_ = 0;
     uint32_t load_sync_blocked_at_flush_ = 0;   // gfx thread
     // The RDP's colour image, kept across display lists (RenderState::cimg_*).
@@ -6020,16 +6066,43 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         g_exec_draws.store(draws_recorded_, std::memory_order_relaxed);
     }
 
-    // Makes the pixels a colour image holds on the GPU readable from RDRAM, for
-    // a display-list load whose source range is that image. RT64 makes a GPU
-    // tile copy here (`RDP::checkFramebufferOverlap`); this renderer keeps one
-    // source of truth, so it writes the image's drawn rectangles back instead
-    // and the load copies them normally. Runs on the gfx thread: it publishes
-    // the draws recorded so far, then waits for the browser main thread's flush
-    // to execute them and write the rectangles back.
-    //
-    // Returns false when the wait timed out, in which case the load reads RDRAM
-    // as it is (the pre-session-193 behaviour) and `[GFX-FBTEX]` reports it.
+    // The RDRAM hash an image was uploaded from or written back to, published
+    // for the gfx thread. `publish_fb_ram_state` runs on the main thread after
+    // `upload_framebuffer`/`readback_framebuffer`; `fb_ram_changed` runs on the
+    // gfx thread and compares the current bytes with it. The state is copied out
+    // under `fbtex_mutex_` and the hash is taken outside it, so the main thread
+    // is never blocked for the length of a 150 KiB hash.
+    void publish_fb_ram_state(const GlFramebuffer& fb, uint32_t address) {
+        if (!fb.rdram_hash_valid) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(fbtex_mutex_);
+        FbRamState& s = fb_ram_states_[address];
+        s.bytes = static_cast<uint32_t>(fb.row_bytes * fb.height);
+        s.hash = fb.rdram_hash;
+        s.valid = true;
+    }
+
+    bool fb_ram_changed(uint32_t image) {
+        if (image == 0 || rdram_ == nullptr) {
+            return false;
+        }
+        FbRamState s;
+        {
+            std::lock_guard<std::mutex> lock(fbtex_mutex_);
+            auto it = fb_ram_states_.find(image);
+            if (it == fb_ram_states_.end() || !it->second.valid) {
+                return false;   // no baseline: keep the pre-hash behaviour
+            }
+            s = it->second;
+        }
+        if (s.bytes == 0 ||
+            static_cast<uint64_t>(image) + s.bytes > gbi::kRdramSize) {
+            return false;
+        }
+        return XXH3_64bits(rdram_ + image, s.bytes) != s.hash;
+    }
+
     // Asks the browser main thread for a private copy of one colour image's
     // rendered pixels, in the guest byte layout, and waits for it. A TMEM load
     // whose source range is that image then reads the copy instead of RDRAM
@@ -6040,8 +6113,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     //
     // Runs on the gfx thread. The draws recorded so far are published first, so
     // the main thread executes the ones that produced these pixels before it
-    // reads them. Returns false when the page did not flush in time, or when the
-    // image's RDRAM changed since its GPU copy was made (the copy is stale).
+    // builds the shadow. Returns false when the page did not flush in time; the
+    // main thread decides separately whether the GPU rectangles are stale.
     bool fetch_fb_source(ExecCtx* ctx, uint32_t image) {
         if (image == 0 || emscripten_is_main_runtime_thread()) {
             return false;
@@ -6053,6 +6126,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (fbtex_sync_skips_++ == 0) {
                 OGRE_MILESTONE("GFX-FBTEX-SYNC",
                                "no flush since the last timeout; reading RDRAM");
+            }
+            return false;
+        }
+        // RT64 `FramebufferManager::checkRAM`: a framebuffer whose RDRAM bytes
+        // changed after the GPU copy was made must not serve a texture load from
+        // that copy. Decide it here, before publishing the draws, so a stale
+        // image costs one hash and no flush round trip; the load then reads
+        // RDRAM, which is the source that changed.
+        if (fb_ram_changed(image)) {
+            if (fbtex_stale_skips_++ < 4) {
+                OGRE_MILESTONE("GFX-FBTEX-STALE",
+                               "source 0x%06X: RDRAM changed since the GPU copy; "
+                               "reading RDRAM", image);
             }
             return false;
         }
@@ -6155,6 +6241,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         }
         out.assign(static_cast<size_t>(bytes), 0);
         std::memcpy(out.data(), rdram_ + image, static_cast<size_t>(bytes));
+        // RT64 `FramebufferManager::checkRAM`: a framebuffer whose RDRAM bytes
+        // changed since its GPU copy was made is re-uploaded before a tile copy
+        // uses it. This renderer cannot re-upload mid-list, so it takes the
+        // RDRAM bytes it already copied and skips the GPU rectangles. Without
+        // this the briefing's white fade rectangles replaced the CPU-composed
+        // NOTE text (session 193).
+        if (fb.rdram_hash_valid) {
+            const uint64_t hash = framebuffer_rdram_hash(fb, image);
+            if (hash != fb.rdram_hash) {
+                if (fbtex_stale_logged_ < 8) {
+                    ++fbtex_stale_logged_;
+                    OGRE_MILESTONE("GFX-FBTEX-STALE",
+                                   "image 0x%06X: RDRAM changed since the GPU copy "
+                                   "(hash %016llX != %016llX); reading RDRAM",
+                                   image, (unsigned long long)hash,
+                                   (unsigned long long)fb.rdram_hash);
+                }
+                return true;
+            }
+        }
         if (fb.exact_rects.empty() || fbtex_rdram_only_) {
             return true;   // nothing exact to substitute (or the RDRAM control)
         }
@@ -7416,11 +7522,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             block ? 1 : static_cast<int>(1 + ((lrt >> 2) - (ult >> 2)));
         // Framebuffer-as-texture. The copy below reads RDRAM, and the pixels of a
         // colour image the RDP has drawn are still in a GL framebuffer object
-        // until the main thread writes them back. Detect the overlap first, make
-        // the main thread execute the draws recorded so far and write the
-        // image's drawn rectangles into RDRAM, and only then copy. RT64 makes a
-        // GPU tile copy instead (`RDP::checkFramebufferOverlap`); this renderer
-        // has one source of truth, so the load reads RDRAM in both cases.
+        // until the main thread writes them back. Detect the overlap first, then
+        // ask the main thread for a private shadow of the image: RDRAM with the
+        // image's drawn rectangles substituted from the GPU, unless RDRAM changed
+        // since the GPU copy (then RDRAM is authoritative). RT64 makes a per-tile
+        // GPU copy instead (`RDP::checkFramebufferOverlap`); the shadow is this
+        // renderer's equivalent and never writes RDRAM.
         LoadSource source;
         source.rdram = rdram_;
         uint32_t overlap_image = 0;

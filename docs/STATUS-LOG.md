@@ -2727,3 +2727,25 @@ live under `config/` and `patches/` (session 97 moved them).
   field/browser/native side-by-side is
   `docs/proofs/web-mission-field-vs-native-session196.png`. `make web` clean.
   See `docs/HANDOFF-2026-10-26-session196.md`.
+- **Session 197**: ran the same-run `OGRE_RECT_HALFPIX` A/B and applied RT64's
+  stale-RDRAM test to `OGRE_FBTEX`. The probe harness's SwiftShader launch was
+  the blocker: with `--enable-gpu --use-angle=metal` (now in
+  `debug/probes/recttoggle.cjs`) the briefing is reached in about seven minutes
+  instead of 33-36. The arrival signal is the illustration's
+  `[GFX-FRAME-DUMP]` line and the route `title:start:6,0x12:a:6`; a scene-line
+  trigger crosses the briefing's NOTE-page change. Same run: switch-on 0 green
+  pixels in the illustration rectangle, switch-off 399 (175 seam rows),
+  switch-on-again 0. Proofs
+  `docs/proofs/web-mission-briefing-recttoggle-{on,off,zoom}-session197.png`.
+  `GlFramebuffer` now keeps an XXH3-64 of its RDRAM at the last
+  upload/writeback; the gfx thread refuses a framebuffer-as-texture copy when
+  the bytes changed (`[GFX-FBTEX-STALE]`, one hash and no flush round trip), and
+  `build_image_source` repeats the check. With `OGRE_FBTEX=1` the briefing's
+  NOTE and label match the copy-off frame at `meanAbs 0.057`/`0.024` (max 1)
+  instead of white bars; four refusals, no sync timeout, no crash. The copy
+  stays opt-in. A read-only audit corrected the top-of-file limitations
+  (TEXEL1, `G_TEXTURE_GEN`, lighting and LOADBLOCK `dxt` are implemented) and
+  found `G_TEXRECTFLIP`'s half-step wrong for non-square flips, copy-mode
+  texrect and fractional-rect differences, and the title residual's real range
+  (rows ~81..119). `make web` clean. See
+  `docs/HANDOFF-2026-10-26-session197.md`.

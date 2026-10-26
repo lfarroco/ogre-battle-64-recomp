@@ -1028,6 +1028,29 @@ mission's framed illustration is clean on this build
 (`docs/proofs/web-mission-briefing-illustration-session196.png`). See
 `docs/HANDOFF-2026-10-26-session196.md`.
 
+Session 197 ran the same-run rectangle A/B on one build and one screen. The
+blocker was the probe harness's SwiftShader launch: with
+`--enable-gpu --use-angle=metal` the briefing is reached in about seven minutes
+instead of 33-36. Triggered by the illustration's `[GFX-FRAME-DUMP]` line and
+the route that holds the briefing (`title:start:6,0x12:a:6`), the switch-on
+frame has 0 green-dominant pixels in the illustration rectangle, the switch-off
+frame 399 (175 on the seam rows) and the switch-on-again frame 0. A scene-line
+trigger crosses the briefing's NOTE-page change and is not usable. The session
+also applied RT64's `checkRAM` test to `OGRE_FBTEX`: each `GlFramebuffer` keeps
+an XXH3-64 of its RDRAM at the last upload/writeback, the gfx thread refuses the
+GPU copy when the current bytes differ (one hash, no flush round trip), and the
+main thread repeats the check before substituting `exact_rects`. With
+`OGRE_FBTEX=1` the briefing's NOTE and label now match the copy-off frame
+(`meanAbs 0.057`/`0.024`, max 1) instead of the white bars of session 193;
+`[GFX-FBTEX-STALE]` reports four refusals and there is no sync timeout or crash.
+The copy stays opt-in because a copy that does fire still reads the whole image
+back. The top-of-file limitation list is corrected: TEXEL1, `G_TEXTURE_GEN`,
+lighting and LOADBLOCK `dxt` are implemented. Open: `G_TEXRECTFLIP`'s half-step
+is `0.5*dv` where its quad interpolates `dv*h/w`, copy-mode texrects and
+fractional rect coordinates do not reproduce RT64's `dsdx >>= 2`/edge pad and
+`vFractionOffset`, and the title residual is rows ~81..119, not the
+session-159 rows 195..232. See `docs/HANDOFF-2026-10-26-session197.md`.
+
 ## Status
 
 The game runs end to end. A build boots the publisher stills, the title, the New
