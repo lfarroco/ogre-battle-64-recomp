@@ -100,10 +100,15 @@ subagents for the independent audits.
 - **The same screen, three states:** the rect run's on/off pair and the FBTEX
   run's on/off pair are the same Castle Burgund briefing. The illustration is
   clean in both on frames; the copy-on frame has readable NOTE and label text.
-- **The forced-map attempt:** `recttoggle.cjs --wait 'id=0x0005'
-  --settle 4000 --timeout 900 --url '...?OGRE_SCENE=map&OGRE_SCENE_LOG=1'`
-  wrote no screenshot before it was stopped at about nine minutes; no
-  `[scene] id=0x0005` line means the force did not take.
+- **The forced-map attempts:** the name `map` is not in `kScenes`
+  (`app/src/bank_overlays.cpp:109-118` has title, intro, publishers, story,
+  unit-info, tutorial, menu and new-game), so `OGRE_SCENE=map` configures no
+  force at all. The hex retry `OGRE_SCENE=0x05` also wrote no screenshot before
+  it was stopped at about six minutes; no `[scene] id=0x0005` line appeared.
+- **The natural-title attempt:** `recttoggle.cjs --wait 'id=0x0004'
+  --settle 2500 --timeout 300 --url '...?OGRE_SCENE_LOG=1'` landed on the idle
+  trajectory: `[scene] t=5640ms id=0x0000`, then 14 160 empty flushes
+  (`live=0 decodes=0`) and no `id=0x0004`. The shots are black.
 - **The audits' references:** RT64 `checkRAM`/`uploadRAM` at
   `tools/RT64/src/hle/rt64_framebuffer_manager.cpp:909-964`, the tile-copy hash
   at `hle/rt64_rdp.cpp:177-196`; the flip/copy-mode/fractional differences at
@@ -160,9 +165,9 @@ guard does not make the whole-image copy cheap when it does fire.
    when RDRAM matches. The RT64 parity model (re-upload on a mismatch) is not
    implemented; it is not needed for any reached screen.
 5. **The world map/title rectangle A/B** was not completed. The GPU launch
-   makes the probe cheap, but a forced-map attempt
-   (`OGRE_SCENE=map`, `--wait 'id=0x0005'`, `--timeout 900`) wrote no frames in
-   about nine minutes, so the scene force is the blocker, not the rectangle
-   switch. The title has the same force problem: `--scene title` landed on
-   scenes `0x09`/`0x0A` in session 196. Both need a played state or a fixed
-   force before the A/B is meaningful.
+   makes the probe cheap, but both scenes need a state the forced boot does not
+   build. `map` is not a scene name, and the hex retry
+   (`OGRE_SCENE=0x05`) did not reach scene `0x05`; the map's enter needs the
+   party/state a played save carries. A natural title capture landed on the
+   idle trajectory (`id=0x0000`, 14 160 empty flushes), the boot race the probes
+   retry around. Both checks need a retry on a quiet host or a played state.
