@@ -63,6 +63,7 @@ nginx and other hosts, and for the package layout.
 ## Run a probe
 
 ```sh
+node debug/probes/scene.cjs --route tutorial-field --out /tmp/field   # reach a screen and capture it
 node debug/probes/boot.cjs --attempts 10 --secs 45   # render check + pixel counts
 node debug/probes/progress.cjs --attempts 6 --secs 75 # how far the intro gets
 node debug/probes/shots.cjs --shots 8 --gap 1200     # timed screenshot series
@@ -86,11 +87,12 @@ node debug/probes/rdram.cjs --query 'OGRE_RAM_KEY_AT_MS=52000&OGRE_RAM_KEY_FULL=
 node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 ```
 
-`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|fbtex|gamepad|textures|spritecheck|isolate` and
+`npm run scene|boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|fbtex|gamepad|textures|spritecheck|isolate` and
 `npm run serve` work from inside `debug/`.
 
 | Probe | Measures | Exit 0 means |
 |---|---|---|
+| `scene.cjs` | one screen, reached by a named route, as a PNG per debug-flag value, plus sampled pixels, the page log and the scene timeline; see "Capturing a screen" below | the scene was reached and a shot was written (exit 2: the route never reached the scene) |
 | `boot.cjs` | boot → real display list → canvas pixels (non-black, colorful, top colours) | the game rendered |
 | `progress.cjs` | highest `tasks=` reached over a full time budget, plus any `GFX-ESCAPE`/`GFX-RUNAWAY` bad-walk line | the intro reached `--min-tasks` on some boot with no bad walk |
 | `shots.cjs` | canvas PNG series + per-frame pixel counts | a series was captured |
@@ -115,6 +117,63 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `rectab.cjs` | the mission briefing's framed illustration, one shot per run, for the `OGRE_RECT_HALFPIX` A/B. The arrival signal is the `[GFX-FRAME-DUMP]` line the strip draw prints (`OGRE_FRAME_DUMP=1`), not a timer, because the browser's boot length varies with host load; the briefing is static, so two runs are the same screen. Run it once with the default and once with `&OGRE_RECT_HALFPIX=0` in `--query` (`--secs` 400 is enough on an idle host, ~100 s) | `FRAME DUMPS 2` and a `<prefix>-briefing.png` |
 | `recttoggle.cjs` | one screen, three frames in one run with a live debug bit on, off and on again. The arrival default is the briefing's `[GFX-FRAME-DUMP]` line (`OGRE_FRAME_DUMP=1` is added), because a scene line crosses the briefing's NOTE-page change; `--flag N` selects the bit (32768 = `OGRE_RECT_HALFPIX` off, 8192 = the `OGRE_FBTEX` copy off) and `--name` prefixes the files. It launches Chromium with `--enable-gpu --use-angle=metal` (the SwiftShader default takes 30+ minutes to reach the mission; `--gpu 0` restores it). The route goes in `--url`; `--settle` is the wait after the marker | three screenshots were written (`<name>-on`, `-off`, `-on2`) |
 | `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
+
+### Capturing a screen
+
+`scene.cjs` owns the four steps every screen capture used to re-implement: boot
+the build, drive the route, wait for the scene line, then write a frame. Use it
+when the question is "what does this screen look like" or "which draw painted
+this pixel". The comparison probes (`recttoggle.cjs`, `stripab.cjs`) stay their
+own tools because they need a same-screen A/B inside one run.
+
+The built-in routes are:
+
+| `--route` | Screen | How it gets there |
+|---|---|---|
+| `title` | scene `0x0004` | `OGRE_SCENE=title` |
+| `mission-briefing` | scene `0x0003`, Castle Burgund | `OGRE_SAVE=assets/escort_suspend.bin`, forced title, URL taps `title:start:6,0x12:a:6` |
+| `tutorial-field` | scene `0x0003`, Jangurri practice field | natural boot to the title, `Enter`, `ArrowDown`, `Enter` (tutorial), then one `KeyX` (A) per 1.4 s until the scene line says `0x0003` |
+| `tutorial` | scene `0x0017` | `OGRE_SCENE=tutorial` |
+
+A route is data in `ROUTES` at the top of the probe: `query` (the page's OGRE
+knobs), `scene` (the line to wait for), `settle` (ms after that line) and `steps`
+(`waitScene`, `sleep`, `press`, `pressUntilScene`). Add a route there instead of
+writing a new script; `--scene`/`--query` cover one-off screens without touching
+the table.
+
+```sh
+# the practice field, normal and TEXEL0 raw, sampling the grass at N64 (12,160)
+node debug/probes/scene.cjs --route tutorial-field --raw --points 12,160 --out /tmp/field
+
+# the mission briefing, one frame every 2 s for 8 s
+node debug/probes/scene.cjs --route mission-briefing --shots 0 --settle 12000     --repeat 4 --repeat-gap 2000 --out /tmp/mission
+
+# any screen with a query of your own
+node debug/probes/scene.cjs --scene 0x0005     --query 'OGRE_SAVE=assets/scene_5_suspend.bin&OGRE_SCENE=title' --out /tmp/map
+```
+
+Options that matter:
+
+- `--shots 0,8,16` captures one PNG per `ogre_gfx_debug_flags` value, named
+  `normal`, `texel1`, `texel0` (or `f<value>`), each after a `--shot-settle`
+  (default 1.2 s) so the frame can re-present. `--raw` is `0,8,16`.
+- `--points x,y;x,y` samples the canvas after each shot and writes
+  `<prefix>-samples.json`. The default `--points-space guest` treats the points
+  as 320x240 screen coordinates scaled to the drawing buffer; use
+  `--points-space canvas` for a 640-wide target.
+- `--settle` defaults to 2 s; `mission-briefing` and `tutorial-field` carry 12 s
+  because their scenes fade in late. A frame taken before the fade is a dark
+  frame, not a renderer bug.
+- `--attempts` (default 3) re-boots the page when a boot lands on the idle
+  trajectory. Exit 2 means every attempt missed the scene; the per-attempt logs
+  are written as `<prefix>-log-attemptN.txt`.
+
+Output, one run: `<prefix>-<tag>.png`, `<prefix>-samples.json` (when `--points`
+is given), `<prefix>-log.txt` (the page log, including the `[scene]` timeline and
+every `GFX-*` line), `<prefix>-meta.json` (URL, scene, settle, canvas size,
+timings, the last eight scene lines, `#gfxstats`) and `<prefix>-errors.txt`.
+The run also prints the `tasks=` rate over 3 s, which is the game's display-list
+rate on that screen.
 
 ### The framebuffer-as-texture check
 

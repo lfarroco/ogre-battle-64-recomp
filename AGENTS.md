@@ -169,6 +169,12 @@ wrong half of a function. Check these first.
     itself: ROM start, RAM base, size, code/data split, BSS, the loader
     instruction, whether a bank unit links it; plus `--verify`, `--coverage` and
     `--entries`. Offline, ~10 s, no run needed.
+  - `debug/probes/scene.cjs --route tutorial-field` — reach a named browser
+    screen (title, mission briefing, tutorial field, forced tutorial) and capture
+    it, one PNG per `ogre_gfx_debug_flags` value, with sampled pixels, the page
+    log and the scene timeline. Routes are data in the probe; add one instead of
+    writing another throwaway Playwright script. See
+    `docs/guides/web-probes.md` → "Capturing a screen".
 - **For "what is in RAM at the moment X happens", use the live console, and not a
   bounded run's exit dump.** An exit dump is always too late (session 56). The
   console is off unless the run asks for it, because a command writes guest RAM:

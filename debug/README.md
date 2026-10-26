@@ -23,11 +23,18 @@ python3 debug/server.py
 cd debug && npm install
 
 # 4. run a probe
+node debug/probes/scene.cjs --route tutorial-field --raw --points '12,160' --out /tmp/field
 node debug/probes/boot.cjs --attempts 10 --secs 45
 node debug/probes/progress.cjs --attempts 6 --secs 75   # how far the intro gets
 node debug/probes/intro-capture.cjs --seconds 30        # 1 fps series of the opening
 node debug/probes/intro-capture.cjs --seconds 8 --interval-ms 100  # dense series
 ```
+
+`scene.cjs` is the one-command screen capture: a named route (title, mission
+briefing, tutorial field, forced tutorial) boots the build, drives the menu and
+dialogue, waits for the `[scene]` line, and writes a PNG per debug-flag value,
+sampled pixels, the page log and the scene timeline. Add a route in its `ROUTES`
+table instead of writing another throwaway script.
 
 The opening is normally captured through `python3 tools/intro_capture.py`, which
 runs this probe and its native counterpart and writes both series with a

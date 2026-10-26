@@ -5,6 +5,7 @@
   "description": "Headless-browser probes for the Ogre Battle 64 WebAssembly build",
   "type": "commonjs",
   "scripts": {
+    "scene": "node probes/scene.cjs",
     "serve": "python3 server.py",
     "boot": "node probes/boot.cjs",
     "progress": "node probes/progress.cjs",
