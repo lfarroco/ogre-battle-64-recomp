@@ -5618,7 +5618,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     float ndc_min_[2] = {1e9f, 1e9f};
     float ndc_max_[2] = {-1e9f, -1e9f};
     bool logged_first_flush_ = false;
-    unsigned tex_logged_ = 0;    unsigned tri_reject_logged_ = 0;
+    unsigned tex_logged_ = 0;
     unsigned tex_uv_logged_ = 0;
     unsigned draw_logged_ = 0;
     unsigned vert_logged_ = 0;
