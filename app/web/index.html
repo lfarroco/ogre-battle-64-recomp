@@ -72,9 +72,13 @@
   .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .brand-mark {
     flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 32px;
     height: 38px;
-    color: var(--gold);
+    font-size: 30px;
+    line-height: 1;
     filter: drop-shadow(0 0 10px rgba(201, 162, 74, 0.18));
   }
   .brand-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -648,10 +652,7 @@
 <body>
 <header class="topbar">
   <div class="brand">
-    <svg class="brand-mark" viewBox="0 0 32 38" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
-      <path d="M16 2.5 28.5 7v10.2c0 7.6-5.2 13.4-12.5 18.3C8.7 30.6 3.5 24.8 3.5 17.2V7z"/>
-      <path d="M16 9.5v12M11.5 13.5h9M13 26h6"/>
-    </svg>
+    <span class="brand-mark" aria-hidden="true">⚔️</span>
     <div class="brand-text">
       <span class="brand-title">Ogre Battle 64</span>
       <span class="brand-sub">Person of Lordly Caliber · Recompiled</span>
