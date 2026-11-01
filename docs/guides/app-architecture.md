@@ -29,6 +29,10 @@ app/
     null_renderer.cpp, main_web.cpp, web_platform.cpp, web_renderer.cpp
 ```
 
+The browser build's renderer is described separately in
+[web-renderer.md](web-renderer.md): its threading, display-list front end, RSP
+emulation, RDP shading, framebuffers and presentation.
+
 ## Runtime flow
 
 1. `main.cpp` creates the SDL window and resolves the config directory through

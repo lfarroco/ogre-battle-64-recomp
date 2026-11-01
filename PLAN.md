@@ -54,7 +54,8 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-24-session189.md`.
+`docs/HANDOFF-2026-11-01-session209.md`. The browser renderer's design is
+documented in `docs/guides/web-renderer.md`.
 
 Session 189 ported four RT64 behaviours into the browser renderer. The RDRAM
 writeback now applies `G_CD` colour dither (`Float4ToRGBA16` plus

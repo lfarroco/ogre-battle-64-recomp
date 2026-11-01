@@ -12,6 +12,9 @@ You can play the recomp without installing anything by using the web version: ht
 It allows importing saves from the native version (and you can export the saves back).
 No mod support for the web version is available yet.
 
+The browser build uses its own WebGL2 renderer. Its design is documented in
+[docs/guides/web-renderer.md](docs/guides/web-renderer.md).
+
 ## System Requirements
 
 A 64-bit PC and a GPU the renderer supports:
