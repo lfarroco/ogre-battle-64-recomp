@@ -130,6 +130,25 @@ add_header Cross-Origin-Embedder-Policy "require-corp" always;
 - The ROM must be a big-endian `.z64` dump; `recomp::select_rom` validates its
   hash against the supported revision and the page reports a mismatch.
 
+## Battery saves
+
+The page imports a 32 KiB battery image with `?OGRE_SAVE=<url>` or the "Load
+save" file input, and exports the image the game last committed with the topbar
+"Export save" button or Options -> MAIN -> "Export battery save".
+
+The export reads `/ogre/saves/ogrebattle64-us-rev1.bin` from the wasm FS — the
+file `pi.cpp`'s saving thread writes whenever the game commits its SRAM — and
+downloads it as `ogrebattle64-us-rev1.bin`. That is the raw 32 KiB logical image,
+which the native build reads from `<config>/saves/ogrebattle64-us-rev1.bin`
+without conversion. `tools/sramsave.py export` converts it to the byteswapped
+wrapper other emulators use. The page validates the size and the `QuestOG3`
+device signature before downloading and retries once, because the runtime writes
+through a `.temp` file and copies it over the image.
+
+The launcher carries an experimental notice: the browser renderer is not
+feature-complete, so scenes can crash or draw incorrectly. The Options MAIN tab
+repeats the notice.
+
 ## The page in the repository layout
 
 Serving the repository root (`python3 debug/server.py`) is still supported and is

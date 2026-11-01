@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#08090b">
-<title>Ogre Battle 64 · Recompilation</title>
+<title>Ogre Battle 64 · Recompilation (experimental)</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M16 4l9 3v8c0 6-4 10-9 13-5-3-9-7-9-13V7z' fill='none' stroke='%23c9a24a' stroke-width='1.6'/%3E%3Cpath d='M16 10v9M12 14h8' stroke='%23c9a24a' stroke-width='1.6'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -316,7 +316,7 @@
     z-index: 2;
     display: grid;
     place-items: center;
-    padding: 24px;
+    padding: 18px;
     background: radial-gradient(ellipse at 50% 40%, rgba(20, 22, 28, 0.55), rgba(4, 5, 7, 0.9) 72%);
     transition: opacity 0.45s ease, visibility 0.45s ease;
   }
@@ -397,6 +397,23 @@
     color: #5f646d;
     font-size: 10px;
     letter-spacing: 0.02em;
+  }
+  .launcher-disclaimer {
+    margin: 16px 0 0;
+    padding: 10px 12px;
+    border: 1px solid rgba(201, 162, 74, 0.32);
+    border-radius: 8px;
+    background: rgba(201, 162, 74, 0.07);
+    color: #b9b3a5;
+    font-size: 10.5px;
+    line-height: 1.6;
+    text-align: left;
+  }
+  .launcher-disclaimer b {
+    color: var(--gold-bright);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 
   /* ------------------------------------------------------------ log / dialog */
@@ -618,6 +635,7 @@
     .launcher h1 { font-size: 23px; }
     .launcher-sub, .launcher-rule, .launcher-hint, .launcher-privacy { display: none; }
     .launcher-copy { margin: 8px 0 14px; font-size: 11.5px; line-height: 1.5; }
+    .launcher-disclaimer { margin-top: 10px; padding: 7px 9px; font-size: 9.5px; line-height: 1.45; }
     .launcher-actions { gap: 8px; }
     .launcher-actions .btn { flex: 1 1 120px; min-width: 0; height: 34px; font-size: 10.5px; }
     .options-row { grid-template-columns: 118px minmax(0, 1fr); gap: 10px; font-size: 11px; }
@@ -672,12 +690,19 @@
       </svg>
       <span class="btn-label">Options</span>
     </button>
-    <button class="btn btn-ghost" id="save-btn" type="button" title="Load a 32 KiB battery save">
+    <button class="btn btn-ghost" id="save-btn" type="button" title="Load a 32 KiB battery save" aria-label="Load battery save">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 4h12l4 4v12H4z"/>
         <path d="M8 4v6h8V4M8 20v-6h8v6"/>
       </svg>
       <span class="btn-label">Load save</span>
+    </button>
+    <button class="btn btn-ghost" id="export-save-btn" type="button" title="Download the 32 KiB battery save (raw SRAM)" aria-label="Export battery save">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3v11M8 10l4 4 4-4"/>
+        <path d="M4 17v3h16v-3"/>
+      </svg>
+      <span class="btn-label">Export save</span>
     </button>
     <button class="btn btn-icon" id="fullscreen-btn" type="button" title="Fullscreen" aria-label="Enter fullscreen">
       <svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -723,6 +748,11 @@
               </button>
             </div>
             <p class="launcher-hint">or drop a <code>.z64</code> file anywhere</p>
+            <p class="launcher-disclaimer">
+              <b>Experimental build:</b> rendering, audio and saving are
+              incomplete and scenes can crash. Use <b>Export save</b> to keep a
+              copy. Unofficial, not affiliated with Nintendo or Quest.
+            </p>
             <p class="launcher-privacy">Bring your own ROM · Saves persist in this browser</p>
           </div>
         </div>

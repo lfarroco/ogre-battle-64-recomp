@@ -80,7 +80,11 @@
   // `/assets/escort_suspend.bin` (the file the repository serves and the path
   // the native `OGRE_SAVE` example names). An absolute URL or a leading `/` is
   // used as written.
-  var SAVE_IMPORT_PATH = "/ogre/saves/ogrebattle64-us-rev1.bin";
+  var SAVE_GAME_ID = "ogrebattle64-us-rev1";   // ogre::GAME_ID, app/src/game.hpp
+  var SAVE_IMPORT_PATH = "/ogre/saves/" + SAVE_GAME_ID + ".bin";
+  var SAVE_SIZE = 32768;                        // the game's 32 KiB SRAM battery
+  var SAVE_DEVICE_MAGIC = "QuestOG3";           // device signature at +0x04
+  var SAVE_DEVICE_MAGIC_OFF = 4;
   var saveImport = {
     spec: urlParam("OGRE_SAVE"),
     armed: false,
@@ -222,6 +226,115 @@
       settleSaveImport();
     });
   }
+
+  // --- Battery save export -----------------------------------------------------
+  //
+  // The runtime writes the game's current SRAM image to SAVE_IMPORT_PATH from
+  // its saving thread whenever the game commits a save (librecomp/src/pi.cpp's
+  // `update_save_file`), so reading that file back gives the same 32 KiB
+  // logical image the native build loads from `<config>/saves/<game id>.bin`.
+  // The download is the raw image with exactly that filename, which is what the
+  // native build and `tools/sramsave.py import` consume.
+  //
+  // The runtime writes through `<file>.temp` and copies it over the image, so a
+  // read can land mid-copy. A read that is not 32 KiB or carries no device
+  // signature is retried once; the retry stays inside the click's transient
+  // activation window, so the browser still treats it as a user download.
+  var SAVE_RETRY_MS = 200;
+
+  function batteryImageProblem(bytes) {
+    if (!bytes || bytes.length !== SAVE_SIZE) {
+      return "the image is " + (bytes ? bytes.length : 0) + " bytes, not " + SAVE_SIZE;
+    }
+    var magic = "";
+    for (var i = 0; i < SAVE_DEVICE_MAGIC.length; i++) {
+      magic += String.fromCharCode(bytes[SAVE_DEVICE_MAGIC_OFF + i]);
+    }
+    if (magic !== SAVE_DEVICE_MAGIC) {
+      return "the device signature is missing";
+    }
+    return "";
+  }
+
+  function readBatteryImage() {
+    if (!moduleReady() || !Module.FS || typeof Module.FS.readFile !== "function") {
+      return { notReady: true };
+    }
+    try {
+      if (typeof Module.FS.analyzePath === "function" &&
+          !Module.FS.analyzePath(SAVE_IMPORT_PATH).exists) {
+        return { missing: true };
+      }
+      return { bytes: Module.FS.readFile(SAVE_IMPORT_PATH) };
+    } catch (e) {
+      log("[web:save] export: reading " + SAVE_IMPORT_PATH + " failed: " + e);
+      return { missing: true };
+    }
+  }
+
+  function downloadBytes(bytes, filename) {
+    try {
+      var blob = new Blob([bytes], { type: "application/octet-stream" });
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.rel = "noopener";
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      // Revoke only after the browser has taken the blob.
+      window.setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+      return true;
+    } catch (e) {
+      log("[web:save] export: the download could not be started: " + e);
+      return false;
+    }
+  }
+
+  function exportBatterySave() {
+    function attempt(retried) {
+      var image = readBatteryImage();
+      if (image.notReady) {
+        log("[web:save] export: the wasm FS is not ready yet");
+        uiSetStatus("The runtime is still starting. Try again in a moment.");
+        return;
+      }
+      if (image.missing) {
+        log("[web:save] export: " + SAVE_IMPORT_PATH +
+            " does not exist; there is no battery in this browser yet");
+        uiSetStatus("No battery save in this browser yet. Load a save or save in the game first.");
+        return;
+      }
+      var problem = batteryImageProblem(image.bytes);
+      if (problem && !retried) {
+        log("[web:save] export: " + problem + "; reading again");
+        window.setTimeout(function () { attempt(true); }, SAVE_RETRY_MS);
+        return;
+      }
+      if (problem) {
+        log("[web:save] export: " + problem + "; not exporting " + image.bytes.length + " bytes");
+        uiSetStatus("The battery save is not ready yet. Wait a moment and try again.");
+        return;
+      }
+      if (!downloadBytes(image.bytes, SAVE_GAME_ID + ".bin")) {
+        uiSetStatus("The browser blocked the download.");
+        return;
+      }
+      log("[web:save] exported " + SAVE_IMPORT_PATH + " (" + image.bytes.length +
+          " bytes) as " + SAVE_GAME_ID + ".bin");
+      uiSetStatus("Battery exported: " + SAVE_GAME_ID +
+                  ".bin. Put it in the native build's saves/ folder.");
+    }
+    attempt(false);
+  }
+
+  window.ogreSave = {
+    export: exportBatterySave,
+    path: SAVE_IMPORT_PATH,
+    size: SAVE_SIZE
+  };
 
   var status = document.getElementById("status");
   var input = document.getElementById("rom-input");
@@ -643,6 +756,12 @@
         desc: "Use EXIT GAME to return to the launcher and choose a different file."
       });
       rows.push({
+        kind: "row", label: "Export battery save",
+        value: "Download " + SAVE_GAME_ID + ".bin",
+        desc: "The raw 32 KiB SRAM image; the native build reads it from saves/.",
+        action: "export-save"
+      });
+      rows.push({
         kind: "row", label: "Exit Game",
         value: "Return to the launcher",
         desc: "Syncs the battery and reloads the page without auto-starting.",
@@ -652,7 +771,8 @@
         kind: "note",
         text: "The browser cannot restart the runtime in place, so EXIT GAME " +
               "returns to the launcher. The selected ROM and save stay in this " +
-              "browser's storage."
+              "browser's storage. This browser build is experimental: rendering, " +
+              "audio and save compatibility are incomplete."
       });
     } else if (tab === "controls") {
       rows.push({ kind: "section", label: "KEYBOARD + GAMEPAD TO N64" });
@@ -989,6 +1109,10 @@
     }
     if (row.action === "exit") {
       exitToLauncher();
+      return;
+    }
+    if (row.action === "export-save") {
+      exportBatterySave();
       return;
     }
     if (row.action === "reset-bindings") {
@@ -2323,6 +2447,16 @@
       uiSetStatus("Could not read that ROM file.");
     });
   });
+
+  // --- "Export save" button -----------------------------------------------------
+  //
+  // The topbar companion to "Load save". It works before a ROM is picked (a
+  // battery from an earlier session) and while the game runs (the last save the
+  // game committed).
+  var exportSaveBtn = document.getElementById("export-save-btn");
+  if (exportSaveBtn) {
+    exportSaveBtn.addEventListener("click", function () { exportBatterySave(); });
+  }
 
   // --- "Load save" file input ---------------------------------------------------
   //

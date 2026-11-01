@@ -571,12 +571,39 @@ route, which reaches scene `0x03`:
 
 `OGRE_TAP_SCENE` and `OGRE_TAP_NOT_SCENE` are still native-only.
 
+### The battery export round trip
+
+`save.cjs` checks the page's battery export end to end. It boots from
+`?OGRE_SAVE=`, clicks the topbar `#export-save-btn`, and compares the browser
+download byte-for-byte with the source image. It also asserts the launcher's
+experimental notice and the `Export battery save` row in the Options MAIN tab.
+
+```sh
+make web-dist
+cp assets/escort_suspend.bin dist-web/
+python3 -m http.server --bind 127.0.0.1 --directory dist-web 8940 &
+node debug/probes/save.cjs \
+  --url 'http://127.0.0.1:8940/?OGRE_SAVE=escort_suspend.bin&OGRE_SCENE=title'
+```
+
+The static package is the GitHub Pages layout: the host sends no COOP/COEP, so
+the probe also exercises the service worker's reload. The exported file is the
+raw 32 KiB logical image named `ogrebattle64-us-rev1.bin`, the file the native
+build reads from `<config>/saves/`. `python3 tools/sramsave.py check <file>`
+validates the slots. The probe writes the download to
+`debug/out/save-<name>-ogrebattle64-us-rev1.bin` and a `result.json` verdict.
+
 ## The page contract
 
 The probes read the page, so these are an interface: changing them breaks every
 probe (and `logmode.cjs` is there to catch it).
 
 - `#rom-input` — the ROM file input.
+- `#save-input` — the 32 KiB battery file input ("Load save").
+- `#export-save-btn` — the topbar "Export save" button; it downloads
+  `ogrebattle64-us-rev1.bin`.
+- `window.ogreSave` — `{ export(), path, size }`; `path` is
+  `/ogre/saves/ogrebattle64-us-rev1.bin` and `export()` starts the download.
 - `#gfxstats`, `#gfx-status` — renderer counters; `tasks=N` is the frame counter.
 - `#game-canvas` — what `shots.cjs` / `boot.cjs` screenshot.
 - `#status` — one line by default; gets the `log-mode` class under `?log`.
@@ -586,12 +613,10 @@ probe (and `logmode.cjs` is there to catch it).
   page does no per-line DOM work (session 20: that was throttling the emulator).
 - Optional wasm exports: `Module._ogre_set_trace_enabled(0|1)` (`vi.cjs`),
   `Module._ogre_gfx_test_draw()` (`testdraw.cjs`).
-- `window.ogreAudio` — `enabled()` / `setEnabled(bool)`. **Game audio is muted
-  by default** (the audio microcode is not emulated, so the samples screech);
-  the worklet still drains the ring so the game sees the same backpressure.
-  `?audio` on the URL starts unmuted. A default boot logs
-  `game audio MUTED - add ?audio to the URL to hear it`, which is what a probe
-  should assert if it ever needs to care.
+- `window.ogreAudio` — `enabled()`, `setEnabled(bool)`, `volume()`,
+  `setVolume(percent)` and `levels()` for probes. Game audio is on by default
+  (the game's audio microcode is recompiled and runs); SETTINGS > SOUNDS and
+  `?audio=0` mute. `audio.cjs` measures the ring and the worklet's own output.
 
 ## Output
 

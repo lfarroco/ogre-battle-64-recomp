@@ -1249,6 +1249,23 @@ Organize Screen, the credits, the ending and the attract loop.
   to `0x800C49E8` hung the title and is not used. The worklet's `levels` reply
   carries `underruns` and `underrunFrames`, and `audio.cjs --wait-scene 0x0003`
   measures the mission. See `docs/HANDOFF-2026-10-31-session205.md`.
+- **Browser public page** — session 209 added the two things the GitHub Pages
+  release needed beyond the static package: an experimental notice and a battery
+  save export. The launcher card states that rendering, audio and saving are
+  incomplete, that scenes can crash, and that the build is unofficial; the
+  Options MAIN tab repeats it. The topbar "Export save" button and the Options
+  MAIN "Export battery save" row read the runtime's
+  `/ogre/saves/ogrebattle64-us-rev1.bin` out of the wasm FS and download it as
+  `ogrebattle64-us-rev1.bin`, the raw 32 KiB logical image the native build reads
+  from `<config>/saves/`. A read that is not 32 KiB or lacks the `QuestOG3`
+  device signature is retried once, because the runtime writes through a `.temp`
+  file and copies it over the image. Verified on the static package with the
+  COOP/COEP service worker: the imported `assets/escort_suspend.bin` round-trips
+  byte-for-byte (same SHA-256), and `tools/sramsave.py check` validates both slots
+  and the map record. A blank boot writes the file from the runtime's saving
+  thread (`[save] wrote /ogre/saves/... (32768 bytes)`), so the export reads the
+  bytes the game last committed. `debug/probes/save.cjs` is the regression
+  check. See `docs/HANDOFF-2026-11-01-session209.md`.
 - **Renderer** — RT64 (Metal, Vulkan, D3D12) with a null renderer for bring-up.
   RT64's **"Fix LR with Scissor"** rect enhancement is off by default here
   (`OGRE_RECT_LR_FIX=1` restores it): it rewrites a rectangle's right edge to the
@@ -2709,6 +2726,15 @@ holds the evidence.
     twice per 16 ms timer tick (the interval callback and `updateGfxStatus`); the
     second call is redundant now that the flush is cheap. See
     `docs/HANDOFF-2026-11-01-session208.md`.
+
+24. **Browser public release (session 209).** The page now carries the
+    experimental notice and exports the battery. The Pages workflow and the
+    static package were already in place; the deployed site was not re-checked
+    after this change (the local static server served the same layout). The
+    export is the raw logical image; a player whose emulator wants parallel-n64's
+    byteswapped `.sra` still needs `tools/sramsave.py export`. The mid-copy retry
+    window was not measured at the file-system level. See
+    `docs/HANDOFF-2026-11-01-session209.md`.
 
 Parked, not defects:
 

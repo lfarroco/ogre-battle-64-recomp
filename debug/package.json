@@ -21,7 +21,8 @@
     "textures": "node probes/textures.cjs",
     "spritecheck": "node probes/spritecheck.cjs",
     "rdram": "node probes/rdram.cjs",
-    "isolate": "node probes/isolate.cjs"
+    "isolate": "node probes/isolate.cjs",
+    "save": "node probes/save.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"

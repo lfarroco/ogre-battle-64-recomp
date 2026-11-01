@@ -2811,3 +2811,13 @@ through `docs/HANDOFF-2026-10-31-session207.md`); this log resumes here.
   Open: 8x's remaining 14%, the per-draw `glViewport`/`glScissor`/enable state
   calls, `reference_era_rows`' per-row hashing, and the duplicate flush call in
   `updateGfxStatus`. See `docs/HANDOFF-2026-11-01-session208.md`.
+
+- **Session 209**: the public browser page carries an experimental notice and
+  exports the battery. The topbar "Export save" button and the Options MAIN
+  "Export battery save" row download the runtime's
+  `/ogre/saves/ogrebattle64-us-rev1.bin` as `ogrebattle64-us-rev1.bin`, the raw
+  32 KiB logical image the native build reads from `<config>/saves/`. The
+  import -> export round trip is byte-exact on the static package
+  (`debug/probes/save.cjs`, same SHA-256), and `tools/sramsave.py check`
+  validates both slots and the map record. A blank boot writes the file from the
+  runtime's saving thread. See `docs/HANDOFF-2026-11-01-session209.md`.
