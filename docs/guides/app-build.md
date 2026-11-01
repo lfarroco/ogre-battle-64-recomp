@@ -7,6 +7,10 @@ and links the renderer (RT64), then boots the game on your ROM.
 
 - CMake ≥ 3.20 and a C++20 compiler (clang/gcc/msvc).
 - SDL2. On macOS: `brew install sdl2` (installs `sdl3` + `sdl2-compat`).
+- macOS: the Xcode Metal Toolchain. Xcode 26 does not install it by default,
+  and RT64's shader build then fails with `cannot execute tool 'metal' due to
+  missing Metal Toolchain`. Install it once with
+  `xcodebuild -downloadComponent MetalToolchain` (about 700 MB).
 - The toolchain from the main [PLAN.md](../../PLAN.md) reproduce section
   (splat, mips binutils, the N64Recomp and N64ModernRuntime vendored clones, and
   the RT64 submodule).
