@@ -6,6 +6,12 @@ Static recompilation of the N64 game *Ogre Battle 64: Person of Lordly Caliber*
 **This repository contains no copyrighted game data.** You must supply your own
 ROM dump (see below).
 
+## Experimenta: Web Version
+
+You can play the recomp without installing anything by using the web version: https://lfarroco.github.io/ogre-battle-64-recomp/
+It allows importing saves from the native version (and you can export the saves back).
+No mod support for the web version is available yet.
+
 ## System Requirements
 
 A 64-bit PC and a GPU the renderer supports:
