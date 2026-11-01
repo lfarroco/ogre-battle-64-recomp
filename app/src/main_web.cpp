@@ -197,4 +197,29 @@ void ogre_send_prnmi() {
     ultramodern::debug_send_prnmi();
 }
 
+// Debug: guest RDRAM for a probe that needs to read game state after a stall.
+// The runtime's RDRAM base is stable for the process, so the pointer is valid
+// for the whole run. The load address that maps to guest 0x80000000 is offset 0.
+uint8_t* ogre_guest_rdram(unsigned* len) {
+    if (len != nullptr) {
+        *len = 0x800000;
+    }
+    return ultramodern::get_rdram_base();
+}
+
+// Debug: dump where every known game thread is, the scheduler's running queue
+// and the recent scheduling events. Used when the browser build stops drawing
+// but the page still responds, because in that state the renderer has no work
+// to log and the guest threads are the only evidence. Needs OGRE_TRACE_HOOKS=1
+// (or OGRE_DEBUG_TRACES=1) at boot for the call chains to be recorded.
+void ogre_debug_threads() {
+    static const int kThreads[] = {1, 3, 4, 5, 16, 17, 18, 19, 50, 200};
+    std::printf("[web-debug] thread call chains:\n");
+    for (int tid : kThreads) {
+        ultramodern::debug_dump_call_chain(tid, "web");
+    }
+    ultramodern::debug_dump_running_queue(ultramodern::get_rdram_base());
+    ultramodern::debug_dump_sched_ring(-1);
+}
+
 }  // extern "C"

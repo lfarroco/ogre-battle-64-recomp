@@ -1144,6 +1144,111 @@ Organize Screen, the credits, the ending and the attract loop.
   135). A hosted run needs the private data bundle regenerated for the commit it
   builds, because the unpack step refuses a bundle whose recorded commit differs
   from `GITHUB_SHA`; `platforms=windows` is the ~8-minute iteration path.
+- **Browser renderer** — the New Game cathedral backdrop now renders
+  (`docs/proofs/web-newgame-cathedral-session203.png`). Session 203 found and
+  fixed two faults in the browser renderer. `tmem_load_yuv` indexed the njpeg
+  macroblock's source word with RT64's native byte order through an accessor that
+  already applies the guest `^ 3` permutation, so luma and chroma were exchanged
+  and the backdrop drew as green/magenta stripes; it now reads the logical
+  `[U, Y(even), V, Y(odd)]` order, and the TMEM planes match the values session
+  51 verified (`luma 28 27 25 24`, `chroma 7A 9A 7B 96`). The framebuffer
+  writeback recorded its row band from NDC scaled by the colour image's own
+  height, so a 320x240 image drawn into the 320x476 target the title grew marked
+  476 rows as drawn and copied 236 rows over the next framebuffer; the band now
+  uses the same viewport mapping the draws render through, and the reference hash
+  is taken when a draw era starts (RT64's `hashTracking`) and re-tested once per
+  batch (RT64's `checkRAM(updateHashes = true)`). Before the row fix the first
+  njpeg pass copied a black framebuffer; before the hash fix every pass did. The
+  session-202 writeback guard keeps its `[GFX-FBWRITE-STALE]` line. Title,
+  tutorial field, mission briefing and the tutorial battle still render. See
+  `docs/HANDOFF-2026-10-30-session203.md`.
+- **Browser cathedral backdrop, second visit** — session 207 fixed the black
+  top-left quadrant that appeared after the first New Game question
+  (`docs/proofs/web-newgame-cathedral-birth-session207.png`). The writeback guard
+  compared the colour image's whole `row_bytes * height` range, and a 320x476
+  target at `0x025C00` spans `0x025C00..0x070200`; the game's next framebuffer at
+  `0x04B400` is row 240 of that target, so its writeback changed the hash and
+  the whole pending band was dropped. The band also mixed the previous screen's
+  rows with the pass's rows, and the epoch reference kept the previous screen's
+  reference for a row the pass redrew. `GlFramebuffer::era_row_hash` now holds one
+  reference per guest row, refreshed immediately before each draw into the row;
+  `readback_framebuffer` compares and skips row by row. The first pass of the
+  `0x025C00` assembly copies `69915/76800` pixels instead of `14875`. See
+  `docs/HANDOFF-2026-10-31-session207.md`.
+- **Browser GAME SPEED** — 2x and 4x hold the requested speed and the display
+  holds 60 Hz (session 208). Before, the guest reached 188.8 frames/s of the 240
+  asked for at 4x, and the page's requestAnimationFrame cadence was 50 ms at its
+  95th percentile; at 1x both were fine. `flush_commands()` held the renderer
+  mutex across its whole GL batch, and the gfx pthread publishes every display
+  list and present through that mutex, so the GL batch paced the game: with the
+  flush disabled, the same 4x run reached 239.9 frames/s. The lock now covers
+  only the queue exchange. The flush also uploaded ~66 uniforms per draw, 1.88 M
+  WebGL uniform calls/s at 4x; `draw_uniform_key()` skips the block when a draw's
+  values equal the previous draw's, which took the calls to 495 353/s and the
+  mean flush from 11.4 ms to 5.4 ms. Measured after, same page and screen: 1x 60.0,
+  2x 119.7-120.2, 4x 234.5-240.7 frames/s, rAF p95 16.67 ms at all three; 8x
+  reaches 414.8 of 480. The title capture is identical to its pre-change one,
+  and the tutorial field and mission briefing keep their composition. See `docs/HANDOFF-2026-11-01-session208.md`.
+- **Browser audio** — the page plays the game's own audio (session 204). The
+  audio microcode runs in the wasm build (`[rsp] task type 2 submitted (audio
+  microcode)`) and the ring in `app/src/web_platform.cpp` holds real PCM at the
+  game's 32 kHz rate: the title's ring peak is 2073-4237 across runs, and its
+  waveform's zero-crossing rate matches the native capture's. Six page-side faults
+  kept it silent, stale or distorted. `initAudio()` was only called from the ROM
+  file-picker path, so a session restored from the stored ROM never created an
+  AudioContext; that call is a promise continuation, which is not a user
+  activation, and the early `if (audioContext) return` meant a gesture could not
+  resume it. SOUNDS defaulted to off, from a session-22 comment that predates the
+  recompiled audio microcode (session 75). The worklet's ring view used
+  `ringPtr / 2` as its byte offset, so it read unrelated wasm memory, and it wrote
+  int16 magnitudes into a float output without dividing by 32768, which is the
+  clipping the session-22 note called "screeching". It also started at ring index
+  0, so a context that attached late played stale audio. `initAudio()` is now
+  idempotent, runs from `startBoot()`, the file picker and the first pointer/key
+  event, and resumes a suspended context. The worklet reads the ring at its byte
+  address, scales each sample by `1/32768`, and adopts the producer's newest frame
+  on `init` and `resync` (posted when a suspended context resumes).
+  `get_frames_remaining` now reports int16 samples like SDL (`(head - tail) * 2`)
+  instead of stereo frames, which restores the 52 ms AI pacing cushion. Two
+  cursor faults then stalled the game's audio thread after the first drain:
+  `tail` dropped the fractional frame every quantum, and a 1e-12 disagreement
+  between the float `readPos` and the integer `tail` was treated as a desync and
+  moved `readPos` to `head`, skipping every queued frame, so `head - tail` looked
+  like a backlog and `audio_dma_busy()` stopped the producer. `pendingFrames`
+  carries the fraction, and the guard clamps to `tail`; only a real underrun
+  moves to `head`. Headless Chromium renders through SwiftShader, where the
+  frame-paced audio task rate is 2-3 buffers/s; a headed ANGLE Metal browser
+  measures 57.4 tasks/s, 31 758 ring frames/s and continuous output at the title
+  (0.33 peak), the tutorial (0.52) and the mission (0.77). Sound is
+  on by default, as in native; SETTINGS > SOUNDS and `?audio=0` mute, and VOLUME
+  scales the worklet's output. The page also retries `resume()` on window focus,
+  `pageshow` and visibility, and raises a `SOUND PAUSED · CLICK TO RESUME` button
+  over the screen when browser autoplay policy still keeps the context suspended;
+  the stored-ROM auto-start has no gesture, so the first click anywhere starts
+  it. `debug/probes/audio.cjs` measures the ring and the worklet's own output
+  levels: output peak 0.099-0.117, muted peak 0 while the ring still drains,
+  unmuted again 0.245-0.294. Open: listen on a real output device; the probe
+  measures samples, not speakers. See
+  `docs/HANDOFF-2026-10-30-session204.md`.
+  Session 205 measured the mission's "laggy" sound and found the worklet is
+  starved, not at fault. The game's audio thread generates one 552-frame buffer
+  per RSP completion, and a completion is delivered only while a game thread is
+  blocked or yields, so the mission's ~30 fps frame rate lowered the rate below
+  the 58 buffers/s the 32 kHz DAC consumes: the title read 56.3-58.0 buffers/s
+  with 0-2.6% worklet underrun, the mission 40.8-57.4/s with 1.5-29.8%, and the
+  tutorial field 57.0/s with 1.9%. Native audio has the same pacing: the SDL
+  path queues with `SDL_QueueAudio`, reports `SDL_GetQueuedAudioSize()/2`, and
+  uses the same 52 ms `audio_dma_busy` cushion; retail renders the mission at 60 fps (session 199),
+  so its frame-paced audio thread reaches 58 buffers/s. The browser runtime now
+  runs `M_AUDTASK` on the submitting thread (under a mutex around the shared RSP
+  DMEM, with `OGRE_AUDIO_INLINE=0` as the A/B), so the completion is queued
+  before the game's `osRecvMesg` and the audio thread refills the cushion in one
+  visit. The mission measures 57.8/s with 0.1-0.4% underrun and the tutorial
+  field 58.0/s with 0%. The 30 s cathedral capture was the backdrop still
+  assembling; at a 60 s settle it is complete. Posting the completion straight
+  to `0x800C49E8` hung the title and is not used. The worklet's `levels` reply
+  carries `underruns` and `underrunFrames`, and `audio.cjs --wait-scene 0x0003`
+  measures the mission. See `docs/HANDOFF-2026-10-31-session205.md`.
 - **Renderer** — RT64 (Metal, Vulkan, D3D12) with a null renderer for bring-up.
   RT64's **"Fix LR with Scissor"** rect enhancement is off by default here
   (`OGRE_RECT_LR_FIX=1` restores it): it rewrites a rectangle's right edge to the
@@ -1343,6 +1448,23 @@ Organize Screen, the credits, the ending and the attract loop.
   off unless `OGRE_LIVE_CONSOLE=1` (or the trigger's own variable) is set, so a
   stock run opens no path, reads no keyboard and prints nothing (session 117). The
   rest is open work below.
+- **Browser VI presentation** — the frames of noise between the publisher logos
+  and the title are fixed (session 206, developer report). At title entry the VI
+  is blanked (`hStart = 0`) with its origin already on the title's buffer
+  `0x000400`, and the old presenter paired that address with the last *visible*
+  mode's 640x476 area. It resolved the address to the title's new 320x476 colour
+  image and sampled rows 240..320, which the title never draws and which held
+  RDRAM bytes converted as RGBA5551. The present now carries the visible flag and
+  `fbSize` of the VI that produced it; a blanked or sizeless VI clears the canvas
+  to black, which is RT64's `colorTarget == nullptr` present
+  (`tools/RT64/src/hle/rt64_present_queue.cpp`), and the canvas is resized from
+  the request's size. The 639x475 frames before the visible mode now read
+  `nonBlack=0`, then the 319x239 title fades in; the proof pair is
+  `docs/proofs/web-title-transition-noise-before-session206.png` and
+  `-black-after-session206.png`. Open in the same pipeline: a depth-only present
+  is not converted to colour, a presented image's CPU-written bytes are not
+  re-uploaded, and a new colour image is still seeded from its whole RDRAM range.
+  See `docs/HANDOFF-2026-10-31-session206.md`.
 - **Browser renderer state (session 174)** — `G_TP` is decoded from OTHERMODE_H
   bit 19, the tile `ShiftScaleMap` is applied in the sampler, the chroma-key
   centre/scale reach the combiner's `KEY_CENTER`/`KEY_SCALE` inputs, and `G_FOG`
@@ -2267,6 +2389,32 @@ holds the evidence.
    at host load 16-27 (`scene 0x0000`, `block=0x00000000`), so the exact entry
    instant and the `0x12 -> 0x03` transition are still unrun there. See
    `docs/HANDOFF-2026-10-25-session190.md`.
+   **(y) The tutorial combat's green background and freeze: fixed session 202,
+   with three measurements open.** The browser's deferred writeback wrote a
+   stale 640x481 image (`0x1BA780`) over the scene-0x02 njpeg buffers at
+   `0x801CDA00`/`0x801CE3A0`, which the allocator had reused inside that image's
+   481-row span; the S2DEX2 draw sampled the overwritten bytes (green/magenta)
+   and the next `free()` trapped in `func_80071950`. `readback_framebuffer` now
+   skips a writeback whose RDRAM differs from the hash at its last
+   upload/writeback (RT64 `checkRAM`) and logs `[GFX-FBWRITE-STALE]`; the final
+   build passes `0x0002 -> 0x000D -> 0x0003` with no page error and the tutorial
+   battle renders (`docs/proofs/web-tutorial-combat-session202.png`). Session 203
+   closed two of the three open measurements: the writeback records its row band
+   through the draw's own viewport (so it no longer copies rows past the image
+   into the next framebuffer), and the njpeg backdrop's green/magenta display was
+   the YUV load's byte order, fixed in `tmem_load_yuv`
+   (`docs/proofs/web-newgame-cathedral-session203.png`). Session 207 replaced the
+   whole-image reference with one hash per guest row, refreshed before each draw
+   into that row, so a writeback skips only a row the CPU changed after its last
+   draw; this closed the session-202/203 per-row-hash item and fixed the second
+   cathedral visit's black top-left quadrant
+   (`docs/proofs/web-newgame-cathedral-birth-session207.png`). Open: drive the
+   exact `3. Combat` lesson (the list scrolls with C-Up; `5. Unit Commands` also
+   battles), and move `testdraw`'s scratch below the 8 MiB RDRAM (its positive
+   control fails on a fresh generated build; the guard is not the cause). See
+   `docs/HANDOFF-2026-10-26-session202.md`,
+   `docs/HANDOFF-2026-10-30-session203.md` and
+   `docs/HANDOFF-2026-10-31-session207.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and
@@ -2547,6 +2695,20 @@ holds the evidence.
     field, so its mottling never appears, and the scripted `tutorial-field` route
     is not deterministic. See `docs/HANDOFF-2026-10-26-session201.md`, `-199.md`
     and `-198.md`.
+
+23. **Browser GAME SPEED 2x/4x holds (session 208); 8x and the remaining flush
+    cost are open.** The main-thread flush no longer holds the renderer mutex
+    across its GL batch, and it skips the per-draw uniform block when a draw's
+    values equal the previous draw's. 2x and 4x now reach 120 and 234.5-240.7 guest
+    frames/s with the page's requestAnimationFrame cadence at 16.67 ms (95th
+    percentile); 8x reaches 414.8 of 480. The next candidates are the per-draw GL
+    state calls (`glViewport`/`glScissor`/`glEnable`/`glDisable` are issued once
+    per draw: about 90 000 viewport and scissor calls and 271 000
+    enable/disable calls per second at 4x) and `reference_era_rows`, which
+    XXH3-hashes every guest row each draw covers. `ogre_gfx_flush` also still runs
+    twice per 16 ms timer tick (the interval callback and `updateGfxStatus`); the
+    second call is redundant now that the flush is cheap. See
+    `docs/HANDOFF-2026-11-01-session208.md`.
 
 Parked, not defects:
 

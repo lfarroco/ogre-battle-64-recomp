@@ -223,10 +223,16 @@ static void queue_audio_samples(int16_t* samples, size_t count) {
     s.enabled.store(1, std::memory_order_release);
 }
 
-static size_t get_audio_frames_remaining() {
+// The runtime's `audio_callbacks_t::get_frames_remaining` reports *int16
+// samples for both channels*, not stereo frames: `audio.cpp` multiplies the
+// value by `2 * sizeof(int16_t)` to get bytes, and `audio_dma_busy()` compares
+// it with `sample_rate * ms * 2`. SDL returns `SDL_GetQueuedAudioSize() /
+// sizeof(int16_t)`, so double the frame count here. Returning the frame count
+// would halve the AI pacing cushion (104 ms instead of the measured 52 ms).
+static size_t get_audio_samples_remaining() {
     AudioRingState& s = g_audio_state;
     return static_cast<size_t>(s.head.load(std::memory_order_acquire) -
-                               s.tail.load(std::memory_order_acquire));
+                               s.tail.load(std::memory_order_acquire)) * 2;
 }
 
 static void set_audio_frequency(uint32_t frequency) {
@@ -242,7 +248,7 @@ static void set_audio_frequency(uint32_t frequency) {
 ultramodern::audio_callbacks_t make_audio_callbacks() {
     return {
         .queue_samples = queue_audio_samples,
-        .get_frames_remaining = get_audio_frames_remaining,
+        .get_frames_remaining = get_audio_samples_remaining,
         .set_frequency = set_audio_frequency,
     };
 }

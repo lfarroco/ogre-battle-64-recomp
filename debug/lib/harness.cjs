@@ -85,8 +85,11 @@ function resolveConfig(opts = {}) {
   };
 }
 
+// `browserArgs` lets a probe pass Chromium switches (the audio probe needs
+// `--autoplay-policy=no-user-gesture-required` when it does not press a key
+// before measuring). Every other probe keeps the defaults.
 function launch(cfg = {}) {
-  return chromium.launch({ headless: !cfg.headed });
+  return chromium.launch({ headless: !cfg.headed, args: cfg.browserArgs || [] });
 }
 
 /** Resolve the output prefix for a probe and make sure its directory exists.

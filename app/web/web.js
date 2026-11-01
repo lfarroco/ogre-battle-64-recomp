@@ -254,14 +254,19 @@
 
   // --- Audio switch -------------------------------------------------------------
   //
-  // Game audio is MUTED by default. The audio microcode is not emulated yet (the
-  // RSP audio task is auto-completed, so whatever the game hands the AI is not
-  // real audio), and playing it is a wall of screeching. The AudioWorklet is
-  // still created and still drains the ring buffer, so the game sees exactly
-  // the same backpressure as before - only the samples written to the output
-  // are silenced. Add ?audio to the URL (or call
-  // window.ogreAudio.setEnabled(true) at runtime) to hear it while working on
-  // the audio path.
+  // Game audio is ON by default, like the native port. The game's own audio
+  // microcode is recompiled and runs by default (app/src/rsp.cpp), so the ring
+  // holds real PCM at the game's 32 kHz rate; the AudioWorklet resamples it to
+  // the AudioContext rate. SETTINGS > SOUNDS and `?audio=0` mute the output, and
+  // SETTINGS > VOLUME scales it. Muting posts a flag to the worklet, which keeps
+  // draining the ring: the game's AI pacing sees the same backpressure either
+  // way.
+  //
+  // The AudioContext must be created or resumed from a user gesture (browser
+  // autoplay policy), so initAudio() also runs from the first pointer or key
+  // event and retries on focus, pageshow and visibility. A returning session
+  // auto-starts from the stored ROM with no gesture, so it shows the
+  // click-to-resume hint until one arrives.
   function urlFlag(name) {
     var m = new RegExp("(^|[?&])" + name + "(=([^&]*))?(&|$)").exec(window.location.search);
     if (!m) {
@@ -488,7 +493,8 @@
     webAudioSettings.enabled = urlFlag("audio") === true;
   }
   if (typeof webAudioSettings.enabled !== "boolean") {
-    webAudioSettings.enabled = false;
+    // Sound is on unless the player turned it off (native's default too).
+    webAudioSettings.enabled = true;
   }
   if (typeof webAudioSettings.volume !== "number" || !isFinite(webAudioSettings.volume)) {
     webAudioSettings.volume = 100;
@@ -1322,6 +1328,10 @@
     uiSetPhase("loading", "Loading");
     uiSetStatus("Starting the game…");
     uiDismissLauncher();
+    // Every boot path, including the stored-ROM auto-start, needs the audio
+    // worklet. Without a gesture the context starts suspended; the pointer/key
+    // hook in installAudioGesture() resumes it.
+    initAudio();
     Module.ccall("ogre_start_boot", "void", [], []);
     log("[web] Boot thread started. Waiting for milestones...");
     if (pollTimer === null) {
@@ -1752,26 +1762,138 @@
 
   // --- Audio: AudioContext + AudioWorklet --------------------------------------
 
-  function initAudio() {
-    if (audioContext) {
+  var audioNode = null;
+  var audioInitPending = false;
+  var audioInitRetry = null;
+  var audioWasRunning = false;
+
+  function audioExportsReady() {
+    return moduleReady() &&
+           typeof Module._ogre_audio_state_ptr === "function" &&
+           typeof Module._ogre_audio_ring_ptr === "function";
+  }
+
+  // A button inside the screen (so it is part of the fullscreen element) that
+  // appears only while the browser keeps the AudioContext suspended. Autoplay
+  // policy allows a context to start only from a user gesture; on the stored-ROM
+  // auto-start path there is none, so the page says why the game is silent and
+  // makes the click that fixes it obvious.
+  var soundHint = null;
+  function soundHintHost() {
+    return document.querySelector(".screen") ||
+           document.querySelector(".bezel") ||
+           document.getElementById("stage") ||
+           document.body;
+  }
+  function ensureSoundHint() {
+    if (soundHint) {
+      return soundHint;
+    }
+    soundHint = document.createElement("button");
+    soundHint.type = "button";
+    soundHint.id = "sound-hint";
+    soundHint.className = "sound-hint";
+    soundHint.textContent = "SOUND PAUSED · CLICK TO RESUME";
+    soundHint.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      initAudio();
+      if (audioContext && audioContext.state !== "running") {
+        audioContext.resume().catch(function () {});
+      }
+      updateSoundHint();
+    });
+    soundHintHost().appendChild(soundHint);
+    return soundHint;
+  }
+  function updateSoundHint() {
+    var show = !!(bootStarted && audioEnabled && audioContext &&
+                  audioContext.state === "suspended");
+    if (!show) {
+      if (soundHint) {
+        soundHint.hidden = true;
+      }
       return;
     }
-    try {
-      var Ctx = window.AudioContext || window.webkitAudioContext;
-      audioContext = new Ctx();
-    } catch (err) {
-      log("[web:audio] could not create AudioContext: " + err);
-      audioContext = null;
+    ensureSoundHint();
+    soundHint.hidden = false;
+  }
+
+  // Try to start or resume the context from focus or visibility. A context that
+  // was created without a gesture stays suspended until the first click or key;
+  // after one, the browser honours resume() on the next focus.
+  function resumeAudioIfNeeded() {
+    if (!audioContext || !audioEnabled || audioContext.state === "running") {
+      return;
+    }
+    audioContext.resume().catch(function () {});
+    updateSoundHint();
+  }
+
+  function onAudioStateChange() {
+    if (!audioContext) {
+      return;
+    }
+    var state = audioContext.state;
+    log("[web:audio] context " + state);
+    if (state === "running") {
+      if (audioNode && !audioWasRunning) {
+        // The ring kept filling while the context was not running and the game
+        // has been dropping buffers. Start from the newest one instead of
+        // playing up to a second of audio from before the pause.
+        audioNode.port.postMessage({ type: "resync" });
+      }
+      audioWasRunning = true;
+    } else {
+      audioWasRunning = false;
+    }
+    updateSoundHint();
+  }
+
+  function initAudio() {
+    if (!audioContext) {
+      try {
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        audioContext = new Ctx();
+      } catch (err) {
+        log("[web:audio] could not create AudioContext: " + err);
+        audioContext = null;
+        return;
+      }
+      audioContext.onstatechange = onAudioStateChange;
+      audioWasRunning = audioContext.state === "running";
+      updateSoundHint();
+    }
+    if (audioContext.state === "suspended") {
+      // Allowed from a user gesture only; the pointer/key hook below retries.
+      audioContext.resume().catch(function (err) {
+        log("[web:audio] resume failed: " + err);
+      });
+    }
+    // A context created before the boot started (the file picker path) still has
+    // to raise the hint if the browser keeps it suspended.
+    updateSoundHint();
+    if (audioNode || audioInitPending) {
+      return;
+    }
+    if (!audioExportsReady()) {
+      // The boot may start before the wasm glue publishes the exports.
+      if (audioInitRetry === null) {
+        audioInitRetry = window.setTimeout(function () {
+          audioInitRetry = null;
+          initAudio();
+        }, 500);
+      }
       return;
     }
 
+    audioInitPending = true;
     audioContext.audioWorklet.addModule("audio-worklet.js").then(function () {
-      if (!moduleReady() || typeof Module._ogre_audio_state_ptr !== "function") {
-        log("[web:audio] wasm audio exports not available yet");
+      if (!audioExportsReady()) {
+        audioInitPending = false;
+        initAudio();
         return;
       }
-      var statePtr = Module._ogre_audio_state_ptr();
-      var ringPtr = Module._ogre_audio_ring_ptr();
       var node = new AudioWorkletNode(audioContext, "ogre-audio-processor", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
@@ -1780,24 +1902,56 @@
       node.port.postMessage({
         type: "init",
         sab: Module.HEAPU8.buffer,
-        statePtr: statePtr,
-        ringPtr: ringPtr,
+        statePtr: Module._ogre_audio_state_ptr(),
+        ringPtr: Module._ogre_audio_ring_ptr(),
         ringFrames: 32768,  // kAudioRingFrames in app/src/web_platform.cpp
         muted: !audioEnabled,
         gain: audioVolume / 100
       });
       node.connect(audioContext.destination);
+      audioNode = node;
+      audioInitPending = false;
       // The worklet keeps draining the ring even while muted, so the game's
       // audio thread sees the same producer/consumer backpressure either way.
       window.ogreAudio = {
+        // `node` is the test/debug handle. A probe reads the worklet's own
+        // output levels with `levels()`; see docs/guides/web-probes.md.
+        node: node,
+        // Peak/RMS/frames the processor wrote since the previous call, measured
+        // on the audio thread after VOLUME and the mute. A probe calls it once
+        // to reset, waits, then calls it again for the window.
+        levels: function () {
+          return new Promise(function (resolve) {
+            var timer = window.setTimeout(function () {
+              node.port.removeEventListener("message", onMessage);
+              resolve({ type: "levels", peak: 0, rms: 0, frames: 0, timeout: true });
+            }, 2000);
+            function onMessage(event) {
+              var d = event.data;
+              if (d && d.type === "levels") {
+                window.clearTimeout(timer);
+                node.port.removeEventListener("message", onMessage);
+                resolve(d);
+              }
+            }
+            node.port.addEventListener("message", onMessage);
+            // A MessagePort that uses addEventListener (rather than onmessage)
+            // must be started explicitly or its messages are never delivered.
+            node.port.start();
+            node.port.postMessage({ type: "levels" });
+          });
+        },
         enabled: function () { return audioEnabled; },
         volume: function () { return audioVolume; },
         setEnabled: function (on) {
           audioEnabled = !!on;
           saveAudioSettings();
           node.port.postMessage({ type: "mute", muted: !audioEnabled });
-          log("[web:audio] " + (audioEnabled ? "unmuted (game audio will play - it screeches until the audio microcode is emulated)"
-                                             : "muted"));
+          if (audioEnabled && audioContext && audioContext.state === "suspended") {
+            audioContext.resume().catch(function () {});
+          }
+          log("[web:audio] " + (audioEnabled ? "unmuted" : "muted"));
+          updateSoundHint();
         },
         setVolume: function (percent) {
           audioVolume = Math.max(0, Math.min(100, Math.round(percent)));
@@ -1809,7 +1963,7 @@
       audioContext.resume().then(function () {
         log("[web:audio] AudioWorklet connected (" + audioContext.sampleRate + " Hz context, state " +
             audioContext.state + "), game audio " +
-            (audioEnabled ? "ENABLED (overlay or ?audio)" : "MUTED - add ?audio or use SETTINGS > SOUNDS"));
+            (audioEnabled ? "ON" : "MUTED (SETTINGS > SOUNDS or ?audio=1)"));
         // Report once the game actually starts queueing samples, so a silent
         // page is distinguishable from a stalled audio path.
         var audioWatch = window.setInterval(function () {
@@ -1826,9 +1980,46 @@
         log("[web:audio] resume failed: " + err);
       });
     }).catch(function (err) {
+      audioInitPending = false;
       log("[web:audio] AudioWorklet failed to load: " + err);
     });
   }
+
+  // A browser starts an AudioContext suspended unless it is created or resumed
+  // from a user gesture. The game can boot from the stored ROM without one, so
+  // the first pointer or key anywhere on the page also creates/resumes it. A
+  // context that was created from a gesture resumes on window focus, on
+  // `pageshow` and when the tab becomes visible again; those attempts are
+  // harmless on a context the browser still refuses to start (the sound hint
+  // covers that case).
+  function installAudioGesture() {
+    function kick() {
+      initAudio();
+      resumeAudioIfNeeded();
+    }
+    window.addEventListener("pointerdown", kick, { capture: true, passive: true });
+    window.addEventListener("keydown", kick, { capture: true, passive: true });
+    window.addEventListener("focus", function () {
+      if (bootStarted || audioContext) {
+        initAudio();
+        resumeAudioIfNeeded();
+      }
+    });
+    window.addEventListener("pageshow", function () {
+      if (bootStarted || audioContext) {
+        initAudio();
+        resumeAudioIfNeeded();
+      }
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && (bootStarted || audioContext)) {
+        initAudio();
+        resumeAudioIfNeeded();
+      }
+      updateSoundHint();
+    });
+  }
+  installAudioGesture();
 
   // --- Persistent storage (IDBFS at /ogre) -------------------------------------
 
@@ -2116,7 +2307,10 @@
       log("[web] ROM written to the virtual filesystem. Starting runtime...");
       uiSetStatus("Starting the game…");
       uiDismissLauncher();
-      initAudio();  // inside the user gesture so autoplay is allowed
+      // The file read is a promise continuation, so this is not reliably
+      // inside the change event's user activation; the gesture hook and
+      // startBoot() also call it.
+      initAudio();
       // initWebGL and the boot call wasm exports that the glue publishes a
       // moment after the runtime is up; see whenWasmExportsReady.
       whenWasmExportsReady(function () {

@@ -2522,6 +2522,16 @@ struct GlFramebuffer {
     // refuses the stale copy (see build_image_source).
     uint64_t rdram_hash = 0;
     bool rdram_hash_valid = false;
+    // The RDRAM reference for the writeback guard, one entry per guest row, taken
+    // just before each draw into that row. A row entry of 0 means "no
+    // reference". The writeback compares only the rows it is about to copy and
+    // skips a row the CPU changed after its last draw. The whole-image
+    // `rdram_hash` above cannot serve this test: a 320x476 target at 0x025C00
+    // spans 0x025C00..0x070200, and the game's next framebuffer starts at
+    // 0x04B400 inside that range. Its writeback changes the whole-image hash,
+    // which used to refuse the njpeg pass that drew rows 0..239 of 0x025C00 (the
+    // cathedral backdrop's black top-left quadrant).
+    std::vector<uint64_t> era_row_hash;
 };
 
 // One RDP depth image (`G_SETZIMG`) as a GL renderbuffer. RT64's depth
@@ -3213,18 +3223,70 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     // XXH3-64 of a colour image's whole RDRAM range, the value the GPU copy was
-    // made from (`upload_framebuffer`) or last matched (`readback_framebuffer`).
-    // Zero when the range is not addressable; callers check `rdram_hash_valid`.
+    // made from (`upload_framebuffer`). The framebuffer-as-texture guard compares
+    // it (`build_image_source`); the writeback guard uses `era_row_hash`, because
+    // this range can contain the next framebuffer. Zero when the range is not
+    // addressable; callers check `rdram_hash_valid`.
     uint64_t framebuffer_rdram_hash(const GlFramebuffer& fb, uint32_t address) {
         if (rdram_ == nullptr || address == 0 || fb.row_bytes == 0 ||
             fb.width <= 0 || fb.height <= 0) {
             return 0;
         }
         const uint64_t bytes = static_cast<uint64_t>(fb.row_bytes) * fb.height;
-        if (static_cast<uint64_t>(address) + bytes > gbi::kRdramSize) {
+        if (bytes == 0 || static_cast<uint64_t>(address) + bytes > gbi::kRdramSize) {
             return 0;
         }
         return XXH3_64bits(rdram_ + address, static_cast<size_t>(bytes));
+    }
+
+    // Takes the RDRAM reference for guest rows [gy0, gy1] immediately before a
+    // draw into them. Every draw refreshes its rows' reference: the GPU draw does
+    // not change RDRAM, so the latest reference is still the CPU's bytes, and a
+    // CPU write before this draw is overwritten by it and must not block the
+    // writeback. Only a write after the last draw into a row is a reason to skip
+    // that row.
+    void reference_era_rows(GlFramebuffer& fb, uint32_t address, int gy0, int gy1) {
+        if (rdram_ == nullptr || fb.row_bytes == 0 || fb.height <= 0) {
+            return;
+        }
+        if (fb.era_row_hash.size() != static_cast<size_t>(fb.height)) {
+            fb.era_row_hash.assign(static_cast<size_t>(fb.height), 0);
+        }
+        const int lo = std::max(0, gy0);
+        const int hi = std::min(fb.height - 1, gy1);
+        for (int gy = lo; gy <= hi; ++gy) {
+            if (static_cast<uint64_t>(address) +
+                    static_cast<uint64_t>(gy + 1) * fb.row_bytes >
+                gbi::kRdramSize) {
+                break;
+            }
+            const uint64_t h = XXH3_64bits(
+                rdram_ + address + static_cast<uint32_t>(gy) * fb.row_bytes, fb.row_bytes);
+            fb.era_row_hash[gy] = (h == 0 ? 1 : h);
+        }
+    }
+
+    void clear_era_rows(GlFramebuffer& fb) {
+        fb.era_row_hash.assign(static_cast<size_t>(std::max(fb.height, 0)), 0);
+    }
+
+    // Starts a writeback era when the first draw since the last writeback binds
+    // the target. RT64 refreshes its frame reference at the end of every
+    // workload that drew the framebuffer (`FramebufferManager::hashTracking`);
+    // this renderer defers the writeback to the game's
+    // `ogre_sync_framebuffers()` request, so the reference is taken per row just
+    // before each draw (`reference_era_rows`) and the writeback skips only a row
+    // the CPU changed after its last draw. Pending rows from an earlier batch
+    // stay pending: the writeback compares and skips them individually.
+    void snapshot_fb_ram_before_draw(GlFramebuffer& fb, uint32_t address) {
+        if (fb.max_row >= fb.min_row) {
+            return;   // an era is still open; its row references are current
+        }
+        clear_era_rows(fb);
+        // The whole-image hash still serves the framebuffer-as-texture guard
+        // (`build_image_source`); it is not the writeback's reference.
+        fb.rdram_hash = framebuffer_rdram_hash(fb, address);
+        fb.rdram_hash_valid = fb.rdram_hash != 0;
     }
 
     // The key of the depth buffer a draw uses: the depth image address when the
@@ -3538,6 +3600,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (fb.max_row < fb.min_row) {
             return false;   // nothing drawn since the last writeback
         }
+        // RT64 `FramebufferManager::checkRAM`: RDRAM is the source of truth, and
+        // a colour image whose bytes changed since the GPU copy was made must not
+        // be written back over the CPU's newer data. The game reuses a freed
+        // 640x481 screen buffer for heap allocations (the scene-0x02 njpeg
+        // background buffers at 0x1CDA00 live inside image 0x1BA780's old byte
+        // range); delaying the writeback of that stale image until a later sync
+        // put its old pixels over a heap block, and the game's next free trapped
+        // in the allocator node unlink. Session 170's present-time writeback hit
+        // the same rule from the other side. Skip and drop the recorded rows: the
+        // CPU already owns these bytes.
+        //
+        // The comparison is per row (`era_row_hash`), over exactly the rows this
+        // writeback would copy. Hashing the image's whole `row_bytes * height`
+        // range covers whatever follows it in RDRAM: a 320x476 target at 0x025C00
+        // contains the next game framebuffer at 0x04B400, and that framebuffer's
+        // writeback changed the hash, which refused the njpeg pass that had drawn
+        // rows 0..239 of 0x025C00. The backdrop's first sub-image then came out
+        // black (the cathedral's top-left quadrant). Only a change to a row the
+        // RDP wrote is a CPU write this guard has to protect.
+        //
+        // A row is skipped on its own, not the whole band. A pending band can mix
+        // rows from several draws (the previous screen's frame, then this pass's
+        // 240 rows); a CPU write to one of them used to drop every row with it.
         const int w = fb.width, h = fb.height;
         const uint32_t pitch = fb.row_bytes;
         const int wy0 = std::max(0, fb.min_row);
@@ -3546,9 +3631,43 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         fb.max_row = -1;
         if (wy1 < wy0 || pitch == 0 ||
             static_cast<uint64_t>(address) + static_cast<uint64_t>(pitch) * h > gbi::kRdramSize) {
+            clear_era_rows(fb);
             return false;
         }
         const int rows = wy1 - wy0 + 1;
+        std::vector<uint8_t> row_ok(static_cast<size_t>(rows), 1);
+        int stale_rows = 0;
+        for (int i = 0; i < rows; ++i) {
+            const int wy = wy0 + i;
+            const int gy = h - 1 - wy;
+            const uint64_t ref =
+                (gy >= 0 && gy < static_cast<int>(fb.era_row_hash.size()))
+                    ? fb.era_row_hash[gy]
+                    : 0;
+            if (ref == 0) {
+                continue;
+            }
+            const uint64_t hash = XXH3_64bits(
+                rdram_ + address + static_cast<uint32_t>(gy) * pitch, pitch);
+            if ((hash == 0 ? 1 : hash) == ref) {
+                continue;
+            }
+            row_ok[i] = 0;
+            ++stale_rows;
+            if (stale_writebacks_ < 8) {
+                ++stale_writebacks_;
+                OGRE_MILESTONE("GFX-FBWRITE-STALE",
+                               "fb 0x%06X %dx%d row=%d: RDRAM changed since the GPU "
+                               "copy (hash %016llX != %016llX); leaving that row as the "
+                               "CPU left it",
+                               address, fb.width, fb.height, gy,
+                               (unsigned long long)hash, (unsigned long long)ref);
+            }
+        }
+        clear_era_rows(fb);
+        if (stale_rows == rows) {
+            return false;   // the CPU owns every row in this band
+        }
         static std::vector<uint8_t> px;
         static std::vector<float> fpx;
         px.resize(static_cast<size_t>(w) * rows * 4);
@@ -3579,6 +3698,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const uint32_t dither_pattern = best_dither_pattern(fb.dither_patterns);
         const uint32_t dither_seed = dither_random_seed_;
         for (int i = 0; i < rows; ++i) {
+            if (!row_ok[static_cast<size_t>(i)]) {
+                continue;   // the CPU wrote this row after the RDP drew it
+            }
             // glReadPixels returns row wy0 first; window row wy is guest row
             // height-1-wy (see upload_framebuffer).
             const int gy = h - 1 - (wy0 + i);
@@ -3680,7 +3802,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
     void readback_all_framebuffers() {
         if (!fb_writeback_enabled_) {
-            fb_writeback_pending_ = 0;
+            fb_writeback_pending_.store(0, std::memory_order_relaxed);
             return;
         }
         for (auto& [addr, fb] : gl_framebuffers_) {
@@ -3693,7 +3815,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                first_row, last_row);
             }
         }
-        fb_writeback_pending_ = 0;
+        fb_writeback_pending_.store(0, std::memory_order_relaxed);
     }
 
     // ----- framebuffer-as-texture diagnostic (gfx thread) ----------------------
@@ -4105,6 +4227,25 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
+    // Presents a black frame. RT64's presenter has no colour target for a VI
+    // that is blanked or carries no visible size, and clears the swap chain
+    // (`rt64_present_queue.cpp`, the `colorTarget == nullptr` arm). The canvas
+    // keeps its size: a blanked VI does not resize the window.
+    void clear_canvas_black() {
+        if (canvas_width_ < 1 || canvas_height_ < 1) {
+            return;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, canvas_width_, canvas_height_);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        canvas_dirty_ = false;
+    }
+
     // The key of the framebuffer whose guest range contains `address`, or 0 when
     // none does. The VI origin is not the RDP colour-image address: the standard
     // NTSC mode's `fldRegs[].origin` is 0x280 (one 320-pixel 16-bit row), so the
@@ -4132,7 +4273,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // RDP rendered into when there is one, otherwise the bytes RDRAM holds. When
     // the draws went straight to the canvas (no colour image was ever set), the
     // canvas already holds the frame and nothing is blitted over it.
-    void present_framebuffer(uint32_t address) {
+    void present_framebuffer(uint32_t address, bool vi_ok, int vi_w, int vi_h) {
         // The canvas is the VI's *visible* area, which is the area RT64's
         // presenter writes (`visibleFramebufferSize`, the framebuffer minus the
         // overscan crop). RT64 anchors that area at the window's top-left and
@@ -4148,26 +4289,39 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // A 640x475 mode (the publisher stills) presents 1:1; a 319x239 mode (the
         // title) at the 2x pixelated CSS upscale. `css_scale_for` keeps the box a
         // whole multiple of the buffer.
-        const ViSize vi = vi_size();
-        const ViSize visible = visible_framebuffer_size(vi);
-        const bool have_visible = (visible.width > 0 && visible.height > 0);
-        resize_canvas(have_visible ? visible.width : vi.width,
-                      have_visible ? visible.height : vi.height);
+        //
+        // The size comes from the VI registers that produced this request, not
+        // from the last visible mode: OB64 writes the next scene's scanout
+        // address while the VI is blanked (or still in the previous mode), and
+        // pairing that address with the previous mode's area samples rows the
+        // next scene has not drawn (see request_present). A blanked VI has no
+        // colour target natively, and RT64's presenter clears the swap chain to
+        // black for it (`rt64_present_queue.cpp`, the `colorTarget == nullptr`
+        // arm), so that is what this path does too.
+        const ViSize vi{vi_w, vi_h};
+        const ViSize visible = vi_ok ? visible_framebuffer_size(vi) : ViSize{};
+        const bool presentable = vi_ok && visible.width > 0 && visible.height > 0;
+        if (presentable) {
+            resize_canvas(visible.width, visible.height);
+        }
 
         // The destination is the whole canvas: buffer and visible area are the
-        // same size, so the quad covers it. A present that carries no visible
-        // size (the first one, before the VI mode is known) still writes all of
-        // the canvas it was given.
+        // same size, so the quad covers it.
         const float present_frac_w = 1.0f;
         const float present_frac_h = 1.0f;
         uint32_t key = address;
-        auto it = gl_framebuffers_.find(key);
-        if (it == gl_framebuffers_.end() || it->second.tex == 0) {
-            key = framebuffer_containing(address);
-            it = (key != 0) ? gl_framebuffers_.find(key) : gl_framebuffers_.end();
+        auto it = gl_framebuffers_.end();
+        if (presentable) {
+            it = gl_framebuffers_.find(key);
+            if (it == gl_framebuffers_.end() || it->second.tex == 0) {
+                key = framebuffer_containing(address);
+                it = (key != 0) ? gl_framebuffers_.find(key) : gl_framebuffers_.end();
+            }
         }
-        const bool have_fbo = (it != gl_framebuffers_.end() && it->second.tex != 0);
-        if (present_requests_ <= 12 || (present_requests_ % 300) == 0) {
+        const bool have_fbo =
+            presentable && it != gl_framebuffers_.end() && it->second.tex != 0;
+        const unsigned present_requests = present_requests_.load(std::memory_order_relaxed);
+        if (present_requests <= 12 || (present_requests % 300) == 0) {
             ++presents_logged_;
             OGRE_MILESTONE("GFX-PRESENT",
                            "VI scanout 0x%06X -> fb 0x%06X: fbo=%d size=%dx%d siz=%u "
@@ -4176,11 +4330,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            address, have_fbo ? key : 0u, have_fbo ? 1 : 0,
                            have_fbo ? it->second.width : 0, have_fbo ? it->second.height : 0,
                            have_fbo ? (unsigned)it->second.siz : 0u,
-                           have_fbo ? visible.width : 0, have_fbo ? visible.height : 0,
+                           presentable ? visible.width : 0,
+                           presentable ? visible.height : 0,
                            canvas_width_, canvas_height_,
                            have_fbo ? it->second.last_nonblack : 0u,
                            canvas_dirty_ ? 1 : 0, gl_framebuffers_.size(), vi_status_,
-                           present_requests_);
+                           present_requests);
+        }
+        if (!presentable) {
+            // A blanked VI has no colour target natively. RT64 clears the swap
+            // chain (`rt64_present_queue.cpp`, the `colorTarget == nullptr`
+            // arm); this presenter clears the canvas and samples no framebuffer.
+            clear_canvas_black();
+            return;
         }
         if (have_fbo) {
             // The GL framebuffer is the RDP colour image at the tallest height
@@ -4188,13 +4350,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // than the VI's scanout (a 320x240 image that grew to 320x476 across
             // the publishers' hi-res mode). Present only the visible area, the way
             // RT64 does; the rows past the colour image hold the next one.
-            const float u_max = (have_visible && it->second.width > 0)
+            const float u_max = (it->second.width > 0)
                                     ? std::min(1.0f, static_cast<float>(visible.width) /
                                                          static_cast<float>(it->second.width))
                                     : 1.0f;
             // Texture v = 1 is guest row 0, so the visible rows are the top of the
             // image and the crop takes the high end of v.
-            const float v_min = (have_visible && it->second.height > 0)
+            const float v_min = (it->second.height > 0)
                                     ? std::max(0.0f, 1.0f - static_cast<float>(visible.height) /
                                                                static_cast<float>(it->second.height))
                                     : 0.0f;
@@ -4232,6 +4394,56 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         blit_to_canvas(present_tex_, 1.0f, 0.0f, present_frac_w, present_frac_h);
     }
 
+// FNV-1a over every value the per-draw uniform block uploads, including the
+// ones that come from live renderer state rather than the command. Two
+// consecutive draws with the same key upload nothing: the GL program keeps the
+// values, and a run of draws with identical combiner/blender/texture state is
+// common (the mission's terrain and sprite runs). The key is computed from
+// exactly the values the block sets, so a uniform added to the block must be
+// added here too.
+static uint64_t draw_uniform_key(const DrawCmd& c, int debug_mode, int show_alpha, int persp,
+                                 int cvg_range_steps, unsigned dither_frame,
+                                 unsigned dither_instance, int zclip, int texf) {
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    const auto mi = [&mix](int v) { mix(static_cast<uint32_t>(v)); };
+    const auto mf = [&mix](float v) {
+        uint32_t b;
+        std::memcpy(&b, &v, sizeof(b));
+        mix(b);
+    };
+    for (int i = 0; i < 2; ++i) {
+        mi(c.ca[i]); mi(c.cb[i]); mi(c.cc[i]); mi(c.cd[i]);
+        mi(c.aa[i]); mi(c.ab[i]); mi(c.ac[i]); mi(c.ad[i]);
+        mi(c.bp[i]); mi(c.bm[i]); mi(c.ba[i]); mi(c.bb[i]);
+    }
+    mi(c.cycle); mi(c.blend_approx); mi(c.force_blend ? 1 : 0);
+    mi(c.alpha_blend ? 1 : 0);
+    mi(c.combiner_cycles); mi(c.acmp); mi(c.cvg_x_alpha ? 1 : 0); mi(c.cvg_dst);
+    for (int i = 0; i < 4; ++i) {
+        mf(c.prim[i]); mf(c.env[i]); mf(c.fog[i]); mf(c.blend_color[i]);
+    }
+    mf(c.k4); mf(c.k5);
+    for (int i = 0; i < 3; ++i) {
+        mf(c.key_center[i]); mf(c.key_scale[i]);
+    }
+    mi(c.textured ? 1 : 0);
+    for (int u = 0; u < 2; ++u) {
+        mf(c.tex_size[u][0]); mf(c.tex_size[u][1]);
+        mi(c.tex_cms[u]); mi(c.tex_cmt[u]);
+        mf(c.tex_shift[u][0]); mf(c.tex_shift[u][1]);
+        mi(c.tex_masks[u]); mi(c.tex_maskt[u]);
+        mi(c.tex_win[u][0]); mi(c.tex_win[u][1]);
+    }
+    mf(c.tex_origin[0]); mf(c.tex_origin[1]);
+    mf(c.tex_origin1[0]); mf(c.tex_origin1[1]);
+    mi(c.tex_filter); mi(c.tex_persp ? 1 : 0); mi(texf);
+    mi(debug_mode); mi(show_alpha); mi(persp); mi(cvg_range_steps);
+    mi(static_cast<int>(dither_frame)); mi(static_cast<int>(dither_instance));
+    mi(zclip);
+    return h;
+}
+
     // ----- main-thread flush (ogre_gfx_flush) ------------------------------------
 
     // Runs on the browser main thread: uploads queued textures, then executes
@@ -4241,26 +4453,59 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
 
-        // Never block the browser main thread on the gfx pthread's mutex: a
-        // contended pthread lock on a browser main thread cannot wait legally
-        // (Atomics.wait is disallowed there) and was observed to freeze the
-        // whole page while the gfx pthread sat inside send_dl(). Skip this
-        // tick instead; the next flush drains the queued work. Skips are
-        // counted (flush_skipped_) and surfaced as a one-off stderr note.
-        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-        if (!lock.owns_lock()) {
-            g_flush_skip.fetch_add(1, std::memory_order_relaxed);
-            if (flush_skipped_.fetch_add(1) == 0) {
-                fprintf(stderr, "[web-renderer] ogre_gfx_flush: renderer busy (gfx pthread "
-                                "inside send_dl); skipping flush instead of blocking the main thread\n");
+        // The renderer mutex covers only the queue exchange below, never the GL
+        // work. The gfx pthread publishes every display list (`publish_exec`)
+        // and every VI present (`request_present`) through this mutex, and the
+        // runtime posts `dp_complete` as soon as `send_dl` returns, so the game
+        // waits for it. A mutex held across a whole batch (8-12 ms on the
+        // mission, up to 280 ms at GAME SPEED x4) paces the game itself:
+        // session 208 measured 197 guest frames/s of the 240 requested at x4
+        // with the flush holding it, and 240 with the main-thread flush
+        // disabled entirely.
+        std::vector<TexUpload> uploads;
+        std::vector<DrawCmd> cmds;
+        bool present = false;
+        uint32_t present_address = 0;
+        bool present_vi_ok = false;
+        int present_vi_width = 0;
+        int present_vi_height = 0;
+        uint32_t sync_request = 0;
+        bool sync_pending = false;
+        {
+            // Never block the browser main thread on the gfx pthread's mutex: a
+            // contended pthread lock on a browser main thread cannot wait
+            // legally (Atomics.wait is disallowed there) and was observed to
+            // freeze the whole page while the gfx pthread sat inside send_dl().
+            // Skip this tick instead; the next flush drains the queued work.
+            // Skips are counted (flush_skipped_) and surfaced as a one-off
+            // stderr note.
+            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+            if (!lock.owns_lock()) {
+                g_flush_skip.fetch_add(1, std::memory_order_relaxed);
+                if (flush_skipped_.fetch_add(1) == 0) {
+                    fprintf(stderr, "[web-renderer] ogre_gfx_flush: renderer busy (gfx pthread "
+                                    "inside send_dl); skipping flush instead of blocking the main thread\n");
+                }
+                return;
             }
-            return;
+            uploads.swap(tex_upload_queue_);
+            cmds.swap(draw_queue_);
+            // Presentation and framebuffer-sync requests travel with the queue,
+            // so the main thread renders everything submitted before them.
+            present = present_pending_;
+            present_address = present_address_;
+            present_vi_ok = present_vi_ok_;
+            present_vi_width = present_vi_width_;
+            present_vi_height = present_vi_height_;
+            present_pending_ = false;
+            sync_request = sync_request_.load(std::memory_order_acquire);
+            sync_pending = sync_request > sync_done_.load(std::memory_order_relaxed);
         }
 
         // Texture uploads.
         {
             ++texture_epoch_;
-            for (TexUpload& up : tex_upload_queue_) {
+            for (TexUpload& up : uploads) {
                 // The key is a hash of the decoded bytes, so a resident texture
                 // with this key already holds exactly these pixels. Skip the
                 // upload instead of re-issuing `glTexImage2D` on every display
@@ -4334,21 +4579,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                    (unsigned long long)(nz ? sum / nz : 0));
                 }
             }
-            tex_upload_queue_.clear();
         }
-
-        // Draws.
-        std::vector<DrawCmd> cmds;
-        {
-            cmds.swap(draw_queue_);
-        }
-        // Presentation and framebuffer-sync requests travel with the queue, so
-        // the main thread renders everything submitted before them.
-        const bool present = present_pending_;
-        const uint32_t present_address = present_address_;
-        present_pending_ = false;
-        const uint32_t sync_request = sync_request_.load(std::memory_order_acquire);
-        const bool sync_pending = sync_request > sync_done_.load(std::memory_order_relaxed);
 
         glUseProgram(program_);
         glBindVertexArray(vao_);
@@ -4450,6 +4681,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // Which GL framebuffer the current draw targets (null = the canvas).
         uint32_t bound_fb_address = 0;
         GlFramebuffer* bound_fb = nullptr;
+        // One batch = the draws one flush executes. The RDRAM reference of a
+        // framebuffer with rows already pending is re-tested once per batch, not
+        // once per draw (see snapshot_fb_ram_before_draw).
+        ++fb_batch_seq_;
+        // The previous draw's uniform key (see draw_uniform_key). Reset per
+        // flush: blit_to_canvas() at the end of a flush rewrites uniforms, so a
+        // key from one batch does not describe the program's state in the next.
+        uint64_t last_ukey = 0;
+        bool have_ukey = false;
 
         for (const DrawCmd& cmd : cmds) {
             // Bind the RDP colour image this draw renders into. A zero address
@@ -4465,6 +4705,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                     bound_fb_address = 0;
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, bound_fb != nullptr ? bound_fb->fbo : 0);
+                // The first draw into a target since its last writeback takes
+                // the RDRAM reference the writeback will compare against (see
+                // snapshot_fb_ram_before_draw).
+                if (bound_fb != nullptr) {
+                    snapshot_fb_ram_before_draw(*bound_fb, bound_fb_address);
+                }
             }
             // The draw's NDC was built against `cmd.fb_height_px` (the
             // screen height `target_height_px` returned when the draw was
@@ -4634,50 +4880,67 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                cmd.sx0, cmd.sy0, cmd.sx1, cmd.sy1,
                                cmd.pos[0], cmd.pos[1], cmd.uv[0], cmd.uv[1]);
             }
-            // Combiner uniforms.
+            // The per-draw uniform block. It is uploaded only when this draw's
+            // values differ from the previous draw's (see draw_uniform_key):
+            // the GL program keeps them otherwise, and the mission's terrain
+            // and sprite runs repeat the same combiner, blender and tile state.
+            const int zclip =
+                (cmd.kind == 0 && !cmd.z_source_prim && !cmd.no_near_clip) ? 1 : 0;
+            const uint64_t ukey = draw_uniform_key(
+                cmd, static_cast<int>((g_debug_flags.load(std::memory_order_relaxed) >> 3) & 3),
+                (g_debug_flags.load(std::memory_order_relaxed) & 131072u) != 0 ? 1 : 0,
+                persp_correct_ ? 1 : 0, hp_fb_ ? 65535 : 255,
+                present_requests_.load(std::memory_order_relaxed), flushed_cmds_, zclip, texf_);
+            const bool upload_uniforms = !have_ukey || ukey != last_ukey;
+            last_ukey = ukey;
+            have_ukey = true;
             auto seti = [this](const char* name, int v) {
                 glUniform1i(uloc(name), v);
             };
-            seti("u_ca0", cmd.ca[0]); seti("u_cb0", cmd.cb[0]); seti("u_cc0", cmd.cc[0]); seti("u_cd0", cmd.cd[0]);
-            seti("u_aa0", cmd.aa[0]); seti("u_ab0", cmd.ab[0]); seti("u_ac0", cmd.ac[0]); seti("u_ad0", cmd.ad[0]);
-            seti("u_ca1", cmd.ca[1]); seti("u_cb1", cmd.cb[1]); seti("u_cc1", cmd.cc[1]); seti("u_cd1", cmd.cd[1]);
-            seti("u_aa1", cmd.aa[1]); seti("u_ab1", cmd.ab[1]); seti("u_ac1", cmd.ac[1]); seti("u_ad1", cmd.ad[1]);
-            seti("u_cycle", cmd.cycle);
-            seti("u_debug_mode",
-                 static_cast<int>((g_debug_flags.load(std::memory_order_relaxed) >> 3) & 3));
-            seti("u_show_alpha",
-                 (g_debug_flags.load(std::memory_order_relaxed) & 131072u) != 0 ? 1 : 0);
-            seti("u_persp", persp_correct_ ? 1 : 0);
-            // Blender (render mode) uniforms.
-            seti("u_force_blend", cmd.force_blend ? 1 : 0);
-            seti("u_blend_approx", cmd.blend_approx);
-            seti("u_combiner_cycles", cmd.combiner_cycles);
-            // Alpha compare and coverage. `u_cvg_range` is the attachment's
-            // step count: RT64 uses 65535 when the render target is the
-            // high-precision (RGBA16F) colour buffer and 255 otherwise.
-            seti("u_ac", cmd.acmp);
-            // RT64's alpha-dither seeds: the frame count and the draw's index
-            // (see the `dither_init_rand` port). Only G_AC_DITHER reads them.
-            glUniform1ui(uloc("u_dither_frame"), present_requests_);
-            glUniform1ui(uloc("u_dither_instance"), flushed_cmds_);
-            seti("u_cvg_x_alpha", cmd.cvg_x_alpha ? 1 : 0);
-            seti("u_cvg_dst", cmd.cvg_dst);
-            seti("u_alpha_blend", cmd.alpha_blend ? 1 : 0);
-            glUniform1f(uloc("u_cvg_range"),
-                        hp_fb_ ? 65535.0f : 255.0f);
-            seti("u_bp0", cmd.bp[0]); seti("u_bm0", cmd.bm[0]);
-            seti("u_ba0", cmd.ba[0]); seti("u_bb0", cmd.bb[0]);
-            seti("u_bp1", cmd.bp[1]); seti("u_bm1", cmd.bm[1]);
-            seti("u_ba1", cmd.ba[1]); seti("u_bb1", cmd.bb[1]);
+            if (upload_uniforms) {
+                seti("u_ca0", cmd.ca[0]); seti("u_cb0", cmd.cb[0]); seti("u_cc0", cmd.cc[0]); seti("u_cd0", cmd.cd[0]);
+                seti("u_aa0", cmd.aa[0]); seti("u_ab0", cmd.ab[0]); seti("u_ac0", cmd.ac[0]); seti("u_ad0", cmd.ad[0]);
+                seti("u_ca1", cmd.ca[1]); seti("u_cb1", cmd.cb[1]); seti("u_cc1", cmd.cc[1]); seti("u_cd1", cmd.cd[1]);
+                seti("u_aa1", cmd.aa[1]); seti("u_ab1", cmd.ab[1]); seti("u_ac1", cmd.ac[1]); seti("u_ad1", cmd.ad[1]);
+                seti("u_cycle", cmd.cycle);
+                seti("u_debug_mode",
+                     static_cast<int>((g_debug_flags.load(std::memory_order_relaxed) >> 3) & 3));
+                seti("u_show_alpha",
+                     (g_debug_flags.load(std::memory_order_relaxed) & 131072u) != 0 ? 1 : 0);
+                seti("u_persp", persp_correct_ ? 1 : 0);
+                // Blender (render mode) uniforms.
+                seti("u_force_blend", cmd.force_blend ? 1 : 0);
+                seti("u_blend_approx", cmd.blend_approx);
+                seti("u_combiner_cycles", cmd.combiner_cycles);
+                // Alpha compare and coverage. `u_cvg_range` is the attachment's
+                // step count: RT64 uses 65535 when the render target is the
+                // high-precision (RGBA16F) colour buffer and 255 otherwise.
+                seti("u_ac", cmd.acmp);
+                // RT64's alpha-dither seeds: the frame count and the draw's index
+                // (see the `dither_init_rand` port). Only G_AC_DITHER reads them.
+                glUniform1ui(uloc("u_dither_frame"),
+                             present_requests_.load(std::memory_order_relaxed));
+                glUniform1ui(uloc("u_dither_instance"), flushed_cmds_);
+                seti("u_cvg_x_alpha", cmd.cvg_x_alpha ? 1 : 0);
+                seti("u_cvg_dst", cmd.cvg_dst);
+                seti("u_alpha_blend", cmd.alpha_blend ? 1 : 0);
+                glUniform1f(uloc("u_cvg_range"),
+                            hp_fb_ ? 65535.0f : 255.0f);
+                seti("u_bp0", cmd.bp[0]); seti("u_bm0", cmd.bm[0]);
+                seti("u_ba0", cmd.ba[0]); seti("u_bb0", cmd.bb[0]);
+                seti("u_bp1", cmd.bp[1]); seti("u_bm1", cmd.bm[1]);
+                seti("u_ba1", cmd.ba[1]); seti("u_bb1", cmd.bb[1]);
 
-            glUniform4fv(uloc("u_prim"), 1, cmd.prim);
-            glUniform4fv(uloc("u_env"), 1, cmd.env);
-            glUniform4fv(uloc("u_fog_color"), 1, cmd.fog);
-            glUniform4fv(uloc("u_blend_color"), 1, cmd.blend_color);
-            glUniform1f(uloc("u_k4"), cmd.k4);
-            glUniform1f(uloc("u_k5"), cmd.k5);
-            glUniform3fv(uloc("u_key_center"), 1, cmd.key_center);
-            glUniform3fv(uloc("u_key_scale"), 1, cmd.key_scale);
+                glUniform4fv(uloc("u_prim"), 1, cmd.prim);
+                glUniform4fv(uloc("u_env"), 1, cmd.env);
+                glUniform4fv(uloc("u_fog_color"), 1, cmd.fog);
+                glUniform4fv(uloc("u_blend_color"), 1, cmd.blend_color);
+                glUniform1f(uloc("u_k4"), cmd.k4);
+                glUniform1f(uloc("u_k5"), cmd.k5);
+                glUniform3fv(uloc("u_key_center"), 1, cmd.key_center);
+                glUniform3fv(uloc("u_key_scale"), 1, cmd.key_scale);
+                seti("u_zclip", zclip);
+            }
 
             // One-shot: a draw whose evaluated combiner mux reads KEY_CENTER (B)
             // or KEY_SCALE (C) states itself and the key registers it reads, so
@@ -4750,36 +5013,38 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 // The RDP sampler state (RT64 RDPTile per unit). The shader
                 // samples with texelFetch and filters in fp32; `u_texf` selects
                 // the GL fixed-function sampler instead, for the A/B.
-                glUniform2f(uloc("u_tsize0"),
-                            cmd.tex_size[0][0], cmd.tex_size[0][1]);
-                glUniform2f(uloc("u_tsize1"),
-                            cmd.tex_size[1][0], cmd.tex_size[1][1]);
-                glUniform2f(uloc("u_torig0"),
-                            cmd.tex_origin[0], cmd.tex_origin[1]);
-                glUniform2f(uloc("u_torig1"),
-                            cmd.tex_origin1[0], cmd.tex_origin1[1]);
-                glUniform2i(uloc("u_tcm0"),
-                            cmd.tex_cms[0], cmd.tex_cmt[0]);
-                glUniform2i(uloc("u_tcm1"),
-                            cmd.tex_cms[1], cmd.tex_cmt[1]);
-                glUniform2i(uloc("u_tmask0"),
-                            cmd.tex_masks[0], cmd.tex_maskt[0]);
-                glUniform2i(uloc("u_tmask1"),
-                            cmd.tex_masks[1], cmd.tex_maskt[1]);
-                glUniform2f(uloc("u_twin0"),
-                            static_cast<float>(cmd.tex_win[0][0]),
-                            static_cast<float>(cmd.tex_win[0][1]));
-                glUniform2f(uloc("u_twin1"),
-                            static_cast<float>(cmd.tex_win[1][0]),
-                            static_cast<float>(cmd.tex_win[1][1]));
-                glUniform2f(uloc("u_tshift0"),
-                            cmd.tex_shift[0][0], cmd.tex_shift[0][1]);
-                glUniform2f(uloc("u_tshift1"),
-                            cmd.tex_shift[1][0], cmd.tex_shift[1][1]);
-                glUniform1i(uloc("u_tex_filter"), cmd.tex_filter);
-                glUniform1i(uloc("u_texf"), texf_);
-                glUniform1i(uloc("u_tex_persp"),
-                            cmd.tex_persp ? 1 : 0);
+                if (upload_uniforms) {
+                    glUniform2f(uloc("u_tsize0"),
+                                cmd.tex_size[0][0], cmd.tex_size[0][1]);
+                    glUniform2f(uloc("u_tsize1"),
+                                cmd.tex_size[1][0], cmd.tex_size[1][1]);
+                    glUniform2f(uloc("u_torig0"),
+                                cmd.tex_origin[0], cmd.tex_origin[1]);
+                    glUniform2f(uloc("u_torig1"),
+                                cmd.tex_origin1[0], cmd.tex_origin1[1]);
+                    glUniform2i(uloc("u_tcm0"),
+                                cmd.tex_cms[0], cmd.tex_cmt[0]);
+                    glUniform2i(uloc("u_tcm1"),
+                                cmd.tex_cms[1], cmd.tex_cmt[1]);
+                    glUniform2i(uloc("u_tmask0"),
+                                cmd.tex_masks[0], cmd.tex_maskt[0]);
+                    glUniform2i(uloc("u_tmask1"),
+                                cmd.tex_masks[1], cmd.tex_maskt[1]);
+                    glUniform2f(uloc("u_twin0"),
+                                static_cast<float>(cmd.tex_win[0][0]),
+                                static_cast<float>(cmd.tex_win[0][1]));
+                    glUniform2f(uloc("u_twin1"),
+                                static_cast<float>(cmd.tex_win[1][0]),
+                                static_cast<float>(cmd.tex_win[1][1]));
+                    glUniform2f(uloc("u_tshift0"),
+                                cmd.tex_shift[0][0], cmd.tex_shift[0][1]);
+                    glUniform2f(uloc("u_tshift1"),
+                                cmd.tex_shift[1][0], cmd.tex_shift[1][1]);
+                    glUniform1i(uloc("u_tex_filter"), cmd.tex_filter);
+                    glUniform1i(uloc("u_texf"), texf_);
+                    glUniform1i(uloc("u_tex_persp"),
+                                cmd.tex_persp ? 1 : 0);
+                }
                 ++samp_draws_;
                 if (cmd.tex_filter == 0) {
                     ++samp_point_;
@@ -4913,7 +5178,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
             }
-            seti("u_zclip", (cmd.kind == 0 && !cmd.z_source_prim && !cmd.no_near_clip) ? 1 : 0);
 
             // Interleave pos/uv/shade/w/z into the vertex buffer.
             float vbuf[6 * 10];
@@ -4931,6 +5195,29 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 vbuf[i * 10 + 9] = cmd.z[i];
             }
             glBufferData(GL_ARRAY_BUFFER, count * 10 * sizeof(float), vbuf, GL_DYNAMIC_DRAW);
+            // Take the writeback reference for the rows this draw will cover
+            // before it runs, so the reference is RDRAM as the CPU left it and
+            // not as this draw's pixels would make it after a writeback. The
+            // rows come from the same viewport mapping the band update below
+            // uses. One reference per guest row, not one hash per image: the
+            // image's byte range can contain the next framebuffer.
+            if (bound_fb != nullptr) {
+                const int vh = std::clamp(static_cast<int>(cmd.fb_height_px), 1,
+                                          bound_fb->height);
+                const int y_off = bound_fb->height - vh;
+                int wy_lo = 1 << 30, wy_hi = -1;
+                for (int i = 0; i < count; ++i) {
+                    const int wy = y_off + static_cast<int>(
+                        (cmd.pos[i * 2 + 1] + 1.0f) * 0.5f * static_cast<float>(vh));
+                    wy_lo = std::min(wy_lo, wy);
+                    wy_hi = std::max(wy_hi, wy);
+                }
+                if (wy_hi >= wy_lo) {
+                    reference_era_rows(*bound_fb, bound_fb_address,
+                                       bound_fb->height - 1 - wy_hi,
+                                       bound_fb->height - 1 - wy_lo);
+                }
+            }
             glDrawArrays(GL_TRIANGLES, 0, count);
             if (cmd.depth_probe) {
                 note_depth_probe(cmd, bound_fb);
@@ -4985,31 +5272,45 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                         bound_fb->exact_rects.push_back(r);
                     }
                 }
+                // The rows this draw actually covered, in the same window space
+                // the viewport above maps the NDC into. Using the target's own
+                // height here instead is wrong whenever the colour image is
+                // taller than the draw's screen (a 320x240 image in the 320x476
+                // target the title grew): the NDC spans -1..1 over 240 rows, but
+                // `(pos+1)/2 * 476` marks the whole 476-row target as drawn. The
+                // writeback then copied 476 rows from a 240-row image, over the
+                // next framebuffer's first 236 rows, which made that image's
+                // RDRAM hash stale and refused every later writeback of it (the
+                // scene-0x0D njpeg backdrop's first pass came out black).
+                const int row_vh = std::clamp(static_cast<int>(cmd.fb_height_px), 1,
+                                              bound_fb->height);
+                const int row_y_off = bound_fb->height - row_vh;
                 for (int i = 0; i < count; ++i) {
-                    const int wy = static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
-                                                    static_cast<float>(target_height));
-                    // A vertex on the target's outermost row is a draw one pixel
-                    // taller than the row count the target was sized for. The
+                    const int wy = row_y_off +
+                                   static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
+                                                    static_cast<float>(row_vh));
+                    // A vertex on the screen's outermost row is a draw one pixel
+                    // taller than the row count the screen was sized for. The
                     // writeback copies every row the draw touched, so a draw that
                     // reaches past the guest's colour image writes into whatever
                     // follows it in RDRAM. That is how the 640x480 publisher
                     // stills corrupted the next heap block (session 142), and it
                     // is invisible without this line. Bounded: only targets
                     // taller than 300 rows, 24 lines.
-                    if (target_height > 300 && (wy <= 0 || wy >= target_height - 1)) {
+                    if (bound_fb->height > 300 && (wy <= 0 || wy >= row_y_off + row_vh - 1)) {
                         static int edge_logged = 0;
                         if (edge_logged < 24) {
                             ++edge_logged;
                             OGRE_MILESTONE("GFX-EDGE",
                                            "draw kind=%d row=%d target=%dx%d fb=0x%06X siz=%u "
-                                           "vertices=%d first=(%.3f,%.3f)",
-                                           cmd.kind, wy, bound_fb->width, target_height,
-                                           cmd.fb_address, (unsigned)cmd.fb_siz, count,
-                                           cmd.pos[0], cmd.pos[1]);
+                                           "viewport=%d+%d vertices=%d first=(%.3f,%.3f)",
+                                           cmd.kind, wy, bound_fb->width, bound_fb->height,
+                                           cmd.fb_address, (unsigned)cmd.fb_siz, row_y_off,
+                                           row_vh, count, cmd.pos[0], cmd.pos[1]);
                         }
                     }
                     bound_fb->min_row = std::min(bound_fb->min_row, std::max(wy, 0));
-                    bound_fb->max_row = std::max(bound_fb->max_row, std::min(wy, target_height - 1));
+                    bound_fb->max_row = std::max(bound_fb->max_row, std::min(wy, bound_fb->height - 1));
                 }
                 bound_fb->last_write_seq = ++framebuffer_write_seq_;
                 // RT64 `FramebufferPair::addGameCall` counts the G_CD mode of
@@ -5177,7 +5478,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         // Presentation: show the VI's scanout buffer on the canvas.
         if (present) {
-            present_framebuffer(present_address);
+            present_framebuffer(present_address, present_vi_ok, present_vi_width,
+                                present_vi_height);
         }
 
         // Sampler census: which G_TF_* rules and masks the screens exercised.
@@ -5369,7 +5671,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // and the workload only exists so the presenter has something to show).
         // The pixels are all zero, so presenting that buffer from RDRAM is the
         // same as the RDP fill the native renderer issues.
-        request_present(fb_address, 2);
+        const ViSize size = vi_size();
+        request_present(fb_address, 2, size.width > 0 && size.height > 0, size.width,
+                        size.height);
     }
 
     void update_screen() override {
@@ -5387,7 +5691,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // mode still carries the next mode's serrate bit with `hStart = 0`, so
         // fbSize alone reads that state as a 320x952 image.
         const ViSize size = vi_framebuffer_size(*vi);
-        if (vi_visible(*vi) && size.width > 0 && size.height > 0) {
+        const bool vi_ok = vi_visible(*vi) && size.width > 0 && size.height > 0;
+        if (vi_ok) {
             const uint64_t packed = (static_cast<uint64_t>(size.width) << 32) |
                                     static_cast<uint32_t>(size.height);
             if (vi_scanout_.exchange(packed, std::memory_order_relaxed) != packed &&
@@ -5400,15 +5705,32 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                                vi->VI_V_START_REG, vi->VI_X_SCALE_REG, vi->VI_Y_SCALE_REG);
             }
         }
-        request_present(vi->VI_ORIGIN_REG, vi->VI_STATUS_REG);
+        request_present(vi->VI_ORIGIN_REG, vi->VI_STATUS_REG, vi_ok, size.width,
+                        size.height);
     }
 
     // Asks the browser main thread to show the framebuffer at `guest_address`
     // on the canvas at the next flush. Called from the gfx thread.
-    void request_present(uint32_t guest_address, unsigned vi_status) {
+    //
+    // The VI state travels with the request. The presenter must not pair this
+    // address with the size of a different mode: OB64 writes the next scene's
+    // framebuffer address and its 320x240 mode while the VI is still blanked (or
+    // still scanning the previous 640x476 mode), and the title's colour image is
+    // created at 320x476 because `target_height_px` takes the tallest height it
+    // has been asked for. Presenting that image with the 640x476 visible area
+    // samples rows 240..320, which the title never draws, and which hold whatever
+    // RDRAM had there. RT64 pushes a present for a blanked VI but has no colour
+    // target for it and clears the swap chain to black
+    // (`rt64_present_queue.cpp`, the `colorTarget == nullptr` arm), so the same
+    // frames are black natively.
+    void request_present(uint32_t guest_address, unsigned vi_status, bool vi_ok,
+                         int vi_width, int vi_height) {
         std::lock_guard<std::mutex> lock(mutex_);
         present_address_ = guest_address & 0x00FFFFFFu;
         vi_status_ = vi_status;
+        present_vi_ok_ = vi_ok;
+        present_vi_width_ = vi_width;
+        present_vi_height_ = vi_height;
         present_pending_ = true;
         ++present_requests_;
     }
@@ -5430,7 +5752,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // each wait costs up to one main-thread flush interval otherwise.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (draw_queue_.empty() && !present_pending_ && fb_writeback_pending_ == 0) {
+            if (draw_queue_.empty() && !present_pending_ &&
+                fb_writeback_pending_.load(std::memory_order_relaxed) == 0) {
                 sync_done_.store(request, std::memory_order_release);
                 return;
             }
@@ -5472,8 +5795,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 }
                 o += snprintf(buf + o, sizeof(buf) - o, " 0x%06X=%zu", addr, nz);
             }
-            OGRE_MILESTONE("GFX-FBSYNC", "sync %u: waited=%lldms ramNonBlack:%s",
-                           request, (long long)ms, buf);
+            // The njpeg readback's own choice of source, from the game's state
+            // object (`0x8019A680` -> state[0x64]), next to the destination, the
+            // RSP input buffer and the row size each pass copies. The four
+            // passes copy different sub-rectangles out of a framebuffer into
+            // four fixed heap buffers, so a pass whose source and destination
+            // disagree with the draws is visible here and not in a screenshot.
+            const uint32_t state_ptr =
+                (rdram_ != nullptr) ? rd32(rdram_ + 0x19A680) : 0;
+            uint32_t src = 0, dst = 0, in = 0;
+            int rows = 0, cols = 0;
+            if (state_ptr >= 0x80000000u && state_ptr < 0x80800000u) {
+                const uint32_t off = state_ptr & 0x1FFFFFFFu;
+                src = rd32(rdram_ + off + 0x64);
+                dst = rd32(rdram_ + off + 0x70);
+                in = rd32(rdram_ + off + 0x68);
+                cols = n64h(rdram_ + off, 0x78);
+                rows = n64h(rdram_ + off, 0x7A);
+            }
+            OGRE_MILESTONE("GFX-FBSYNC",
+                           "sync %u: waited=%lldms ramNonBlack:%s state=0x%08X src=0x%08X "
+                           "dst=0x%08X njpeg_in=0x%08X copy=%dx%d",
+                           request, (long long)ms, buf, state_ptr, src, dst, in, cols, rows);
         }
     }
 
@@ -5725,9 +6068,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned wide_logged_ = 0;
     unsigned wide_task_ = 0;   // task whose wide draws the log above covers
     unsigned blit_logged_ = 0;
-    unsigned s2d_logged_ = 0;
+    int s2d_logged_task_ = -1;   // task whose first S2DEX2 macroblock was logged
+    uint64_t fb_batch_seq_ = 0;  // one per flush that executes draws
     unsigned framebuffers_logged_ = 0;
     unsigned framebuffer_readbacks_ = 0;
+    unsigned stale_writebacks_ = 0;   // [GFX-FBWRITE-STALE] lines
     unsigned flushed_cmds_ = 0;
     unsigned gl_errors_logged_ = 0;
     unsigned flush_count_ = 0;
@@ -5925,8 +6270,18 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // gfx thread and consumed by flush_commands() on the main thread.
     uint32_t present_address_ = 0;
     bool present_pending_ = false;
+    // The VI mode that produced the pending present. The size must travel with
+    // the address: a scene switch writes the next buffer while the VI is still
+    // blanked or in the previous mode, and the presenter must not pair that
+    // address with the previous mode's visible area (see present_framebuffer).
+    bool present_vi_ok_ = false;
+    int present_vi_width_ = 0;
+    int present_vi_height_ = 0;
     unsigned vi_status_ = 0;
-    unsigned present_requests_ = 0;
+    // Incremented by the gfx thread (request_present), read by the main-thread
+    // presenter and the dither uniform, so it is atomic like the rest of the
+    // request state.
+    std::atomic<unsigned> present_requests_{0};
     bool canvas_dirty_ = false;   // a draw went straight to the canvas
     GLuint present_tex_ = 0;      // canvas-sized, for a scanout buffer with no FBO
     unsigned presents_logged_ = 0;
@@ -5943,10 +6298,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     std::atomic<uint32_t> sync_done_{0};
     std::atomic<unsigned> sync_timeouts_{0};
     // Draws that landed in a colour image whose pixels are not in RDRAM yet.
-    // Guarded by mutex_: send_dl() sets it when it publishes draws, the main
-    // thread clears it after a writeback, and sync_framebuffers() reads it to
-    // decide whether it has to wait at all.
-    uint32_t fb_writeback_pending_ = 0;
+    // send_dl() sets it when it publishes draws and the main thread clears it
+    // after a writeback; sync_framebuffers() reads it to decide whether it has
+    // to wait at all. Atomic because the main thread clears it outside the
+    // renderer mutex (the mutex no longer covers the GL work).
+    std::atomic<uint32_t> fb_writeback_pending_{0};
     static constexpr int kSyncTimeoutMs = 1000;
     // The largest render target this renderer will allocate a side for. The N64
     // tops out at 640x480; the cap keeps a corrupt G_SETCIMG from asking for a
@@ -6225,7 +6581,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 break;
             }
             if (d.fb_address != 0) {
-                fb_writeback_pending_ = 1;
+                fb_writeback_pending_.store(1, std::memory_order_relaxed);
             }
             draw_queue_.push_back(std::move(d));
             ++draws_recorded_;
@@ -7639,6 +7995,16 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
     // RT64 `RDP::loadYUVTileToTMEM`: a YUV16 tile is de-interleaved into the
     // luma plane in TMEM's upper half and the U/V pairs in the lower half.
+    //
+    // The source word is `[U, Y(even), V, Y(odd)]` in guest/logical byte order
+    // (mupen64plus-rsp-hle `GetUYVY`; verified from a live macroblock dump in
+    // docs/HANDOFF-2026-09-15-session51.md §6). RT64 reads those same bytes as
+    // `word[0..3]` from its RDRAM pointer, which is native byte order, so its
+    // `word[2]`/`word[0]`/`word[3]`/`word[1]` are logical 1/3/0/2. `byte()` here
+    // already applies the `^ 3` guest permutation, so index it by the logical
+    // positions instead: reading it with RT64's raw indices swaps luma with
+    // chroma and paints the backdrop green/magenta (the njpeg macroblock's
+    // bytes look like `7A 28 9A 27` = U 0x7A, Y 0x28, V 0x9A, Y 0x27).
     void tmem_load_yuv(const LoadSource& source, uint32_t tex_start, uint32_t tex_stride,
                        uint32_t tmem_start, uint32_t tmem_stride, uint32_t rows) {
         const uint32_t words_per_row = tmem_stride / 2;
@@ -7647,10 +8013,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             const uint32_t row_xor = ((row & 1) != 0) ? 4u : 0u;
             for (uint32_t w = 0; w < words_per_row; ++w) {
                 const uint32_t word = tex_start + row * tex_stride + w * 4;
-                const uint8_t y_even = source.byte(word + 2);
-                const uint8_t y_odd = source.byte(word + 0);
-                const uint8_t uu = source.byte(word + 3);
-                const uint8_t vv = source.byte(word + 1);
+                const uint8_t uu = source.byte(word + 0);
+                const uint8_t y_even = source.byte(word + 1);
+                const uint8_t vv = source.byte(word + 2);
+                const uint8_t y_odd = source.byte(word + 3);
                 const uint32_t luma = (((row_base + w * 2) ^ row_xor) | 0x800u) & 0xFFFu;
                 const uint32_t chroma = ((row_base + w * 2) ^ row_xor) & 0xFFFu;
                 tmem_[luma + 0] = y_even;
@@ -7659,6 +8025,34 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 tmem_[(chroma + 1) & 0xFFFu] = vv;
             }
         }
+    }
+
+    // OGRE_YUV_TRACE: the first six YUV16 tile loads, with the source bytes they
+    // read. The njpeg background path is the only producer of a YUV16 tile, and
+    // it stores one U/V pair per two texels, so the source word pattern says
+    // whether the load reads the game's interleaved layout or another plane.
+    // Printed after the load so the bytes are the ones that landed in TMEM.
+    void trace_yuv_load(const RenderState& st, const TileState& lt, const LoadSource& source,
+                        uint32_t tex_start, uint32_t bytes_per_row, uint32_t rows,
+                        uint32_t tmem_start) {
+        static const bool on = getenv("OGRE_YUV_TRACE") != nullptr;
+        static unsigned n = 0;
+        if (!on || n >= 6) {
+            return;
+        }
+        ++n;
+        char src[3 * 24 + 1];
+        int o = 0;
+        for (uint32_t i = 0; i < 24 && o + 4 < static_cast<int>(sizeof(src)); ++i) {
+            o += snprintf(src + o, sizeof(src) - static_cast<size_t>(o), "%02X ",
+                          source.byte(tex_start + i));
+        }
+        OGRE_MILESTONE("GFX-YUVLOAD",
+                       "load %u: addr=0x%06X rowbytes=%u rows=%u tmem=%u line=%u fmt=%u siz=%u "
+                       "src[0..23]=%s k=%d,%d,%d,%d",
+                       n, tex_start, bytes_per_row, rows, tmem_start, (unsigned)lt.line,
+                       (unsigned)lt.fmt, (unsigned)lt.siz, src, st.convert_k[0], st.convert_k[1],
+                       st.convert_k[2], st.convert_k[3]);
     }
 
     // Runs one of G_LOADTILE / G_LOADBLOCK / G_LOADTLUT into TMEM from the
@@ -7735,6 +8129,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (!rgba32 && lt.fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
                 tmem_load_yuv(source, tex_start, bytes_per_row, tmem_start,
                               static_cast<uint32_t>(lt.line) << 3, 1);
+                trace_yuv_load(st, lt, source, tex_start, bytes_per_row, 1, tmem_start);
             } else {
                 tmem_copy(source, tex_start, bytes_per_row, tmem_start,
                           static_cast<uint32_t>(lt.line) << 3, word_count, 1, rgba32, false, lrt,
@@ -7759,6 +8154,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             if (!rgba32 && lt.fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
                 tmem_load_yuv(source, tex_start, bytes_per_row, tmem_start,
                               static_cast<uint32_t>(lt.line) << 3, rows);
+                trace_yuv_load(st, lt, source, tex_start, bytes_per_row, rows, tmem_start);
             } else {
                 tmem_copy(source, tex_start, bytes_per_row, tmem_start,
                           static_cast<uint32_t>(lt.line) << 3, words_per_row, rows, rgba32, false,
@@ -8050,6 +8446,44 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             ++tex_decodes_;
         }
         g_load_done.fetch_add(1, std::memory_order_relaxed);
+
+        // OGRE_YUV_TRACE: what the YUV decode produced, side by side with the
+        // TMEM bytes it read. A macroblock whose chroma alternates per texel
+        // says the load's source layout is not the interleaved one the RDP's
+        // YUV16 addressing assumes; a correct block's U/V vary only every two
+        // texels and stay near-constant across a 16x16 macroblock.
+        {
+            static const bool yuv_trace_on = getenv("OGRE_YUV_TRACE") != nullptr;
+            static unsigned yuv_decoded = 0;
+            if (yuv_trace_on && yuv_decoded < 6 && t.fmt == gbi::IM_FMT_YUV &&
+                t.siz == gbi::IM_SIZ_16b && pixels->size() >= 16 * 4) {
+                ++yuv_decoded;
+                const uint32_t address = static_cast<uint32_t>(t.tmem) << 3;
+                const uint32_t stride = static_cast<uint32_t>(t.line) << 3;
+                auto px = [&](int index) {
+                    return std::array<int, 3>{(*pixels)[index * 4 + 0], (*pixels)[index * 4 + 1],
+                                              (*pixels)[index * 4 + 2]};
+                };
+                const auto p0 = px(0), p1 = px(1), p16 = px(16);
+                OGRE_MILESTONE("GFX-YUVDEC",
+                               "decode %u: %dx%d tmem=%u line=%u stride=%u addr=0x%06X "
+                               "tmemrow0[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X "
+                               "luma=(%02X %02X) chroma=(%02X %02X) rgb0=(%d,%d,%d) "
+                               "rgb1=(%d,%d,%d) rgb@row1=(%d,%d,%d) decodes=%u hits=%u",
+                               yuv_decoded, w, h, (unsigned)t.tmem, (unsigned)t.line,
+                               (unsigned)stride, address, tmem_[address & 0xFFF],
+                               tmem_[(address + 1) & 0xFFF], tmem_[(address + 2) & 0xFFF],
+                               tmem_[(address + 3) & 0xFFF], tmem_[(address + 4) & 0xFFF],
+                               tmem_[(address + 5) & 0xFFF], tmem_[(address + 6) & 0xFFF],
+                               tmem_[(address + 7) & 0xFFF],
+                               tmem_[(address | 0x800u) & 0xFFFu],
+                               tmem_[(address + 1u | 0x800u) & 0xFFFu], tmem_[address & 0xFFF],
+                               tmem_[(address + 1) & 0xFFF], p0[0], p0[1], p0[2], p1[0], p1[1],
+                               p1[2], p16[0], p16[1], p16[2],
+                               (unsigned)tex_decodes_.load(std::memory_order_relaxed),
+                               (unsigned)tex_decode_hits_.load(std::memory_order_relaxed));
+            }
+        }
 
         // The GL texture is exactly its decoded RGBA8 bytes, its size, and the
         // wrap modes set on the texture object at creation. Keying on those
@@ -9433,15 +9867,23 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         DrawCmd cmd;
         cmd.kind = 2;
         record_state(cmd, st, texture_available(st));
-        if (s2d_logged_ < 3) {
-            ++s2d_logged_;
+        // One line per S2DEX2 task (the first macroblock it draws), not the first
+        // three of the run: the four njpeg passes are four tasks, and which
+        // colour image each one renders into is what says whether the game's
+        // CPU readback copies the buffer that was drawn. RT64's `OGRE_S2D_TRACE`
+        // prints the same `cimg` field.
+        const unsigned task_now = task_count_.load(std::memory_order_relaxed);
+        if (s2d_logged_task_ != static_cast<int>(task_now)) {
+            s2d_logged_task_ = static_cast<int>(task_now);
             OGRE_MILESTONE("GFX-S2D",
-                           "obj rect fmt=%u siz=%u img=%.0fx%.0f stride=%u adrs=%u mtx=(%.1f,%.1f,%.4f,%.4f) "
-                           "rect=(%.1f,%.1f)-(%.1f,%.1f) textured=%d key=0x%llX texaddr=0x%08X",
-                           (unsigned)s.imageFmt, (unsigned)s.imageSiz, imageW, imageH,
+                           "task %u obj rect fmt=%u siz=%u img=%.0fx%.0f stride=%u adrs=%u "
+                           "mtx=(%.1f,%.1f,%.4f,%.4f) rect=(%.1f,%.1f)-(%.1f,%.1f) cimg=0x%06X "
+                           "cimg_w=%u textured=%d key=0x%llX texaddr=0x%08X",
+                           task_now, (unsigned)s.imageFmt, (unsigned)s.imageSiz, imageW, imageH,
                            (unsigned)s.imageStride, (unsigned)s.imageAdrs, mtxX, mtxY, bsX, bsY,
-                           x0, y0, x1, y1, cmd.textured ? 1 : 0,
-                           (unsigned long long)cmd.tex_key, t.image_address);
+                           x0, y0, x1, y1, st.cimg_address, (unsigned)st.cimg_width,
+                           cmd.textured ? 1 : 0, (unsigned long long)cmd.tex_key,
+                           t.image_address);
         }
         queue_triangles(ctx, cmd, data, 6);
         st.active_tile = saved_tile;

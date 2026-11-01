@@ -126,6 +126,17 @@ buffers, not from this render.
   previous screen" always looked like a timing bug.
 * **RT64's scratch word `0x807FFC08` is not a valid readback source.** It is only
   re-set by a YUV-texture-then-colour-image pair and is never cleared.
+* **The browser's framebuffer writeback is deferred, so its RDRAM guard is per
+  row** (session 207). The game's three framebuffers are `0x25800` apart, and a
+  320x476 target contains the next one inside its byte range; a whole-image hash
+  let that neighbour's writeback drop the njpeg pass that had drawn rows 0..239,
+  and the backdrop's top-left quadrant came out black. `GlFramebuffer::
+  era_row_hash` takes one reference per guest row before each draw into it and
+  `readback_framebuffer` skips only a row the CPU changed after its last draw.
+  The browser repro is `node debug/probes/scene.cjs --route cathedral-skip` (the
+  `0x025C00` target) or `--route cathedral-birth`; see
+  `docs/HANDOFF-2026-10-31-session207.md`.
+
 * **The readback is ordered by the game's DP-completion wait**
   (`events.cpp:432`), not by `sp_complete()`, and `ogre_sync_framebuffers()`
   forces the RDP's pixels back to RDRAM before the copy. The session-50

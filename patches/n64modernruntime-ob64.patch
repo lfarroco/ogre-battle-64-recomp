@@ -1717,6 +1717,31 @@ index ea1c49b..09f8dd8 100644
 +        }
      }
  }
+diff --git a/librecomp/src/rsp.cpp b/librecomp/src/rsp.cpp
+index 1cb3f6a..1f2539c 100644
+--- a/librecomp/src/rsp.cpp
++++ b/librecomp/src/rsp.cpp
+@@ -1,4 +1,5 @@
+ #include <cassert>
++#include <mutex>
+ #include <cstring>
+ #include <cinttypes>
+ 
+@@ -32,8 +33,14 @@ void recomp::rsp::constants_init() {
+     }
+ }
+ 
++// The recompiled microcodes share the DMEM image above. The task thread runs
++// them one at a time; the browser build also runs audio tasks on the submitting
++// game thread (events.cpp), so serialize the whole load/execute/exit sequence.
++static std::mutex rsp_task_mutex;
++
+ // Runs a recompiled RSP microcode
+ bool recomp::rsp::run_task(uint8_t* rdram, const OSTask* task) {
++    std::lock_guard<std::mutex> task_lock{rsp_task_mutex};
+     assert(rsp_callbacks.get_rsp_microcode != nullptr);
+     RspUcodeFunc* ucode_func = rsp_callbacks.get_rsp_microcode(task);
+ 
 diff --git a/librecomp/src/sp.cpp b/librecomp/src/sp.cpp
 index ae0f44f..1f7bbd5 100644
 --- a/librecomp/src/sp.cpp
@@ -2164,7 +2189,7 @@ index 3198be0..fd92d59 100644
 +}
 +
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index 2f1cfb5..88a422a 100644
+index 2f1cfb5..583dc7e 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -8,6 +8,7 @@
@@ -2430,7 +2455,7 @@ index 2f1cfb5..88a422a 100644
      }
  }
  
-@@ -550,10 +684,16 @@ extern "C" void osViSetYScale(float scale) {
+@@ -550,16 +684,48 @@ extern "C" void osViSetYScale(float scale) {
  }
  
  extern "C" PTR(void) osViGetNextFramebuffer() {
@@ -2447,6 +2472,38 @@ index 2f1cfb5..88a422a 100644
      return events_context.vi.get_cur_state()->framebuffer;
  }
  
+ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+     OSTask* task = TO_PTR(OSTask, task_);
+ 
++#if defined(__EMSCRIPTEN__)
++    // Browser: an audio task completes with an external message that only a
++    // game thread delivers (see mesgqueue.cpp). The audio thread's next buffer
++    // waits for that message, so the buffer rate follows the frame rate: the
++    // mission scene 0x03 produced 40-57 buffers/s at ~30 fps while the 32 kHz
++    // DAC needs 58, and 1.5-30% of the worklet's output was underrun silence.
++    // Run the audio task on the thread that submits it, so sp_complete() is
++    // queued before the game's osRecvMesg and the audio thread can refill the
++    // 52 ms AI cushion in one visit. Graphics tasks stay on the gfx thread and
++    // other RSP tasks stay on the task thread. The mutex in
++    // `recomp::rsp::run_task` serializes the shared DMEM image against njpeg.
++    // `OGRE_AUDIO_INLINE=0` restores the task-thread path for an A/B.
++    static const bool inline_audio = [] {
++        const char* v = getenv("OGRE_AUDIO_INLINE");
++        return v == nullptr || v[0] != '0';
++    }();
++    if (task->t.type == M_AUDTASK && inline_audio) {
++        if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
++            fprintf(stderr, "Failed to execute inline audio task\n");
++            ULTRAMODERN_QUICK_EXIT();
++        }
++        sp_complete();
++        return;
++    }
++#endif
++
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+         events_context.action_queue.enqueue(SpTaskAction{ *task });
 diff --git a/ultramodern/src/function_trace.cpp b/ultramodern/src/function_trace.cpp
 new file mode 100644
 index 0000000..786872e

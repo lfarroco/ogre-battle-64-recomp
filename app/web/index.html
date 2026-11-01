@@ -225,6 +225,31 @@
   }
   .screen { position: relative; background: #000; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.9); }
 
+  /* Shown by app/web/web.js only while the browser keeps the AudioContext
+     suspended (autoplay policy). It is a descendant of .screen, so it stays
+     visible in fullscreen, and its click is the gesture that starts audio. */
+  .sound-hint {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    z-index: 30;
+    transform: translateX(-50%);
+    appearance: none;
+    border: 1px solid rgba(231, 200, 121, 0.45);
+    border-radius: 999px;
+    padding: 7px 14px;
+    background: rgba(10, 9, 7, 0.86);
+    color: var(--gold-bright);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+  .sound-hint:hover { border-color: var(--gold-bright); background: rgba(24, 20, 13, 0.92); }
+  .sound-hint:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 2px; }
+
   /* The renderer sets the CSS box with emscripten_set_element_css_size() on
      every VI mode change. The 640x480 here is only the initial 2x box, and the
      1px border is expected by tools/web_frame_cmp.py. No border radius: the

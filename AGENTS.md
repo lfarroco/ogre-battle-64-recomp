@@ -175,6 +175,19 @@ wrong half of a function. Check these first.
     log and the scene timeline. Routes are data in the probe; add one instead of
     writing another throwaway Playwright script. See
     `docs/guides/web-probes.md` → "Capturing a screen".
+  - `debug/probes/audio.cjs` — measure the browser's audio in two places: the
+    game's PCM in the wasm ring (a 25 ms watcher, because one 552-frame buffer
+    drains in 17 ms) and the worklet's own output levels (`ogreAudio.levels()`,
+    accumulated on the audio thread after the gain and mute). It also requires
+    mute to be silent while the ring keeps draining. Audio is frame-paced, and
+    headless SwiftShader slows the frames to 2-3 buffers/s; use `--headed` for
+    the real rate. See `docs/guides/web-probes.md` → "The audio check".
+  - In the browser, `Module._ogre_guest_rdram(0)` reads guest RDRAM from the page
+    and `Module._ogre_debug_threads()` dumps the call chains, running queue and
+    scheduler ring. Use them when the page still responds but the game stops
+    drawing: the canvas keeps the last frame and `tasks=` stops advancing. See
+    `docs/guides/web-probes.md` → "When the page keeps responding but the game
+    stops drawing". Session 202 read the scene-0x02 njpeg fault this way.
 - **For "what is in RAM at the moment X happens", use the live console, and not a
   bounded run's exit dump.** An exit dump is always too late (session 56). The
   console is off unless the run asks for it, because a command writes guest RAM:

@@ -83,6 +83,8 @@ node debug/probes/fbtex.cjs --scenes 0x04,0x0b --secs 20  # framebuffer-as-textu
 node debug/probes/gamepad.cjs --secs 14               # a pad must reach N64 controller 1
 node debug/probes/textures.cjs --attempts 3 --secs 60 # decoded tile images
 node debug/probes/spritecheck.cjs --out sprite        # one sprite vs its textures
+node debug/probes/audio.cjs                           # game PCM in the ring and out of the worklet
+node debug/probes/audio.cjs --secs 300 --query 'OGRE_SCENE=tutorial'  # another screen's audio
 node debug/probes/rdram.cjs --query 'OGRE_RAM_KEY_AT_MS=52000&OGRE_RAM_KEY_FULL=1'  # guest RDRAM out of the wasm FS
 node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 ```
@@ -98,6 +100,16 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `shots.cjs` | canvas PNG series + per-frame pixel counts | a series was captured |
 | `intro-capture.cjs` | one canvas PNG per `--interval-ms` (default 1000) from the first scene, with `nonBlack / colourful / white` per frame, the frame's scene id, and the scene timeline; retries an idle boot | a series was written (exit 2: the game never drew) |
 | `fps.cjs` | `tasks=` delta over a window | a rate was measured |
+
+`intro-capture.cjs` waits for the page's `(present 1)` line before it starts.
+The presenter prints the `(present N)` suffix only for `N <= 12` or a multiple of
+300, and under host load the first main-thread flush can happen after more than
+12 VI updates, so that line can be missing and every attempt times out waiting
+for it. Session 206 hit this on three attempts at load 7-8 while the same build
+reached the title normally. A scene-armed capture avoids the dependency: boot
+with the harness, wait for `[scene] id=0x0009` (or another id), then sample the
+canvas on a timer.
+
 | `vi.cjs` | `[vi-debug] retrace/swap`, `[snap]`, tasks/s | a rate was measured |
 | `stats.cjs` | full `#gfxstats` / `#gfx-status` / milestone dump | (always; read the files) |
 | `diag.cjs` | main-thread heartbeat + `Module.print` rate + wedge forensics | (always; read the files) |
@@ -134,12 +146,39 @@ The built-in routes are:
 | `mission-briefing` | scene `0x0003`, Castle Burgund | `OGRE_SAVE=assets/escort_suspend.bin`, forced title, URL taps `title:start:6,0x12:a:6` |
 | `tutorial-field` | scene `0x0003`, Jangurri practice field | natural boot to the title, `Enter`, `ArrowDown`, `Enter` (tutorial), then one `KeyX` (A) per 1.4 s until the scene line says `0x0003` |
 | `tutorial` | scene `0x0017` | `OGRE_SCENE=tutorial` |
+| `cathedral` | scene `0x000D`, the New Game cathedral dialogue | URL taps `title:start:6,title:a:1` (menu, New Game), then wait for the `[GFX-S2D-CENSUS]` line that marks the njpeg macroblock task, then `settle` |
+| `cathedral-birth` | scene `0x000D`, the second visit (date of birth) | as `cathedral`, then one `KeyX` per 1.4 s until scene `0x0007`; the page's scene taps press START once and A eight times on the form, then the route waits for the *second* `0x000D` |
+| `cathedral-skip` | scene `0x000D`, the first assembly with A pressed through the movie | scene taps `title:start:6,title:a:1,0x0D:a:8`; this run's A presses can leave the other game framebuffer displayed, which makes the assembly target `0x025C00` |
+| `name-entry` | scene `0x0007`, the natural name form | as `cathedral-birth`, but stops at the form; the START+A taps open the `Yes/No` prompt |
 
 A route is data in `ROUTES` at the top of the probe: `query` (the page's OGRE
 knobs), `scene` (the line to wait for), `settle` (ms after that line) and `steps`
-(`waitScene`, `sleep`, `press`, `pressUntilScene`). Add a route there instead of
-writing a new script; `--scene`/`--query` cover one-off screens without touching
-the table.
+(`waitScene`, `waitLog`, `sleep`, `press`, `pressUntilScene`). Add a route there
+instead of writing a new script; `--scene`/`--query` cover one-off screens
+without touching the table.
+
+`waitLog` waits for a page-log line (`window.ogreLog.find`) and is the arrival
+clock for a screen that no scene line marks. The cathedral is the example: its
+scene line (`0x000D`) arrives when the opening movie starts, and the backdrop is
+drawn about 80 s later, after the movie and the "Ischka Military Academy" card.
+`waitScene` reads the dispatcher's own id from
+`Module._ogre_web_active_scene()` and only falls back to the `[scene]` log. The
+page log is a 20000-line ring, and the `[rsp]` task lines fill it in about a
+minute, so a long route that polled the log would stop seeing scene lines; the
+export keeps `cathedral-birth`'s second visit observable. `--log-cap N` raises
+the ring for a run whose later `GFX-*` lines are needed in `-log.txt`.
+
+```sh
+# the cathedral backdrop (njpeg + S2DEX2), captured after the macroblock task
+node debug/probes/scene.cjs --route cathedral --repeat 3 --repeat-gap 10000 \
+    --points 160,120 --out /tmp/cathedral
+
+# the second cathedral visit (date of birth): needs the whole opening, the
+# name form and the second assembly
+node debug/probes/scene.cjs --route cathedral-birth --settle 15000 --repeat 3 \
+    --repeat-gap 5000 --points '160,60;160,150' --log-cap 300000 \
+    --out /tmp/cathedral-birth
+```
 
 ```sh
 # the practice field, normal and TEXEL0 raw, sampling the grass at N64 (12,160)
@@ -167,6 +206,9 @@ Options that matter:
 - `--attempts` (default 3) re-boots the page when a boot lands on the idle
   trajectory. Exit 2 means every attempt missed the scene; the per-attempt logs
   are written as `<prefix>-log-attemptN.txt`.
+- `--log-cap N` sets `window.OGRE_LOG_CAP` before the page loads. The default
+  ring is 20000 lines; the cathedral route needs 300000 to keep the second
+  assembly's `[GFX-FBSYNC]`/`[GFX-FBWRITE-STALE]` lines.
 
 Output, one run: `<prefix>-<tag>.png`, `<prefix>-samples.json` (when `--points`
 is given), `<prefix>-log.txt` (the page log, including the `[scene]` timeline and
@@ -309,6 +351,95 @@ pad pass writing slot 0 and the keyboard pass writing it before it, a pad made
 the keyboard dead. `Module._ogre_input_debug(slot)` replies `0xFFFF` for a slot
 with no connected device and the button mask otherwise.
 
+### The audio check
+
+`audio.cjs` measures the two halves of the browser's audio path separately, so a
+silent page can be attributed to the game or to the page.
+
+1. **The ring** (`app/src/web_platform.cpp`): `ogre_audio_state_ptr()` and
+   `ogre_audio_ring_ptr()` give the page a view of `head`, `tail`, the game's
+   sample rate and the interleaved int16 stereo ring. The probe starts a 25 ms
+   watcher in the page that keeps the peak and RMS of everything the game
+   queues. A single poll would miss the data: the worklet drains a 552-frame
+   buffer in about 17 ms.
+2. **The output**: `window.ogreAudio.levels()` asks the processor for the peak,
+   RMS and frame count of everything it wrote since the previous call. The
+   accumulator runs in `process()` on the audio thread, after the resample, the
+   VOLUME gain and the SOUNDS mute, and resets on each reply. Measuring there
+   avoids two traps in a headless run: an `AnalyserNode` only keeps 42 ms of
+   history for a buffer that plays for 17 ms, and the main thread's timers are
+   throttled (the analyser version sampled three times in a second). The probe
+   calls `levels()` once to reset, waits on the Node side, then calls it again
+   for the window. The reply also carries `underruns` (runs of starved output)
+   and `underrunFrames` (output frames written as silence). `frames` counts
+   both channels, so the starved share is `underrunFrames / (frames / 2)`.
+
+It then mutes with `window.ogreAudio.setEnabled(false)` and requires silence
+while `tail` keeps advancing, and unmutes and requires nonzero output again.
+
+The task rate is frame-paced: the game's audio thread generates one 552-frame
+buffer after each RSP completion, and a completion is delivered only while a
+game thread is blocked or yielding. A low frame rate therefore lowers the
+buffer rate. Headless Chromium renders through SwiftShader, so its 3D frames
+take hundreds of milliseconds and the title produces only 2-3 audio buffers/s;
+that is the harness, not the page. Run `--headed` on a machine with GPU
+rendering for the real rate (57.4 audio tasks/s and 31 758 ring frames/s at the
+title on ANGLE Metal). The ring and output levels are still valid in either
+mode.
+
+The mission screen showed the pacing problem. At scene `0x0003` the game
+produced 40.8-57.4 buffers/s against the 58 the 32 kHz DAC needs, depending on
+host load, and the worklet wrote 1.5-30% of its output as underrun silence. The
+title and the tutorial practice field measured 57-58 buffers/s and 0-3%. The
+page was not the cause in either case: the game was generating fewer frames of
+audio than playback consumed. Native has the same frame-paced audio thread
+(`app/src/sdl_platform.cpp` queues with `SDL_QueueAudio` and reports
+`SDL_GetQueuedAudioSize()/2` to the same 52 ms `audio_dma_busy` cushion), and
+retail renders the mission at 60 fps (session 199), so it reaches 58 buffers/s.
+
+Session 205 changed the browser runtime to run `M_AUDTASK` on the submitting
+thread, under a mutex around the shared RSP DMEM image. The completion is queued
+before the game's `osRecvMesg`, so the audio thread refills the 52 ms cushion in
+one visit. The mission now measures 57.8 buffers/s and 0.1-0.4% underrun, and the
+tutorial field 58.0/s and 0%. `OGRE_AUDIO_INLINE=0` restores the task-thread path
+for an A/B. A 30 s cathedral capture showed the backdrop still assembling; at a
+60 s settle it is complete, so that was the fade-in and assembly time, not a
+lost njpeg completion.
+
+A mission measurement needs the save and the tap schedule. `--wait-scene <id>`
+holds the ring watch and the output measurement until the page's `[scene]` line
+reaches that id; without it the probe measures the title's music while the
+mission is still loading.
+
+```sh
+node debug/probes/audio.cjs --headed --secs 180 --wait-scene 0x0003 \
+  --query 'OGRE_SAVE=assets/escort_suspend.bin&OGRE_SCENE=title&OGRE_TAP_MS=2000&OGRE_TAP_SCENE_BUTTON=title:start:6,0x12:a:6' \
+  --out /tmp/audio-mission
+# scene 0x0003 after 40.7 s
+# ring: peak 563, rms 134.7, rate 32000 Hz, ...
+# output: peak 0.4579, rms 0.1185
+# underrun: 0.1% of 240128 output frames (241 frames, 1 run)
+```
+
+```sh
+node debug/probes/audio.cjs --out /tmp/audio
+# ring: peak 2073, rms 659.0, rate 32000 Hz, 1463 nonzero samples, max buffered 2038 frames
+# context: running at 48000 Hz, worklet connected, sounds on
+# output: peak 0.0989, rms 0.0051
+# underrun: 0.0% of 240000 output frames (0 frames, 0 runs)
+# muted:  peak 0.0000 (drain 2576 frames)
+# unmuted again: peak 0.2451
+# AUDIO OK
+```
+
+The probe launches Chromium with `--autoplay-policy=no-user-gesture-required`
+(through `harness.launch`'s `browserArgs`) so a headless run does not need a
+click; in a real browser the page's first pointer or key event resumes the
+context (`installAudioGesture` in `app/web/web.js`). Exit 0 means the ring, the
+output, the mute and the unmute all passed; exit 2 means no nonzero PCM arrived
+within `--secs` (default 180) - the game generates audio with its frame pump, so
+a stalled boot produces none.
+
 ### Reading the pixel counts
 
 `#game-canvas` has a 1 px CSS border, and a canvas screenshot includes it. The
@@ -345,6 +476,37 @@ capture").
 Each probe also writes `<prefix>-result.json` with its machine-readable verdict
 (`diag.cjs` writes a live trace instead — it characterises a run rather than
 scoring it).
+
+## When the page keeps responding but the game stops drawing
+
+A wasm trap on a game thread kills that thread without stopping the browser main
+thread: the canvas keeps the last frame (often black), the `#gfxstats` counter
+stops advancing, and no `pageerror` reaches the page log until the worker's
+exception is forwarded. Read the state and the thread chains from the page
+before closing it:
+
+```js
+const base = Module._ogre_guest_rdram(0) >>> 0;   // guest RDRAM base
+const dv = new DataView(Module.HEAPU8.buffer);
+const word = (a) => dv.getUint32(base + (a & 0x1FFFFFFF), true);
+const half = (a) => dv.getUint16(base + ((a & 0x1FFFFFFF) ^ 2), true);
+const state = word(0x8019A680);                    // scene-0x0D/0x02 engine state
+const byte = (a) => Module.HEAPU8[base + ((a & 0x1FFFFFFF) ^ 3)];
+console.log({ state, pass: byte(state + 0x7E), scene: half(0x800C4C26) });
+Module._ogre_debug_threads();                      // chains, running queue, ring
+```
+
+`OGRE_TRACE_HOOKS=1` (or `OGRE_DEBUG_TRACES=1`) at boot records the call chains;
+the dump without it still prints the running queue and the scheduler ring. The
+scene-0x02 njpeg fault of session 202 was read this way: `state+0x7E` was 6, the
+njpeg destination was `state+0x70` = `0x801CDA00`, and the pinned page error
+named `func_80071950` ← `func_800712C4` ← `func_ovlE_80199D30`.
+
+The tutorial route that reaches the fault is title → Tutorial → Field Map, then
+A; at game speed 4 it enters scene `0x0002` after about 75 A presses and scene
+`0x000D` at the next. The tutorial's lesson list is the second menu (the right
+`MENU` window); C-Up/C-Down scroll it, and `3. Combat` is two entries above
+`5. Unit Commands`, which is itself a battle.
 
 ## Why every probe retries the boot
 

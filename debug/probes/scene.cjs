@@ -41,6 +41,8 @@
 //                       <prefix>-<tag>-N.png each, to catch an animation phase
 //   --repeat-gap MS     wait between repeats (default 1000)
 //   --attempts N        boots to try when one lands on the idle trajectory
+//   --log-cap N         raise window.OGRE_LOG_CAP (default 20000 lines) so a
+//                       long route keeps its later GFX-* lines in -log.txt
 //   --headed            show the browser window
 //   --url URL / --rom PATH
 //                       overrides (same as the other probes)
@@ -116,6 +118,90 @@ const ROUTES = {
     notes: 'forced tutorial scene',
     steps: [],
   },
+
+  // The New Game cathedral dialogue (scene 0x0D, step 2). Its backdrop is the
+  // njpeg + S2DEX2 path: the game submits type-4 RSP tasks, then per macroblock
+  // an S2DEX2 `G_OBJ_RECTANGLE_R` into a colour image, then copies that image
+  // back with the CPU and blits the assembled picture. The page's scene-keyed
+  // taps open the title menu and pick New Game; the route then waits for the
+  // first `[GFX-S2D-CENSUS]` line, which is the njpeg macroblock task, and
+  // settles while the passes assemble. A wall-clock settle cannot do this: the
+  // opening movie and the "Ischka Military Academy" card before the cathedral
+  // make the arrival vary by 20 s between runs.
+  cathedral: {
+    query: 'OGRE_NO_AUDIO=1&OGRE_TAP_MS=1500&OGRE_TAP_SCENE_BUTTON=title:start:6,title:a:1',
+    scene: '0x000D',
+    settle: 12000,
+    notes: 'title menu -> New Game -> the opening movie -> the cathedral dialogue',
+    steps: [
+      { waitScene: '0x0004', timeout: 80 },
+      { waitLog: 'GFX-S2D-CENSUS', timeout: 300 },
+    ],
+  },
+
+  // The cathedral's second visit (scene 0x0D step 4): it asks the date of birth
+  // after the name form, so the assembly's pass 0 reads a framebuffer that the
+  // form scene used. Native called this the stale-backdrop rectangle and fixed
+  // it in sessions 56/57; this route is the browser regression target for a
+  // black readback there. The form confirms with START then A (session 55's
+  // natural run read scene 0x07 -> scene 0x02 1.7 s apart under `start,a`).
+  // The route has already passed the first 0x0D, so the final scene wait is the
+  // second visit.
+  'cathedral-birth': {
+    query:
+      'OGRE_NO_AUDIO=1&OGRE_TAP_MS=1500&OGRE_TAP_SCENE_BUTTON=title:start:6,title:a:1' +
+      ',0x07:start:1,0x07:a:8',
+    scene: '0x000D',
+    settle: 15000,
+    notes: 'title menu -> New Game -> cathedral -> name form -> cathedral (date of birth)',
+    steps: [
+      { waitScene: '0x0004', timeout: 80 },
+      { waitLog: 'GFX-S2D-CENSUS', timeout: 300 },
+      { sleep: 12000 },
+      { pressUntilScene: 'KeyX', scene: '0x0007', interval: 1400, max: 60 },
+      { sleep: 20000 },
+    ],
+  },
+
+  // The natural name-entry form, reached by pressing A through the cathedral
+  // dialogue. The scene-keyed schedule presses START then A eight times once the
+  // form is active; `settle` then shows whether that opened the Yes/No prompt or
+  // confirmed it (the final wait already passed 0x07, so a scene change during
+  // the settle is visible in the capture and the timeline).
+  'name-entry': {
+    query:
+      'OGRE_NO_AUDIO=1&OGRE_TAP_MS=1500&OGRE_TAP_SCENE_BUTTON=title:start:6,title:a:1' +
+      ',0x07:start:1,0x07:a:8',
+    scene: '0x0007',
+    settle: 6000,
+    notes: 'title menu -> New Game -> cathedral -> A through the dialogue -> name form',
+    steps: [
+      { waitScene: '0x0004', timeout: 80 },
+      { waitLog: 'GFX-S2D-CENSUS', timeout: 300 },
+      { sleep: 12000 },
+      { pressUntilScene: 'KeyX', scene: '0x0007', interval: 1400, max: 60 },
+    ],
+  },
+
+  // The same cathedral with A pressed through the opening movie. Pressing A
+  // while the movie plays makes the loader pick the other game framebuffer for
+  // the backdrop assembly (`src=0x80025C00`, the 320x476 target at 0x025C00),
+  // which is the target whose whole-image RDRAM range contains 0x04B400. This
+  // is the case the per-row writeback guard fixes: the old whole-image hash saw
+  // 0x04B400's writeback as a change to 0x025C00 and refused the first pass, so
+  // the backdrop's top-left quadrant was black.
+  'cathedral-skip': {
+    query:
+      'OGRE_NO_AUDIO=1&OGRE_TAP_MS=1500&OGRE_TAP_SCENE_BUTTON=title:start:6,title:a:1' +
+      ',0x0D:a:8',
+    scene: '0x000D',
+    settle: 6000,
+    notes: 'title menu -> New Game -> A through the movie -> the cathedral assembly',
+    steps: [
+      { waitScene: '0x0004', timeout: 80 },
+      { waitLog: 'GFX-S2D-CENSUS', timeout: 300 },
+    ],
+  },
 };
 
 const FLAG_TAGS = { 0: 'normal', 8: 'texel1', 16: 'texel0' };
@@ -154,6 +240,17 @@ async function sceneLines(page) {
 }
 
 async function lastScene(page) {
+  // The dispatcher's own id, so a long run whose first 20000 log lines have
+  // been evicted (the `[rsp]` task lines fill the ring in about a minute) can
+  // still be waited on. The log remains the fallback for an export that is not
+  // built in.
+  const id = await page
+    .evaluate(() =>
+      (typeof Module !== 'undefined' && typeof Module._ogre_web_active_scene === 'function')
+        ? Module._ogre_web_active_scene()
+        : -1)
+    .catch(() => -1);
+  if (id >= 0 && id !== 0xFFFF) return normScene(id);
   const lines = await sceneLines(page);
   const m = lines.length ? /id=0x([0-9a-fA-F]+)/.exec(lines[lines.length - 1]) : null;
   return m ? normScene('0x' + m[1]) : '';
@@ -195,6 +292,30 @@ async function pressUntilScene(page, key, scene, interval, max, log) {
 async function runRoute(page, route, scene, log) {
   for (const step of route.steps) {
     if (step.waitScene && !(await waitScene(page, step.waitScene, step.timeout || 30, log))) return false;
+    if (step.waitLog) {
+      // A route step that waits for a `[GFX-...]` line in the page log. The log
+      // is the only clock some screens have: the njpeg backdrop is drawn several
+      // seconds after the scene line, and how long the opening movie takes
+      // varies with host load.
+      const pattern = String(step.waitLog);
+      const timeout = step.timeout || 60;
+      const t0 = Date.now();
+      let seen = false;
+      while ((Date.now() - t0) / 1000 < timeout) {
+        const n = await page
+          .evaluate((src) => (window.ogreLog ? window.ogreLog.find(new RegExp(src)).length : 0),
+                    pattern)
+          .catch(() => 0);
+        if (n > 0) {
+          seen = true;
+          break;
+        }
+        await sleep(250);
+      }
+      log(`log /${pattern}/ ${seen ? 'seen' : 'not seen'} after ` +
+          `${((Date.now() - t0) / 1000).toFixed(1)} s`);
+      if (!seen) return false;
+    }
     if (step.sleep) await sleep(step.sleep);
     if (step.press) await press(page, step.press, step.hold);
     if (step.pressUntilScene) {
@@ -295,6 +416,7 @@ async function main() {
   const repeat = Math.max(1, parseInt(opts.repeat || '1', 10));
   const repeatGap = parseInt(opts['repeat-gap'] || '1000', 10);
   const attempts = parseInt(opts.attempts || '3', 10);
+  const logCap = Math.max(0, parseInt(opts['log-cap'] || '0', 10) || 0);
   const prefix = outputPrefix(opts, route);
 
   const cfg = h.resolveConfig(opts);
@@ -326,6 +448,12 @@ async function main() {
   try {
     for (let attempt = 1; attempt <= attempts && !reached; attempt++) {
       const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      // The `[rsp]` task line fills the 20000-line ring in about a minute, so a
+      // long route's later `GFX-*` lines are otherwise evicted before the log
+      // is written. `--log-cap` raises the ring for a run that needs them.
+      if (logCap > 0) {
+        await page.addInitScript((cap) => { window.OGRE_LOG_CAP = cap; }, logCap);
+      }
       page.on('pageerror', (e) => errors.push(`PAGEERROR: ${e.message}`));
       page.on('console', (m) => {
         if (m.type() === 'error') errors.push(`CONSOLE: ${m.text().slice(0, 300)}`);

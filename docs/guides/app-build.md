@@ -201,9 +201,14 @@ GAME SPEED, WIDESCREEN and MOUSE ENABLED are the shared `settings.cfg` values:
 `load_settings("/ogre")` before `recomp::start`, and `web_settings.cpp` exports
 the getters/setters (`_ogre_web_settings_*`). CONTROLS is JavaScript because the
 browser input path is JavaScript; its 14 rows persist in localStorage. SOUNDS and
-VOLUME are the page AudioWorklet gain (muted by default, `?audio` starts
-enabled). The DEBUG tab reads `_ogre_web_chaos_frame` and
-`_ogre_web_active_scene`.
+VOLUME are the page AudioWorklet's mute and gain; sound is on by default (the
+game's audio microcode is recompiled and runs), and `?audio=0` starts muted. The
+`AudioContext` is created on every boot path and resumed from the first pointer
+or key event, on window focus, on `pageshow` and when the tab becomes visible
+again; browser autoplay policy still requires one gesture, so a
+`SOUND PAUSED · CLICK TO RESUME` button appears over the screen while the
+context is suspended (the stored-ROM auto-start has no gesture). The DEBUG tab
+reads `_ogre_web_chaos_frame` and `_ogre_web_active_scene`.
 
 WIDESCREEN sets a 16:9 CSS box on `#game-canvas` only while
 `_ogre_web_widescreen_expand` is 1 (mission `0x03`, dialogue `0x0D`, an
@@ -306,6 +311,30 @@ the drawn rows and outside the drawn columns and a load from a second image in a
 row its fill never drew, so `testdraw.cjs --flags 96 --expect-hits 1` fails if
 either axis stops being tested or the row inversion is off by one. See
 [web-probes.md](web-probes.md) -> "The framebuffer-as-texture check".
+
+`[GFX-FBWRITE-STALE]` reports a framebuffer writeback the renderer skipped
+because RDRAM changed since the bytes the GPU copy was made from; the log names
+the image, its size and both XXH3-64 values. It is the writeback-side
+application of the same `checkRAM` rule as `[GFX-FBTEX-STALE]`, and it is what
+keeps a stale screen image from overwriting heap data the game has since
+reallocated (session 202).
+
+Two web-only exports read the live guest state after the page has stopped
+drawing. They are exported from `app/src/main_web.cpp` and listed in
+`app/CMakeLists.txt`:
+
+```js
+// guest address -> RDRAM base + (addr & 0x1FFFFFFF); guest words are
+// little-endian at that offset and logical bytes are at (offset ^ 3).
+const base = Module._ogre_guest_rdram(0) >>> 0;
+const state = new DataView(Module.HEAPU8.buffer).getUint32(base + 0x19A680, true);
+// call chains (needs OGRE_TRACE_HOOKS=1 at boot), the running queue and the
+// scheduler ring:
+Module._ogre_debug_threads();
+```
+
+The reader is what named the scene-0x02 njpeg buffers in session 202; the thread
+dump is the web counterpart of the native `snap` command for a wedged game.
 
 ## Running
 
@@ -1023,7 +1052,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_NJPEG=0` | force the **stub** for the Nintendo-JPEG decoder (`M_NJPEGTASK`, type 4: the New Game step ≥ 2 background decode). On by default since session 47, when the recompiled microcode was fixed (`text_address` is a label base — see `docs/guides/rsp-microcode.md`); it costs 0–1 ms per image |
 | `OGRE_NJPEG_TRACE=1` | `[njpeg]` lines: the colour image the YUV macroblock draw landed in. RT64 records it in the scratch word, but it is only *re*set by a YUV-texture-then-colour-image pair and never cleared, so it can be stale — the readback trusts the game's own `state[0x64]` instead (`tools/njpeg_readback.py`, `docs/HANDOFF-2026-09-16-session57.md` §1) |
 | `OGRE_NJREAD_LOG=1` | `[njread]` one line per njpeg stage-3 pass (`func_ovlE_8019976C`): the pass number, scene/step, the framebuffer the game's `state[0x64]` selects, which rule the `njpeg_readback.py` patch applied (`game` or `scratch`), the scratch word (`cimg`/`njpeg`/`lastfb`), the display word `D_800C4BB8`, and the pass's destination/size. This is how the stale-source artifact was found and is the before/after check for it |
-| `OGRE_YUV_TRACE=1` | `[yuv]` one line per `G_SETTIMG` with `fmt=YUV` (the njpeg macroblock texture image): confirms the `0x800A5110` draws reach RT64 at all |
+| `OGRE_YUV_TRACE=1` | native: `[yuv]` one line per `G_SETTIMG` with `fmt=YUV` (the njpeg macroblock texture image), which confirms the `0x800A5110` draws reach RT64 at all. Browser: `[GFX-YUVLOAD]` the first six YUV16 tile loads with the 24 source bytes they read, the row stride, rows, TMEM base/line and the `G_SETCONVERT` fields, then `[GFX-YUVDEC]` the TMEM bytes and the decoded RGB of the first six decodes. A macroblock's chroma is one U/V pair per two texels and is near-constant over 16x16, so the byte pattern says whether the load reads the game's interleaved layout or another plane. This is what identified the exchanged luma/chroma in `tmem_load_yuv` (session 203); the `[GFX-S2D]` line next to it prints one rectangle per S2DEX2 task with the target colour image |
 | `OGRE_BG=0` | run **without** the `mods/backgrounds/` HD-background pack (`off`, `false` and `no` also work). The pack is otherwise loaded automatically from the first folder that has a `backgrounds.txt` (`docs/guides/hd-backgrounds.md`) |
 | `OGRE_BG_DIR=<dir>` | use **only** this folder as the pack, instead of `<config>/mods/backgrounds`, `<config>/../mods/backgrounds` and `<cwd>/mods/backgrounds`. Pointing it at an empty folder is the other way to run without a pack |
 | `OGRE_BG_LOG=1` | `[hdbg]` one line per njpeg readback pass and per applied chunk: the scene/step, the destination, and which image (`01` or `01 wide`) |
@@ -2431,8 +2460,8 @@ before them. The browser build also reads `<config>/settings.cfg` for GAME SPEED
 WIDESCREEN and MOUSE ENABLED (`settings.cpp` is compiled into the wasm target and
 `main_web.cpp` calls `load_settings("/ogre")` before `recomp::start`). Its
 SOUNDS/VOLUME rows are different: the browser's audio path is the page's
-AudioWorklet, which starts muted unless `?audio` is in the URL and takes its gain
-from the overlay (session 191).
+AudioWorklet, which starts enabled (like native; `?audio=0` starts muted) and
+takes its gain from the overlay (session 191; default changed in session 204).
 
 Proofs: `native-launcher-settings.png`, `native-launcher-settings-experiments.png`
 and `native-overlay-settings.png` (the tab in the launcher, the same tab with the
