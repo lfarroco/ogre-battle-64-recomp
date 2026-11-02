@@ -1,0 +1,101 @@
+# Compile RT64, the native renderer, on an Apple Silicon GitHub-hosted runner
+# with Xcode 26.
+#
+# The `rt64` target needs no ROM-derived generated code, so this job runs on a
+# fresh clone without the private data bundle that Release uses. It covers the
+# macOS build constraint that broke on Xcode 26: RT64 forces hlslpp's scalar
+# backend on Apple Silicon (tools/RT64/src/common/rt64_hlslpp.h), that backend
+# calls labs(), and libc++ 21 no longer declares it through <math.h>.
+# app/CMakeLists.txt force-includes <stdlib.h> for the rt64 and ogrebattle64
+# targets.
+#
+# The app's src/renderer.cpp is compiled too: it includes hlslpp's headers and
+# is the only app target that gets the same force-include.
+name: macOS arm64 RT64 build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/macos-arm64-verify
+
+jobs:
+  rt64:
+    runs-on: macos-26
+    steps:
+      - name: Check out with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Report the toolchain
+        run: |
+          uname -m
+          xcodebuild -version
+          clang++ --version
+          echo | clang++ -std=c++20 -E -x c++ -dM - |
+            grep -E '^#define (_LIBCPP_VERSION|__apple_build_version__)' || true
+          printf '#include <math.h>\n#include <stdint.h>\nint main() { return (int)labs(1); }\n' > /tmp/labs-probe.cpp
+          if clang++ -std=c++17 -c /tmp/labs-probe.cpp -o /tmp/labs-probe.o; then
+            echo "<math.h> declares labs on this image"
+          else
+            echo "<math.h> does not declare labs on this image (the Xcode 26 failure)"
+          fi
+
+      - name: Prepare the runtime clone
+        run: |
+          set -e
+          N64MODERNRUNTIME_COMMIT=589bbf018a3e6d3646ddf7de1e7919f1b7e99bb1
+          git clone https://github.com/N64Recomp/N64ModernRuntime.git tools/N64ModernRuntime
+          git -C tools/N64ModernRuntime checkout "$N64MODERNRUNTIME_COMMIT"
+          git -C tools/N64ModernRuntime submodule update --init --recursive
+          ( cd tools/N64ModernRuntime && git apply ../../patches/n64modernruntime-ob64.patch )
+          ( cd tools/N64ModernRuntime/N64Recomp && git apply ../../../patches/n64modernruntime-n64recomp.patch )
+
+      - name: Apply the RT64 patches
+        run: |
+          set -e
+          git -C tools/RT64 apply ../../patches/rt64-ob64.patch
+          git -C tools/RT64/src/contrib/plume apply ../../../../../patches/rt64-plume-ob64.patch
+
+      - name: Ensure the Metal toolchain
+        run: |
+          if xcrun -sdk macosx metal --version; then
+            echo "the metal compiler is already available"
+          else
+            sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      - name: Install SDL2
+        run: brew install sdl2
+
+      - name: Stub the generated recompiled code
+        run: |
+          # app/CMakeLists.txt globs RecompiledFuncs/*.c into a static library,
+          # and an empty source list is a configure error. The rt64 target never
+          # uses those sources, so one stand-in file is enough.
+          mkdir -p RecompiledFuncs
+          printf '/* Stand-in for the ROM-derived RecompiledFuncs/ sources. */\n' > RecompiledFuncs/ci_stub.c
+
+      - name: Configure
+        run: >
+          cmake -S app -B build-ci -G "Unix Makefiles"
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+
+      - name: Build RT64
+        run: cmake --build build-ci --target rt64 -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build the app's renderer object
+        run: |
+          cd build-ci
+          make -f CMakeFiles/ogrebattle64.dir/build.make \
+            CMakeFiles/ogrebattle64.dir/src/renderer.cpp.o
+
+      - name: Report the flags and the built slices
+        run: |
+          grep -h -- "-include stdlib.h" \
+            build-ci/RT64/CMakeFiles/rt64.dir/flags.make \
+            build-ci/CMakeFiles/ogrebattle64.dir/flags.make
+          lipo -archs build-ci/RT64/CMakeFiles/rt64.dir/src/hle/rt64_projection.cpp.o
+          lipo -archs build-ci/CMakeFiles/ogrebattle64.dir/src/renderer.cpp.o

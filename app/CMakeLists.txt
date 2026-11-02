@@ -179,13 +179,19 @@ if (OGRE_USE_RT64)
     add_compile_definitions(HLSL_CPU)
     add_subdirectory(${OGRE_TOOLS}/RT64 ${CMAKE_BINARY_DIR}/RT64)
     target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/RT64/src)
-    # hlslpp's scalar backend (hlsl++/platforms/scalar.h, an RT64 nested
-    # submodule) calls labs() but includes only <math.h> and <stdint.h>. Older
-    # libc++ pulled in <stdlib.h> transitively; the one in Xcode 26 does not, and
+    # RT64 forces hlslpp's scalar backend on Apple Silicon
+    # (src/common/rt64_hlslpp.h defines HLSLPP_SCALAR for __APPLE__ &&
+    # __aarch64__), and that backend (hlsl++/platforms/scalar.h, a nested
+    # submodule) calls labs() while including only <math.h> and <stdint.h>.
+    # libc++ 21 and later no longer pull <stdlib.h> in through <math.h>, so
     # rt64_projection.cpp fails with "use of undeclared identifier 'labs'".
-    # Force-include it for RT64 only rather than patching a nested submodule.
+    # libc++ 20 (Xcode 26.2 and older) still includes it, so the flag is inert
+    # there. Force-include the header rather than patch the nested submodule,
+    # which a submodule update would discard. Upstream hlslpp no longer calls
+    # labs(), so drop this when the submodule moves.
     if (APPLE)
-        target_compile_options(rt64 PRIVATE "SHELL:-include stdlib.h")
+        set(OGRE_APPLE_FORCE_INCLUDE_STDLIB "SHELL:-include stdlib.h")
+        target_compile_options(rt64 PRIVATE ${OGRE_APPLE_FORCE_INCLUDE_STDLIB})
     endif()
     set(OGRE_RENDERER_SOURCES src/renderer.cpp)
 elseif (EMSCRIPTEN)
@@ -426,6 +432,13 @@ if (OGRE_USE_RT64)
         ${OGRE_TOOLS}/RT64/src/contrib/mupen64plus-core/src/api
         ${OGRE_TOOLS}/RT64/src/contrib/nativefiledialog-extended/src/include
     )
+    # The app sources include hlslpp's headers too (src/renderer.cpp), and
+    # RT64's rt64_hlslpp.h forces the scalar backend whose labs() call needs
+    # <stdlib.h>; see the note next to OGRE_APPLE_FORCE_INCLUDE_STDLIB above.
+    if (OGRE_APPLE_FORCE_INCLUDE_STDLIB)
+        target_compile_options(ogrebattle64 PRIVATE
+            ${OGRE_APPLE_FORCE_INCLUDE_STDLIB})
+    endif()
 endif()
 
 target_link_libraries(ogrebattle64 PRIVATE

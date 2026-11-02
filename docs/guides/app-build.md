@@ -9,8 +9,9 @@ and links the renderer (RT64), then boots the game on your ROM.
 - SDL2. On macOS: `brew install sdl2` (installs `sdl3` + `sdl2-compat`).
 - macOS: the Xcode Metal Toolchain. Xcode 26 does not install it by default,
   and RT64's shader build then fails with `cannot execute tool 'metal' due to
-  missing Metal Toolchain`. Install it once with
-  `xcodebuild -downloadComponent MetalToolchain` (about 700 MB).
+  missing Metal Toolchain`. Check with `xcrun -sdk macosx metal --version` and
+  install it once with `xcodebuild -downloadComponent MetalToolchain`
+  (about 700 MB).
 - The toolchain from the main [PLAN.md](../../PLAN.md) reproduce section
   (splat, mips binutils, the N64Recomp and N64ModernRuntime vendored clones, and
   the RT64 submodule).
@@ -803,7 +804,7 @@ A self-hosted runner needs, per platform:
 
 | platform | toolchain | SDL2 |
 |---|---|---|
-| macOS | Xcode command line tools (incl. the Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`) | built by `make sdl2-static` |
+| macOS | full Xcode 26, plus the separately downloaded Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) | built by `make sdl2-static` |
 | Linux | `cmake`, `ninja`, `g++`, `pkg-config`, `libgtk-3-dev`, `libvulkan-dev`, `libx11-dev` | `libsdl2-dev` (or `make sdl2-static`, which also needs `libasound2-dev libpulse-dev libpipewire-0.3-dev` so the static SDL2 has audio) |
 | Windows | Visual Studio 2022 with the C++ Clang tools (`clang-cl`) and `ninja`, `make`, run from a Developer Command Prompt; MinGW is not tested | built by `make sdl2-static` |
 
@@ -2800,8 +2801,9 @@ ln -sf "$(brew --prefix zlib)/lib/libz.dylib" tools/RT64/src/contrib/dxc/lib/x64
 
 ### `metal` tool missing ("missing Metal Toolchain")
 
-RT64's macOS shader build calls `xcrun -sdk macosx metal`. Newer Xcode releases
-require the separate Metal toolchain component:
+RT64's macOS shader build calls `xcrun -sdk macosx metal`. Xcode 26 and later
+require the separate Metal toolchain component; `xcrun -sdk macosx metal
+--version` fails while it is missing:
 
 ```sh
 xcodebuild -downloadComponent MetalToolchain
