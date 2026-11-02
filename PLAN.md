@@ -1129,6 +1129,14 @@ The game runs end to end. A build boots the publisher stills, the title, the New
 Game opening, the map, missions and battles, the tutorial, the shop, the
 Organize Screen, the credits, the ending and the attract loop.
 
+- **Input** — the left stick's Y sign matches the N64 pad on both builds
+  (session 211). SDL's left-stick Y is negative up and the Gamepad API's axis 1
+  is also negative up, while the N64 pad's `stick_y` is positive up. The native
+  path passed the SDL value through, so pushing up moved the world-map cursor
+  down (issue #21); the browser had the same fault. Both now negate the axis.
+  The game's own consumer is `func_ovlM_8019AF0C`, which computes
+  `screen_y - stick_y / 8` at `0x8019B490`. The right-stick C layer already read
+  SDL's convention. See `docs/HANDOFF-2026-11-02-session211.md`.
 - **Recompilation** — 99.05% of the ROM code span `0x001000..0x2B8B70` is
   compiled; the one gap (`0x0DDF80..0x0E4910`) is data. 44 records in 34 bank
   units (`BankA`..`BankZ`, `BankAA`..`BankAH`), 5037 registered function entries

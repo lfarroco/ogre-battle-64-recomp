@@ -2120,10 +2120,16 @@ static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y)
 
     if (controller != nullptr) {
         out_buttons |= gamecontroller_buttons(controller);
-        // Left stick maps to the N64 analog stick.
+        // Left stick maps to the N64 analog stick. SDL's Y axis is negative up
+        // (`SDL_GameControllerGetAxis`: -32768 up/left, 32767 down/right) and
+        // the N64 pad's `stick_y` is positive up, so the sign is flipped here.
+        // The game relies on that: the world map's mover `func_ovlM_8019AF0C`
+        // computes screen_y - stick_y/8 at 0x8019B490. The right-stick C layer
+        // in `gamecontroller_buttons` reads SDL's convention directly and
+        // needs no flip.
         constexpr float axis_scale = 1.0f / 32768.0f;
         *x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX) * axis_scale;
-        *y = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) * axis_scale;
+        *y = -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) * axis_scale;
         connected = true;
     }
 

@@ -2119,7 +2119,9 @@ mapping the port used before the tab existed:
 
 The left stick is always the N64 analog stick, and the right stick presses the C
 buttons on top of whatever the map binds to them. Both are fixed, and the
-CONTROLS tab says so. `ESC` is reserved for the overlay and cannot be bound.
+CONTROLS tab says so. SDL's left-stick Y is negative up and the N64 pad's
+`stick_y` is positive up, so `get_input` negates it; the browser does the same
+for the Gamepad API. `ESC` is reserved for the overlay and cannot be bound.
 `=` and `-` step the game speed while the game runs, and the pad's **R3** cycles
 it (see "Game speed" below); none of the three is part of this map. Binding one of
 them to an N64 button would still work, but the press would change the speed as

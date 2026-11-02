@@ -1801,7 +1801,9 @@
       if (axes[2] > 0.5) buttons |= BTN.C_RIGHT;
     }
     var x = axes.length > 0 ? Math.max(-1, Math.min(1, axes[0])) : 0;
-    var y = axes.length > 1 ? Math.max(-1, Math.min(1, axes[1])) : 0;
+    // The Gamepad API's standard mapping is negative up on axis 1; the N64
+    // pad's stick_y is positive up (see the native path in sdl_platform.cpp).
+    var y = axes.length > 1 ? -Math.max(-1, Math.min(1, axes[1])) : 0;
     return { buttons: buttons, x: x, y: y };
   }
 
