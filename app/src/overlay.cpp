@@ -310,8 +310,28 @@ void hide() {
 // window's close button instead of a second teardown.
 std::atomic<bool> g_quit_requested{false};
 
+// The MAIN tab's RESTART GAME row, recorded the same way. RESTART GAME ends the
+// run through the same teardown as EXIT GAME, and `main.cpp` relaunches the
+// process instead of exiting once that teardown has returned.
+std::atomic<bool> g_restart_requested{false};
+
 void request_quit() {
     g_quit_requested.store(true, std::memory_order_relaxed);
+}
+
+void request_restart() {
+    g_restart_requested.store(true, std::memory_order_relaxed);
+}
+
+// Applies one row activation from any of the three input paths (keyboard, pad,
+// mouse). Both actions only record a request; `main.cpp` owns the teardown.
+void handle_row_action(ui::RowAction action) {
+    if (action == ui::RowAction::QuitGame) {
+        request_quit();
+    }
+    else if (action == ui::RowAction::RestartGame) {
+        request_restart();
+    }
 }
 
 void draw() {
@@ -490,6 +510,10 @@ bool overlay_quit_requested() {
     return g_quit_requested.load(std::memory_order_relaxed);
 }
 
+bool overlay_restart_requested() {
+    return g_restart_requested.load(std::memory_order_relaxed);
+}
+
 int overlay_frames_produced() {
     return guest_word(kFrameCounterAddress);
 }
@@ -558,9 +582,7 @@ void overlay_handle_event(const SDL_Event& event) {
                 if (index < g_overlay.panel->row_count() &&
                     g_overlay.panel->selectable(index)) {
                     const ui::RowAction action = g_overlay.panel->activate(index, 1);
-                    if (action == ui::RowAction::QuitGame) {
-                        request_quit();
-                    }
+                    handle_row_action(action);
                     if (g_overlay.panel->capturing()) {
                         g_overlay.capture_active = true;
                         g_overlay.capture_started_ms = SDL_GetTicks64();
@@ -590,9 +612,7 @@ void overlay_handle_event(const SDL_Event& event) {
                 break;
             }
             const ui::RowAction action = g_overlay.panel->pad_command(command);
-            if (action == ui::RowAction::QuitGame) {
-                request_quit();
-            }
+            handle_row_action(action);
             if (g_overlay.panel->capturing()) {
                 g_overlay.capture_active = true;
                 g_overlay.capture_started_ms = SDL_GetTicks64();
@@ -637,9 +657,7 @@ void overlay_handle_event(const SDL_Event& event) {
                     g_overlay.panel->selectable(index)) {
                     g_overlay.panel->set_selected(index);
                     const ui::RowAction action = g_overlay.panel->activate(index, 1);
-                    if (action == ui::RowAction::QuitGame) {
-                        request_quit();
-                    }
+                    handle_row_action(action);
                     if (g_overlay.panel->capturing()) {
                         g_overlay.capture_active = true;
                         g_overlay.capture_started_ms = SDL_GetTicks64();
@@ -692,10 +710,11 @@ void overlay_render() {
         return;
     }
 
-    // EXIT GAME asked to leave during this frame's events, and the caller acts
-    // on it right after this call. Drawing the panel over the frame the run
-    // ends on would be one wasted present.
-    if (g_quit_requested.load(std::memory_order_relaxed)) {
+    // EXIT GAME or RESTART GAME asked to leave during this frame's events, and
+    // the caller acts on it right after this call. Drawing the panel over the
+    // frame the run ends on would be one wasted present.
+    if (g_quit_requested.load(std::memory_order_relaxed) ||
+        g_restart_requested.load(std::memory_order_relaxed)) {
         return;
     }
 

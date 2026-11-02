@@ -88,6 +88,9 @@ enum class RowAction {
     // The EXIT GAME row of the MAIN tab. The launcher stops its own loop on it;
     // the overlay asks the runtime to quit.
     QuitGame,
+    // The RESTART GAME row of the overlay's MAIN tab. The runtime cannot start
+    // the same image twice, so the overlay asks for a relaunch of the process.
+    RestartGame,
     ModToggled,
     OptionChanged,
     BindingChanged,
@@ -102,6 +105,10 @@ public:
         Section,
         StartGame,
         Rom,
+        // The overlay's way to boot the running ROM again from the beginning.
+        // The row is not built in Launcher mode, where there is no game to
+        // restart.
+        RestartGame,
         ExitGame,
         Mod,
         Option,

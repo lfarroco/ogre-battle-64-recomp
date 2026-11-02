@@ -969,7 +969,8 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_PREF_DIR=<dir>` | use `<dir>` as the runtime config dir instead of the executable's own folder, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write next to the app). The boot log prints the resolved path |
 | `OGRE_ROM=<path>` | boot this ROM without passing it as an argument (validated and stored like an argument; the start screen is skipped) |
 | `OGRE_LAUNCHER=1` | force the start screen even when a ROM is available (testing the first-launch experience) |
-| `OGRE_MOD_TEST=1` | start the game with `mods.json` as it stands, with no start screen. An installed mod normally forces the start screen, because the mod toggles live there, and `build-app/mods/` holds three `.nrm` mods, so **a scripted native run needs this**: without it the app prints `[launcher] waiting for a ROM` and writes no capture even when the ROM is on the command line. `OGRE_LAUNCHER=1` still wins over it |
+| `OGRE_MOD_TEST=1` | start the game with `mods.json` as it stands, with no start screen. An installed mod normally forces the start screen, because the mod toggles live there, and `build-app/mods/` holds four `.nrm` mods, so **a scripted native run needs this**: without it the app prints `[launcher] waiting for a ROM` and writes no capture even when the ROM is on the command line. `OGRE_LAUNCHER=1` still wins over it |
+| `OGRE_RESTARTED=1` | boot straight past the start screen, as RESTART GAME's new process does. It overrides both the installed-mod rule and `OGRE_LAUNCHER=1`, so a restart lands in the game rather than on the launcher |
 | `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
 | `OGRE_LAUNCHER_TAB=<main\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
 | `OGRE_LAUNCHER_KEYS=<name>,…` | push one synthetic keydown per 150 ms through the start screen's real key handler. Names are SDL scancode names (`Tab`, `Down`, `Space`, `p`, `Return`), so `Tab,Tab,Tab,Space,p` opens CONTROLS, arms the A row's rebind and binds `P` |
@@ -2511,6 +2512,9 @@ the EXIT GAME row, which is the overlay's own way to end the run; MODS is the on
 tab a running game cannot use, because the runtime loads mods before it boots.
 `ESC` closes it and returns the keyboard to the game.
 
+The panel opens on CONTROLS, not on MAIN: `Panel`'s Overlay constructor sets that
+tab (`app/src/ui.cpp`), so the first thing a player sees is the bindings list.
+
 EXIT GAME records a request and `update_gfx` (`app/src/main.cpp`) polls it next
 to the window-close flag, so both exit paths share one teardown, its dumps and
 `ultramodern::quit`. Both are checked against the game's own frame counter
@@ -2520,6 +2524,18 @@ runtime's teardown, because `ultramodern::quit` while the game thread is inside
 `ultramodern::preinit`, or while RT64 is still building its renderer, leaves
 `recomp::start` blocked in `game_thread.join` or throws out of the shutdown. That
 is the same reason the `OGRE_EXIT_AFTER_MS` path leaves through `_Exit`.
+
+RESTART GAME is the MAIN tab row between ROM and EXIT GAME, and exists only in
+the overlay (the launcher has no running game). It ends the run through the same
+teardown as EXIT GAME and then starts a new copy of the executable with the same
+arguments, so the ROM boots from the beginning with no launcher. The new process
+is spawned with `posix_spawn` (Windows: `_wspawnv`) and this one leaves with
+`_Exit`; `execv` replaces the image while the runtime's unjoined game threads are
+alive and hangs on a libc lock they hold. `relaunch_process()` calls
+`crash_log::flush()` first, which restores stdout/stderr from the capture pipe,
+so the new process inherits the terminal or the redirected log file. The new
+process reads `OGRE_RESTARTED=1`, which is the rule that keeps it off the start
+screen when a mod is installed. The row is `docs/proofs/native-overlay-restart-row.png`.
 
 While it is open, `get_input` reports an idle controller (`buttons=0`, stick 0),
 so the game's own menus do not see the keys used to navigate the panel. The game
@@ -2559,6 +2575,15 @@ grep '^a.key' /tmp/ui/controls.cfg      # a.key = P
 OGRE_PREF_DIR=/tmp/ov OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=4000 \
   OGRE_OVERLAY_KEYS="Space,p" OGRE_CAPTURE_OVERLAY=/tmp/overlay.ppm \
   OGRE_EXIT_AFTER_MS=8000 ./build-app/ogrebattle64
+
+# RESTART GAME from the overlay on the MAIN tab, with no window on screen. The
+# new process repeats the same scripted keys, so the log holds one
+# "[overlay] RESTART GAME" and one "[boot] init_sdl..." per generation; stop it
+# when the second boot has appeared.
+SDL_VIDEODRIVER=dummy OGRE_PREF_DIR=/tmp/rs OGRE_ROM=assets/ogre64.z64 \
+  OGRE_OVERLAY_AT_MS=9000 OGRE_OVERLAY_TAB=main \
+  OGRE_OVERLAY_KEYS="Down,Return" ./build-null/ogrebattle64
+grep -c '\[boot\] init_sdl' /tmp/rs.log   # 2 after one restart
 
 # change GAME SPEED from 1 to 4 in the overlay while the game runs
 OGRE_PREF_DIR=/tmp/gs OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=2500 \
@@ -2717,6 +2742,18 @@ script uses a `mips-linux-gnu-gcc` when one is on `PATH` and otherwise runs
 itself. A package built from a release bundle gets them from `files.tar.gz`
 (see "Releases (GitHub Actions)"), and `tools/smoke-dist.sh` fails a package
 whose `mods/` directory carries no `.nrm`.
+
+Shipped mods: `skip-boot-logos` (boot to the title), `exp-overflow` (carry the
+leftover EXP over a level up), `item-randomizer` (reroll item acquisitions) and
+`permanent-suspend` (keep the suspend save after it is loaded).
+
+`mods/permanent-suspend/` is a `RECOMP_PATCH` with a base-game call, which the
+other mods do not do. A mod cannot `jal` a base function directly: the linker has
+no definition for the symbol, and a 26-bit call from the mod's `0x81000000`
+segment to the game's `0x800xxxxx` segment does not fit (the build fails with
+`relocation truncated to fit: R_MIPS_26`). The mod calls through a `volatile`
+address instead, so the compiler emits `lui`/`addiu`/`jalr`, which N64Recomp
+turns into a `LOOKUP_FUNC` that the runtime resolves against the loaded game.
 
 ### What a hook can reach
 

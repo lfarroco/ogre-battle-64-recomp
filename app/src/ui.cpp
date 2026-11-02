@@ -729,6 +729,11 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             // is not selectable.
             rows.push_back(Row{RowKind::StartGame, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Rom, {}, 0, 0, -1});
+            // RESTART GAME exists only while a game is running: the launcher has
+            // nothing to restart, and the row's action relaunches the process.
+            if (mode_ == Mode::Overlay) {
+                rows.push_back(Row{RowKind::RestartGame, {}, 0, 0, -1});
+            }
             rows.push_back(Row{RowKind::ExitGame, {}, 0, 0, -1});
             break;
 
@@ -943,6 +948,8 @@ std::string Panel::left_text(size_t index) const {
             return row.title;
         case RowKind::StartGame:
             return rom_.empty() ? "[ ] Start Game" : "[x] Start Game";
+        case RowKind::RestartGame:
+            return "[ ] Restart Game";
         case RowKind::ExitGame:
             return "[ ] Exit Game";
         case RowKind::Rom:
@@ -1006,6 +1013,8 @@ std::string Panel::right_text_for(const Row& row) const {
                        ? std::string("ALREADY RUNNING")
                        : (rom_.empty() ? std::string("CHOOSE A ROM FIRST")
                                        : std::string("Press ENTER or SPACE to start"));
+        case RowKind::RestartGame:
+            return "Boot the ROM again from the beginning";
         case RowKind::ExitGame:
             return mode_ == Mode::Overlay
                        ? std::string("Quit the game and close the window")
@@ -1063,6 +1072,10 @@ RowAction Panel::activate(size_t index, int direction) {
 
         case RowKind::StartGame:
             return mode_ == Mode::Overlay ? RowAction::None : RowAction::Play;
+
+        case RowKind::RestartGame:
+            // Built only in Overlay mode, so this is always a running game.
+            return RowAction::RestartGame;
 
         case RowKind::ExitGame:
             return RowAction::QuitGame;

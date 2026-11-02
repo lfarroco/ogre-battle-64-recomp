@@ -17,8 +17,10 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <limits.h>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <SDL.h>
 
@@ -28,6 +30,28 @@
 // an identical redefinition is harmless.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
+
+#if defined(_WIN32)
+// RESTART GAME's relaunch (`GetModuleFileNameW`, `_wspawnv`, `_wputenv_s`). The
+// include is repeated for a MinGW build, which the block above skips.
+#include <process.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#if !defined(_WIN32)
+// RESTART GAME's relaunch: posix_spawn, and the platform call that resolves this
+// executable's own path (`_NSGetExecutablePath`, `/proc/self/exe`).
+#include <spawn.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+// The relaunched process inherits the environment, including OGRE_RESTARTED.
+extern char** environ;
 #endif
 
 #include "recomp.h"
@@ -104,6 +128,111 @@ bool mod_test_run() {
 // anything well past 0 means the frame pump and the renderer are both up.
 constexpr int kFirstFrameCount = 60;
 
+namespace {
+
+// The process's own arguments, kept for RESTART GAME. `update_gfx` runs from the
+// runtime's frame callback and cannot see main's argc/argv.
+int g_process_argc = 0;
+char** g_process_argv = nullptr;
+
+// Set when the overlay's RESTART GAME row has ended the run. `main` relaunches
+// the process after the runtime's teardown instead of exiting.
+bool g_restart_requested = false;
+
+// Starts a fresh copy of the same executable, so the ROM boots again from the
+// beginning, and leaves this process. The runtime's game thread boots the image
+// once: `recomp::start` returns when `ultramodern::quit` is called, and the
+// game's own threads are not joined after that (main's tail `_Exit`s for that
+// reason), so a second `recomp::start` in the same process is not supported.
+//
+// The new copy is spawned rather than reached with `execv`. `execv` replaces the
+// image in a process whose runtime threads are still alive, and it hangs there:
+// the C library takes locks during exec that those threads can hold. A spawn
+// leaves the threads to this process, which then leaves with `_Exit` (no atexit,
+// no stdio flush, no static destructors), the same way the exit path does.
+//
+// `OGRE_RESTARTED=1` tells the new process to skip the start screen even when an
+// installed mod would otherwise force it, so a restart lands back in the game.
+// Never returns: on failure the process ends with an error rather than resuming
+// a run that has already been torn down.
+[[noreturn]] void relaunch_process() {
+    // Restore stdout/stderr and join the capture threads. `crash_log::install`
+    // replaces both with a pipe read by a thread in this process; a child that
+    // inherited that pipe would write to it with no reader left, and every line
+    // would be lost. `flush` dup2s the original descriptors back, so the new
+    // process inherits the terminal or the redirected log file.
+    ogre::crash_log::flush();
+#if defined(_WIN32)
+    wchar_t exe_path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    if (length == 0 || length == MAX_PATH) {
+        fprintf(stderr, "[restart] could not resolve the executable path\n");
+        fflush(nullptr);
+        _Exit(EXIT_FAILURE);
+    }
+    _wputenv_s(L"OGRE_RESTARTED", L"1");
+    std::vector<std::wstring> wide_args;
+    wide_args.reserve(static_cast<size_t>(g_process_argc));
+    for (int i = 0; i < g_process_argc; i++) {
+        const char* arg = g_process_argv[i];
+        const int needed = MultiByteToWideChar(CP_UTF8, 0, arg, -1, nullptr, 0);
+        std::wstring wide(needed > 0 ? static_cast<size_t>(needed) : 0, L'\0');
+        if (needed > 0) {
+            MultiByteToWideChar(CP_UTF8, 0, arg, -1, wide.data(), needed);
+        }
+        wide_args.push_back(std::move(wide));
+    }
+    std::vector<const wchar_t*> argv;
+    argv.reserve(wide_args.size() + 2);
+    argv.push_back(exe_path);
+    for (size_t i = 1; i < wide_args.size(); i++) {
+        argv.push_back(wide_args[i].c_str());
+    }
+    argv.push_back(nullptr);
+    if (_wspawnv(_P_NOWAIT, exe_path, argv.data()) == -1) {
+        fprintf(stderr, "[restart] could not relaunch %ls\n", exe_path);
+        fflush(nullptr);
+        _Exit(EXIT_FAILURE);
+    }
+    _Exit(EXIT_SUCCESS);
+#else
+    std::string exe_path;
+#if defined(__APPLE__)
+    char apple_path[PATH_MAX];
+    uint32_t apple_size = sizeof(apple_path);
+    if (_NSGetExecutablePath(apple_path, &apple_size) == 0) {
+        char resolved[PATH_MAX];
+        exe_path = realpath(apple_path, resolved) != nullptr ? resolved : apple_path;
+    }
+#else
+    char buffer[PATH_MAX];
+    const ssize_t got = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (got > 0) {
+        buffer[got] = '\0';
+        exe_path = buffer;
+    }
+#endif
+    if (exe_path.empty()) {
+        fprintf(stderr, "[restart] could not resolve the executable path\n");
+        fflush(nullptr);
+        _Exit(EXIT_FAILURE);
+    }
+    setenv("OGRE_RESTARTED", "1", 1);
+    pid_t child = 0;
+    const int spawn_error =
+        posix_spawn(&child, exe_path.c_str(), nullptr, nullptr, g_process_argv, environ);
+    if (spawn_error != 0) {
+        fprintf(stderr, "[restart] could not relaunch %s: %s\n", exe_path.c_str(),
+                std::strerror(spawn_error));
+        fflush(nullptr);
+        _Exit(EXIT_FAILURE);
+    }
+    _Exit(EXIT_SUCCESS);
+#endif
+}
+
+}  // namespace
+
 static void update_gfx(void*) {
     // OGRE_SCENE=<name|hex>: boot straight into a screen (see bank_overlays.cpp).
     // Polled here because this callback runs once per frame.
@@ -135,6 +264,16 @@ static void update_gfx(void*) {
     if (ogre::overlay_quit_requested()) {
         fprintf(stderr, "[overlay] EXIT GAME\n");
         fflush(stderr);
+        quit = true;
+    }
+    // RESTART GAME ends the run through the same teardown and then relaunches the
+    // process. `main` performs the relaunch after `recomp::start` has returned and
+    // the windows are shut down, so the new image starts from a clean display and
+    // audio state.
+    if (ogre::overlay_restart_requested()) {
+        fprintf(stderr, "[overlay] RESTART GAME\n");
+        fflush(stderr);
+        g_restart_requested = true;
         quit = true;
     }
     if (quit) {
@@ -178,6 +317,12 @@ static void update_gfx(void*) {
                             "skipping the runtime teardown\n");
             fflush(nullptr);
             ogre::crash_log::flush();
+            // A restart asked for before the first frame has no teardown to run:
+            // replace the process now, which is the same fresh start the normal
+            // path gives it.
+            if (g_restart_requested) {
+                relaunch_process();
+            }
             _Exit(EXIT_SUCCESS);
         }
         ultramodern::quit();
@@ -207,6 +352,10 @@ static void disable_console_quick_edit() {
 #endif
 
 int main(int argc, char** argv) {
+    // Kept for RESTART GAME, which replaces this image with the same executable
+    // and the same arguments once the run has been torn down.
+    g_process_argc = argc;
+    g_process_argv = argv;
 #if defined(_WIN32) && !defined(__MINGW32__)
     // OGRE_CONSOLE=1: allocate a console and put the [boot] log in it. The
     // distributed build is a GUI-subsystem image, and AttachConsole below only
@@ -481,7 +630,18 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (rom_path.empty() || (!installed_mods.empty() && !mod_test_run()) || launcher_forced()) {
+    // RESTART GAME relaunches the process with this set, so a restart lands back
+    // in the game even when an installed mod would otherwise force the start
+    // screen. The screen exists to let the player turn a mod off before it runs,
+    // and a restart keeps the mod set the run already had.
+    const bool restarted_run = [] {
+        const char* value = std::getenv("OGRE_RESTARTED");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+
+    if (rom_path.empty() ||
+        (!installed_mods.empty() && !mod_test_run() && !restarted_run) ||
+        (launcher_forced() && !restarted_run)) {
         // The start screen is the whole interface: it returns the path of a ROM
         // it has already validated, or empty if the user closed the window.
         //
@@ -583,6 +743,12 @@ int main(int argc, char** argv) {
     ogre::overlay_shutdown();
     ogre::speed_badge_shutdown();
     ogre::shutdown_sdl(ogre::g_platform);
+    // RESTART GAME: the run has been torn down and both windows are gone, so
+    // replacing the image now gives the new boot a clean display and audio
+    // state. This does not return.
+    if (g_restart_requested) {
+        relaunch_process();
+    }
     // The runtime does not join the game's own threads, so they are still
     // running recompiled code here. Running the C++ static destructors (what
     // `return` does next) with them live is a race, and it is what made closing

@@ -48,6 +48,11 @@ bool overlay_visible();
 // it next to the window-close flag, so the two exit paths share one teardown.
 bool overlay_quit_requested();
 
+// True once the MAIN tab's RESTART GAME row has been activated. `update_gfx`
+// ends the run through the same teardown as EXIT GAME and then relaunches the
+// process, because the runtime cannot start the same image twice in one process.
+bool overlay_restart_requested();
+
 // How many frames the game has produced this run, from its own frame counter
 // `D_800AEFA4` (`func_80072398`), or -1 while the runtime has no image (which
 // includes the whole time before the renderer exists). 0 during the first

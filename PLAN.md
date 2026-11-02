@@ -1129,6 +1129,20 @@ The game runs end to end. A build boots the publisher stills, the title, the New
 Game opening, the map, missions and battles, the tutorial, the shop, the
 Organize Screen, the credits, the ending and the attract loop.
 
+- **Issue #22, items 1 and 2 (session 212)** — the Esc overlay's MAIN tab has a
+  RESTART GAME row between ROM and EXIT GAME. It ends the run through the same
+  teardown as EXIT GAME, then spawns a new copy of the executable with the same
+  arguments (`posix_spawn`, or `_wspawnv` on Windows) and leaves with `_Exit`.
+  `execv` hung on a libc lock held by the runtime's unjoined game threads.
+  `OGRE_RESTARTED=1` keeps the new process off the start screen when a mod is
+  installed. `mods/permanent-suspend/` patches `func_80074834` (`.main`) to skip
+  erasing SRAM record 15 when a suspend save is loaded, so the same suspend
+  point can be loaded again after a relaunch. Verified on the real renderer: the
+  vanilla load turns `0x30B0` from `dc41 9ec6` into `00000000` and the patched
+  one leaves the 32 KiB image byte-identical, and a second process then resumes
+  the same save to scene `0x03`. The restart was measured with the null renderer
+  and `SDL_VIDEODRIVER=dummy` (two boots in one log); it has not been pressed in
+  the RT64 window. See `docs/HANDOFF-2026-11-02-session212.md`.
 - **Input** — the left stick's Y sign matches the N64 pad on both builds
   (session 211). SDL's left-stick Y is negative up and the Gamepad API's axis 1
   is also negative up, while the N64 pad's `stick_y` is positive up. The native
@@ -2744,6 +2758,16 @@ holds the evidence.
     byteswapped `.sra` still needs `tools/sramsave.py export`. The mid-copy retry
     window was not measured at the file-system level. See
     `docs/HANDOFF-2026-11-01-session209.md`.
+
+25. **RESTART GAME has not been pressed in the RT64 window (session 212).** The
+    row, the request path and the relaunch were measured with `build-null` and
+    `SDL_VIDEODRIVER=dummy`: `[overlay] RESTART GAME` is followed by a second
+    `[boot] init_sdl...` in the same log, through the full `recomp::start`
+    teardown and `shutdown_sdl`. What is unmeasured is the RT64/Metal window on
+    macOS (the child starts after the parent has released the renderer) and the
+    Windows `_wspawnv` path, which is compiled only by the Release workflow. The
+    recipe is in `docs/guides/app-build.md` -> "Verifying it without a human".
+    See `docs/HANDOFF-2026-11-02-session212.md`.
 
 Parked, not defects:
 
