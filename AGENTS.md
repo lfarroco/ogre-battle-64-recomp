@@ -313,8 +313,9 @@ it means stop chasing the path as a port bug.
   misses the title. Re-tune it, or tap forever, when you need a trace.
 - `OGRE_SPEED=n` scales the emulated clock, so a fixed wall-clock tap point moves
   relative to the game.
-- Scene forcing (`OGRE_SCENE=…`) lands only before the boot enters its first scene
-  (~1.1 s). A forced scene enters without the pre-state a natural path builds, so
+- Scene forcing (`OGRE_SCENE=…`) stores its request at a scene change, so it lands
+  when the boot's first scene hands over (~2.7 s at 8x, ~6.4 s at 1x), not at
+  1.1 s. A forced scene enters without the pre-state a natural path builds, so
   "forced X crashes" does not mean "X is broken".
 - No repo test harness exists. Each check is a ROM-dependent 12–170 s game run.
   Disclose that; do not invent a framework.
@@ -391,8 +392,9 @@ session afterwards.
 ## 13. Start debug runs at the title screen
 
 `OGRE_SCENE=title` boots straight to the title scene `0x04` instead of waiting
-out the boot intro and the publisher stills. Verified in session 130:
-`forcing scene 0x04`, then `forced scene 0x04 is active` at `t=3793ms`.
+out the boot intro and the publisher stills. Verified in session 213:
+`forcing scene 0x04: requested 0x8004 while 0x09 runs`, then
+`forced scene 0x04 is active` at `t=6353ms` (1x).
 
 - `OGRE_SCENE=<name|hex>` uses the scene table in `app/src/bank_overlays.cpp`
   (`title`, `intro`, `publishers`, `story`, `unit-info`, `tutorial`, `menu`,

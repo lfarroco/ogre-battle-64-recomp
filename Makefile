@@ -79,7 +79,7 @@ recomp: recomp-prep $(ELF)
 	@# emits (session 58, after moving bankRec10a out of unit C). Clear first.
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config/config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0,0x801AB740,0x801AB76C
 
 # The cross-bank dispatch inside `recomp` can only see bank records that
 # `make bank-recomp` has already written to app/src/bank_funcs.inc. Without it
@@ -199,6 +199,15 @@ regenerate:
 # The `func_8019D568` override is left in place: 0x8019D67C is a genuine
 # continuation of that body, and the one *call* to it is the site dispatched
 # here.
+# 0x801AB740/0x801AB76C, the two calls func_80079BD8 makes into record 3 (unit
+# A). `jal 0x801AB740` at 0x80079C4C and `jal 0x801AB76C` at 0x80079C78 are
+# bound by N64Recomp to func_801AB568, the overlay-C body that
+# config/config.toml extends over 0x801AB740 (the symbol's real body runs to
+# 0x801AB770): the call re-enters the body's start with the caller's $a0
+# instead of the loop epilogue at 0x801AB740. Unit A registers both addresses
+# (func_ovlA_801AB740, func_ovlA_801AB76C), so the lookup hands each call to
+# the resident record; both sites have the redirect/early-return shape and get
+# the tail repair.
 # The remaining targets stay on the recompiler's bindings (session 33's
 # behaviour); dispatching the other resolvable ones is still an opt-in
 # experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41, 55, 88).

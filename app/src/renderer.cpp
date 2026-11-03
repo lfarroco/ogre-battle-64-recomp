@@ -142,6 +142,37 @@ void set_application_user_config(RT64::Application* app, const ultramodern::rend
     app->userConfig.internalColorFormat = to_rt64(config.hpfb_option);
     app->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
 
+    // 2D rectangles sample at the console's pixel positions (RT64 `Original`).
+    // RT64's default `ScaledOnly` upscales every `G_TEXRECT` whose dsdx/dtdy is
+    // not exactly 1024 (`DrawCall::identityRectScale`). OB64 draws its dialogue
+    // box as three rectangles stretched by 1026..1169/1024 over a 16x61 texel
+    // window, and at a scaled resolution (3x here) the last row and column
+    // sample one texel past the window: a broken row under the box's shadow and
+    // a sliver beside the portrait. With `Original` the shader snaps each rectangle's UV to the
+    // native pixel (`RasterPS.hlsl`, `lowResUV`). Triangles (3D, the cutscene
+    // backdrop strips) are always upscaled, and HD replacement textures sample
+    // at full resolution in either mode. `OGRE_UPSCALE_2D=scaled|all` restores
+    // RT64's modes for an A/B.
+    {
+        auto mode = RT64::UserConfiguration::Upscale2D::Original;
+        const char* name = "original";
+        if (const char* env = getenv("OGRE_UPSCALE_2D")) {
+            if (strcmp(env, "scaled") == 0) {
+                mode = RT64::UserConfiguration::Upscale2D::ScaledOnly;
+                name = "scaled";
+            } else if (strcmp(env, "all") == 0) {
+                mode = RT64::UserConfiguration::Upscale2D::All;
+                name = "all";
+            }
+        }
+        app->userConfig.upscale2D = mode;
+        static const char* logged = nullptr;
+        if (logged != name) {
+            fprintf(stderr, "[renderer] 2D rectangles: upscale2D %s\n", name);
+            logged = name;
+        }
+    }
+
     // One line per applied configuration: the SETTINGS tab's DISPLAY rows change
     // any of these at runtime, and this is what makes the value a run actually
     // used readable from its log (the rows themselves only show the panel's

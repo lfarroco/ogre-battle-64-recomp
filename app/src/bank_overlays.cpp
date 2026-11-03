@@ -86,13 +86,9 @@ static const StreamedRecord kAllStreamedRecords[] = {
 // Boot straight into a screen.
 //
 // `OGRE_SCENE=<name|hex>` (or the original `OGRE_FORCE_SCENE=<hex>`) jumps to a
-// scene instead of waiting out the attract loop (which takes minutes). The
-// attract scene dispatcher (asm/1060.s @0x80075DB8) uses the u16 at
-// `*(u16*)(D_800C4BBC + 4)` as the current scene id every frame and derives
-// everything else -- the per-scene update function and the bank it loads --
-// from it, so poking that word makes the game load and run the scene normally.
-// The poke repeats until `D_800E810E` reports the scene active, and only starts
-// after `OGRE_SCENE_AFTER_MS` (default 3000) so boot/init can settle.
+// scene instead of waiting out the attract loop (which takes minutes). It
+// stores the game's own scene request (`0x8000 | id` into `D_800C4C26`) once
+// the first scene after the boot's `0x00` runs; see "scene forcing" below.
 //
 // The names are the scenes this project has identified so far; a hex id can
 // always be given instead. `OGRE_SCENE_TRACE=1` logs every scene change
@@ -135,20 +131,24 @@ static bool scene_lookup_impl(const char* spec, uint16_t& id) {
 
 // --- scene forcing --------------------------------------------------------
 //
-// The dispatcher is `func_80075BC0` (asm/1060.s @0x80075DB8). Each call:
-//   1. copies the pending id `D_800E8214` into the current scene-state block
-//      (`*(u16*)(*(u32*)D_800C4BBC + 4)`), then
-//   2. runs the block's id as the scene.
-// So writing *either* word can select a scene, but only inside a narrow window:
-// once the boot has entered its first real scene (0x09 at ~1.1 s) the running
-// scene's own update function owns the block and re-establishes it every frame,
-// and a poke is simply overwritten. A late poke therefore does nothing, which
-// is why the default `OGRE_SCENE_AFTER_MS` is 0 and why poking *every* frame
-// forever corrupts the state machine.
+// The dispatcher is `func_80075BC0`. Its loop top reads the root id
+// `D_800E8214` (`lhu` at `0x80075DA8`) into the scene block, and no main-ELF
+// code writes that word, so the boot's first scene is `0x00`. After that a
+// scene changes only through the request word `D_800C4C26`:
+//   * before each enter the dispatcher stores `0xFFFF` there (`0x80075F54`);
+//   * it spins while the word still reads `0xFFFF` (`0x80075FB8`);
+//   * for a word with bit 15 set it clears the bit (`andi 0x7FFF` at
+//     `0x800760C4`), stores the id into the block (`0x800760D8`) and re-enters
+//     the loop with that scene (`0x800760A0`).
+// The game's own transitions store `0x8000 | id` in that word from a scene
+// update (39 sites, `tools/scenemap.py`).
 //
-// The poke is retried from `poll_scene` (per frame, main thread) as well as
-// from `force_scene_on_load` (the streamed-DMA hook, i.e. from inside a scene
-// update) until `D_800E810E` reports the target active, then released.
+// `OGRE_SCENE` stores the same request: `0x8000 | id` when a scene past the
+// boot's `0x00` is running and the word reads `0xFFFF`. The running scene's
+// leave hook then runs as in a natural transition, and the next scene's enter
+// loads its own banks. `poll_scene` (per frame, main thread) and
+// `force_scene_on_load` (the streamed-DMA hook) both retry until
+// `D_800E810E` reports the target active.
 
 struct ForcedScene {
     bool configured = false;
@@ -176,9 +176,8 @@ const ForcedScene& forced_scene() {
     return forced;
 }
 
-// Delay before the first poke. The window in which a poke takes effect is at
-// the *start* of the run (before ~1 s), so this defaults to 0; it exists only
-// for A/B runs that want to reproduce the old delayed behaviour.
+// Delay before the first request (default 0): `OGRE_SCENE_AFTER_MS=n` lets the
+// first scene run for n ms before it is replaced.
 uint32_t scene_after_ms() {
     static const uint32_t value = [] {
         const char* v = getenv("OGRE_SCENE_AFTER_MS");
@@ -211,28 +210,29 @@ bool forced_scene_active(const ForcedScene& forced) {
     return seen;
 }
 
-// Write both words the dispatcher reads: the state block's id (seen when the
-// poke lands inside a scene update) and the pending id (copied into the block
-// at the top of every dispatcher call, so it is what a main-thread poke uses).
-bool poke_scene(uint16_t id) {
+constexpr uint32_t kSceneRequestAddress = 0x800C4C26;
+constexpr uint16_t kSceneRunning = 0xFFFF;
+
+// Stores `0x8000 | id` into the request word when a scene past the boot's
+// `0x00` is running and nothing is pending. Returns the scene it asked to
+// leave, or -1 when it stored nothing.
+int request_scene(uint16_t id) {
     uint8_t* rdram = ultramodern::get_rdram_base();
     if (rdram == nullptr) {
-        return false;
+        return -1;
     }
-    const uint32_t block = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x800C4BBC);
-    if (block >= 0x80000000u && block < 0x80800000u) {
-        MEM_H(0x4, (gpr)(int32_t)block) = id;
+    const uint16_t running = active_scene_id();
+    if (running == 0 || running >= 0x1F) {
+        return -1;
     }
-    MEM_H(0x0, (gpr)(int32_t)0x800E8214) = id;
-    return true;
+    if ((uint16_t)MEM_HU(0x0, (gpr)(int32_t)kSceneRequestAddress) != kSceneRunning) {
+        return -1;
+    }
+    MEM_H(0x0, (gpr)(int32_t)kSceneRequestAddress) = (int16_t)(0x8000 | id);
+    return running;
 }
 
-}  // namespace
-
-// The poke itself, run from the streamed-DMA hook: a bank load during a scene
-// update is the one moment the dispatcher is inside its loop and will re-read
-// the block id. `poll_scene` retries it per frame for the boot window.
-void force_scene_on_load() {
+void try_force_scene() {
     const ForcedScene& forced = forced_scene();
     if (!forced.configured || forced_scene_active(forced)) {
         return;
@@ -240,12 +240,19 @@ void force_scene_on_load() {
     if (scene_elapsed_ms() < scene_after_ms()) {
         return;
     }
-    static bool announced = false;
-    if (!announced && poke_scene(forced.id)) {
-        announced = true;
-        printf("[scene] forcing scene 0x%02X\n", forced.id);
+    const int left = request_scene(forced.id);
+    if (left >= 0) {
+        printf("[scene] forcing scene 0x%02X: requested 0x%04X while 0x%02X runs\n",
+               forced.id, 0x8000u | forced.id, (unsigned)left);
         fflush(stdout);
     }
+}
+
+}  // namespace
+
+// The streamed-DMA hook's chance to request the forced scene (see above).
+void force_scene_on_load() {
+    try_force_scene();
 }
 
 // --- Scene-script step shortcut (OGRE_STEP) ---------------------------------
@@ -359,8 +366,8 @@ bool hold_step() {
 
 // OGRE_SCENE_LOG=1: log every scene change. This is how the names in kScenes
 // are found and verified. Also the retry half of the scene forcing above: the
-// streamed-DMA hook rarely fires inside the boot window, so the per-frame path
-// re-applies the poke until the dispatcher agrees.
+// streamed-DMA hook rarely fires while the dispatcher waits, so the per-frame
+// path writes the request again until the dispatcher agrees.
 // The id the dispatcher is currently running (`D_800E810E`), or 0xFFFF when the
 // game is not up yet.
 uint16_t active_scene_id() {
@@ -469,11 +476,7 @@ void poll_scene() {
         }
     }
 
-    const ForcedScene& forced = forced_scene();
-    if (forced.configured && !forced_scene_active(forced) &&
-        (scene_elapsed_ms() >= scene_after_ms())) {
-        poke_scene(forced.id);
-    }
+    try_force_scene();
 
     // OGRE_STEP=<n>: hold the scene-script step (see `forced_step`). The VM
     // rewrites D_8018F1C0 on every visit, so this must be re-applied per frame,
@@ -540,23 +543,27 @@ void poll_scene() {
     }
 
     // OGRE_SCENE_TRACE=1: the forcing state every ~500 ms: what the dispatcher
-    // reports active, the pending word this pass writes, and what the state
-    // block currently holds. "forcing the id but the block never shows it" and
-    // "the block shows it but the dispatcher ignores it" are different bugs.
+    // reports active, the request word this pass writes, the root word the
+    // loop top reads, and what the state block currently holds. "requested but
+    // the word never shows it" and "the word shows it but the dispatcher
+    // ignores it" are different bugs.
     if (getenv("OGRE_SCENE_TRACE") != nullptr) {
         static uint32_t last_trace = 0;
         if (scene_elapsed_ms() - last_trace >= 500) {
             last_trace = scene_elapsed_ms();
             uint8_t* rdram = ultramodern::get_rdram_base();
             if (rdram != nullptr) {
+                const ForcedScene& forced = forced_scene();
                 const uint32_t block = (uint32_t)MEM_W(0x0, (gpr)(int32_t)0x800C4BBC);
                 const uint16_t block_id = (block >= 0x80000000u && block < 0x80800000u)
                                               ? (uint16_t)MEM_HU(0x4, (gpr)(int32_t)block)
                                               : 0xFFFF;
                 fprintf(stderr,
-                        "[scene-trace] t=%ums active=0x%04X pending(D_800E8214)=0x%04X "
-                        "block=0x%08X block->id=0x%04X forced=0x%04X done=%d\n",
+                        "[scene-trace] t=%ums active=0x%04X request(D_800C4C26)=0x%04X "
+                        "root(D_800E8214)=0x%04X block=0x%08X block->id=0x%04X forced=0x%04X "
+                        "done=%d\n",
                         scene_elapsed_ms(), active_scene_id(),
+                        (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x800C4C26),
                         (uint16_t)MEM_HU(0x0, (gpr)(int32_t)0x800E8214), block, block_id,
                         forced.configured ? forced.id : 0, (int)forced_scene_active(forced));
                 fflush(stderr);
@@ -725,10 +732,10 @@ void on_streamed_dma(uint32_t rom_offset, uint32_t ram_addr, uint32_t /*size*/) 
         e.last = dma_trace_events;
         ++e.count;
     }
-    // Scene loads are the moments the dispatcher is guaranteed to be looking at
-    // the id, so the poke lives here (the original behaviour). Poking every
-    // frame instead corrupts the scene state machine: the game rewrites the id
-    // itself and a running scene then sees a state that does not match it.
+    // A record load is also a scene change, so this is one more chance to store
+    // the forced scene's request while the dispatcher waits for one. Writing it
+    // every frame is not equivalent: once the request is consumed, a running
+    // scene that has not installed its next request yet must not be replaced.
     force_scene_on_load();
 
     for (const BankRecord& record : kBankRecords) {

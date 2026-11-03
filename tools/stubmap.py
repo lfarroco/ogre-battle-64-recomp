@@ -583,29 +583,89 @@ def same_window_gap(site: Site, addr: int, modules: list[Module]) -> Module | No
     return cm
 
 
-def looks_like_entry(rom: "Rom", module: Module, addr: int) -> bool | None:
-    """Do the missing module's *own* ROM bytes at `addr` open like a function?
+JR_RA = 0x03E00008
 
-    This is the sharp end of the candidate triage. An address the module never
-    registered is either a body interior in its layout (the caller dispatched
-    another bank's address -- harmless, the resident bank simply is not this one)
-    or a genuine function start the split missed, which happens for a body
-    reachable only through a data pointer / callback table -- and that one *is*
-    a stub the moment the bank is resident. The ROM distinguishes them.
+
+def branch_target(pc: int, w: int) -> int | None:
+    """The target of a branch or `j` at `pc`, or None for other instructions."""
+    op = w >> 26
+    rt = (w >> 16) & 0x1F
+    imm = w & 0xFFFF
+    rel = pc + 4 + ((imm - 0x10000 if imm & 0x8000 else imm) << 2)
+    if op in (4, 5, 6, 7, 20, 21, 22, 23):  # beq bne blez bgtz (+likely)
+        return rel
+    if op == 1 and rt in (0, 1, 2, 3, 16, 17, 18, 19):  # REGIMM branches
+        return rel
+    if op == 17 and ((w >> 21) & 0x1F) == 8:  # bc1f/bc1t (+likely)
+        return rel
+    if op == 2:  # j (jal returns, so it never reaches an interior label)
+        return (pc & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+    return None
+
+
+def looks_like_entry(rom: "Rom", module: Module, addr: int) -> bool | None:
+    """Do the missing module's *own* ROM bytes at `addr` start a function?
+
+    An address the module never registered is either a body interior in its
+    layout (the caller dispatched another bank's address -- harmless, the
+    resident bank simply is not this one) or a function start the split missed,
+    which happens for a body reachable only through a data pointer -- and that
+    one *is* a stub the moment the bank is resident. The ROM distinguishes them:
+
+    * the code before `addr` (skipping nop padding) must end a function with
+      `jr ra` and its delay slot, so nothing falls through into `addr`;
+    * no branch or `j` in the containing body may reach `addr` or beyond;
+    * no word of the module may hold `addr`, because a jump-table case has its
+      address in the module's rodata (a callback pointer does too, so such an
+      address stays a bank-selection candidate);
+    * the code at `addr` opens a frame (`addiu sp,sp,-N`) or returns within 16
+      instructions (a leaf).
+
+    Accepting `lui`, `sw`, `j`, `jal` and `jr` as openers, the previous test
+    also admitted body interiors, switch cases and data. The four checks above
+    are the ones that separate those from a start.
 
     Returns None when the address is past the module's DMA size (no bytes).
     """
-    words = rom.words_at(module, addr, 1)
-    if words is None:
+    first = rom.words_at(module, addr, 1)
+    if first is None:
         return None
-    w = int.from_bytes(words, "big")
-    op = w >> 26
-    rs, rt = (w >> 21) & 0x1F, (w >> 16) & 0x1F
-    if op == 9 and rs == 29 and rt == 29 and (w & 0x8000):  # addiu sp,sp,-N
+    off = module.rom_of(addr)
+    data = rom.data
+
+    def word_at(o: int) -> int:
+        return int.from_bytes(data[o:o + 4], "big")
+
+    # 1. The previous non-nop pair is `jr ra` + delay slot.
+    k = off - 4
+    lo = module.rom
+    while k >= lo and word_at(k) == 0:
+        k -= 4
+    if k - 4 < lo:
+        return False
+    if word_at(k - 4) != JR_RA and word_at(k) != JR_RA:
+        return False
+    # 2. No branch in the containing body reaches addr or beyond.
+    body = body_containing(module, addr)
+    if body is not None:
+        for pc in range(body, addr, 4):
+            t = branch_target(pc, word_at(module.rom + (pc - module.ram)))
+            if t is not None and t >= addr and t < module.code_hi:
+                return False
+    # 3. No word of the module's image holds the address (jump table / pointer).
+    image = data[module.rom:module.rom + module.size]
+    if addr.to_bytes(4, "big") in image:
+        return False
+    # 4. A frame, or a leaf return within 16 instructions.
+    w = word_at(off)
+    if (w >> 16) == 0x27BD and (w & 0x8000):
         return True
-    # The prologue set `cross_bank.entry_looks_real` uses for a body that opens
-    # with a dispatch or a save instead of a frame.
-    return op in {2, 3, 8, 15, 43, 63}  # j, jal, jr, lui, sw, sd
+    for i in range(16):
+        if module.rom_of(addr + 4 * i) is None:
+            break
+        if word_at(off + 4 * i) == JR_RA:
+            return True
+    return False
 
 
 def unregistered(verdict: Verdict) -> bool:

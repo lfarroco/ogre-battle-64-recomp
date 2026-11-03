@@ -1129,6 +1129,19 @@ The game runs end to end. A build boots the publisher stills, the title, the New
 Game opening, the map, missions and battles, the tutorial, the shop, the
 Organize Screen, the credits, the ending and the attract loop.
 
+- **Issue #24, items 1-4 (session 213)** — four items from the Windows fork in
+  `issues/24` landed. RT64 now runs with `upscale2D = Original`
+  (`app/src/renderer.cpp`), so 2D rectangles sample at the console's pixel
+  positions; at 3x the dialogue box drew a dashed row under its shadow and a dark
+  column beside the portrait with RT64's `ScaledOnly` default, and neither is
+  present with `Original` (`docs/proofs/native-dialogue-upscale2d-*.png`).
+  `OGRE_SCENE` stores the game's own request `0x8000 | id` in `D_800C4C26`
+  instead of poking the state block and the root word; verified with
+  `OGRE_SCENE=title` and the cathedral route. Two calls `func_80079BD8` makes into
+  record 3 (`0x801AB740`, `0x801AB76C`) are dispatched through `LOOKUP_FUNC`, and
+  `tools/stubmap.py`'s entry test no longer accepts body interiors as function
+  starts (130 missing-function candidates -> 0). See
+  `docs/HANDOFF-2026-11-02-session213.md`.
 - **Issue #22, items 1 and 2 (session 212)** — the Esc overlay's MAIN tab has a
   RESTART GAME row between ROM and EXIT GAME. It ends the run through the same
   teardown as EXIT GAME, then spawns a new copy of the executable with the same
@@ -1686,12 +1699,16 @@ holds the evidence.
    window-close path dumps the DMA census and then faults. See
    `docs/HANDOFF-2026-09-19-session85.md` §4.
 6. **Latent static backlog.** `tools/stubmap.py report` classifies the 986 static
-   dispatch targets as 130 missing-function candidates, 152 bank-selection
-   candidates, 369 inert, 332 resolvable and 3 IMEM. The main unit also makes 951
-   direct calls into swappable RAM across 236 targets (`make cross-bank-check`),
-   a known backlog that `cross_bank.py dispatch --only` fixes one target at a
-   time. The 288 indirect `jalr` sites are outside any static measurement; a
-   run's stub log is the only check for them.
+   dispatch targets as 0 missing-function candidates, 282 bank-selection
+   candidates, 369 inert, 332 resolvable and 3 IMEM (session 213; the old entry
+   test reported 130 missing-function candidates, and every one is a body
+   interior, switch case or data). The main unit also makes 949 direct calls into
+   swappable RAM across 235 targets (`make cross-bank-check`), a known backlog
+   that `cross_bank.py dispatch --only` fixes one target at a time; session 213
+   dispatched `0x801AB740`/`0x801AB76C` (record 3, unit A), which removed the two
+   call sites and one target. The 288 indirect
+   `jalr` sites are outside any static measurement; a run's stub log is the only
+   check for them.
 7. **Controller Pak copy/backup (cartridge battery ↔ Controller Pak
    `Save`/`Load`/`Erase`).** The screen renders; the copy flow is deferred. The
    developer's decision is that it is low priority for a PC port. The device half
@@ -2616,6 +2633,25 @@ holds the evidence.
       a hook-section registry kept out of `sections_info`, and `rom_size` on
       `BankFunctionEntry`. A hook on `func_8016B774` is known to crash the save
       load, so the re-prime signal must avoid the save path.
+    * **Loading a save crashes with the mod enabled (session 213, developer
+      report).** The developer's battery `build-app/saves/ogrebattle64-us-rev1.bin`
+      (2 valid slots) SIGBUSes when the Load Game screen applies a slot:
+      `signal: SIGBUS`, `n64 thread: 4`, fault address `rdram + 0x800375F0`,
+      empty call chain. The same battery and settings load to scene `0x05`
+      without the crash when the randomizer is unticked, and the crash still
+      reproduces with session 213's cross-bank dispatch removed and the whole
+      game recompiled, so it is the mod's path. Under lldb the fault is
+      `movslq (%rbx,%rax)` with index `0x375F0`, in an `rwx` region outside the
+      app image (the mod's loaded code), called from the Load Game update
+      `func_80178430`; the randomizer replaces the save-field reader
+      `func_800749C0` to hook it. Opening the Load Game screen alone does not
+      crash; pressing A to apply the slot does. A rebuild of the mod with the
+      current toolchain (`build/mods/item-randomizer.nrm`, 5977 bytes) crashes
+      the same way. Workaround: untick the mod in MODS before loading.
+      Reproduction: `OGRE_MOD_TEST=1 OGRE_SAVE=<battery> OGRE_SCENE=title
+      OGRE_TAP_MS=1000 OGRE_TAP_SCENE_BUTTON="title:start:6,0x12:a:6"`. The fault
+      address is the same `rdram + 0x800375F0` shape as item 17's tutorial
+      reports, which were never A/B'd with the mod off.
     See `docs/HANDOFF-2026-10-03-session123.md`.
 17. **The Tutorial (scene `0x17`) crashes on entry with a SIGBUS; the Item
     Randomizer is in no frame of it.** Four macOS crash reports on 2026-10-03 (16:59:21,
@@ -2633,7 +2669,10 @@ holds the evidence.
     pointer the game follows, and an unknown guest code address resolves to a stub
     rather than a jump. The earliest report (16:59) also predates session 124's
     change to the mod. That is a mechanism argument and not a measurement: the run
-    that would have measured it did not have the mod off. The A/B that was meant to show this did
+    that would have measured it did not have the mod off. Session 213 reproduced
+    the same `rdram + 0x800375F0` fault on the Load Game path, deterministically
+    with the randomizer enabled and absent with it disabled (item 16), so the
+    mod-off A/B is the first check for this fault too. The A/B that was meant to show this did
     not: `run-with-save.sh` copies `build-app/mods.json` over any `mods.json`
     written into the preference directory, so the mod was loaded in both runs;
     the veto has to move `<pref>/mods/item-randomizer.nrm` aside. Open: which
