@@ -5,6 +5,14 @@
 #   2. make          -> assemble/objcopy to .o, link to build/ogrebattle64.elf
 #   3. N64Recomp     -> generate C from the ELF + config/config.toml
 
+# Parallel compile jobs for the SDL2, app and web builds. A bare `-j` means
+# "unlimited": on a 4-core GitHub-hosted Linux runner, `make dist` started about
+# 180 compiles within one minute and the job was killed (exit code 143, make
+# reports "Terminated") roughly 100 s later, with about 60 g++ processes still
+# running. Both attempts of run 41559650810 died the same way. Bound the job
+# count to the CPU count.
+JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
 ROM      := assets/ogre64.z64
 BASENAME := ogrebattle64
 LDSCRIPT := $(BASENAME).ld
@@ -568,7 +576,7 @@ sdl2-static:
 	      $(SDL2_AUDIO_ARGS) \
 	      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
 	      -DSDL_TEST=OFF -DSDL_TESTS=OFF \
-	    && cmake --build tools/SDL2-static/build --config Release -j \
+	    && cmake --build tools/SDL2-static/build --config Release -j$(JOBS) \
 	    && cmake --install tools/SDL2-static/build --config Release --prefix "$(SDL2_PREFIX)"; \
 	  } > tools/SDL2-static/build.log 2>&1 || true; \
 	  lib=""; \
@@ -607,7 +615,7 @@ EXE_BUILT = $(firstword $(wildcard $(APP_BUILD_DIR)/$(EXE_NAME) $(APP_BUILD_DIR)
 .PHONY: app
 app:
 	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) $(CMAKE_ARGS) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
-	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 --config Release -j
+	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 --config Release -j$(JOBS)
 
 # --- Web (Emscripten) build ---------------------------------------------------
 #
@@ -625,7 +633,7 @@ EM_CACHE ?= $(HOME)/.cache/emscripten-ogre
 .PHONY: web
 web:
 	@EM_CACHE=$(EM_CACHE) emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release
-	@EM_CACHE=$(EM_CACHE) cmake --build build-wasm -j
+	@EM_CACHE=$(EM_CACHE) cmake --build build-wasm -j$(JOBS)
 	@echo "web: build-wasm/ogrebattle64.wasm is ready; serve it with python3 debug/server.py"
 
 # --- Static web build (GitHub Pages) ------------------------------------------
