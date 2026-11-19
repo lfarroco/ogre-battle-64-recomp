@@ -4,53 +4,17 @@
 #include "web_settings.hpp"
 
 #include <cstdint>
-#include <cstdlib>
-#include <vector>
 
 #include <ultramodern/ultramodern.hpp>
 
 #include "bank_overlays.hpp"
 #include "game.hpp"
-#include "hd_backgrounds.hpp"
 #include "map_cursor.hpp"
 #include "mission_cursor.hpp"
 #include "settings.hpp"
 
 namespace ogre {
 namespace {
-
-// The scenes the wide view is used for. Mirrors the native `expand_scenes()` in
-// `widescreen.cpp`; that file includes SDL and is not part of the wasm target,
-// so the set lives here for the browser. `OGRE_WS_SCENES` replaces it for a
-// developer run.
-const std::vector<uint16_t>& expand_scenes() {
-    static const std::vector<uint16_t> scenes = [] {
-        std::vector<uint16_t> out{0x0003, 0x000D};
-        const char* spec = std::getenv("OGRE_WS_SCENES");
-        if (spec == nullptr || spec[0] == '\0') {
-            return out;
-        }
-        out.clear();
-        const char* p = spec;
-        while (*p != '\0') {
-            char* end = nullptr;
-            const unsigned long id = std::strtoul(p, &end, 0);
-            if (end == p) {
-                break;
-            }
-            out.push_back(static_cast<uint16_t>(id & 0xFFFFu));
-            p = end;
-            while (*p == ',' || *p == ' ' || *p == '+') {
-                ++p;
-            }
-        }
-        if (out.empty()) {
-            out.push_back(0x0003);
-        }
-        return out;
-    }();
-    return scenes;
-}
 
 int guest_byte(uint32_t address) {
     uint8_t* rdram = ultramodern::get_rdram_base();
@@ -70,20 +34,14 @@ int chaos_frame() {
     return guest_byte(CHAOS_FRAME_ADDRESS);
 }
 
+// The scenes the wide view is used for come from `settings.cpp`, which both
+// builds share: `widescreen.cpp` includes SDL and is not part of the wasm
+// target, and the set must not drift between them.
 bool web_widescreen_expand() {
     if (widescreen_mode() == WidescreenMode::Off) {
         return false;
     }
-    const uint16_t scene = active_scene_id();
-    if (hd_backgrounds_covers_scene(scene)) {
-        return true;
-    }
-    for (uint16_t id : expand_scenes()) {
-        if (id == scene) {
-            return true;
-        }
-    }
-    return false;
+    return widescreen_scene_expands(active_scene_id());
 }
 
 }  // namespace ogre

@@ -1129,6 +1129,17 @@ The game runs end to end. A build boots the publisher stills, the title, the New
 Game opening, the map, missions and battles, the tutorial, the shop, the
 Organize Screen, the credits, the ending and the attract loop.
 
+- **Issue #27 (session 214)** — a cutscene no longer shows bands of unrelated
+  content at the sides in widescreen. RT64's Expand is used for the mission
+  scene `0x03` only: an expanded frame is a 428x240 target whose game picture is
+  the centred columns 53..373, and the columns outside it are painted by the
+  same frame's 2D draws through RT64's wide viewport. Scene `0x0D` is now
+  presented 4:3 and pillarboxed, the expand set moved to
+  `widescreen_expand_scenes()` (`app/src/settings.cpp`) so the native and
+  browser builds share it, and the HD pack's `-wide` image is used only for a
+  scene that expands. Verified on the cutscene, the mission (`aspect ratio
+  expand (scene 0x0003, mode ON)`, 428x240) and the pack (`applied 'cathedral'
+  (01)`). See `docs/HANDOFF-2026-11-19-session214.md`.
 - **Issue #24, items 1-4 (session 213)** — four items from the Windows fork in
   `issues/24` landed. RT64 now runs with `upscale2D = Original`
   (`app/src/renderer.cpp`), so 2D rectangles sample at the console's pixel
@@ -1370,7 +1381,10 @@ Organize Screen, the credits, the ending and the attract loop.
   hosted release runners get them from the private data bundle (session 108).
   WIDESCREEN is a toggle (`off` / `on`): `on` turns RT64's Expand aspect ratio
   on only while scene `0x03` runs, so the mission field is hor+ 16:9 and the 4:3
-  2D screens are untouched (sessions 102, 105). The window shape follows the
+  2D screens are untouched (sessions 102, 105). The cutscene scene `0x0D` does
+  not expand: the columns beside its picture are painted by the frame's own 2D
+  draws mapped through RT64's wide viewport, and show content that is not part
+  of the 4:3 frame (issue #27, session 214). The window shape follows the
   toggle and never the scene: `off` opens 4:3 with no pillarbox, and `on` opens
   16:9 with the 4:3 scenes pillarboxed inside. SOUNDS is a radio group
   (`off` / `on`) and VOLUME a 0..100 slider; the audio callback scales every
@@ -1431,11 +1445,13 @@ Organize Screen, the credits, the ending and the attract loop.
   the pixels the njpeg readback copies, split to match the game's four-chunk
   496x384 backdrop canvas, so one PNG fills the whole backdrop. The first
   mapping is scene `0x0D` step 2 (the New Game cathedral), with a plain
-  `01.png` and a widescreen `01-wide.png`. With WIDESCREEN on, scene `0x0D`
-  expands whether or not the pack is installed (its own 496x384 backdrop has
-  content the 4:3 view crops), and a scene the pack covers is added to the RT64
-  Expand set, so the backdrop fills the 16:9 window and reveals more of the
-  canvas at the sides while the dialogue box and text keep their size.
+  `01.png` and a widescreen `01-wide.png`. WIDESCREEN does not expand scene
+  `0x0D` (issue #27): its 2D draws are mapped into RT64's wide viewport, so the
+  columns outside the game's own 320-pixel picture show content that is not
+  part of the 4:3 frame. The scene is presented 4:3 and pillarboxed in the wide
+  window, and the
+  `-wide.png` variant is used only for a scene that expands, which none of the
+  pack's mappings is (see `docs/DECISIONS.md`, session 214).
   `OGRE_BG=0` runs without the pack. `tools/backgrounds.py` (and `make
   bg-extract`) extracts the game's own backdrop as the reference an artist
   draws over; the output lives in the gitignored `mods/backgrounds/reference/`.

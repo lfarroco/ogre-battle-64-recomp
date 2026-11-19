@@ -37,8 +37,10 @@
 // The file is `<config>/settings.cfg`, plain text.
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace ogre {
 
@@ -113,6 +115,29 @@ int widescreen_mode_index();
 // Stores `mode` and writes `<config>/settings.cfg`. `widescreen.cpp` applies it
 // on the next frame, so a change while the game runs takes effect immediately.
 void set_widescreen_mode(WidescreenMode mode);
+
+// The scenes RT64's Expand aspect ratio is used for. Only scene `0x03`, the
+// mission, is in the default set: it is the scene the setting exists for, and
+// its field is 3D across the whole frame, so `ProjectionProcessor` can widen it
+// without stretching the game's 2D layout. Every other scene keeps its 4:3
+// authoring and is presented pillarboxed.
+// `OGRE_WS_SCENES=<hex>[,<hex>...]` replaces the set for a developer run.
+//
+// This list lives here, and not in `widescreen.cpp`, because the browser build
+// compiles `settings.cpp` and not `widescreen.cpp`: both targets ask the same
+// question and must answer it the same way.
+//
+// Scene `0x0D` (the dialogue/cutscene engine) is deliberately absent. Its
+// cutscene frames are 2D draws across the whole 4:3 frame, and RT64's Expand
+// maps those draws into its wide viewport, so the columns outside the game's
+// own 320-pixel image show content that is not part of the 4:3 frame
+// (developer report, issue #27). RT64 has no mid-scene signal
+// for a 4:3-authored draw, and the game does not emit the extended GBI commands
+// that would provide one, so the only correct presentation for it is 4:3.
+const std::vector<uint16_t>& widescreen_expand_scenes();
+
+// Whether the toggle should Expand the given scene.
+bool widescreen_scene_expands(uint16_t scene);
 
 // The WIDESCREEN row's options as one string (radio markers and labels), for
 // `right_text`; the drawn row uses the panel's own radio layout.

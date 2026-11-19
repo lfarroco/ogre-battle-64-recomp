@@ -66,9 +66,14 @@ OGRE_BG_DIR=/path/to/another-pack ./build-app/ogrebattle64 assets/ogre64.z64
 `OGRE_BG=0` logs `[hdbg] pack disabled (OGRE_BG=0)`; an empty `OGRE_BG_DIR` logs
 `[hdbg] no backgrounds.txt found (looked in 1 place(s))`. With the pack off, the
 game's own `njpeg` backdrop is drawn unchanged and `OGRE_BG_LOG` prints no
-`[hdbg] pass` lines. WIDESCREEN is unaffected: scene `0x0D` is in the Expand set
-whether or not the pack is installed, and the game's own 496x384 backdrop has
-content that the 4:3 view crops, so the wide view reveals it.
+`[hdbg] pass` lines. WIDESCREEN does not expand scene `0x0D`, so the backdrop
+is drawn 4:3 and pillarboxed in the wide window. The `-wide` variant is used
+only for a scene that expands, and the pack's mappings are not for the mission,
+so the plain image is the one applied (`[hdbg] applied 'cathedral' (01)`, with
+no `wide` suffix). Issue #27 and `docs/DECISIONS.md` (session 214) hold the
+reason: the frame is 2D in a 4:3 layout, and RT64's Expand maps those draws
+into its wide viewport, so the columns outside the game's own 320-pixel picture
+show content that is not part of the 4:3 frame.
 
 ## Extracting the original (the reference to draw over)
 

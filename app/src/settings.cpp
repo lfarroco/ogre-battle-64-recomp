@@ -25,6 +25,11 @@ namespace {
 // (`step_game_speed`) walk this same list.
 const int kGameSpeeds[kGameSpeedCount] = {1, 2, 4, 8};
 
+// Scene `0x03` is the mission: the 3D field with the party, its intro, and the
+// battles inside it. It is the one scene Expand widens (see
+// `widescreen_expand_scenes`).
+constexpr uint16_t kMissionScene = 0x0003;
+
 // The config directory the file is written to; empty until load_settings runs,
 // in which case a change still applies to the runtime but is not persisted.
 std::filesystem::path g_pref_dir;
@@ -511,6 +516,44 @@ void set_widescreen_mode(WidescreenMode mode) {
     }
     g_widescreen = mode;
     write_settings();
+}
+
+const std::vector<uint16_t>& widescreen_expand_scenes() {
+    static const std::vector<uint16_t> scenes = [] {
+        std::vector<uint16_t> out{kMissionScene};
+        const char* spec = std::getenv("OGRE_WS_SCENES");
+        if (spec == nullptr || spec[0] == '\0') {
+            return out;
+        }
+        out.clear();
+        const char* p = spec;
+        while (*p != '\0') {
+            char* end = nullptr;
+            const unsigned long id = std::strtoul(p, &end, 0);
+            if (end == p) {
+                break;
+            }
+            out.push_back(static_cast<uint16_t>(id & 0xFFFFu));
+            p = end;
+            while (*p == ',' || *p == ' ' || *p == '+') {
+                ++p;
+            }
+        }
+        if (out.empty()) {
+            out.push_back(kMissionScene);
+        }
+        return out;
+    }();
+    return scenes;
+}
+
+bool widescreen_scene_expands(uint16_t scene) {
+    for (uint16_t id : widescreen_expand_scenes()) {
+        if (id == scene) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string widescreen_mode_text() {

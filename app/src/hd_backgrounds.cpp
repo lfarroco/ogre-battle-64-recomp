@@ -10,11 +10,12 @@
 #include <string>
 #include <vector>
 
-#if !defined(__EMSCRIPTEN__)
-// `widescreen_mode()` selects the `-wide` image. The browser build has no
-// settings screen and no widescreen mode, so it always uses the plain image.
+// `widescreen_mode()` and `widescreen_scene_expands()` decide whether the
+// `-wide` image can be shown. Both live in `settings.cpp`, which the browser
+// build compiles too, so this include is not guarded: the browser build has no
+// widescreen UI, but its settings default to `Off` and the scene set is the
+// same one the native build uses.
 #include "settings.hpp"
-#endif
 
 // A single-header decoder. RT64 compiles its own copy of stb_image into the
 // renderer, so this one is `static` to keep the two from colliding at link
@@ -465,15 +466,6 @@ void hd_backgrounds_init(const std::filesystem::path& pref_dir) {
 
 }  // namespace ogre
 
-bool ogre::hd_backgrounds_covers_scene(uint16_t scene) {
-    for (const Entry& e : g_pack.entries) {
-        if (e.scene == scene) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Called by the generated njpeg readback (tools/hd_backgrounds.py) at the end of
 // each pass's row copy.
 extern "C" void ogre_hd_background(uint8_t* rdram) {
@@ -525,15 +517,6 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
         return;
     }
 
-    // The widescreen mode selects the `-wide` image when the pack has one. The
-    // readback runs one scene early (the `0x02` loader), so the live aspect is
-    // still 4:3 there and the setting, not the current `ar_option`, is the
-    // signal.
-    bool wide = false;
-#if !defined(__EMSCRIPTEN__)
-    wide = ogre::widescreen_mode() != ogre::WidescreenMode::Off;
-#endif
-
     const Entry* match = find_entry(scene, next_scene, step);
     if (std::getenv("OGRE_BG_LOG") != nullptr) {
         std::fprintf(stderr,
@@ -556,6 +539,12 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
                      match->name.c_str(), base);
         return;
     }
+    // The `-wide` variant is authored for the expanded 16:9 presentation, so it
+    // is used only while the matched scene expands (`widescreen_expand_scenes`
+    // in `settings.cpp`). The readback runs one scene early (the `0x02` loader),
+    // so the setting, and not the live `ar_option`, is the signal.
+    const bool wide = ogre::widescreen_mode() != ogre::WidescreenMode::Off &&
+                      ogre::widescreen_scene_expands(match->scene);
     const bool use_wide = wide && !match->pixels_wide.empty();
     const std::vector<uint16_t>& art = use_wide ? match->pixels_wide : match->pixels;
     // Copy this pass's sub-rectangle out of the canvas.

@@ -27,77 +27,16 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <vector>
 
 #include <SDL.h>
 #include <ultramodern/config.hpp>
 #include <ultramodern/ultramodern.hpp>
 
 #include "bank_overlays.hpp"
-#include "hd_backgrounds.hpp"
 #include "settings.hpp"
 
 namespace ogre {
 namespace {
-
-// Scene `0x03` is the mission: the 3D field with the party, its intro, and the
-// battles inside it. Descriptor `0x8018F350`; see docs/scenes.md. It is the
-// scene the developer asked widescreen for.
-constexpr uint16_t kMissionScene = 0x0003;
-
-// Scene `0x0D` is the New Game dialogue/cutscene scene. Its backdrop is a
-// 496x384 canvas and the 4:3 view crops it, so Expand reveals the sides of the
-// game's own art (verified with the HD-background pack off: the wide capture
-// shows statues and columns the 4:3 capture does not). It expands whether or not
-// the pack is installed.
-constexpr uint16_t kDialogueScene = 0x000D;
-
-// The scenes Expand is used for by default. `OGRE_WS_SCENES=<hex>[,<hex>...]`
-// replaces the set for a developer run. The set is parsed once. A scene the
-// HD-background pack covers is added by `scene_expands` on top of this.
-const std::vector<uint16_t>& expand_scenes() {
-    static const std::vector<uint16_t> scenes = [] {
-        std::vector<uint16_t> out{kMissionScene, kDialogueScene};
-        const char* spec = std::getenv("OGRE_WS_SCENES");
-        if (spec == nullptr || spec[0] == '\0') {
-            return out;
-        }
-        out.clear();
-        const char* p = spec;
-        while (*p != '\0') {
-            char* end = nullptr;
-            const unsigned long id = std::strtoul(p, &end, 0);
-            if (end == p) {
-                break;
-            }
-            out.push_back(uint16_t(id & 0xFFFFu));
-            p = end;
-            while (*p == ',' || *p == ' ' || *p == '+') {
-                ++p;
-            }
-        }
-        if (out.empty()) {
-            out.push_back(kMissionScene);
-        }
-        return out;
-    }();
-    return scenes;
-}
-
-bool scene_expands(uint16_t scene) {
-    // A scene the pack covers expands too, so the replacement fills the wide
-    // window instead of being pillarboxed.
-    if (hd_backgrounds_covers_scene(scene)) {
-        return true;
-    }
-    for (uint16_t id : expand_scenes()) {
-        if (id == scene) {
-            return true;
-        }
-    }
-    return false;
-}
 
 // The VI framebuffer is 320x240, so 4:3 is the game's own shape. 16:9 is the
 // shape a widescreen mode gives the window: `ProjectionProcessor` counter-scales
@@ -123,9 +62,11 @@ int width_for_height(int height, float aspect) {
 }
 
 // Whether Expand is on this frame: the toggle is on and the dispatcher is
-// running a scene in the expand set.
+// running a scene in the expand set. The set is `settings.cpp`'s, shared with
+// the browser build; see `widescreen_expand_scenes` for why scene `0x0D` is not
+// in it.
 bool wants_expand() {
-    return widescreen_mode() != WidescreenMode::Off && scene_expands(active_scene_id());
+    return widescreen_mode() != WidescreenMode::Off && widescreen_scene_expands(active_scene_id());
 }
 
 // The shape the *window* has, which is the mode's and not the scene's: any

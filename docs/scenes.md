@@ -111,6 +111,10 @@ This is one flow made of several *steps*; the game plays them as repeated
 in `D_8018F1C0` (see `docs/HANDOFF-2026-09-15-session44.md` §1 for the decoded
 step table).
 
+The scene is authored for 4:3. With WIDESCREEN on it is presented at its own
+320x240 and pillarboxed in the wide window; it is not in RT64's Expand set
+(issue #27, `docs/DECISIONS.md` session 214).
+
 | # | what the player sees | source | status |
 |---|---|---|---|
 | 1 | **the intro movie**: a multi-shot sepia cutscene in a castle courtyard, ending on the subtitle *"I promise I'll make you proud."* (~28.7 s) | dev (session 43), proof (`native-newgame-cutscene.png`, `native-newgame-cutscene-2.png`) | renders |
