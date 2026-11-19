@@ -181,6 +181,8 @@ Technical documentation for the Ogre Battle 64 (USA, Rev A) PC port project.
 | [guides/emulator-first.md](guides/emulator-first.md) | **Read before theorising about what a display list "meant".** The three pillars an emulator has (GBI identification by ucode hash, a faithful RSP, ground truth), where the port stands (it has the first, stubs the second, lacks the third), the five-check checklist to run before blaming game data, the recipe to hash a ucode into RT64's GBI database, how to borrow a reference emulator (RetroArch + Mupen64Plus-Next is installed), and what GLideN64/mupen64plus-rsp-hle know about OB64 specifically (`[OGREBATTLE64] enableTexCoordBounds=1`, `hack_Ogre64`, `jpeg_decode_OB`). |
 | [guides/linux-migration.md](guides/linux-migration.md) | Moving the dev environment to Ubuntu: prerequisites and macOS-specific code to remove. |
 | [guides/web-probes.md](guides/web-probes.md) | Headless-browser probes (`debug/`): serving the wasm build, running the probes, the page contract. |
+| [DEVELOPING.md](DEVELOPING.md) | Quick start for a fresh clone: the vendored toolchain clones and their patches, `make regenerate`, running the app, and the SDL 2.0.22 guard. The full build reference is [guides/app-build.md](guides/app-build.md). |
+| [DISTRIBUTION.md](DISTRIBUTION.md) | Packaging a release with `make dist` / `make dist-zip`: the single executable, the static SDL2 build, and the no-game-data rule. |
 | [PLAN.md](../PLAN.md) | The high-level project plan and roadmap. |
 
 ## Conventions
