@@ -160,6 +160,21 @@ finishing a change to any file in `app/CMakeLists.txt`'s Emscripten source list.
 `EM_CACHE` holds the Emscripten sysroot (`~/.cache/emscripten-ogre` by default)
 so a rebuild does not re-download it.
 
+The workflow installs the release that `latest` names, so a new emsdk can break
+the third-party tree without a change in this repository. Emscripten 7.0.0
+(2026-11-19) stopped declaring `malloc`/`free` through `<stdexcept>`, and
+rabbitizer's `InstructionBase.cpp` calls them with only that header included;
+`app/CMakeLists.txt` pre-includes `<cstdlib>` for the `rabbitizer` target's C++
+sources. The same class of change removed `labs()` from RT64's `<math.h>` path
+on libc++ 21, which is the `APPLE` force-include beside it. A new emsdk is
+checked with `make web`.
+
+On macOS the emsdk and `EM_CACHE` must resolve under the same `/tmp` form. When
+the emsdk is at `/private/tmp/emsdk700` and `EM_CACHE` at `/private/tmp/...`,
+Emscripten 7.0.0 builds its cached system libraries; mixing `/tmp` and
+`/private/tmp` makes it look for `.../private/tmp/...` under the cache
+directory and the link fails on `emscripten_tls_init.c`.
+
 `make web-dist` runs `make web` and then writes `dist-web/`: one self-contained
 directory a plain static host can serve (the page, the shell, the Emscripten
 output, and `coi-serviceworker.js`, which supplies the COOP/COEP headers a static

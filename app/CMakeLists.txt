@@ -132,6 +132,21 @@ endif()
 # --- Runtime: ultramodern + librecomp (+ its bundled N64Recomp) --------------
 add_subdirectory(${OGRE_TOOLS}/N64ModernRuntime ${CMAKE_BINARY_DIR}/N64ModernRuntime)
 
+# rabbitizer's InstructionBase.cpp calls malloc()/free() while including only
+# <stdexcept>, and relied on that header to declare them transitively. The
+# emsdk release the wasm workflow installed on 2026-11-19 (6afbd834) dropped the
+# transitive declaration, and the job failed with "use of undeclared identifier
+# 'malloc'" in that one file. libc++ 21 did the same to RT64's labs(); see the
+# APPLE force-include below. Force the header into the target rather than patch
+# the nested submodule, which a submodule update would discard. cl.exe rejects
+# `-include`, and it declares malloc() through <stdexcept> on every supported
+# version, so the flag is limited to clang and gcc.
+# The target compiles C sources too, and `-include cstdlib` has no meaning in C,
+# so the pre-include is limited to C++ compilations.
+if (TARGET rabbitizer AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rabbitizer PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdlib>")
+endif()
+
 # Frame pointers in the runtime too, not just in the app: a crash inside
 # runtime code reached through a bridge (the message-queue math, for example)
 # has an empty shadow *guest* chain, and without frame pointers lldb prints only
