@@ -40,6 +40,42 @@ recipe step is `chmod -R a+rX`, because the checked-in files carry the checkout'
 own mode and a strict umask would leave the package mode 0600, which a static
 host reading the files as another user cannot serve.
 
+### Bundled mods on the Pages site
+
+The four shipped code mods are compiled into `ogrebattle64.wasm` (see
+`docs/guides/app-build.md` -> "The browser build: bundled code mods"). The
+package needs no `mods/` directory and no extra request: the `.nrm` archives,
+their manifests and their recompiled code are inside the binary. A package
+built from a source tree that has `app/src/web_mods/` therefore serves the MODS
+tab with all four mods.
+
+Both browser workflows take that generated C++ from the private data bundle, not
+from the checkout, because producing it needs the ROM and a host
+`OfflineModRecomp`. The bundle must be regenerated after the browser mods land:
+
+```sh
+make example-mods && make web-mods
+tools/data-bundle.sh
+# upload dist/ogre-data/files.tar.gz to the private data repository
+```
+
+The unpack step in `.github/workflows/pages.yml` (and `.github/workflows/wasm.yml`)
+fails with that command when the archive has no
+`app/src/web_mods/bundled_mods.cpp` or `instrumented.txt`, so a stale bundle is
+reported where it is uploaded rather than at `make web`.
+
+To check the package locally without GitHub Pages, build it and serve it with a
+host that sends no COOP/COEP, which is the configuration the service worker is
+for:
+
+```sh
+make web-dist
+python3 -m http.server --bind 127.0.0.1 --directory dist-web 8940
+```
+
+`grep -a ogre_skip_boot_logos dist-web/ogrebattle64.wasm` is a quick proof that
+the package carries the mod; the MODS tab is the real check.
+
 ## Cross-origin isolation on a host that cannot set headers
 
 GitHub Pages, S3, and `python3 -m http.server` cannot send response headers, so

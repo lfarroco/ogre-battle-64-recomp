@@ -745,6 +745,65 @@
     return "HIGH";
   }
 
+  // --- Bundled mods ------------------------------------------------------------
+  //
+  // The browser build ships the four `.nrm` mods compiled into the wasm binary
+  // (tools/gen_web_mods.py). Each archive is installed through the runtime's mod
+  // system, so the page only lists them and writes the same `mods.json` the
+  // native build writes. A code mod is not runtime toggleable, so the rows are
+  // disabled while a game is running and the change applies at the next start.
+  var webMods = { scanned: false, list: [] };
+
+  function modsAvailable() {
+    return moduleReady() && typeof Module._ogre_web_mods_count === "function";
+  }
+
+  function modsRefresh() {
+    // The mod list lives in mods.json on the IDBFS mount. Scanning before the
+    // mount finishes would write the toggle to MEMFS and lose it on reload.
+    if (!modsAvailable() || !saveImport.storageReady) {
+      webMods.list = [];
+      return;
+    }
+    if (!webMods.scanned) {
+      try {
+        Module._ogre_web_mods_scan();
+        webMods.scanned = true;
+      } catch (e) {
+        log("[web:mods] scan failed: " + e);
+        return;
+      }
+    }
+    var count = Module._ogre_web_mods_count();
+    var list = [];
+    for (var i = 0; i < count; i++) {
+      list.push({
+        id: Module.UTF8ToString(Module._ogre_web_mods_id(i)),
+        name: Module.UTF8ToString(Module._ogre_web_mods_name(i)),
+        desc: Module.UTF8ToString(Module._ogre_web_mods_description(i)),
+        enabled: Module._ogre_web_mods_enabled(i) !== 0
+      });
+    }
+    webMods.list = list;
+  }
+
+  function setModEnabled(index, enabled) {
+    var mod = webMods.list[index];
+    if (!mod || bootStarted) {
+      return;
+    }
+    // `ccall` with "string" marshals the id to a UTF-8 pointer; calling the
+    // raw export would pass the JS string as a number.
+    Module.ccall("ogre_web_mod_set_enabled", "void", ["string", "number"],
+                 [mod.id, enabled ? 1 : 0]);
+    // The C side writes mods.json synchronously; push it to IndexedDB so the
+    // next load of this page sees it.
+    syncStorage();
+    modsRefresh();
+    log("[web:mods] " + mod.id + " -> " + (enabled ? "on" : "off"));
+    refreshOptions();
+  }
+
   function optionsRows() {
     var rows = [];
     var tab = optionsState.tab;
@@ -773,6 +832,36 @@
               "returns to the launcher. The selected ROM and save stay in this " +
               "browser's storage. This browser build is experimental: rendering, " +
               "audio and save compatibility are incomplete."
+      });
+    } else if (tab === "mods") {
+      rows.push({ kind: "section", label: "BUNDLED MODS" });
+      if (!webMods.scanned) {
+        modsRefresh();
+      }
+      if (!webMods.list.length) {
+        rows.push({
+          kind: "note",
+          text: "No bundled mods found. This build ships the mods from the " +
+                "repository's mods/ directory."
+        });
+      }
+      for (var m = 0; m < webMods.list.length; m++) {
+        var mod = webMods.list[m];
+        var modRow = radioRow(mod.name, [0, 1], ["OFF", "ON"],
+                              mod.enabled ? 1 : 0, "mod", mod.desc);
+        modRow.modIndex = m;
+        if (bootStarted) {
+          modRow.disabled = true;
+        }
+        rows.push(modRow);
+      }
+      rows.push({
+        kind: "note",
+        text: bootStarted
+          ? "A code mod is loaded when the game starts. Use EXIT GAME to return " +
+            "to the launcher, change the mods there, then start the game again."
+          : "The four mods this port ships, compiled into this build. The choice " +
+            "is written to mods.json and applies when the game starts."
       });
     } else if (tab === "controls") {
       rows.push({ kind: "section", label: "KEYBOARD + GAMEPAD TO N64" });
@@ -954,10 +1043,7 @@
   }
 
   function selectTab(tab) {
-    if (tab === "mods") {
-      return;
-    }
-    if (["main", "controls", "settings", "debug"].indexOf(tab) < 0) {
+    if (["main", "mods", "controls", "settings", "debug"].indexOf(tab) < 0) {
       return;
     }
     optionsState.tab = tab;
@@ -1075,6 +1161,7 @@
         break;
       case "sound": setSoundEnabled(value !== 0); break;
       case "mouse": setMouseEnabled(value !== 0); break;
+      case "mod": setModEnabled(row.modIndex, value !== 0); break;
       default: break;
     }
     renderOptions();
@@ -1162,7 +1249,7 @@
       return;
     }
     if (e.code === "Tab") {
-      var order = ["main", "controls", "settings", "debug"];
+      var order = ["main", "mods", "controls", "settings", "debug"];
       var at = order.indexOf(optionsState.tab);
       at = (at + (e.shiftKey ? order.length - 1 : 1)) % order.length;
       selectTab(order[at]);
@@ -1258,12 +1345,12 @@
         if (edge(0)) { activateRow(optionsState.selected); }
         if (edge(1)) { closeOptions(); }
         if (edge(4)) {
-          var tabs = ["main", "controls", "settings", "debug"];
+          var tabs = ["main", "mods", "controls", "settings", "debug"];
           var at = tabs.indexOf(optionsState.tab);
           selectTab(tabs[(at + tabs.length - 1) % tabs.length]);
         }
         if (edge(5)) {
-          var tabsNext = ["main", "controls", "settings", "debug"];
+          var tabsNext = ["main", "mods", "controls", "settings", "debug"];
           var atNext = tabsNext.indexOf(optionsState.tab);
           selectTab(tabsNext[(atNext + 1) % tabsNext.length]);
         }
@@ -2176,6 +2263,12 @@
       uiSetStatus("Ready. Select a ROM to begin.");
     }
     importBatterySave();
+    // Populate the MODS tab before a ROM is picked. The scan registers the game
+    // entry and the embedded `.nrm` archives, so it must run after IDBFS is
+    // mounted (the mod list persists in mods.json on that mount).
+    whenWasmExportsReady(function () {
+      modsRefresh();
+    });
   }
 
   function mountPersistentStorage() {

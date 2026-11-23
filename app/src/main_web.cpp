@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <thread>
 
 #include "recomp.h"
@@ -30,6 +31,7 @@
 #include "bank_overlays.hpp"
 #include "web_platform.hpp"
 #include "web_settings.hpp"
+#include "web_mods.hpp"
 #include "milestones.hpp"
 
 int main() {
@@ -39,24 +41,21 @@ int main() {
 
 namespace {
 
-void boot_runtime() {
-    OGRE_MILESTONE("BOOT", "application started (web build)");
+// Defined in the extern "C" block below. It registers the config path, the game
+// entry and the bundled mods, so the page can list the mods before the player
+// starts a ROM. It is idempotent and must run after IDBFS is mounted.
+extern "C" void ogre_web_early_init();
 
-    // Config dir on the wasm virtual filesystem (MEMFS). The runtime stores a
-    // validated copy of the ROM and save data here.
-    recomp::register_config_path("/ogre");
-    std::filesystem::create_directories("/ogre");  // ofstream won't create parents
-    OGRE_MILESTONE("BOOT", "config path registered (/ogre)");
-    // The player's saved SETTINGS values. Same call the native app makes before
-    // its game starts (app/src/main.cpp); the file is on the IDBFS mount.
-    ogre::web_settings_load();
-
-    // --- game registration ----------------------------------------------------
+recomp::GameEntry make_game_entry() {
     recomp::GameEntry entry;
     entry.rom_hash = ogre::ROM_HASH;
     entry.internal_name = std::string(ogre::INTERNAL_NAME);
     entry.display_name = std::string(ogre::DISPLAY_NAME);
     entry.game_id = std::u8string(ogre::GAME_ID);
+    // The id mods target. `recomp::register_game` registers it with the runtime's
+    // mod system; without it `wait_for_game_started` loads no mods at all
+    // (librecomp/src/recomp.cpp).
+    entry.mod_game_id = std::string(ogre::MOD_GAME_ID);
     entry.entrypoint_address = ogre::ENTRYPOINT_ADDRESS;
     entry.entrypoint = recomp_entrypoint;
     // Register streamed overlays A/B/C after init_overlays() clears the map,
@@ -75,9 +74,16 @@ void boot_runtime() {
     entry.save_type = recomp::SaveType::Sram;
     entry.is_enabled = true;
     entry.has_compressed_code = false;
+    return entry;
+}
 
-    recomp::register_game(entry);
-    OGRE_MILESTONE("BOOT", "game registered");
+void boot_runtime() {
+    OGRE_MILESTONE("BOOT", "application started (web build)");
+    // Config dir, game entry and bundled mods. The page normally ran this when
+    // it populated the MODS tab; running it here covers a probe that starts the
+    // boot directly.
+    ogre_web_early_init();
+    recomp::GameEntry entry = make_game_entry();
 
     // --- base overlays (entry + main sections) --------------------------------
     ogre::register_base_overlays();
@@ -172,9 +178,30 @@ void boot_runtime() {
 
 extern "C" {
 
+// Registers the config path, the game entry and the bundled code mods. The
+// page calls this once wasm and IDBFS are ready, so the MODS tab can list the
+// mods before a ROM is picked. `recomp::start` repeats the mod scan before it
+// boots, which is safe (scan_mods closes the previous scan first).
+void ogre_web_early_init() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        recomp::register_config_path("/ogre");
+        std::filesystem::create_directories("/ogre");  // ofstream won't create parents
+        OGRE_MILESTONE("BOOT", "config path registered (/ogre)");
+        // The player's saved SETTINGS values. Same call the native app makes
+        // before its game starts (app/src/main.cpp); the file is on the IDBFS
+        // mount.
+        ogre::web_settings_load();
+        recomp::register_game(make_game_entry());
+        OGRE_MILESTONE("BOOT", "game registered");
+        ogre::web_mods_scan();
+    });
+}
+
 // Starts the runtime boot on a background thread. Returns immediately so the
 // browser main thread keeps running the event loop.
 void ogre_start_boot() {
+    ogre_web_early_init();
     OGRE_MILESTONE("BOOT", "ogre_start_boot() called from JS");
     std::thread boot_thread{[] { boot_runtime(); }};
     boot_thread.detach();

@@ -36,24 +36,28 @@ index 55f10a5..67ab81b 100644
  
 diff --git a/LiveRecomp/live_generator_wasm.cpp b/LiveRecomp/live_generator_wasm.cpp
 new file mode 100644
-index 0000000..9647d5a
+index 0000000..345d094
 --- /dev/null
 +++ b/LiveRecomp/live_generator_wasm.cpp
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,160 @@
 +// No-op LiveRecomp implementation for WebAssembly builds.
 +//
 +// The live recompiler generates native machine code via sljit, which cannot
 +// run on WebAssembly. This stub provides the same symbols so librecomp's mod
-+// system compiles unchanged; loading code mods simply fails
-+// (recompile_function_live returns false, so generated handles are never
-+// marked good). live_recompiler_init() is a no-op.
++// system compiles unchanged. The browser build loads the mods this port ships by
++// recompiling them ahead of time and linking the result into the app
++// (tools/gen_web_mods.py, recomp::mods::StaticModInfo); an arbitrary `.nrm` code
++// mod has no precompiled body here, so recompile_function_live returns false and
++// its load fails cleanly. live_recompiler_init() only reports that once.
 +//
 +// Only compiled when EMSCRIPTEN is defined (see N64Recomp/CMakeLists.txt).
 +
++#include <array>
 +#include <cstdint>
 +#include <cstdio>
 +#include <ostream>
 +#include <span>
++#include <utility>
 +#include <vector>
 +
 +#include "recompiler/live_recompiler.h"
@@ -67,7 +71,12 @@ index 0000000..9647d5a
 +namespace N64Recomp {
 +
 +void live_recompiler_init() {
-+    fprintf(stderr, "[LiveRecomp] the live recompiler is unavailable in this (wasm) build; code mods cannot be loaded.\n");
++    static bool reported = false;
++    if (!reported) {
++        reported = true;
++        fprintf(stderr, "[LiveRecomp] no runtime code generation in this (wasm) build; "
++                        "only the bundled precompiled mods can load.\n");
++    }
 +}
 +
 +LiveGenerator::LiveGenerator(size_t num_funcs, const LiveGeneratorInputs& inputs) {
@@ -149,9 +158,43 @@ index 0000000..9647d5a
 +    return false;
 +}
 +
++// A shim turns an extended export into the two-argument function type a mod
++// calls. The native implementation generates a trampoline at runtime; wasm
++// cannot, so a fixed pool of C++ trampolines carries the target and the argument
++// instead. That is enough for the handful of extended exports a bundled mod can
++// import (`recomp_log`, the mod-config getters, ...).
++namespace {
++constexpr size_t kMaxShims = 64;
++
++struct ShimSlot {
++    recomp_func_ext_t* to_shim = nullptr;
++    uintptr_t value = 0;
++};
++
++ShimSlot g_shim_slots[kMaxShims];
++size_t g_shim_count = 0;
++
++template <size_t Index>
++void shim_thunk(uint8_t* rdram, recomp_context* ctx) {
++    g_shim_slots[Index].to_shim(rdram, ctx, g_shim_slots[Index].value);
++}
++
++template <size_t... Indices>
++constexpr std::array<recomp_func_t*, sizeof...(Indices)> make_shims(std::index_sequence<Indices...>) {
++    return { &shim_thunk<Indices>... };
++}
++
++const auto g_shims = make_shims(std::make_index_sequence<kMaxShims>{});
++}  // namespace
++
 +ShimFunction::ShimFunction(recomp_func_ext_t* to_shim, uintptr_t value) : code(nullptr), func(nullptr) {
-+    (void)to_shim;
-+    (void)value;
++    if (g_shim_count >= kMaxShims) {
++        fprintf(stderr, "[LiveRecomp] the wasm shim pool is full; an extended export is unavailable\n");
++        return;
++    }
++    const size_t index = g_shim_count++;
++    g_shim_slots[index] = ShimSlot{ to_shim, value };
++    func = g_shims[index];
 +}
 +
 +ShimFunction::~ShimFunction() = default;

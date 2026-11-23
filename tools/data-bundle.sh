@@ -44,6 +44,10 @@ banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
 [ "$banks" -gt 0 ]            || missing="$missing Bank*Funcs/"
 mods=$( (ls build/mods/*.nrm 2>/dev/null || true) | wc -l | tr -d ' ')
 [ "$mods" -gt 0 ]             || missing="$missing build/mods/*.nrm"
+# The browser build compiles the bundled mods into the wasm app; the generated
+# C++ cannot be produced on the runner (it needs the ROM and a host N64Recomp),
+# so the bundle carries it. `make web-mods` writes it after `make example-mods`.
+[ -f app/src/web_mods/bundled_mods.cpp ] || missing="$missing app/src/web_mods/ (make web-mods)"
 if [ -n "$missing" ]; then
     cat >&2 <<EOF
 data-bundle.sh: required inputs are missing:$missing
@@ -52,6 +56,7 @@ Generate it first, on a machine that has the ROM:
 
     make && make recomp && make bank-recomp && make rsp-recomp
     make example-mods
+    make web-mods
 
 See docs/guides/app-build.md. Nothing was written.
 EOF
@@ -83,7 +88,8 @@ mkdir -p "$(dirname -- "$out")"
 # the excludes cover a bundle produced by other means.
 COPYFILE_DISABLE=1 tar czf "$out" \
     --exclude '._*' --exclude '*/._*' --exclude '.DS_Store' --exclude '*/.DS_Store' \
-    ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc build/mods/*.nrm
+    ogre-data.txt RecompiledFuncs Bank*Funcs RspFuncs app/src/bank_funcs.inc build/mods/*.nrm \
+    app/src/web_mods
 
 # `shasum` is on macOS, `sha256sum` on Linux; one of them exists.
 sha=$( (shasum -a 256 "$out" 2>/dev/null || sha256sum "$out") | awk '{print $1}')
@@ -95,6 +101,7 @@ echo "    RecompiledFuncs: $(find RecompiledFuncs -type f | wc -l | tr -d ' ') f
 echo "    Bank units:      $banks"
 echo "    RspFuncs:        $(find RspFuncs -type f | wc -l | tr -d ' ') files"
 echo "    Example mods:    $mods .nrm"
+echo "    Browser mods:    $(ls app/src/web_mods/*.cpp | wc -l | tr -d ' ') generated file(s)"
 echo "    sha256: $sha"
 cat "$meta" | sed 's/^/    /'
 echo

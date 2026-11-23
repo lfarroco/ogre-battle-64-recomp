@@ -240,6 +240,37 @@ target_include_directories(ogrebattle64_recomp PRIVATE
 
 target_compile_options(ogrebattle64_recomp PRIVATE ${OGRE_GCC_FLAGS})
 
+# --- Bundled code mods (browser only) ---------------------------------------
+# WebAssembly has no runtime code generation, so the browser build ships the
+# `.nrm` code mods precompiled: tools/gen_web_mods.py runs N64Recomp's
+# OfflineModRecomp over each archive and writes C++ that is compiled here. The
+# archives themselves are embedded and installed through the normal mod system,
+# so `mods.json`, the MODS tab and the hook machinery are shared with native.
+# The directory is generated and gitignored; `make web-mods` writes it, and the
+# private data bundle ships it to CI.
+if (EMSCRIPTEN)
+    file(GLOB WEB_MOD_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/web_mods/*.cpp)
+    if (NOT WEB_MOD_SOURCES)
+        message(FATAL_ERROR
+            "app/src/web_mods/ has no generated mod C++. Run 'make web-mods' "
+            "(it needs build/mods/*.nrm and mods/reference/dump.toml) before "
+            "configuring the browser build.")
+    endif()
+
+    add_library(ogrebattle64_web_mods STATIC ${WEB_MOD_SOURCES})
+
+    target_include_directories(ogrebattle64_web_mods PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${OGRE_TOOLS}/N64Recomp/include
+        ${OGRE_TOOLS}/N64ModernRuntime/N64Recomp/include
+        ${OGRE_TOOLS}/N64ModernRuntime/ultramodern/include
+        ${OGRE_TOOLS}/N64ModernRuntime/librecomp/include
+        ${OGRE_TOOLS}/N64ModernRuntime/thirdparty
+    )
+
+    target_link_libraries(ogrebattle64_web_mods PRIVATE librecomp)
+endif()
+
 # --- Recompiled RSP microcode -----------------------------------------------
 # Non-graphics RSP tasks are run through recompiled microcode (src/rsp.cpp).
 # Today that is the game's Nintendo-JPEG decoder (M_NJPEGTASK, type 4) used for
@@ -315,6 +346,7 @@ if (EMSCRIPTEN)
         src/map_cursor.cpp
         src/mission_cursor.cpp
         src/ram_key.cpp
+        src/web_mods.cpp
     )
 else()
     set(OGRE_APP_SOURCES
@@ -467,6 +499,10 @@ if(RSP_RECOMP_SOURCES)
     target_link_libraries(ogrebattle64 PRIVATE ogrebattle64_rsp)
 endif()
 
+if (EMSCRIPTEN)
+    target_link_libraries(ogrebattle64 PRIVATE ogrebattle64_web_mods)
+endif()
+
 if (OGRE_USE_RT64)
     target_link_libraries(ogrebattle64 PRIVATE rt64)
     # The start screen's "click to load your ROM" uses nativefiledialog-extended,
@@ -521,7 +557,7 @@ if (EMSCRIPTEN)
         "-sUSE_WEBGL2=1"
         "-sMAX_WEBGL_VERSION=2"
         
-        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_web_settings_game_speed,_ogre_web_settings_set_game_speed,_ogre_web_settings_widescreen,_ogre_web_settings_set_widescreen,_ogre_web_settings_mouse,_ogre_web_settings_set_mouse,_ogre_web_settings_display_experiments,_ogre_web_chaos_frame,_ogre_web_active_scene,_ogre_web_widescreen_expand,_ogre_web_mouse_move,_ogre_web_mouse_click,_ogre_web_mouse_leave,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_ogre_gfx_debug_tex,_ogre_gfx_debug_tex_count,_ogre_gfx_debug_last_tex,_ogre_gfx_debug_flags,_ogre_gfx_debug_fb_source,_ogre_set_trace_enabled,_ogre_send_prnmi,_ogre_guest_rdram,_ogre_debug_threads,_malloc,_free,_main"
+        "-sEXPORTED_FUNCTIONS=_ogre_start_boot,_ogre_poll_milestones,_ogre_web_mods_scan,_ogre_web_mods_count,_ogre_web_mods_id,_ogre_web_mods_name,_ogre_web_mods_description,_ogre_web_mods_enabled,_ogre_web_mod_set_enabled,_ogre_input_set,_ogre_input_debug,_ogre_audio_state_ptr,_ogre_audio_ring_ptr,_ogre_audio_frames_available,_ogre_web_settings_game_speed,_ogre_web_settings_set_game_speed,_ogre_web_settings_widescreen,_ogre_web_settings_set_widescreen,_ogre_web_settings_mouse,_ogre_web_settings_set_mouse,_ogre_web_settings_display_experiments,_ogre_web_chaos_frame,_ogre_web_active_scene,_ogre_web_widescreen_expand,_ogre_web_mouse_move,_ogre_web_mouse_click,_ogre_web_mouse_leave,_ogre_gfx_stats,_ogre_gfx_create_context,_ogre_gfx_set_canvas,_ogre_gfx_flush,_ogre_gfx_test_draw,_ogre_gfx_debug_tex,_ogre_gfx_debug_tex_count,_ogre_gfx_debug_last_tex,_ogre_gfx_debug_flags,_ogre_gfx_debug_fb_source,_ogre_set_trace_enabled,_ogre_send_prnmi,_ogre_guest_rdram,_ogre_debug_threads,_malloc,_free,_main"
         # Session-16 diagnostic: keep C function names in the wasm so worker
         # crash stacks identify the faulting game/runtime function. Remove
         # before any release (costs size).

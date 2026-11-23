@@ -88,6 +88,11 @@ recomp: recomp-prep $(ELF)
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config/config.toml
 	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0,0x801AB740,0x801AB76C
+	@# The browser build dispatches its bundled code mods from the game function's
+	@# own entry, because wasm cannot patch a function prologue. The list comes
+	@# from `make web-mods`; when it is absent (a native-only checkout) the script
+	@# removes a previous run's calls and says so.
+	python3 tools/web_mod_hooks.py
 
 # The cross-bank dispatch inside `recomp` can only see bank records that
 # `make bank-recomp` has already written to app/src/bank_funcs.inc. Without it
@@ -293,6 +298,38 @@ mod-syms: $(ELF)
 .PHONY: example-mods
 example-mods: mod-syms
 	tools/build-example-mods.sh
+
+# ---------------------------------------------------------------------------
+# Bundled browser mods. The browser has no runtime code generation, so the mods
+# the port ships are recompiled ahead of time and compiled into the wasm app
+# (tools/gen_web_mods.py). The output is gitignored, like RecompiledFuncs/; run
+# this before `make web`, and before `make recomp` if you want the hook call
+# sites regenerated in the same pass (both orders work: `make recomp` also
+# applies the list when it is present).
+#
+#   make web-mods   -> app/src/web_mods/
+#
+# It needs build/mods/*.nrm (`make example-mods`), mods/reference/dump.toml
+# (`make mod-syms`) and tools/N64Recomp/build/OfflineModRecomp.
+# ---------------------------------------------------------------------------
+.PHONY: web-mods
+web-mods:
+	python3 tools/gen_web_mods.py
+	python3 tools/web_mod_hooks.py
+
+# `make web` refuses to build a binary whose mods would load but whose hooks are
+# never called, which is what a stale `make recomp` after a new mod produces.
+.PHONY: web-mods-check
+web-mods-check:
+	@test -f app/src/web_mods/bundled_mods.cpp || { \
+	  echo "make web: app/src/web_mods/ has no generated mods."; \
+	  echo "  Run 'make example-mods && make web-mods' (they need the ROM), or"; \
+	  echo "  unpack the data bundle that ships the generated output."; \
+	  exit 1; }
+	@# RecompiledFuncs/ arrives from the data bundle on the hosted runners, so
+	@# instrument it here as well as in `make recomp`; applying is idempotent.
+	@python3 tools/web_mod_hooks.py
+	@python3 tools/web_mod_hooks.py --check
 
 # ---------------------------------------------------------------------------
 # Backdrop references for HD backgrounds.
@@ -631,7 +668,7 @@ app:
 EM_CACHE ?= $(HOME)/.cache/emscripten-ogre
 
 .PHONY: web
-web:
+web: web-mods-check
 	@EM_CACHE=$(EM_CACHE) emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release
 	@EM_CACHE=$(EM_CACHE) cmake --build build-wasm -j$(JOBS)
 	@echo "web: build-wasm/ogrebattle64.wasm is ready; serve it with python3 debug/server.py"
@@ -830,4 +867,4 @@ release:
 release-check:
 	NO_PUSH=1 tools/release.sh "$(VERSION)"
 
-.PHONY: all clean recomp recomp-prep regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke release release-check
+.PHONY: all clean recomp recomp-prep web-mods web-mods-check regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke release release-check

@@ -61,6 +61,18 @@ jobs:
           banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
           [ "$banks" -gt 0 ] || { echo "::error::Bank*Funcs/ is missing from files.tar.gz"; exit 1; }
           echo "Bank units: $banks"
+          # The browser build compiles the bundled code mods into the wasm app.
+          # A bundle made before they existed has no generated mod C++, and
+          # `make web` would stop at its `web-mods-check` step. Name the exact
+          # regeneration command instead of failing there.
+          for p in app/src/web_mods/bundled_mods.cpp app/src/web_mods/instrumented.txt; do
+            test -e "$p" || {
+              echo "::error::$p is missing from files.tar.gz"
+              echo "::error::the data bundle predates the browser mods; on a machine with the ROM run: make example-mods && make web-mods && tools/data-bundle.sh, then upload files.tar.gz"
+              exit 1
+            }
+          done
+          echo "Browser mods: $(ls app/src/web_mods/*.cpp | wc -l | tr -d ' ') generated file(s)"
 
       # tools/N64ModernRuntime is gitignored, so a hosted runner has none.
       # Same pinned commit and patches as the release workflow.

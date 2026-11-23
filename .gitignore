@@ -62,3 +62,10 @@ __pycache__/
 
 # OS junk
 .DS_Store
+
+# Generated bundled browser mods (`make web-mods` -> tools/gen_web_mods.py).
+# The code comes from build/mods/*.nrm, which itself needs the ROM; the private
+# data bundle ships the generated output to CI.
+app/src/web_mods/*.cpp
+app/src/web_mods/*.h
+app/src/web_mods/instrumented.txt

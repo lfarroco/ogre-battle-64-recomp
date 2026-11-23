@@ -26,7 +26,7 @@ index 716d48b..697df58 100644
  if (WIN32)
      add_compile_definitions(NOMINMAX)
 diff --git a/librecomp/include/librecomp/mods.hpp b/librecomp/include/librecomp/mods.hpp
-index 37556bd..eefe64b 100644
+index 37556bd..855fe9c 100644
 --- a/librecomp/include/librecomp/mods.hpp
 +++ b/librecomp/include/librecomp/mods.hpp
 @@ -50,12 +50,18 @@ template <>
@@ -48,6 +48,111 @@ index 37556bd..eefe64b 100644
      }
  };
  
+@@ -333,6 +339,40 @@ namespace recomp {
+         typedef std::variant<ModConfigQueueSaveMod, ModConfigQueueSave, ModConfigQueueEnd, ModConfigSetLatestGamemode> ModConfigQueueVariant;
+ 
+         class LiveRecompilerCodeHandle;
++        class StaticModCodeHandle;
++
++#ifdef __EMSCRIPTEN__
++        // A code mod's precompiled body, for builds that cannot generate code at
++        // runtime. WebAssembly has no writable executable memory and no JIT, so
++        // the browser build recompiles the bundled mods ahead of time
++        // (tools/gen_web_mods.py) and links them into the app. The fields are
++        // the globals OfflineModRecomp emits for one mod; the runtime fills in
++        // the function pointers the same way the native dynamic-library handle
++        // does, and the generated game code calls
++        // `recomp::mods::run_entry_hook` / `run_static_replacement` instead of
++        // patching a function's prologue.
++        struct StaticModInfo {
++            const char* mod_id;
++            uint32_t api_version;
++            recomp_func_t* const* functions;
++            size_t num_functions;
++            recomp_func_t** imported_funcs;
++            size_t num_imported_funcs;
++            recomp_func_t** reference_symbol_funcs;
++            size_t num_reference_symbols;
++            uint32_t* base_event_index;
++            void (**recomp_trigger_event)(uint8_t* rdram, recomp_context* ctx, uint32_t index);
++            recomp_func_t* (**get_function)(int32_t vram);
++            void (**cop0_status_write)(recomp_context* ctx, gpr value);
++            gpr (**cop0_status_read)(recomp_context* ctx);
++            void (**switch_error)(const char* func, uint32_t vram, uint32_t jtbl);
++            void (**do_break)(uint32_t vram);
++            int32_t** reference_section_addresses;
++            int32_t* section_addresses;
++            size_t num_sections;
++        };
++#endif
++
+         class ModContext {
+         public:
+             ModContext();
+@@ -344,6 +384,10 @@ namespace recomp {
+             std::vector<ModOpenErrorDetails> scan_mod_folder(const std::filesystem::path& mod_folder);
+             void close_mods();
+             void load_mods_config();
++            // Write mods.json now instead of waiting for the background saver.
++            // The browser toggles a mod on the page and then boots the game, so
++            // the file has to be on disk before `recomp::start` reads it.
++            void save_config_now();
+             void enable_mod(const std::string& mod_id, bool enabled, bool trigger_save);
+             bool is_mod_enabled(const std::string& mod_id) const;
+             bool is_mod_auto_enabled(const std::string& mod_id) const;
+@@ -382,6 +426,14 @@ namespace recomp {
+             std::filesystem::path get_mod_path(size_t mod_index) const;
+             std::pair<std::string, std::string> get_mod_import_info(size_t mod_index, size_t import_index) const;
+             DependencyStatus is_dependency_met(size_t mod_index, const std::string& dependency_id) const;
++#ifdef __EMSCRIPTEN__
++            // The entry hook slot registered for a game function, or (size_t)-1.
++            // The recompiled game code calls this at the function's entry
++            // (tools/web_mod_hooks.py); there is no prologue patch in wasm.
++            size_t find_entry_hook_slot(uint32_t function_vram) const;
++            bool run_replacement(uint32_t function_vram, uint8_t* rdram, recomp_context* ctx);
++            void register_replacement(uint32_t function_vram, GenericFunction func);
++#endif
+         private:
+             ModOpenError open_mod_from_manifest(ModManifest &manifest, std::string &error_param, const std::vector<ModContentTypeId> &supported_content_types, bool requires_manifest);
+             ModOpenError open_mod_from_path(const std::filesystem::path& mod_path, std::string& error_param, const std::vector<ModContentTypeId>& supported_content_types, bool requires_manifest);
+@@ -418,6 +470,12 @@ namespace recomp {
+             std::unordered_set<std::string> auto_enabled_mods;
+             std::unordered_map<std::string, DeprecatedMod> deprecated_mods;
+             std::unordered_map<recomp_func_t*, PatchData> patched_funcs;
++#ifdef __EMSCRIPTEN__
++            // Browser build: function-vram -> the precompiled replacement. The
++            // recompiled game code asks for it at the function's entry instead
++            // of the runtime patching the function's prologue.
++            std::unordered_map<uint32_t, GenericFunction> static_replacements;
++#endif
+             std::unordered_map<std::string, size_t> loaded_mods_by_id;
+             std::unique_ptr<std::thread> mod_configuration_thread;
+             moodycamel::BlockingConcurrentQueue<ModConfigQueueVariant> mod_configuration_thread_queue;
+@@ -617,6 +675,16 @@ namespace recomp {
+         void register_hook_exports();
+         void run_hook(uint8_t* rdram, recomp_context* ctx, size_t hook_slot_index);
+ 
++#ifdef __EMSCRIPTEN__
++        // Browser build: the entry hook / function replacement call sites are
++        // compiled into the recompiled game code (tools/web_mod_hooks.py), so
++        // there is no prologue to patch. These helpers resolve the site's
++        // function address to the enabled bundled mods.
++        void run_entry_hook(uint32_t function_vram, uint8_t* rdram, recomp_context* ctx);
++        bool run_static_replacement(uint32_t function_vram, uint8_t* rdram, recomp_context* ctx);
++        const StaticModInfo* find_static_mod(const char* mod_id);
++#endif
++
+         ModOpenError parse_manifest(ModManifest &ret, const std::vector<char> &manifest_data, std::string &error_param, recomp::config::Config *config = nullptr);
+         CodeModLoadError validate_api_version(uint32_t api_version, std::string& error_param);
+ 
+@@ -624,6 +692,7 @@ namespace recomp {
+         void register_embedded_mod(const std::string& mod_id, std::span<const uint8_t> mod_bytes);
+         void register_deprecated_mod(const std::string& mod_id, DeprecationStatus deprecation_status, const Version &maximum_version);
+         void scan_mods();
++        void flush_mods_config();
+         void close_mods();
+         std::filesystem::path get_mods_directory();
+         std::optional<ModDetails> get_details_for_mod(const std::string& mod_id);
 diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
 index 35703bd..be20d5b 100644
 --- a/librecomp/include/librecomp/overlays.hpp
@@ -301,7 +406,7 @@ index 04b67e3..a174266 100644
          auto storage_json = config_json.find("storage");
          if (storage_json == config_json.end()) {
 diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
-index 0f7de83..856225c 100644
+index 0f7de83..43f2ad9 100644
 --- a/librecomp/src/mods.cpp
 +++ b/librecomp/src/mods.cpp
 @@ -74,6 +74,10 @@ bool get_to_vec(const nlohmann::json& val, std::vector<T2>& out) {
@@ -387,18 +492,125 @@ index 0f7de83..856225c 100644
      (void)result;
  }
  #endif
-@@ -585,6 +625,10 @@ void patch_func(recomp_func_t* target_func, recomp::mods::GenericFunction replac
+@@ -476,6 +516,88 @@ recomp::mods::CodeModLoadError recomp::mods::DynamicLibraryCodeHandle::populate_
+     return CodeModLoadError::Good;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// A bundled code mod whose body was recompiled ahead of time and linked into the
++// wasm app (tools/gen_web_mods.py). It fills in the same globals the native
++// dynamic-library handle fills, from the mod's own generated C, and hands out
++// its function table by the mod recompiler context's function index.
++class recomp::mods::StaticModCodeHandle final : public recomp::mods::ModCodeHandle {
++public:
++    StaticModCodeHandle(const StaticModInfo& info, const ModCodeHandleInputs& inputs)
++        : info(info) {
++        *info.base_event_index = inputs.base_event_index;
++        *info.recomp_trigger_event = inputs.recomp_trigger_event;
++        *info.get_function = inputs.get_function;
++        *info.cop0_status_write = inputs.cop0_status_write;
++        *info.cop0_status_read = inputs.cop0_status_read;
++        *info.switch_error = inputs.switch_error;
++        *info.do_break = inputs.do_break;
++        *info.reference_section_addresses = inputs.reference_section_addresses;
++        is_good = info.num_functions != 0 && info.functions != nullptr;
++    }
++
++    bool good() final {
++        return is_good;
++    }
++
++    uint32_t get_api_version() final {
++        return info.api_version;
++    }
++
++    void set_imported_function(size_t import_index, GenericFunction func) final {
++        std::visit(overloaded {
++            [this, import_index](recomp_func_t* native_func) {
++                if (import_index < info.num_imported_funcs) {
++                    info.imported_funcs[import_index] = native_func;
++                }
++            }
++        }, func);
++    }
++
++    CodeModLoadError populate_reference_symbols(const N64Recomp::Context& context, std::string& error_param) final {
++        size_t reference_symbol_index = 0;
++        for (const auto& section : context.sections) {
++            for (const auto& reloc : section.relocs) {
++                if (reloc.type == N64Recomp::RelocType::R_MIPS_26 && reloc.reference_symbol && context.is_regular_reference_section(reloc.target_section)) {
++                    recomp_func_t* cur_func = recomp::overlays::get_func_by_section_index_function_offset(reloc.target_section, reloc.target_section_offset);
++                    if (cur_func == nullptr) {
++                        std::stringstream error_param_stream{};
++                        error_param_stream << std::hex <<
++                            "section: " << reloc.target_section <<
++                            " func offset: 0x" << reloc.target_section_offset;
++                        error_param = error_param_stream.str();
++                        return CodeModLoadError::InvalidReferenceSymbol;
++                    }
++                    if (reference_symbol_index < info.num_reference_symbols) {
++                        info.reference_symbol_funcs[reference_symbol_index] = cur_func;
++                    }
++                    reference_symbol_index++;
++                }
++            }
++        }
++        return CodeModLoadError::Good;
++    }
++
++    uint32_t get_base_event_index() final {
++        return *info.base_event_index;
++    }
++
++    void set_local_section_address(size_t section_index, int32_t address) final {
++        if (section_index < info.num_sections) {
++            info.section_addresses[section_index] = address;
++        }
++    }
++
++    GenericFunction get_function_handle(size_t func_index) final {
++        return GenericFunction{ info.functions[func_index] };
++    }
++
++private:
++    const StaticModInfo& info;
++    bool is_good = false;
++};
++#endif
++
+ recomp::mods::LiveRecompilerCodeHandle::LiveRecompilerCodeHandle(
+     const N64Recomp::Context& context, const ModCodeHandleInputs& inputs,
+     std::unordered_map<size_t, size_t>&& entry_func_hooks, std::unordered_map<size_t, size_t>&& return_func_hooks, std::vector<size_t>&& original_section_indices, bool regenerated)
+@@ -585,6 +707,12 @@ void patch_func(recomp_func_t* target_func, recomp::mods::GenericFunction replac
             write_bytes(&native_func, sizeof(&native_func));
          }
      }, replacement_func);
 +#elif defined(IS_WASM)
-+    // No native code patching on WebAssembly (code mods cannot be loaded).
++    // No native code patching on WebAssembly. A bundled mod's replacement is
++    // dispatched from the function's entry instead (see the replacement branch
++    // in resolve_code_dependencies and recomp::mods::run_static_replacement).
 +    (void)write_bytes;
 +    (void)replacement_func;
  #else
  #   error "Unsupported architecture"
  #endif
-@@ -1414,9 +1458,40 @@ N64Recomp::Context context_from_regenerated_list(const RegeneratedList& regenlis
+@@ -883,6 +1011,15 @@ void recomp::mods::ModContext::load_mods_config() {
+     }
+ }
+ 
++void recomp::mods::ModContext::save_config_now() {
++    std::vector<std::string> order;
++    std::unique_lock lock(opened_mods_mutex);
++    for (size_t mod_index : opened_mods_order) {
++        order.emplace_back(opened_mods[mod_index].manifest.mod_id);
++    }
++    save_mods_config(mods_config_path, latest_game_mode, enabled_mods, order);
++}
++
+ void recomp::mods::ModContext::rebuild_mod_order_lookup() {
+     // Initialize the mod order lookup to all -1 so that mods that aren't enabled have an order index of -1.
+     mod_order_lookup.resize(opened_mods.size());
+@@ -1414,9 +1551,40 @@ N64Recomp::Context context_from_regenerated_list(const RegeneratedList& regenlis
              else {
                  reloc_out.symbol_index = 0; // Unused for live recompilation.
              }
@@ -440,6 +652,130 @@ index 0f7de83..856225c 100644
          }
      }
  
+@@ -2367,9 +2535,52 @@ recomp::mods::CodeModLoadError recomp::mods::ModContext::load_mod_code(uint8_t*
+         .reference_section_addresses = section_addresses,
+     };
+ 
++#ifdef __EMSCRIPTEN__
++    // Precompiled bundled mod. Every entry hook it owns is dispatched by the
++    // recompiled game code's injected call site (tools/web_mod_hooks.py), so
++    // mark the slot processed here; otherwise the runtime would try to
++    // regenerate the vanilla function, which needs the live recompiler. A
++    // return hook has no injected call site, so it is refused instead.
++    if (const StaticModInfo* static_info = find_static_mod(mod.manifest.mod_id.c_str())) {
++        for (const N64Recomp::FunctionHook& hook : mod.recompiler_context->hooks) {
++            if ((hook.flags & N64Recomp::HookFlags::AtReturn) == N64Recomp::HookFlags::AtReturn) {
++                error_param = mod.manifest.mod_id;
++                return CodeModLoadError::HooksUnavailable;
++            }
++            HookDefinition def {
++                .section_rom = hook.original_section_vrom,
++                .function_vram = hook.original_vram,
++                .at_return = false
++            };
++            auto find_it = hook_slots.find(def);
++            if (find_it != hook_slots.end()) {
++                processed_hook_slots[find_it->second] = true;
++            }
++        }
++
++        mod.code_handle = std::make_unique<StaticModCodeHandle>(*static_info, handle_inputs);
++        if (!mod.code_handle->good()) {
++            mod.code_handle.reset();
++            error_param = mod.manifest.mod_id;
++            return CodeModLoadError::FailedToRecompile;
++        }
++
++        cur_error = validate_api_version(mod.code_handle->get_api_version(), cur_error_param);
++        if (cur_error != CodeModLoadError::Good) {
++            if (cur_error_param.empty()) {
++                error_param = mod.manifest.mod_id;
++            }
++            else {
++                error_param = mod.manifest.mod_id + ":" + std::move(cur_error_param);
++            }
++            return cur_error;
++        }
++    }
+     // Use a dynamic library code handle. This feature isn't meant to be used by end users, but provides a more debuggable
+     // experience than the live recompiler for mod developers.
+     // Enabled if the mod's filename ends with ".offline.nrm".
++    else
++#endif
+     if (mod.manifest.mod_root_path.filename().string().ends_with(".offline.nrm")) {
+         // Hooks can't be generated for native mods, so return an error if any of the functions this mod replaces are also hooked by another mod.
+         if (!entry_func_hooks.empty() || !return_func_hooks.empty()) {
+@@ -2628,6 +2839,16 @@ recomp::mods::CodeModLoadError recomp::mods::ModContext::resolve_code_dependenci
+             return CodeModLoadError::ModConflict;
+         }
+ 
++#ifdef __EMSCRIPTEN__
++        // A wasm function's body is immutable at runtime, so the replacement is
++        // recorded for the injected call site at the function's entry
++        // (tools/web_mod_hooks.py) rather than patching a prologue. The
++        // bookkeeping above still runs so a conflict between two mods is
++        // reported the same way.
++        (void)to_replace;
++        patched_funcs[to_replace].mod_id = mod.manifest.mod_id;
++        register_replacement(replacement.original_vram, mod.code_handle->get_function_handle(replacement.func_index));
++#else
+         // Copy the original bytes so they can be restored later after the mod is unloaded.
+         PatchData& cur_replacement_data = patched_funcs[to_replace];
+         memcpy(cur_replacement_data.replaced_bytes.data(), reinterpret_cast<void*>(to_replace), cur_replacement_data.replaced_bytes.size());
+@@ -2635,16 +2856,53 @@ recomp::mods::CodeModLoadError recomp::mods::ModContext::resolve_code_dependenci
+ 
+         // Patch the function to redirect it to the replacement.
+         patch_func(to_replace, mod.code_handle->get_function_handle(replacement.func_index));
++#endif
+     }
+ 
+     return CodeModLoadError::Good;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++size_t recomp::mods::ModContext::find_entry_hook_slot(uint32_t function_vram) const {
++    for (const auto& [def, index] : hook_slots) {
++        if (!def.at_return && def.function_vram == function_vram) {
++            return index;
++        }
++    }
++    return static_cast<size_t>(-1);
++}
++
++void recomp::mods::ModContext::register_replacement(uint32_t function_vram, GenericFunction func) {
++    static_replacements[function_vram] = func;
++}
++
++bool recomp::mods::ModContext::run_replacement(uint32_t function_vram, uint8_t* rdram, recomp_context* ctx) {
++    auto find_it = static_replacements.find(function_vram);
++    if (find_it == static_replacements.end()) {
++        return false;
++    }
++    std::visit(overloaded {
++        [rdram, ctx](recomp_func_t* native_func) {
++            native_func(rdram, ctx);
++        }
++    }, find_it->second);
++    return true;
++}
++#endif
++
+ void recomp::mods::ModContext::unload_mods() {
++#ifndef __EMSCRIPTEN__
++    // Native builds overwrite a function's prologue to install a mod; restore
++    // it. WebAssembly has no prologue patch to undo (see the replacement
++    // branch in resolve_code_dependencies).
+     for (auto& [replacement_func, replacement_data] : patched_funcs) {
+         unpatch_func(reinterpret_cast<void*>(replacement_func), replacement_data);
+     }
++#endif
+     patched_funcs.clear();
++#ifdef __EMSCRIPTEN__
++    static_replacements.clear();
++#endif
+     loaded_mods_by_id.clear();
+     hook_slots.clear();
+     processed_hook_slots.clear();
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
 index 8c8e5d1..6ad498c 100644
 --- a/librecomp/src/overlays.cpp
@@ -1442,10 +1778,51 @@ index 43509ba..bb9dc4e 100644
  
  void ultramodern::init_saving(RDRAM_ARG1) {
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
-index ea1c49b..09f8dd8 100644
+index ea1c49b..9927505 100644
 --- a/librecomp/src/recomp.cpp
 +++ b/librecomp/src/recomp.cpp
-@@ -410,6 +410,13 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
+@@ -127,10 +127,40 @@ void recomp::mods::close_mods() {
+     }
+ }
+ 
++void recomp::mods::flush_mods_config() {
++    std::lock_guard mod_lock{ mod_context_mutex };
++    mod_context->save_config_now();
++}
++
+ std::filesystem::path recomp::mods::get_mods_directory() {
+     return config_path / mods_directory;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// The browser build's bundled mods are recompiled ahead of time and linked into
++// the app, so a code mod's body and its hook/replacement call sites are already
++// compiled. These are the runtime side of that: the generated game code calls
++// the entry hook helper, and the replacement helper, instead of the runtime
++// patching a native function prologue. The lookup itself is provided by the
++// generated `app/src/web_mods/bundled_mods.cpp`.
++extern "C" const recomp::mods::StaticModInfo* recomp_find_static_mod(const char* mod_id);
++
++const recomp::mods::StaticModInfo* recomp::mods::find_static_mod(const char* mod_id) {
++    return recomp_find_static_mod(mod_id);
++}
++
++void recomp::mods::run_entry_hook(uint32_t function_vram, uint8_t* rdram, recomp_context* ctx) {
++    const size_t slot = mod_context->find_entry_hook_slot(function_vram);
++    if (slot != static_cast<size_t>(-1)) {
++        recomp::mods::run_hook(rdram, ctx, slot);
++    }
++}
++
++bool recomp::mods::run_static_replacement(uint32_t function_vram, uint8_t* rdram, recomp_context* ctx) {
++    return mod_context->run_replacement(function_vram, rdram, ctx);
++}
++#endif
++
+ recomp::mods::ModContentTypeId recomp::mods::register_mod_content_type(const ModContentType& type) {
+     std::lock_guard mod_lock{ mod_context_mutex };
+     return mod_context->register_content_type(type);
+@@ -410,6 +440,13 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
      return recomp::RomValidationError::Good;
  }
  
@@ -1459,7 +1836,7 @@ index ea1c49b..09f8dd8 100644
  extern "C" void osGetMemSize_recomp(uint8_t * rdram, recomp_context * ctx) {
      ctx->r2 = 8 * 1024 * 1024;
  }
-@@ -437,19 +444,10 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
+@@ -437,19 +474,10 @@ extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
              ctx->f_odd = &ctx->f0.u32h;
              ctx->mips3_float_mode = false;
          }
@@ -1481,7 +1858,7 @@ index ea1c49b..09f8dd8 100644
      ctx->status_reg = new_sr;
  }
  
-@@ -457,6 +455,53 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
+@@ -457,6 +485,53 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
      return (gpr)(int32_t)ctx->status_reg;
  }
  
@@ -1535,7 +1912,7 @@ index ea1c49b..09f8dd8 100644
  extern "C" void switch_error(const char* func, uint32_t vram, uint32_t jtbl) {
      printf("Switch-case out of bounds in %s at 0x%08X for jump table at 0x%08X\n", func, vram, jtbl);
      assert(false);
-@@ -495,11 +540,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+@@ -495,11 +570,19 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
      // Initialize the overlays
      recomp::overlays::init_overlays();
  
@@ -1558,7 +1935,7 @@ index ea1c49b..09f8dd8 100644
  
      // Read in any extra data from patches
      recomp::overlays::read_patch_data(rdram, (gpr)recomp::patch_rdram_start);
-@@ -698,6 +751,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
+@@ -698,6 +781,66 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
      return mod_context->set_mod_index(mod_game_id, mod_id, index);
  }
  
@@ -1625,7 +2002,7 @@ index ea1c49b..09f8dd8 100644
  bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
      game_status.wait(GameStatus::None);
  
-@@ -717,6 +830,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+@@ -717,6 +860,11 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                      game_entry.on_init_callback(rdram, context);
                  }
  
@@ -1637,7 +2014,7 @@ index ea1c49b..09f8dd8 100644
                  uint32_t mod_ram_used = 0;
                  if (!game_entry.mod_game_id.empty()) {
                      std::vector<recomp::mods::ModLoadErrorDetails> mod_load_errors;
-@@ -832,7 +950,15 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -832,7 +980,15 @@ void recomp::start(const recomp::Configuration& cfg) {
      // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
      uint8_t* rdram;
      bool alloc_failed;
@@ -1654,7 +2031,7 @@ index ea1c49b..09f8dd8 100644
      rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
      DWORD old_protect = 0;
      alloc_failed = (rdram == nullptr);
-@@ -847,7 +973,6 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -847,7 +1003,6 @@ void recomp::start(const recomp::Configuration& cfg) {
      rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
      alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
      if (!alloc_failed) {
@@ -1662,7 +2039,7 @@ index ea1c49b..09f8dd8 100644
          alloc_failed = (mprotect(rdram, mem_size, PROT_READ | PROT_WRITE) == -1);
          if (alloc_failed) {
              munmap(rdram, allocation_size);
-@@ -864,6 +989,17 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -864,6 +1019,17 @@ void recomp::start(const recomp::Configuration& cfg) {
      recomp::mods::register_config_exports();
      recomp::mods::register_hook_exports();
  
@@ -1680,7 +2057,7 @@ index ea1c49b..09f8dd8 100644
      std::thread game_thread{[](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
          debug_printf("[Recomp] Starting\n");
  
-@@ -891,17 +1027,27 @@ void recomp::start(const recomp::Configuration& cfg) {
+@@ -891,17 +1057,27 @@ void recomp::start(const recomp::Configuration& cfg) {
      ultramodern::join_thread_cleaner_thread();
      ultramodern::join_saving_thread();
      

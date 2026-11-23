@@ -160,6 +160,21 @@ finishing a change to any file in `app/CMakeLists.txt`'s Emscripten source list.
 `EM_CACHE` holds the Emscripten sysroot (`~/.cache/emscripten-ogre` by default)
 so a rebuild does not re-download it.
 
+The browser build also compiles the bundled code mods in, so it refuses to
+configure until `make web-mods` has written `app/src/web_mods/` (see "The browser
+build: bundled code mods"). On a fresh clone the order is:
+
+```sh
+make mod-syms && make example-mods   # ROM machine only
+make web-mods                        # generated mod C++ and call-site list
+make recomp                          # applies the call sites
+make web
+```
+
+`make web` also applies the call sites itself, so a data bundle that carries
+`RecompiledFuncs/` from an earlier `make recomp` still builds; it fails if the
+generated mod directory is absent.
+
 The workflow installs the release that `latest` names, so a new emsdk can break
 the third-party tree without a change in this repository. Emscripten 7.0.0
 (2026-11-19) stopped declaring `malloc`/`free` through `<stdexcept>`, and
@@ -211,10 +226,16 @@ JS-side; they drive the same `ogre_input_set` the keyboard does.
 ### The browser options overlay
 
 Esc, or the topbar Options button, opens the browser's version of the native Esc
-panel: MAIN, MODS (disabled), CONTROLS, SETTINGS and DEBUG. The `ogreUI` shell
+panel: MAIN, MODS, CONTROLS, SETTINGS and DEBUG. The `ogreUI` shell
 does not need a second window; the panel is a fixed overlay inside `#stage`, so
 it stays visible when WINDOW enters browser fullscreen. Keyboard and pad drive it
 (Up/Down, Left/Right, Enter/Space, Tab, pad D-pad/A/B, LB/RB switch tab).
+
+MODS lists the four bundled code mods with an OFF/ON row each and writes the
+same `mods.json` the native build writes (`_ogre_web_mods_*` exports). A code mod
+is loaded when the game starts, so while a game is running the rows are disabled
+and the note points at EXIT GAME: change them on the launcher, then start the
+game again. See "The browser build: bundled code mods" under Mods.
 
 GAME SPEED, WIDESCREEN and MOUSE ENABLED are the shared `settings.cfg` values:
 `settings.cpp` is in the wasm target, `main_web.cpp` calls
@@ -2820,6 +2841,67 @@ to load, corrupts memory, or the periodic snapshot kills the process.
    already did. The snapshot is a diagnostic, so this is a fix to the diagnostic;
    a `[snap]` line with an impossible count is now a bug report about the game,
    not about the snapshot.
+
+### The browser build: bundled code mods
+
+WebAssembly has no runtime code generation: `LiveRecomp` is sljit, which emits
+x86-64 or AArch64 machine code, and a wasm function's body cannot be made
+writable and executable. The native runtime also installs a hook or a
+replacement by overwriting the first bytes of a recompiled function, which a wasm
+build cannot do. The browser build therefore loads only the mods this port ships,
+and it loads them from code compiled into the binary.
+
+`tools/gen_web_mods.py` turns each `build/mods/*.nrm` into C++:
+
+- it runs `tools/N64Recomp/build/OfflineModRecomp` on the archive's
+  `mod_syms.bin` and `mod_binary.bin`, against `mods/reference/dump.toml`;
+- it writes the result as `app/src/web_mods/<mod id>.cpp`, in a namespace,
+  compiled against `app/src/web_mod_recomp.h` (`recomp_context`, the `MEM_*`
+  byte rules and the reloc macros, without the game's single
+  `section_addresses` global);
+- it writes `app/src/web_mods/bundled_mods.cpp`, which embeds the `.nrm` bytes,
+  exports `recomp_find_static_mod`, and builds a
+  `recomp::mods::StaticModInfo` per mod;
+- it writes `instrumented.txt`, the game functions the mods hook or replace.
+
+The `.nrm` archives are still installed through the mod system: `web_mods.cpp`
+calls `recomp::mods::register_embedded_mod` for each one, so the manifest, the
+config options, the MODS tab and `mods.json` are the native ones. What changes is
+`ModHandle::load_mod_code` on wasm: `StaticModCodeHandle` hands out the compiled
+function table instead of asking the live recompiler for one
+(`librecomp/src/mods.cpp`).
+
+The call sites come from `tools/web_mod_hooks.py`, which `make recomp` and
+`make web` run. For each instrumented function it inserts a `__EMSCRIPTEN__`
+block after the generated `recomp_trace_entry`:
+
+```c
+ogre_web_mod_entry_hook(rdram, ctx, 0x80177DCC);          // a hook
+if (ogre_web_mod_replace(rdram, ctx, 0x80074834)) {       // a replacement
+    return;
+}
+```
+
+The helpers (`app/src/web_mods.cpp`) resolve the function's vram against the
+loaded mods: `run_entry_hook` finds the hook slot and calls
+`recomp::mods::run_hook`, and `run_static_replacement` calls the replacement the
+mod registered. An unenabled mod registers nothing, so both are no-ops. Native
+builds never see the calls; the block is inside `#ifdef __EMSCRIPTEN__`.
+
+A bundled mod with a **return** hook is refused at load (`HooksUnavailable`):
+only an entry call site is generated.
+
+`make web-mods` needs `build/mods/*.nrm` (`make example-mods`),
+`mods/reference/dump.toml` (`make mod-syms`) and
+`tools/N64Recomp/build/OfflineModRecomp`. Its output is gitignored; the private
+data bundle carries it to CI (`tools/data-bundle.sh`).
+
+OfflineModRecomp turns a "static function" (a fall-through or jump into a
+function's interior) into a separate C function, as the normal driver does.
+`emit_fallthrough_tails` is off for mod code: a mod is compiled as whole
+functions, so a trailing delay slot of a branch is not a fall-through, and the
+next address can be `.rodata` rather than instructions. Both changes are in
+`patches/n64recomp-ob64.patch`.
 
 ## Config directory
 

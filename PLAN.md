@@ -57,6 +57,23 @@ feasibility work and not the current state. The current state is this file and
 `docs/HANDOFF-2026-11-01-session209.md`. The browser renderer's design is
 documented in `docs/guides/web-renderer.md`.
 
+Session 216 gave the browser build its bundled code mods. The MODS tab lists the
+four `mods/` mods, writes the same `mods.json` the native build writes, and the
+mods actually run: `tools/gen_web_mods.py` recompiles each `.nrm`'s MIPS ahead of
+time with N64Recomp's `OfflineModRecomp`, links the result into the wasm app, and
+embeds the archive so the runtime's normal mod system installs it
+(`recomp::mods::register_embedded_mod`). What changes is only how the code is
+obtained: `StaticModCodeHandle` hands out the compiled function table instead of
+the live recompiler. Hooks and replacements are dispatched from call sites
+`tools/web_mod_hooks.py` inserts at the target function's entry, which
+`make recomp` and `make web` apply; an unenabled mod registers nothing, so the
+calls are no-ops. Verified in the browser: the four mods load with no error, and
+with `ogre_skip_boot_logos` on the boot runs `0x09 -> 0x04` (the publisher stills
+are skipped) instead of `0x09 -> 0x0A -> 0x04`. The permanent-suspend replacement
+path is registered but not played through; arbitrary third-party `.nrm` code
+mods remain unsupported in the browser. See
+`docs/HANDOFF-2026-11-23-session216.md`.
+
 Session 189 ported four RT64 behaviours into the browser renderer. The RDRAM
 writeback now applies `G_CD` colour dither (`Float4ToRGBA16` plus
 `DitherPatternValue`), choosing the most-used pattern per colour image the way
@@ -2823,6 +2840,27 @@ holds the evidence.
     Windows `_wspawnv` path, which is compiled only by the Release workflow. The
     recipe is in `docs/guides/app-build.md` -> "Verifying it without a human".
     See `docs/HANDOFF-2026-11-02-session212.md`.
+
+26. **The private data bundle must be uploaded before the hosted browser jobs
+    pass.** `dist/ogre-data/files.tar.gz` was regenerated with the four generated
+    mod files and `instrumented.txt`, but it has not been copied to the private
+    repository. Both `.github/workflows/pages.yml` and `wasm.yml` now stop at the
+    unpack step, with the regeneration command, when the archive has no
+    `app/src/web_mods/bundled_mods.cpp`. `make web` instruments `RecompiledFuncs/`
+    itself, so a bundle whose game code predates the call sites still builds; the
+    generated mod directory itself cannot be produced on the runner.
+
+27. **The browser runs only the bundle's own code mods, and the permanent-suspend
+    replacement is not played through.** A third-party `.nrm` code mod cannot
+    load in the browser: WebAssembly has no runtime code generation and no
+    writable executable memory. The MODS tab lists the four bundled mods and the
+    runtime refuses a bundled mod with a return hook (`HooksUnavailable`); a
+    future bundled mod with a hook needs `make web-mods` rerun so
+    `instrumented.txt` and the generated table include it. `permanent-suspend`'s
+    `RECOMP_PATCH` is registered and its call site is injected, but the
+    load-a-suspend-and-check-`0x30B0` route has not been run in the browser. The
+    full native test is session 212's. See
+    `docs/HANDOFF-2026-11-23-session216.md`.
 
 Parked, not defects:
 

@@ -23,6 +23,136 @@ index 61e1ff5..345f134 100644
  void N64Recomp::LiveGenerator::emit_trigger_event(uint32_t event_index) const {
      // Load rdram and ctx into R0 and R1.
      sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, Registers::rdram, 0, SLJIT_IMM, rdram_offset);
+diff --git a/OfflineModRecomp/main.cpp b/OfflineModRecomp/main.cpp
+index 29e5232..6d04213 100644
+--- a/OfflineModRecomp/main.cpp
++++ b/OfflineModRecomp/main.cpp
+@@ -1,5 +1,9 @@
++#include <algorithm>
++#include <cstdio>
+ #include <filesystem>
+ #include <fstream>
++#include <set>
++#include <sstream>
+ #include <vector>
+ #include <span>
+ 
+@@ -72,6 +76,10 @@ int main(int argc, const char** argv) {
+     }
+ 
+     mod_context.import_reference_context(reference_context);
++    // A mod is a whole compiled program, so a trailing delay slot must not be
++    // expanded into a tail call into the following section (which can be rodata
++    // and therefore not instructions).
++    mod_context.emit_fallthrough_tails = false;
+ 
+     // Populate R_MIPS_26 reloc symbol indices. Start by building a map of vram address to matching reference symbols.
+     std::unordered_map<uint32_t, std::vector<size_t>> reference_symbols_by_vram{};
+@@ -207,19 +215,100 @@ int main(int argc, const char** argv) {
+     // Create a set of the export indices to avoid renaming them.
+     std::unordered_set<size_t> export_indices{mod_context.exported_funcs.begin(), mod_context.exported_funcs.end()};
+ 
+-    // Name all the functions in a first pass so function calls emitted in the second are correct. Also emit function prototypes.
+-    output_file << "// Function prototypes.\n";
++    // Name all the functions so calls emitted below use the right symbol.
+     for (size_t func_index = 0; func_index < mod_context.functions.size(); func_index++) {
+         auto& func = mod_context.functions[func_index];
+         // Don't rename exports since they already have a name from the mod symbol file.
+         if (!export_indices.contains(func_index)) {
+             func.name = "mod_func_" + std::to_string(func_index);
+         }
+-        output_file << "RECOMP_FUNC void " << func.name << "(uint8_t* rdram, recomp_context* ctx);\n";
++    }
++
++    // A fall-through beyond the end of a function, or a direct jump into a
++    // function's interior, is emitted as a call to a synthetic "static"
++    // function. The normal N64Recomp driver turns each recorded address into a
++    // function before writing the prototypes; this tool has to do the same, or
++    // the generated call has no definition. Scan against a sink first, because
++    // the prototypes must precede every body that calls one.
++    std::ostringstream discovery_sink{};
++    for (size_t func_index = 0; func_index < mod_context.functions.size(); func_index++) {
++        if (!N64Recomp::recompile_function(mod_context, func_index, discovery_sink, static_funcs_by_section, true)) {
++            fprintf(stderr, "Failed to scan mod function %zu for static functions\n", func_index);
++            return EXIT_FAILURE;
++        }
++    }
++
++    for (size_t section_index = 0; section_index < mod_context.sections.size(); section_index++) {
++        auto& section = mod_context.sections[section_index];
++        auto& section_funcs = section.function_addrs;
++        std::sort(section_funcs.begin(), section_funcs.end());
++
++        std::set<uint32_t> statics_set{ static_funcs_by_section[section_index].begin(), static_funcs_by_section[section_index].end() };
++        std::vector<uint32_t> pending(statics_set.begin(), statics_set.end());
++        std::set<uint32_t> emitted{};
++
++        while (!pending.empty()) {
++            uint32_t static_func_addr = pending.back();
++            pending.pop_back();
++            if (!emitted.insert(static_func_addr).second) {
++                continue;
++            }
++
++            // End at the next known function, the next static, or the section end.
++            uint32_t cur_func_end = static_cast<uint32_t>(section.size + section.ram_addr);
++            for (uint32_t addr : section_funcs) {
++                if (addr > static_func_addr) {
++                    cur_func_end = std::min(cur_func_end, addr);
++                    break;
++                }
++            }
++            for (uint32_t addr : statics_set) {
++                if (addr > static_func_addr && addr < cur_func_end) {
++                    cur_func_end = addr;
++                }
++            }
++
++            uint32_t rom_addr = static_cast<uint32_t>(static_func_addr - section.ram_addr + section.rom_addr);
++            const uint32_t* func_rom_start = reinterpret_cast<const uint32_t*>(mod_context.rom.data() + rom_addr);
++            std::vector<uint32_t> insn_words((cur_func_end - static_func_addr) / sizeof(uint32_t));
++            insn_words.assign(func_rom_start, func_rom_start + insn_words.size());
++
++            char static_name[40];
++            std::snprintf(static_name, sizeof(static_name), "static_%zu_%08X", section_index, static_func_addr);
++            size_t new_func_index = mod_context.functions.size();
++            mod_context.functions.emplace_back(
++                static_func_addr,
++                rom_addr,
++                std::move(insn_words),
++                static_name,
++                static_cast<uint16_t>(section_index),
++                false
++            );
++
++            size_t prev_num_statics = static_funcs_by_section[section_index].size();
++            if (!N64Recomp::recompile_function(mod_context, new_func_index, discovery_sink, static_funcs_by_section, true)) {
++                fprintf(stderr, "Failed to scan static function 0x%08X\n", static_func_addr);
++                return EXIT_FAILURE;
++            }
++            size_t cur_num_statics = static_funcs_by_section[section_index].size();
++            for (size_t i = prev_num_statics; i < cur_num_statics; i++) {
++                uint32_t new_addr = static_funcs_by_section[section_index][i];
++                if (statics_set.emplace(new_addr).second) {
++                    pending.push_back(new_addr);
++                }
++            }
++        }
++    }
++
++    // Emit prototypes for every function, including the statics just created.
++    output_file << "// Function prototypes.\n";
++    for (size_t func_index = 0; func_index < mod_context.functions.size(); func_index++) {
++        output_file << "RECOMP_FUNC void " << mod_context.functions[func_index].name
++                    << "(uint8_t* rdram, recomp_context* ctx);\n";
+     }
+     output_file << "\n";
+ 
+-    // Perform a second pass for recompiling all the functions.
++    // Perform the real pass for every function.
+     for (size_t func_index = 0; func_index < mod_context.functions.size(); func_index++) {
+         if (!N64Recomp::recompile_function(mod_context, func_index, output_file, static_funcs_by_section, true)) {
+             output_file.close();
 diff --git a/RSPRecomp/src/rsp_recomp.cpp b/RSPRecomp/src/rsp_recomp.cpp
 index 518477d..60eb175 100644
 --- a/RSPRecomp/src/rsp_recomp.cpp
@@ -185,7 +315,7 @@ index 73f3e73..13ea02b 100644
  void do_break(uint32_t vram);
  
 diff --git a/include/recompiler/context.h b/include/recompiler/context.h
-index e7b4431..a35deb7 100644
+index e7b4431..e7e483d 100644
 --- a/include/recompiler/context.h
 +++ b/include/recompiler/context.h
 @@ -31,6 +31,13 @@ namespace N64Recomp {
@@ -202,10 +332,18 @@ index e7b4431..a35deb7 100644
          std::unordered_map<int32_t, std::string> function_hooks;
  
          Function(uint32_t vram, uint32_t rom, std::vector<uint32_t> words, std::string name, uint16_t section_index, bool ignored = false, bool reimplemented = false, bool stubbed = false)
-@@ -235,6 +242,16 @@ namespace N64Recomp {
+@@ -235,6 +242,24 @@ namespace N64Recomp {
          bool skip_validating_reference_symbols = true;
          // Whether all function calls (excluding reference symbols) should go through lookup.
          bool use_lookup_for_all_function_calls = false;
++        // Whether a function whose last instruction is not a control transfer
++        // emits a tail call to the next address. The game's recompilation needs
++        // it for bodies splat cut out of a larger function. A mod is compiled as
++        // whole functions, so its last non-transfer instruction is normally the
++        // delay slot of a branch (the branch executed; execution never reaches
++        // this address), and the target can be data in the next section
++        // (OfflineModRecomp turns this off).
++        bool emit_fallthrough_tails = true;
 +        // OB64 (project addition): backward-branch VRAMs whose loop the poll-loop
 +        // heuristic in recompilation.cpp must NOT classify as a poll loop. The
 +        // heuristic asks only whether some load in the loop body has a
@@ -497,7 +635,7 @@ index 669c4a1..40c5c10 100644
                      }
  
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..b05f50f 100644
+index c228433..544846d 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
 @@ -1,5 +1,7 @@
@@ -952,7 +1090,7 @@ index c228433..b05f50f 100644
 +                last_id != InstrId::cpu_b &&
 +                last_id != InstrId::cpu_jr &&
 +                last_id != InstrId::cpu_syscall;
-+            if (falls_through) {
++            if (falls_through && context.emit_fallthrough_tails) {
 +                const uint32_t fallthrough_vram = static_cast<uint32_t>(func.vram + instructions.size() * sizeof(uint32_t));
 +                const auto& fallthrough_section = context.sections[func.section_index];
 +                const bool same_section =
