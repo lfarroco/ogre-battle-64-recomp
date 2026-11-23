@@ -156,18 +156,26 @@ ERRORS []
 wasm is byte-identical to `build-wasm/ogrebattle64.wasm`.
 
 The Pages build takes its generated game code and mod C++ from the private data
-bundle, so two deployment steps remain outside this tree:
+bundle, so the deployment was two steps:
 
-1. `tools/data-bundle.sh` was run; `dist/ogre-data/files.tar.gz` (7.5 MB,
-   sha256 `b77ad2c0…`) contains `app/src/web_mods/{bundled_mods.cpp,h,
-   instrumented.txt}` and the four `<mod id>.cpp`. Upload it to the private data
-   repository.
-2. Commit and push the code to `main`. `.github/workflows/pages.yml` then
-   rebuilds `dist-web` and deploys it.
+1. `tools/data-bundle.sh` wrote `dist/ogre-data/files.tar.gz` at commit
+   `264bca3` (7.5 MB, sha256 `e0f8d87c…`, public tree clean). It contains
+   `app/src/web_mods/{bundled_mods.cpp,h,instrumented.txt}` and the four
+   `<mod id>.cpp`. It was committed to `lfarroco/ogre-recomp-private` as
+   `9017934`.
+2. The code was pushed to `main` as `264bca3`. Workflow runs
+   `45218823360` (`WebAssembly`) and `45218823415` (Pages) are both green, and
+   the deploy job published the package.
 
-Both browser workflows now fail the unpack step with the regeneration command
-when the bundle has no `app/src/web_mods/bundled_mods.cpp` or
-`instrumented.txt`, instead of failing later at `make web`.
+Both browser workflows fail the unpack step with the regeneration command when
+a bundle has no `app/src/web_mods/bundled_mods.cpp` or `instrumented.txt`,
+instead of failing later at `make web`.
+
+The live site was measured after the deploy:
+`https://lfarroco.github.io/ogre-battle-64-recomp/` is cross-origin isolated,
+`ogre_web_mods_scan` returns the four mods, the MODS tab renders them, and with
+`ogre_skip_boot_logos` enabled and a ROM loaded the live page logs
+`[scene] id=0x0009 -> id=0x0004`.
 
 ## Probes
 

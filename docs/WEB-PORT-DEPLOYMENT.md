@@ -147,7 +147,9 @@ workflow runs green on a push to `main`, and
 
 `debug/probes/isolate.cjs --url https://lfarroco.github.io/ogre-battle-64-recomp/`
 checks the deployed page, and `debug/probes/boot.cjs` with the same `--url`
-renders it.
+renders it. The deployed site carries the four bundled mods (session 216): the
+MODS tab lists them, and with `ogre_skip_boot_logos` enabled the boot goes
+`0x09 -> 0x04`.
 
 nginx and other hosts that can set headers do not need the service worker:
 
