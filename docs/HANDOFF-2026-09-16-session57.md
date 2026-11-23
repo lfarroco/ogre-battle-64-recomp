@@ -1,5 +1,7 @@
 # Handoff — 2026-09-16, session 57: the stale New Game backdrop is a stale readback *source*, not a render-vs-readback race
 
+> **Summary.** Session 57 handoff: **the stale New Game backdrop is the njpeg readback's source *selection*, not a render-vs-readback race.** The old patch preferred RT64's never-cleared scratch word `+8`, which at the first pass of every assembly still named the previous step's framebuffer — by then holding the previous screen (the name/date-of-birth form): 13 of 120 measured stage-3 passes read the wrong sub-image before, 0 after, by keeping the game's own `state[0x64]` when `D_800C4BB8` matches a framebuffer-table entry. The ordering hypothesis is wrong too — the game waits for the **DP** completion (`events.cpp:432`), so an in-flight-display-list handshake never blocked once and was reverted. Also: scene `0x16` ends at an **uncompiled module** (ROM `0x244770` ≈`0x7500` → RAM `0x801D0860`, a `bin` gap in `config/banks/config-bankC.yaml` while `bankRec10a` owns that RAM), so the game spins on the streamed stub; the sequence-end crash is still not reproduced (200 s, exit 0).
+
 ## Goal and result
 
 **Goal (developer):** fix the intermittent **stale-backdrop artifact** in the New

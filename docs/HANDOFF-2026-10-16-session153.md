@@ -1,5 +1,7 @@
 # Session 153 handoff — a browser gamepad now drives N64 controller 1, and the keyboard works beside it
 
+> **Summary.** Session 153 handoff - **a browser gamepad now drives N64 controller 1, and the keyboard keeps working beside it.** Open item 13: `app/web/web.js` gave each pad slot `(pad.index % 3) + 1`, so gamepads filled controllers 2-4 and controller 1 was keyboard-only, which is invisible in game (the defect the native build fixed for issue #13). `updateGamepads` now takes the lowest free slot and ORs slot 0's keyboard and tap mask into the pad's buttons; the pad pass also moved after the keyboard pass, because it writes slot 0 and the old order let a pad overwrite the keyboard every frame. `ogre_input_debug` takes a slot and replies `0xFFFF` for an empty one. **Verified** by the new `debug/probes/gamepad.cjs`, which installs a synthetic pad with `page.addInitScript`: `slots=[0x8000,0xFFFF,0xFFFF,0xFFFF]`, `pad 0 -> slot 0`, and `slot0=0xC000` while the probe holds the keyboard's `B` beside the pad's `A` (it read `0x8000` before the order fix, and the pre-fix build logged `gamepad connected (slots 1-3)`). No regression: `boot.cjs` `RENDERED`, `testdraw.cjs --flags 32 --expect-fbtex` `hits=1 lines=1`, a tap route still reaches scene `0x09`. A physical pad on a real page is still unverified.
+
 ## Goal
 
 Continue the web renderer (developer, session start). Session 152's open item 4

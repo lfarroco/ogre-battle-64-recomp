@@ -1,5 +1,7 @@
 # Session 200 handoff — one command to reach a screen and capture it
 
+> **Summary.** Session 200 handoff — **scene captures are one command.** `debug/probes/scene.cjs` boots the build, drives a named route, waits for the `[scene]` line and writes a PNG per `ogre_gfx_debug_flags` value plus sampled pixels, the page log, the scene timeline and the `tasks=` rate. Routes are data (`title`, `mission-briefing`, `tutorial-field`, `tutorial`); a new screen is a `ROUTES` entry with `waitScene`/`sleep`/`press`/`pressUntilScene` steps. All four routes reached their scene in the tests. The field capture gives a cleaner grass repro: N64 `(12,160)` is `(33,33,0)` normal and pure white in `TEXEL0` raw. Documented in `docs/guides/web-probes.md` -> "Capturing a screen", `debug/README.md` and AGENTS rule 4. See `docs/HANDOFF-2026-10-26-session200.md`.
+
 ## Goal
 
 Stop re-deriving the browser scene capture every session: reach a named screen,

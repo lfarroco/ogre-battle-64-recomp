@@ -1,5 +1,7 @@
 # Session 95 — the DEBUG tab and the Chaos Frame
 
+> **Summary.** Session 95 handoff — **the `ESC` overlay's DEBUG tab shows the live Chaos Frame, and the address is `0x801936C9`, not the community `0x801936A9`.** The initialiser `func_8016C900` bzeroes the flags block at `0x80193698` and stores `50` at `0x801936C9`; the scene-`0x13` update `func_801B5128` reads and masks it, and the script VM opcode `0xFF` stores a script operand there. `0x801936A9` has no static read or write and reads 0 at the title. The shared `ui::Panel` does not read guest memory: the overlay samples the byte each frame and pushes it in, so the launcher's DEBUG tab shows `GAME NOT RUNNING`. Row bands (developer): `LOW` 0-35, `NEUTRAL` 36-64, `HIGH` 65-100; `OGRE_OVERLAY_TAB=debug` opens it for a capture.
+
 ## Goal
 
 Add a `DEBUG` tab to the app's shared menu panel (the launcher and the in-game

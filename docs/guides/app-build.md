@@ -1634,7 +1634,7 @@ device signature and slot-0 magic are the ASCII `QuestOG3`.
 
 **A slot's first 4 bytes are two `u16` checksums, and their seed is the slot's own
 device offset** (session 78). `func_8007541C` rejects a slot unless
-`memcmp(D_800B8240, slot+4, 8)` matches `QuestOG3` **and**
+`memcmp(0x800A8240, slot+4, 8)` matches `QuestOG3` **and**
 
 ```
 u16[+0x00] == (sum of the bytes of slot+0x0C .. slot+0x1850) + (0x10 + n*0x1850)   // func_80075A84

@@ -1,5 +1,7 @@
 # Handoff — 2026-09-18, session 82: neutral encounters now spawn their monster
 
+> **Summary.** Session 82 handoff — **neutral encounters now spawn their monster: the battle setup fragment scene `0x0E`'s enter streams was the one bank nobody's route had run.** ROM `0x23A370` (`0xE80` → RAM `0x801D0860`) was uncompiled, so `jal 0x801D0AAC`/`0x801D1508` hit the runtime's streamed stub and the battle's participant table was never built — normal battles worked because their units already exist on the field, a neutral encounter's wild unit is *created* there, hence "instant victory with no enemy". Now **bank unit AH** (`bankRec10s`, siblings of units J and I in the same RAM, three forced entries). The trigger is fully decodable from the ROM (`func_ovlN_801E7940`, `rand() % 72000 <= 50`, terrain tables `0x801ED780`/`0x801ED79E`, class row `0x801E7E38 + mission*12`), so the rare event was reproduced on demand by patching two branches (probe82, reverted); `tools/arenamap.py` had listed the fragment since session 73 as "no observed run streams" — the tool was right, the route coverage was not. Developer-confirmed ("it worked"); `docs/proofs/native-neutral-encounter-message.png`, `-battle.png`.
+
 **Read §1–§3.** The bug was the project's standard shape — a streamed module the
 port had no record for — in the one place nobody had run: the battle scene's
 setup fragment, which only the neutral-encounter path streams. `tools/arenamap.py`

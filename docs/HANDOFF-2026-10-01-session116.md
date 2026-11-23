@@ -1,5 +1,7 @@
 # Session 116 — the every-1.5 s stutter is the runtime's unconditional periodic `[snap]` snapshot
 
+> **Summary.** Session 116 handoff — **the every-1.5 s "clockwork" stutter was the runtime's unconditional periodic `[snap]` queue snapshot.** Player report: *"Every couple of seconds I experience a stutter, like clockwork. Game does run, but with the stutter non-stop."* `vi_thread_func` called `ultramodern::debug_dump_queue_snapshot` every 90 VI frames with no gate, and the dump is heavy (a 100 x 200 us hot-loop sample, every parked thread's call chain, the allocator ring and a 2000-edge heap walk, ~80 printed lines) on the Critical-priority VI thread that delivers the retrace it observes. Four 40 s runs on macOS, only the gate differing: before, 23 of 27 spikes above 1.5x the 33 ms p50 land in the same 100 ms phase bin of a 1500 ms period and each spike is 33 -> 59 ms; after, 0 snapshots and no fixed phase, max gap 866 -> 316 ms; `OGRE_SNAP=1` brings the degradation back. The gate is `OGRE_SNAP` (unset/`0`/`off` = disabled, `1` = 90 VI frames, a number = its own period), off by default. The Windows size is inferred from SDL's `timeBeginPeriod(1)`, which makes the 200 us sampler cost ~1 ms per sample. Carried in `patches/n64modernruntime-ob64.patch`; the patch was regenerated and proved to apply to a pristine worktree of the pinned runtime commit.
+
 Date: 2026-10-01. Follows session 115 (the unit-command menu's fifth injected
 work-loop yield).
 

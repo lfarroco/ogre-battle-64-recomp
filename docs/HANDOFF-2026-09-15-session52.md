@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 52: the cathedral background renders — the YUV→RGB conversion matrix was never applied
 
+> **Summary.** Session 52 handoff (latest): **the cathedral background renders — the YUV→RGB conversion matrix was never applied.** The backdrop drew as blue banding because RT64 fed `G_SETCONVERT`'s **raw unsigned 9-bit** `k0..k3` fields into the matrix, while the hardware sign-extends each field and scales it `2*K+1` (GLideN64 `gDPSetConvert` `SIGN(k,9)<<1+1`, parallel-rdp `set_convert` `2*sext<9>(k)+1`), **and** the green row paired `K1` with V instead of U (`G = Y + K1*U' + K2*V'`, `R = Y + K0*V'`, `B = Y + K3*U'`). With `K0=175 K1=469 K2=423 K3=222` the corrected coefficients are 351/−85/−177/445. The geometry, the de-interleaved TMEM planes and the UYVY source were all verified correct (a loader probe dumped all 16 rows), so session 51 §7's "the defect is in sampling/upload" is wrong — the blue was the raw-coefficient matrix exploding green through the game's own `(TEXEL0-K4)*K5+TEXEL0` combiner. Proofs `native-newgame-cathedral.png` / `-cathedral-background.png` **replaced** (the old ones were the black/blue-band broken renders); the assembled `'B5'` image at `0x80243E28` now renders as the cathedral.
+
 ## Goal and result
 
 **Goal (session 51's open wall):** the New Game cathedral (scene `0x0D` step 2)

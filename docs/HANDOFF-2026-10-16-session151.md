@@ -1,5 +1,7 @@
 # Session 151 handoff — the browser's scripted tap schedule now matches the native one (last slot sticks, `OGRE_TAP_MAX`), and framebuffer-as-texture is the next renderer item
 
+> **Summary.** Session 151 handoff — **the browser's scripted tap schedule now matches the native one (last slot sticks, `OGRE_TAP_MAX`), and framebuffer-as-texture is the next renderer item.** `app/web/web.js` cycled `OGRE_TAP_BUTTON` forever (`names[slot % names.length]`), while the native advance is `slot = tap < count ? tap : count - 1` plus `OGRE_TAP_MAX`, so a route could not stop tapping mid-run and the browser has none of the native's scene-keyed knobs. `web.js` now matches; verified with a 25 s run logging `[web:input] tap schedule done after 3 presses`. Also found: the session-54 title route is racy in the browser (the forced title lands at 8.2 s, after the first taps; `OGRE_TAP_SCENE_BUTTON` has no browser equivalent), while `OGRE_SCENE=new-game OGRE_STEP=2` reaches the cathedral on both sides and waits there. **Next**: framebuffer-as-texture — the gfx thread decodes a load out of RDRAM at record time while a colour image the same list rendered into is still only in a GL framebuffer, written back on the main thread at present/sync.
+
 ## Goal
 
 Continue the web renderer (developer, session start). Session 150 had just

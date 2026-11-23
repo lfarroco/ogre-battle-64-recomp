@@ -1,5 +1,7 @@
 # Session 178 handoff — the boot intro's soldier trails were the fill quad's second triangle
 
+> **Summary.** Session 178 handoff — **the boot intro's soldier trails were the fill quad's second triangle.** The fill's 6-vertex list paired its corners as `(0,1,2)` and `(3,0,1)`, so both triangles covered the left half and the right half was never written; the pairing is now `(0,1,2)`/`(0,2,3)` and the browser intro matches the native RT64 frame. See `docs/HANDOFF-2026-10-19-session178.md`.
+
 ## Goal
 
 The developer reported that the opening animation in the browser build

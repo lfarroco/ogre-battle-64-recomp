@@ -1,5 +1,7 @@
 # Session 213 handoff — issue #24 items 1-4 (fork fixes taken upstream)
 
+> **Summary.** Session 213 handoff — **issue #24 items 1-4, the Windows fork's easy wins.** RT64 now runs with `upscale2D = Original` (`app/src/renderer.cpp`), so 2D rectangles sample at the console's pixel positions; the 3x cathedral A/B shows the dashed row under the dialogue box's shadow and the dark column beside the portrait with `scaled` and neither with `original` (`docs/proofs/native-dialogue-upscale2d-*.png`, `OGRE_UPSCALE_2D=scaled|all` for the A/B). `OGRE_SCENE` stores the game's own request `0x8000 | id` in `D_800C4C26` at a scene change instead of poking the state block and `D_800E8214`; verified with `OGRE_SCENE=title` and the cathedral route, and the forced screen now arrives at the first transition (~2.7 s at 8x). `0x801AB740`/`0x801AB76C` (`func_80079BD8` -> record 3, unit A) are dispatched. `tools/stubmap.py` no longer accepts body interiors as function starts: 130 missing-function candidates -> 0, 282 bank-selection candidates. `make recomp`, `make app`, `make web` and `make patch-check` clean.
+
 ## Goal
 
 Developer request: implement items 1-4 of the analysis of

@@ -1,5 +1,7 @@
 # Handoff — 2026-08-29 (session 11): WebAssembly port kickoff — RT64 optional, null renderer, native macOS boot fixed
 
+> **Summary.** Session 11 handoff: WebAssembly port kickoff — RT64 optional, null renderer, web shell; native macOS boot fixed (stale ELF/funcs, missing runtime fixes, osSpGetStatus bridge, broken debug probe).
+
 ## TL;DR
 
 - **WebAssembly port plan documented** (`docs/WEB-PORT.md`) and implementation

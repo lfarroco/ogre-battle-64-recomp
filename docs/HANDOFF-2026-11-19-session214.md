@@ -1,5 +1,7 @@
 # Session 214 handoff — issue #27, the cutscene's widescreen side bands
 
+> **Summary.** Session 214 handoff — **issue #27, the cutscene's widescreen side bands.** With WIDESCREEN on, the New Game cutscene showed bands of unrelated content beside the 4:3 picture. An expanded frame is a 428x240 target whose game picture is the centred columns 53..373; the columns outside it are painted by the same frame's 2D draws through RT64's wide-viewport mapping, which stretches them, and forcing the centred mapping makes them black. RT64's Expand is now used for the mission scene `0x03` only: the expand set moved to `widescreen_expand_scenes()` in `app/src/settings.cpp` (shared by the native and browser builds), scene `0x0D` is pillarboxed in the wide window, and the HD pack's `-wide` image is used only for a scene that expands. Verified on the cutscene (`docs/proofs/native-widescreen-cutscene-pillarbox.png`), the mission (`aspect ratio expand (scene 0x0003, mode ON)`, 428x240) and the pack (`applied 'cathedral' (01)`); `make app` and `make web` clean.
+
 ## Goal
 
 Issue #27: "Certain scenes darken the original size when in wide screen mode."

@@ -1,5 +1,7 @@
 # Session 181 handoff — the QUEST q meshes do rasterize and the reference frame is produced; a normal-speed run presents the still without them
 
+> **Summary.** Session 181 handoff — **the QUEST q meshes do rasterize and the reference frame is produced; a normal-speed run presents the still without them.** Colour-image readbacks show `white=279632, coloured=20588` after a q list, and the canvas read back after the blit shows the same frame, when a flush carries one display list. With two lists per flush the presented target has `coloured=0` although the batch records 756 q triangles into it. The native sequence was measured: black-plate q animation, then the white plate + q's + wordmark held about 12 presents, then black. Ruled out for the q draws: NDC, z, viewport, scissor, depth, blend, alpha compare, GL errors, FBO binding, texture keys. Also measured: a WebGL texture-feedback loop left by `upload_framebuffer` / `blit_to_canvas` drops 86 fills and 16 texrects per run (`INVALID_OPERATION` 0x0502). No code landed. See `docs/HANDOFF-2026-10-19-session181.md`.
+
 ## Goal
 
 Continue the browser fix of the QUEST publisher logo (`?OGRE_SCENE=publishers`,

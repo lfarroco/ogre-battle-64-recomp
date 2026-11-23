@@ -1,5 +1,7 @@
 # Handoff — 2026-09-20, session 91: the mod system is on, with a shipped example
 
+> **Summary.** Session 91 handoff — **the mod system is on and an example mod ships.** `GameEntry::mod_game_id` was never set, so `wait_for_game_started()` parsed every `.nrm` and discarded it; `app/src/main.cpp` now sets it and shows the start screen whenever a mod is installed. `mods/skip-boot-logos/` is the reference code mod: an entry hook on scene `0x09`'s update writes the title's id into `D_800C4C26`, and it ships **off** (`enabled_by_default = false`; `n64recomp-ob64.patch` adds the field to RecompModTool). The skip must come from `0x09`, not `0x0A`. Four runtime fixes (section-index translation, data-only HI16/LO16 relocations, the macOS `__TEXT` page remap for `patch_func`, and sign-extension in the `[snap]` queue snapshot) are in `n64modernruntime-ob64.patch`.
+
 **Goal (developer):** the game is 99.05 % recompiled, one intention of the
 project is modding, so ship example mods with the client and let the player turn
 them off. Candidate ideas offered: skip the intro with Start, widescreen, mouse

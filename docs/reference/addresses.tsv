@@ -1,0 +1,171 @@
+address	name	kind	page	section	note	evidence	session	confidence
+0x8018FC39	g_step_engine_mode	global	symbols	globals		byte; only writer `func_80227700` (`sb a0`, `0x80227708`); `0` = movie engine, `2` = the cutscene/DL engine every step ≥ 2 selects; read by `func_ovlC_8022D1CC` (`0x8022D208`), `func_ovlC_8022ACB0`, `func_ovlC_8023A9AC`, …	-	high
+0x8018F1C0	g_newgame_step	global	symbols	globals	(half)	scene-script VM opcode `0x10` stores `var[0]` at `0x80170ADC`; read as the step index (`F1C0 & 0xFFF`) by `func_80226FA8` (`0x80226FFC`)	-	high
+0x8018F1C2	g_newgame_next_scene	global	symbols	globals	(half)	stored `0x8002` by the same VM opcode (`0x80170ACC`); copied into `D_800C4C26` by the title transition `func_80177A58`	-	high
+0x8022A978	g_step_descriptor	global	symbols	globals	(ptr)	`func_80227FF8` decompresses the step asset into it (`0x80228110`); the interpreter `s3`	-	high
+0x8022A970	g_step_desc_pc	global	symbols	globals	(word index)	interpreter `s1`; reset to 0 by `func_80227FF8` (`0x80228184`)	-	high
+0x8022A994	g_step_objects	global	symbols	globals	(0x1CB8 malloc)	allocated + bzeroed by `func_ovlC_8022D1CC`; object pointer arrays at `+0x18` (28 entries, read by the render tail) and `+0x1C54` (20 entries, written by `func_ovlC_8023A9AC`)	-	high
+0x8022A9B4	g_step_index	global	symbols	globals	(half)	`func_8022683C` stores its second argument (`0x8022685C`); read by `func_80227FF8` and by the object loop	-	high
+0x8022A9A0	g_step_finished_gate	global	symbols	globals	(byte)	compared with `0xD7` by `func_ovlC_802261B0`/`func_ovlC_802262E4`; set to 0 by the command handlers	-	medium
+0x80196F80	g_step_ptr_reloc	global	symbols	globals	(u16 table)	`func_80227FF8` rewrites `0x088800NN` descriptor words with `u16` entries from here (`0x80228138`-`0x8022817C`)	-	high
+0x800E9BA0	g_dl_cursor	global	symbols	globals		the RDP emitters advance it (`sw v0, D_800E9BA0`); loaded into `a3` by the proper emitters	-	high
+0x800E82C8	g_task_queue[6]	global	symbols	globals	(stride `0xA8`, `+0x10` = callback)	filled by `func_80076F5C`, consumed by `func_800765D8`	-	high
+0x800E7A30	g_current_task	global	symbols	globals	(0xA8 copy)	`func_800765D8` copies the slot here before the `jalr` (`0x80076664`)	-	high
+0x800E7A44	g_scene_hooks[0]	global	symbols	globals		the selector callbacks store the scene's update/draw/aux pointers (`func_ovlC_80225A3C`, `func_ovlC_80226110`)	-	medium
+0x800E7A48	g_scene_hooks[1]	global	symbols	globals		the selector callbacks store the scene's update/draw/aux pointers (`func_ovlC_80225A3C`, `func_ovlC_80226110`)	-	medium
+0x800E7A4C	g_scene_hooks[2]	global	symbols	globals		the selector callbacks store the scene's update/draw/aux pointers (`func_ovlC_80225A3C`, `func_ovlC_80226110`)	-	medium
+0x800C4C26	g_pending_scene	global	symbols	globals		the scene manager reads it; `0x8000|id`, plus `0xFFFC`/`0xFFFE` control words	-	high
+0x800E810E	g_active_scene_id	global	symbols	globals		what the dispatcher is running; the app's `[scene]` log and `OGRE_TAP_SCENE` read it	-	high
+0x800E8294	g_scene_descriptor	global	symbols	globals		scene manager stores the accessor's return here; words are enter/update/hook/leave/mask	-	high
+0x8022A9A4	g_render_matrix_0	global	symbols	globals		written by the `0x80239874` render tail and consumed by its callers	-	medium
+0x8022A9A8	g_render_matrix_1	global	symbols	globals		written by the `0x80239874` render tail and consumed by its callers	-	medium
+0x8022A9AC	g_render_matrix_2	global	symbols	globals		written by the `0x80239874` render tail and consumed by its callers	-	medium
+0x802395E0	g_rec14_arena	global	symbols	globals	(RAM range `0x802395E0..0x80243DC0`)	record 14's arena: the game streams **two banks** here, `bankRec14b` (ROM `0x2AE390`, 0xA7E0 — scene `0x0D` visit 1 / the movie) and `bankRec14c` (ROM `0x2A8CF0`, 0x56A0 — steps ≥ 2); unit F / unit G, and the reason the arena's call sites must be `LOOKUP_FUNC`	-	high
+0x80239C24	func_ovlG_80239C24	global	symbols	globals	(rec14c)	descriptor-interpreter opcode 42 calls it (`jal` at `0x80229004`) with `(6, 0x20, 0x20)`; a real function in rec14c (`addiu sp,sp,-0x60`), a body interior of `func_ovlC_80239874` in rec14b — session 45's wall	-	high
+0x80197B18	g_screen_state	global	symbols	globals	(ptr)	the map's module entry stores `malloc(0x470)` here (`0x8019A82C`) and every map draw loads `state = *(0x80197B18)` from it (`func_ovlM_801A2A7C` `0x801A2ADC`). **It is a heap pointer that changes per run** — read it from this global, never hardcode an observed value (`0x801F1570` in sessions 60/63 is run-specific)	-	high
+0x801A6FE0	g_sprite_table	global	symbols	globals	(stride 8)	entries `{u16 W, u16 H, s16 u, s16 v}`, static module data (unit M's data half, byte-identical to ROM); the consumer is `sprite_rect_emit` (`0x8019F87C`: `(a2 & 0xFFFF)*8 + 0x801A6FE0`, `lhu`/`lh` the four fields). Live: slot 10 `(16,11)`, 11 `(144,23)`, 12-15 `(16,24)`	-	high
+0x801936C9	g_chaos_frame	global	symbols	globals	(u8)	the player's Chaos Frame, 0..100: it picks the good and the bad ending, and the scene-`0x13` screen after the credits is the only place the game prints it. Instruction evidence: the game-state initialiser `func_8016C900` bzeroes the flags block at `0x80193698` for `0x3A` bytes and stores `50` here (`0x8016C998`) — the documented starting value; the scene-`0x13` update `func_801B5128` reads this byte and masks it `0x7F` (`0x801B5360`); the scene-script VM opcode `0xFF` stores a script operand here (`0x80171480`, jump table `0x80190BC8`). The community figure for a Project64 symbol is `0x801936A9`; that byte has no read or write in this ROM, and reads 0 at the title while this one reads 50. The app's DEBUG tab reads it live (`app/src/game.hpp` `CHAOS_FRAME_ADDRESS`)	-	high
+0x80075BC0	scene_manager	function	symbols	functions		per-frame: `D_800AF028[id]()` → descriptor → enter/leave	-	high
+0x80072398	frame_update	function	symbols	functions		calls the descriptor's `+0x04` update (`0x8007265C`) then `func_800765D8` (`0x8007266C`)	-	high
+0x800765D8	task_queue_process	function	symbols	functions		loops the 6 slots, copies to `D_800E7A30`, `jalr` the callback with `a0` = slot	-	high
+0x80076F5C	task_queue_push	function	symbols	functions		finds a free `0x8000`-clear slot, stores `{id, callback, args}`	-	high
+0x80178568	scene_0d_enter	function	symbols	functions		0x0D descriptor word 0; picks movie vs command mode on `D_8018F1C0`	-	high
+0x80178954	scene_0d_update	function	symbols	functions		descriptor word 1	-	high
+0x80226FA8	step_command_run	function	symbols	functions		`func_8022683C(-5, F1C0 & 0xFFF)`; bumps the step word (`0x80227010`)	-	high
+0x8022683C	step_command_dispatch	function	symbols	functions		`jtbl_ovlC_8022ABA0[cmd + 10]`; DMAs 14a/14b, sets `D_8018FC39`	-	high
+0x80227E64	step_command_of	function	symbols	functions		reads the step asset, returns `jtbl_ovlC_8022ABE0[last_byte - 1]`	-	high
+0x80227FF8	step_descriptor_load	function	symbols	functions		loads + LZ-decompresses the step asset, applies `0x088800NN` relocations	-	high
+0x802282D8	step_descriptor_interp	function	symbols	functions		walks `g_step_descriptor[g_step_desc_pc]`; opcodes `0x8000000x`	-	high
+0x80227030	step_enter_run	function	symbols	functions		resets on mode 0, then `func_802282D8`	-	high
+0x802329D0	step_alloc_0x960	function	symbols	functions		malloc + bzero, stored at `D_802395D0`	-	high
+0x8009DAF4	asset_size	function	symbols	functions		reads the u32 at `(id & 0x0FFFFFFF) + 0x594250`	-	high
+0x8009DBB8	asset_load	function	symbols	functions		copies the payload (that u32 bytes) from `rom + 4`	-	high
+0x8007A7E0	lz_size	function	symbols	functions		returns the u32 at the payload start (decompressed size)	-	high
+0x8007A110	lz_decompress	function	symbols	functions		`(dst, src)`, tokens per `tools/ogrelz.py`	-	high
+0x80093380	bzero	function	symbols	functions		all-zero stores	-	high
+0x80070F30	malloc	function	symbols	functions		the allocator family traced by the runtime	-	high
+0x800712C4	free	function	symbols	functions		the allocator family traced by the runtime	-	high
+0x8009AAA0	tlb_map_0xC0000000	function	symbols	functions		writes TLB entry 31, EntryHi `0xC0000000` (`0x8009AAB0`)	-	medium
+0x8009AB00	tlb_clear	function	symbols	functions		writes entries 30..0 with EntryHi/Lo 0	-	medium
+0x800988A0	pack_f32x16_to_s16	function	symbols	functions		reads 16 floats from `a0`, writes 8+8 words packed to `a1`	-	medium
+0x80098AA0	pack_f32x3_to_s16	function	symbols	functions		same shape, inputs in `a1`/`a2`/`a3`	-	low
+0x80092C18	build_fixed_matrix	function	symbols	functions		builds the packed matrix then `func_800988A0`	-	medium
+0x8009DD38	asset_decode	function	symbols	functions		`asset_size` (`0x8009DAF4`) → cache the payload size at `0x800ABD70` → `asset_load` (`0x8009DBB8`) into a temp → `lz_size` (`0x8007A7E0`) → `malloc` (`0x80070F30`) → `lz_decompress` (`0x8007A110`) → `free` the temp; **returns the decompressed buffer** (verified: the map's `state[+0x04]` equals an offline LZ decode of the id passed in, byte for byte). The map's module entry calls it ~17 times	-	high
+0x8019A7C0	scene_05_enter	function	symbols	functions	(map)	the module the scene-`0x05` enter `jal`s after its DMA; mallocs `g_screen_state` (`0x8019A7E4`-ish), decodes ~17 assets into its fields with **software-pipelined `asset_decode` calls** (each `jal`'s delay slot stores the *previous* return), then `malloc(0x18000)`s `state[+0x34]` and composites an RGB555 LUT (`+0x18`/`+0x20`) over an 8-bit index image (`+0x1C`/`+0x24`) into it as RGBA32	-	high
+0x8019F83C	sprite_rect_emit	function	symbols	functions		`(a0 = x, a1 = y, a2 = sprite-table index)`; emits `G_RDPPIPESYNC`, the `G_TEXRECT` (**w0 = lower-right `(x+W, y+H)`, w1 = upper-left `(x, y)`**, both in quarter-px), `G_RDPHALF_1` carrying **s,t** (`u<<21 | v<<5`), `G_RDPHALF_2` with `dsdx = dtdy = 1.0`, `G_RDPPIPESYNC`. It emits **no `G_SETTILESIZE`** — the caller supplies that	-	high
+0x801A2A7C	map_party_draw	function	symbols	functions		`(a0 = x, a1 = y)`; two `sprite_rect_emit` calls — **call 1 = the shadow** (ROM `0x81B50`, `a2=0xB`, origin `(x-8, y)`, texture `state[+0x04]+0x1068`, static) and **call 2 = the knight** (ROM `0x81BFC`, `a2=0xA`, origin `(x-16, y-24)`, texture `state[+0x34] + ((3*state[0x1DC] + f) << 12)`, i.e. 24 frames of `0x1000` bytes). Each call writes its own `SETTIMG`/`SETTILE`/`LOADBLOCK`/`SETTILESIZE` block into `g_dl_cursor` first	-	high
+0x80074CF0	save_image_read(dst, dev_off, size)	function	symbols	save		if `*(0x800A83B8)` is null: `malloc(0x8000)` then read the whole image in 256-byte `save_dma(dev, off, 256, dir=0)` calls (`0x80074D24`-`0x80074D60`); then `memcpy(dst, image + dev_off, size)` (`0x80074D68`)	-	high
+0x80074C58	save_image_write(image)	function	symbols	save		allocates a 16-byte handle holding `save_dma`, then writes `0x8000` bytes in 256-byte chunks with direction `1` (`0x80074CA8`-`0x80074CC4`); skipped while `*(0x800C4800)` is set	-	high
+0x80074BF0	save_commit(magic)	function	symbols	save		if `*(0x800A83BC)` (dirty) **and** `magic == 0x37081383`: `save_image_write(*(0x800A83B8))`; then clears the flag and frees the cached image	-	high
+0x80074AD4	save_slot_summary_load(slot)	function	symbols	save		`malloc(6224)`; `save_slot_validate(slot, buf)`; `save_image_read(buf, 0x10 + slot*0x1850, 6224)`; returns a 26-byte `memcpy` of `buf + (*(0x800A8258) + 12)` when `*(buf+0x0C) != 0`, else NULL. `slot == 15` takes the other arm: `malloc(19176)`, `save_record15_validate`, `save_image_read(buf, 0x30B0, 19176)`	-	high
+0x8007541C	save_slot_validate(slot, buf)	function	symbols	save		reads 6224 bytes from `*(0x800A83B8) + 0x10 + slot*0x1850`; `memcmp(0x800A8240, buf+4, 8)` — the 8-byte `QuestOG3` signature; `u16[0x00] == checksum_sum_seeded(buf+0x0C, 6212, 0x10+slot*0x1850)`; `u16[0x02] == checksum_bits_seeded(same)`	-	high
+0x80075578	save_record15_validate(buf)	function	symbols	save		the same magic check for the 19176-byte record at device `0x30B0`; **a zero first word is accepted as it stands** (`beqz` at `0x80075620`), otherwise the two checksums over `buf+0x0C`, length `0x4ADC` = 19164, seed `0x30B0`	-	high
+0x80075A84	checksum_sum_seeded(data, len, seed)	function	symbols	save		loop of `lbu`/`addu`; returns `(sum + seed) & 0xFFFF`	-	high
+0x80075B00	checksum_bits_seeded(data, len, seed)	function	symbols	save		per byte, 8 `srl`/`andi` steps counting set bits; returns `(count + seed) & 0xFFFF`	-	high
+0x80075AC4	checksum_sum	function	symbols	save		the same two loops **without** the seed; the un-seeded pair is what the copy-to-pak path uses, so every note slot inside a Controller Pak validates with seed 0	-	high
+0x80075B60	checksum_bits	function	symbols	save		the same two loops **without** the seed; the un-seeded pair is what the copy-to-pak path uses, so every note slot inside a Controller Pak validates with seed 0	-	high
+0x80093060	memcpy	function	symbols	save		the two `jal` helpers this cluster is built from	-	high
+0x80092F50	memcmp	function	symbols	save		the two `jal` helpers this cluster is built from	-	high
+0x800A83B8	g_save_image	global	symbols	save	(ptr)	the cached 32 KiB image, allocated by `save_image_read` and freed by `save_commit`	-	high
+0x800A83BC	g_save_dirty	global	symbols	save	(byte)	set by the writers, tested by `save_commit`	-	high
+0x800A8240	g_save_signature	global	symbols	save	(8 bytes)	the `memcmp` target in `save_slot_validate`; BSS, filled at boot, and every valid slot carries `QuestOG3` at `+0x04`	-	high
+0x800A824C	g_save_field_table	table	symbols	save	13 entries, stride 0x1C, ends at 0x800A83B8	func_800749C0 walks 13 entries; calls entry+0x04 (`lw -32176` at 0x80074A70) with slot+0x0C+*(entry+0x0C) (`lw -32168` at 0x80074A84). Entry 0 offset1 is at 0x800A8258.	-	high
+0x800A8258	g_save_field0_offset	field	symbols	save	entry 0, +0x0C	Entry 0 offset1 holds 4, so the summary is at slot+0x10 (`lw -32168` at 0x80074A84).	-	high
+0x802399AC	tail_of_0x80239874	code	symbols	tails	cutscene render	frame `sp+0x1EC` (the `a2` output buffer writes 16 words through `func_800988A0`), `s0`, `fs0`/`fs1`/`fs3`	-	high
+0x80239AA4	tail_of_0x802399AC	code	symbols	tails		`s2` (the tail chain continues past the label splat chose)	-	high
+0x8023C824	tail_of_0x8023C804	code	symbols	tails		`a3` = `g_dl_cursor`, `v0` = the new cursor, `t0`/`t1` = the RDP words	-	high
+0x8023C894	tail_of_0x8023C824	code	symbols	tails		`a3`, `t0`, `v1` (same emitter contract)	-	high
+0x801AFC2C	tail_of_0x801AFAF4	code	symbols	tails		`s1`, `s3`, `s2`, `s7`, `s6` and `0x2C/0x46/0x4E($sp)` — the session-41 mis-binding	-	high
+0x80198D28	tail_of_0x801989AC	code	symbols	tails		`s7` and `0x74..0x88($sp)` — the scene-0x02 loader	-	high
+0x80000000	g_rdram_kseg0	window	reference/memory	memory		KSEG0 base: guest 0x80000000 + physical offset addresses the 8 MiB RDRAM. The port zero-fills RDRAM at boot.	-	high
+0x000400	g_framebuffer_a	framebuffer	reference/memory	memory		320x240 RGBA5551, pitch 640. VI scanout is fb + 0x280 for the standard NTSC modes; resolve a scanout buffer by containment.	-	high
+0x025C00	g_framebuffer_b	framebuffer	reference/memory	memory		Second 320x240 RGBA5551 target; the njpeg assembly draws into it at 320x476.	-	high
+0x04B400	g_framebuffer_c	framebuffer	reference/memory	memory		Third 320x240 RGBA5551 target; its range follows 0x025C00, which the per-row writeback guard must respect.	207	high
+0x1BA780	g_worldmap_color_a	framebuffer	reference/memory	memory	640-wide	World map target in the heap; VI fbSizeX=640 fbSizeY=476 fbSiz=2. Spans 0x1BA780..0x1E05C0, and the allocator reuses that range for the scene-0x02 njpeg buffers.	202	high
+0x250800	g_worldmap_color_b	framebuffer	reference/memory	memory	640-wide	Second world-map target; the same 640x476 VI mode as 0x1BA780.	-	high
+0x2E6840	g_worldmap_color_c	framebuffer	reference/memory	memory	also a depth image in scene 0x0A	Third world-map target. Scene 0x0A names it for three 320x476 colour targets and for a 640x481 depth image, so a depth target is keyed by address, width and height.	186	high
+0x800E79B0	g_pad_report_0	buffer	reference/memory	memory	u16, Start = 0x1000	Controller-0 report filled by the boot poll. The boot branch at 0x800721DC tests Start here to choose scene 0x18 instead of 0x09.	88	high
+0x800AEFA4	g_frame_counter	global	reference/memory	memory		Guest frame-pump counter. Frozen while 0x800C4BCC keeps counting means the pump thread stopped.	60	high
+0x800C4BCC	g_vi_retrace_counter	global	reference/memory	memory		VI retrace count. Compare with 0x800AEFA4 when the game stops producing frames.	60	high
+0x80193700	g_scene03_mode	global	reference/memory	memory		Non-zero selects scene 0x03 descriptor 0x8018F364 and scene 0x06 descriptor 0x8018FD98. Record 18 loader func_ovlB_80221D50 indexes 0x80229DDC by it.	67-71	high
+0x80196B0C	g_tutorial_mode	global	reference/memory	memory	bit 3	Scene 0x17 accessor func_801862F0 picks descriptor 0x8018FE50 or 0x8018FE64 on bit 3.	71	high
+0x801977E8	g_scene_module_mode	global	reference/memory	memory	1 map, 2 mission, 3 form	Scene 0x05 enter sets 1, scene 0x03 enter sets 2, scene 0x07 enter sets 3. The shared module update and hook branch on it.	60	high
+0x801AB870	g_mission_state_ptr	global	reference/memory	memory	heap pointer	state = *(u32*)0x801AB870. The mission mover func_ovlN_801BE4E0 reads the cursor at +0x08 and +0x0C. Read the pointer each run.	128	high
+0x8019EE70	g_mission_buffer	buffer	reference/memory	memory	0xC000 bytes, 320x240	Scene 0x03 enter allocates the mission render buffer here.	67	high
+0x8009F540	gbi_f3dex2_208	ucode	reference/gbi	ucodes		XXH3-64 over 0x1390 text bytes = 0xCF55FAE288BFE48D, RT64 F3DEX2.fifo 2.08. The map and most scenes.	64	high
+0x800A08D0	gbi_f3dex2_non_208	ucode	reference/gbi	ucodes	mission 0x03	XXH3-64 over 0x1390 = 0x4C12DAE0534D7135, RT64 F3DEX2.NoN.fifo 2.08. NoN disables only the near-depth clip.	192	high
+0x800A5110	gbi_s2dex2_208	ucode	reference/gbi	ucodes	njpeg backdrop lists	Text 0x18C0 = 0x9300F34F3B438634, data 0x390 = 0x50EF0DFBD3A8CD0F. 0xDA is G_OBJ_RECTANGLE_R and 0xDC is G_OBJ_MOVEMEM.	51	high
+0x8009E050	ucode_audio	ucode	reference/gbi	ucodes	type 2	Audio microcode. A scene-0x05 run submitted 1706 type-2 tasks in 9 s.	64	medium
+0x8009ED80	ucode_njpeg	ucode	reference/gbi	ucodes	type 4	Nintendo-JPEG decoder, recompiled into RspFuncs/njpeg_ucode.cpp. data_size is the macroblock count and yield_data_size the quantization scale.	47	high
+0x8009ECB0	ucode_njpeg_boot	ucode	reference/gbi	ucodes		Boot half of the njpeg microcode. Its IMEM DMA address is 0x1080 because it loads at IMEM 0x080.	47	high
+0x800AC050	g_njpeg_tables	table	reference/gbi	ucodes		Huffman and quantization tables for the njpeg decoder.	47	high
+0x80170974	scene_script_vm	function	reference/scene-script	script		Runs 16 script opcodes per visit. Opcode 0x10 stores var[0] into D_8018F1C0 and the next scene into D_8018F1C2.	42	high
+0x80170ACC	vm_store_next_scene	code	reference/scene-script	script		Opcode 0x10 store site: writes 0x8002 into D_8018F1C2.	42	high
+0x80170ADC	vm_store_step	code	reference/scene-script	script		Opcode 0x10 store site: writes the step word D_8018F1C0.	42	high
+0x80190BC8	jump_table_opcode_ff	table	reference/scene-script	script		Opcode 0xFF jump table. That opcode stores a script operand into the Chaos Frame 0x801936C9.	-	medium
+0x8022ABA0	step_setup_table	table	reference/scene-script	script	indexed by command + 10	Selects the setup arm and the bank DMA that arm performs.	59	high
+0x8022ABE0	step_command_table	table	reference/scene-script	script	8 entries	Maps the descriptor last word low byte 1..8 to commands -3 -6 -5 -4 -7 -8 -9 -10.	59	high
+0x19A8804	step_table_asset	asset	reference/scene-script	script		Asset id whose payload is the scripted step table at ROM 0x1F3CA54.	44	high
+0x1F3CA54	step_table_rom	rom	reference/scene-script	script	payload 0x1A74	u32 payload size then 1693 u32 asset ids, 1499 distinct, indexed by step & 0xFFF.	44	high
+0x8009DA50	bank_dma	function	reference/banks	banks		The DMA that the generated loader block calls; a2 is rom_end - rom_start, so that difference is the size.	73	high
+0x800900C0	icache_invalidate_range	function	reference/banks	banks		Loader bracket for the code range, before the DMA.	73	high
+0x80090010	dcache_writeback_range	function	reference/banks	banks		Loader bracket for the data range, before the DMA.	73	high
+0x80229DDC	bank_descriptor_table	table	reference/banks	banks	0x28-byte entries	func_ovlB_80221D50 indexes it by D_80193700 and reads ram, rom_start, rom_end, bss and entry. Records 16 and 18 load without a literal loader block.	73	medium
+0x80229E88	tutorial_mode_table	table	reference/banks	banks		Selects the tutorial mode-2 module (unit U).	71	medium
+0x8018FB40	g_scene_desc_0x04	descriptor	scenes	descriptors	scene 0x04, mask 0x8000	Title. The `[scene]` line prints this descriptor with mask 0x8000 (session 216).	216	high
+0x8018FB70	g_scene_desc_0x09	descriptor	scenes	descriptors	scene 0x09, mask 0x8000	Boot intro. The `[scene]` line prints this descriptor with mask 0x8000 (session 216).	216	high
+0x8018FBAC	g_scene_desc_0x11	descriptor	scenes	descriptors	scene 0x11, mask 0x00008000	Credits. Overlay C holds the staff-roll text at ROM 0x1F0117..0x1F08F4.	86	high
+0x8018FBD4	g_scene_desc_0x13	descriptor	scenes	descriptors	scene 0x13, mask 0x8000	Chaos Frame total after the credits. The update func_801B5128 reads 0x801936C9.	86	high
+0x8018FBE8	g_scene_desc_0x14	descriptor	scenes	descriptors	scene 0x14, mask 0x00013C14	Witch Den. Enter func_80178130. Records 2, 4, 10, 11, 12, 13, 16, 17, 18, 19, 20.	73	high
+0x8018FC00	g_scene_desc_0x16	descriptor	scenes	descriptors	scene 0x16, mask 0x400	Closing movie. Chunk-DMAs ROM 0x244770 (0x7500) to RAM 0x801D0860, bank unit I.	58	high
+0x8018FC3C	g_scene_desc_0x0D	descriptor	scenes	descriptors	scene 0x0D, mask 0x40007C14	Enter func_80178568, update func_80178954, hook func_80178B40, leave func_80178B7C.	42	high
+0x8018FC50	g_scene_desc_0x02	descriptor	scenes	descriptors	scene 0x02	Enter func_80178920, a one-frame loader that sets next = 0x0D.	42	high
+0x8018F350	g_scene_desc_0x03	descriptor	scenes	descriptors	scene 0x03 mission, mask 0x38C	Enter func_80173724, update func_801737CC, hook func_801737D4. Records 2, 3, 7, 8, 9.	67	high
+0x8018F364	g_scene_desc_0x03_tutorial	descriptor	scenes	descriptors	scene 0x03 tutorial, records 2, 3, 7, 8, 9, 18	Selected by func_80173700 when D_80193700 is non-zero. The practice stage.	71	high
+0x8018FB2C	g_scene_desc_0x0E	descriptor	scenes	descriptors	scene 0x0E battle, mask 0x00003C00	Enter func_80177754. Streams the 0xE80 participant-table fragment to RAM 0x801D0860.	73	high
+0x8018FD70	g_scene_desc_0x05	descriptor	scenes	descriptors	scene 0x05 map, mask 0x2	Enter func_8017B60C. Module unit M at ROM 0x79750 (0xDAD0) to RAM 0x8019A7C0.	60	high
+0x8018FD84	g_scene_desc_0x06	descriptor	scenes	descriptors	scene 0x06 Organize, mask 0x2	Enter func_8017B6D0, update func_8017B858, hook func_8017B9C8.	69	high
+0x8018FD98	g_scene_desc_0x06_alt	descriptor	scenes	descriptors	scene 0x06 Organize, mask 0x40002	Same hooks as 0x8018FD84, selected when D_80193700 is non-zero.	69	high
+0x8018FDAC	g_scene_desc_0x07	descriptor	scenes	descriptors	scene 0x07 name form, mask 0x2	Accessor func_8017B600; enter func_8017B794, update func_8017B858, hook func_8017B9C8.	55	high
+0x8018FDC0	g_scene_desc_0x18	descriptor	scenes	descriptors	scene 0x18 Controller Pak menu, mask 0x2	Enter func_8017BA60, update func_8017BB28, hook func_8017BB54.	88	high
+0x8018FE50	g_scene_desc_0x17	descriptor	scenes	descriptors	scene 0x17 tutorial, mask 0x00060000	Enter 0x8019B2C0. Records 17 and 18. Selected when D_80196B0C bit 3 is clear.	71	high
+0x8018FE64	g_scene_desc_0x17_alt	descriptor	scenes	descriptors	scene 0x17 tutorial, mask 0x00020000	Enter 0x8019B540. Record 17 only. Selected when D_80196B0C bit 3 is set.	71	high
+0x800A872C	g_scene_desc_0x00	descriptor	scenes	descriptors	scene 0x00, mask 0x0000000C	tools/scenemap.py; enter 0x800761A4, no update, hook or leave.	-	high
+0x8018FB04	g_scene_desc_0x01	descriptor	scenes	descriptors	scene 0x01, mask 0x00000001	tools/scenemap.py; enter 0x801776EC, no update, hook or leave.	-	high
+0x8018FB84	g_scene_desc_0x0A	descriptor	scenes	descriptors	scene 0x0A publisher stills, mask 0x00008000	tools/scenemap.py; enter 0x80177E78, update 0x80177E94, hook 0x80177EC0, leave 0x80177EDC.	-	high
+0x8018F380	g_scene_desc_0x0B	descriptor	scenes	descriptors	scene 0x0B attract story, mask 0x0000004C	tools/scenemap.py; enter 0x8017385C, update 0x801738CC, hook 0x801738D4, leave 0x801738DC.	-	high
+0x8018FB58	g_scene_desc_0x0C	descriptor	scenes	descriptors	scene 0x0C attract unit-info, mask 0x00003C00	tools/scenemap.py; enter 0x80177BA4, update 0x80177CE0, hook 0x80177D24, leave 0x80177D40.	-	high
+0x8018F3A0	g_scene_desc_0x0F	descriptor	scenes	descriptors	scene 0x0F, mask 0x0000000C	tools/scenemap.py; enter 0x8017394C, update 0x80173A38, hook 0x80173AE4, leave 0x80173AEC.	-	high
+0x8018FB98	g_scene_desc_0x10	descriptor	scenes	descriptors	scene 0x10, mask 0x00008000	tools/scenemap.py; enter 0x80177F04, update 0x80177F20, hook 0x80177F3C, leave 0x80177F58. Session 54 misread this as scene 0x07.	54	high
+0x8018FBC0	g_scene_desc_0x12	descriptor	scenes	descriptors	scene 0x12 Load Game, mask 0x00008000	tools/scenemap.py; enter 0x80178034, update 0x80178430, hook 0x80178058, leave 0x80178464.	-	high
+0x8018FB18	g_scene_desc_0x15	descriptor	scenes	descriptors	scene 0x15, mask 0x00000001	tools/scenemap.py; enter 0x80177720, no update, hook or leave.	-	high
+0x8008AFE0	frame_pump	function	reference/runtime	addresses	t4	func_8008AFE0 is the t4 frame-pump entry; a caller that abandons its frame makes the pump read $s0/$s1 from the wrong slots and it stops.	60	high
+0x0030B0	g_save_record15	struct	reference/save	addresses	device offset, 0x4AE8 bytes	`save_slot_summary_load` slot-15 arm reads 19176 bytes here; a blank battery has `QuestOG3` at +4 with a zero first word.	78	high
+0x37081383	save_commit_magic	constant	reference/save	addresses	value, not an address	`save_commit` writes the cached image only when its argument equals this value; `func_80074834` passes it after blanking the header.	212	high
+0x80074834	save_slot_erase	function	reference/save	addresses	0x28 bytes	Blanks a slot 12-byte header through `func_80074F9C(slot)` then commits `0x37081383`; the Load Game handler calls it with 15 at `0x801A9BCC`.	212	high
+0x800749C0	save_field_read	function	reference/save	addresses		Walks the 13-entry save field table and loads a slot fields; the suspend record is loaded through it; `mods/item-randomizer` hooks it.	212	high
+0x80074F9C	save_slot_blank_header	function	reference/save	addresses		`memset`s the 12-byte header at image+0x30B0, copies `QuestOG3` to +4, writes it back and sets the dirty flag.	212	high
+0x800C4800	g_save_write_skip	global	reference/save	addresses	byte	`save_image_write` returns early while this byte is set; sessions 13-15 read the same byte as the VI phase byte.	78	high
+0x801A9BCC	load_menu_suspend_erase	code	reference/save	addresses		`jal 0x80074834` with a0=15 in the Load Game confirm handler `func_801A9B3C` (streamedC).	212	high
+0x800ABD70	g_asset_payload_size	global	reference/assets	addresses	last payload size	`func_8009DD38` stores it (`sw v0,-17040` at 0x8009DDE0) and reads it at 0x8009DD74. `lui 0x800b` + negative offset resolves here, not to 0x800ABD70.	47	high
+0x800AF028	g_scene_accessors	table	reference/scene-dispatch	addresses	25 entries	AGENTS.md rule 3: the scene-id accessor table hardcoded in func_80075BC0; docs/scenes.md: 25 accessor stubs fill [0..24].	-	high
+0x800721DC	boot_scene_branch	code	reference/scene-dispatch	addresses	held-Start bnez	Session 88: bnez at 0x800721DC tests D_800E79B0 bit 0x1000; delay slot sets 0x18, fall-through sets 0x09.	88	high
+0x80075DA8	scene_dispatch_read_root	code	reference/scene-dispatch	addresses	lhu	Session 213: lhu v0,-32236(v0) with v0=0x800F0000 reads D_800E8214 at the dispatcher loop top.	213	high
+0x80075F54	scene_dispatch_clear_request	code	reference/scene-dispatch	addresses	store 0xFFFF	Session 213: sh s1,19494(at) stores 0xFFFF into D_800C4C26 before each enter.	213	high
+0x80075FB8	scene_dispatch_wait_request	code	reference/scene-dispatch	addresses	spin	Session 213: lhu v0,19494(v0) / beq v0,s1 spins while the request word reads 0xFFFF.	213	high
+0x800760C4	scene_dispatch_clear_bit15	code	reference/scene-dispatch	addresses	andi 0x7FFF	Session 213: andi v0,v0,0x7fff clears bit 15 of a scene request before the id is stored.	213	high
+0x800760D8	scene_dispatch_store_id	code	reference/scene-dispatch	addresses	sh v0,4(v1)	Session 213: stores the requested id into the scene block; 0x800760DC jumps to the loop top.	213	high
+0x800760DC	scene_dispatch_reenter	code	reference/scene-dispatch	addresses	loop top	Session 213: jumps to the dispatcher loop top after the requested id is stored at 0x800760D8.	213	high
+0x80075F58	scene_dispatch_enter_call	code	reference/scene-dispatch	addresses	descriptor +0x00	Session 42: jalr at 0x80075F58 calls descriptor +0x00, the enter that runs once at scene start.	42	high
+0x8007265C	scene_dispatch_update_call	code	reference/scene-dispatch	addresses	descriptor +0x04	Session 42: jalr at 0x8007265C calls descriptor +0x04, the per-frame update.	42	high
+0x80072544	scene_dispatch_hook_call	code	reference/scene-dispatch	addresses	descriptor +0x08	Session 42: jalr at 0x80072544 calls descriptor +0x08, the second per-frame hook.	42	high
+0x8007602C	scene_dispatch_leave_call	code	reference/scene-dispatch	addresses	descriptor +0x0C	Session 42: jalr at 0x8007602C calls descriptor +0x0C, the leave at scene end.	42	high
+0x800E8214	g_root_scene_id	global	reference/scene-dispatch	addresses	root id	Session 213: read at the dispatcher loop top (0x80075DA8); session 88: boot stores 0x18 or 0x09 here at 0x800721F0.	213	high
+0x594250	g_asset_size_table	table	reference/assets	addresses	asset id base	`func_8009DAF4` reads a u32 at (id & 0x0FFFFFFF)+this; the address is formed by `lui 0x59`/`addiu 0x4250` at 0x8009DB50.	44	high
+0x183352	asset_njpeg_cathedral	asset	reference/assets	addresses	cathedral container	The njpeg container at ROM 0x7175A2; `HU` + `HUFF`, 320x240, 300 macroblocks (session 46 §2).	46	high
+0x7175A2	rom_njpeg_cathedral	rom	reference/assets	addresses	asset 0x183352	ROM offset of the cathedral njpeg payload; the LZ/container data starts at +4 after the size word.	46	high
+0x8008B250	njpeg_huff_decode	function	reference/assets	addresses	CPU Huffman decode	`func_ovlE_80199A08` calls `func_8008B250(payload, state[0x68])` before the type-4 task (session 47 §3).	47	high
+0x80074BF4	save_dirty_load	code	reference/save	addresses	lbu -31812	Loads the dirty flag; `lui 0x800b` + the negative offset resolves to 0x800A83BC.	217	high
+0x80074C1C	save_image_load	code	reference/save	addresses	lw -31816	Loads the cached image pointer; resolves to 0x800A83B8.	217	high
+0x800754D4	save_signature_addr	code	reference/save	addresses	addiu -32192	Forms the signature address; resolves to 0x800A8240.	217	high
+0x8009DDE0	asset_cache_store	code	reference/assets	addresses	sw -17040	Stores the payload size; resolves to 0x800ABD70.	217	high

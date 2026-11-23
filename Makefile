@@ -408,6 +408,32 @@ handoffs:
 	python3 tools/handoffs.py
 .PHONY: handoffs
 
+# `make docs-index`: regenerate the address tables in docs/reference/, the
+# generated indexes in docs/README.md and the reference index. The data is
+# docs/reference/addresses.tsv.
+docs-index:
+	python3 tools/docindex.py build
+.PHONY: docs-index
+
+# `make docs-check`: every relative markdown link resolves, every registry row
+# names an existing page and section, no address has two names of one kind, and
+# the generated tables are current. Run it before finishing a session.
+docs-check:
+	python3 tools/docindex.py check
+.PHONY: docs-check
+
+# `make docs-find Q=0x8018F1C0`: the registry row and every doc line that mentions
+# an address. A name query searches the registry names.
+docs-find:
+	python3 tools/docindex.py find "$(Q)"
+.PHONY: docs-find
+
+# `make docs-stats`: guest addresses the docs mention, how many the registry
+# covers, and the most-mentioned gaps.
+docs-stats:
+	python3 tools/docindex.py stats
+.PHONY: docs-stats
+
 # `make midfunc`: the fall-through / shared-tail report (see tools/midfunc.py).
 # These are `jal` targets that are the tail of the function above them, so the
 # callee inherits a frame and registers a direct call never sets up.
@@ -867,4 +893,4 @@ release:
 release-check:
 	NO_PUSH=1 tools/release.sh "$(VERSION)"
 
-.PHONY: all clean recomp recomp-prep web-mods web-mods-check regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke release release-check
+.PHONY: all clean recomp recomp-prep web-mods web-mods-check regenerate cross-bank-report cross-bank-dispatch cross-bank-check bank-split bank-recomp handoffs docs-index docs-check docs-find docs-stats midfunc rsp-recomp stubmap stub-check patch-check patch-fix app dist dist-mods-check dist-zip dist-tar sdl2-static smoke release release-check

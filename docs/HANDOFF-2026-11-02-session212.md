@@ -1,5 +1,7 @@
 # Session 212 handoff — issue #22 items 1 and 2
 
+> **Summary.** Session 212 handoff — **issue #22 items 1 and 2: the Esc menu can restart the game, and the suspend save survives being loaded.** RESTART GAME is a new MAIN-tab row in the overlay (built only in Overlay mode), between ROM and EXIT GAME. The runtime boots the image once, so the row ends the run through EXIT GAME's teardown and spawns a new copy of the executable (`posix_spawn`, `_wspawnv` on Windows) after `crash_log::flush()` restores stdout/stderr; `execv` hung on a libc lock held by the runtime's unjoined game threads. `OGRE_RESTARTED=1` bypasses the start screen for the new process. The suspend save is SRAM record 15 at `0x30B0`; loading it calls `func_80074834(15)` at `0x801A9BCC`, which blanks the 12-byte header and commits. `mods/permanent-suspend/` patches that `.main` function to skip the blank for slot 15 and keep the commit. A vanilla load turns `0x30B0` from `dc41 9ec6` into `0000 0000`; the patched load leaves the 32 KiB image byte-identical and a second process resumes the same save to scene `0x0003`. The restart was measured with the null renderer under `SDL_VIDEODRIVER=dummy` and has not been pressed in the RT64 window.
+
 ## Goal
 
 Developer request: address items 1 and 2 of

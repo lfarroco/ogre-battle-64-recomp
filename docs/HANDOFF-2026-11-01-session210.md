@@ -1,5 +1,7 @@
 # Session 210 handoff — the web renderer has a design document
 
+> **Summary.** Session 210 handoff — **the web renderer has a design document.** `docs/guides/web-renderer.md` records the renderer as it is in the tree: its scope (WebGL2, F3DEX2/F3DEX2.NoN/S2DEX2 only, not RT64 and not an RSP/RDP LLE emulator), the gfx-thread record / main-thread GL split, `identify_gbi` and the three ucode hashes, the RSP-side vertex and lighting path, the RDP combiner/blender/sampler shader, the persistent TMEM and the two texture caches, the per-image framebuffers with the per-row writeback guard and dither, VI presentation and canvas sizing, the 25 `OGRE_*` switches and the debug-flag controls, the limitations, and a table of where to change what. It is linked from `README.md`, the docs index and `docs/guides/app-architecture.md`; `PLAN.md`'s browser section points to it and its stale current-state reference is corrected to session 209. No code changed; the 59 doc links were checked against their target files and line counts.
+
 ## Goal
 
 Developer request: document the design of the browser build's WebGL2 renderer,

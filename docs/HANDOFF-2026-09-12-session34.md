@@ -1,5 +1,7 @@
 # Session 34 — the missing smoke/logo effects: a stale linker script, fixed
 
+> **Summary.** Session 34 handoff: the intro's missing smoke and 3D logo characters (a stale linker script meant overlay C was never loaded) and the narrowed bank-swap eviction; cross-bank `jal` routing built but blocked.
+
 ## Addendum — the reported regressions (no intro smoke, no 3D "que" in the logo)
 
 Both are the **same bug**, and it was found and fixed after the cross-bank work

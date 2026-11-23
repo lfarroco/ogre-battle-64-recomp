@@ -1,5 +1,7 @@
 # Handoff — 2026-09-17, session 66: **OB64's save is 32 KiB of battery SRAM, and it now works end to end**
 
+> **Summary.** Session 66 handoff — **OB64's save is 32 KiB of battery SRAM and it now works end to end.** The chip is SRAM (mupen64plus's database `SaveType=SRAM` for this ROM's CRC, and the game's own code: `func_8008A040` builds the save `OSPiHandle` with `baseAddress 0xA8000000`, `func_80074CF0..` reads the whole image in 256-byte DMAs, `func_80074BF0` → `func_80074C58` writes it back). `entry.save_type = recomp::SaveType::Sram`, and the rule that makes it work is that **the device of a game-issued PI DMA is the `OSPiHandle` the `OSIoMesg` carries** (`pi_perform_dma` in `librecomp/src/pi.cpp`), not the address — the old handler read ROM for every transfer, so the boot save read pulled ROM bytes. Verified: blank battery formatted and written (32768 bytes, real `QuestOG3` structure, deterministic), restart accepted, garbled image rejected/repaired, and a converted parallel-n64 save makes the title's `Load Game` appear with the cursor on it (`0x04 → 0x12 → 0x05`, dev-confirmed). New `tools/sramsave.py` imports/exports emulator wrappings; new knob `OGRE_PREF_DIR`.
+
 > **Read §3 if you are here for save/load.** The chip is **SRAM** (32 KiB), the
 > runtime owns `<config>/saves/ogrebattle64-us-rev1.bin`, the game formats /
 > repairs / reads / writes it through its own PI DMA path, and the title's

@@ -1,5 +1,7 @@
 # Session 183 handoff — the QUEST q meshes were failing the depth test against a stale depth image; the fix is verified with one variable and recorded
 
+> **Summary.** Session 183 handoff — **the browser's QUEST q meshes were failing the depth test against stale depth, and the fix is verified with one variable.** Scene `0x0A` shares `0x2E6840` between the plate colour image and the depth image; the q draws are depth-tested and depth-written (`OTHERMODE_L 0x00552078`), so the plate's colour fills left stale depth contents and every q fragment failed `GL_LESS`. The renderer now invalidates the depth target when a colour draw writes an address a display list named with `G_SETZIMG`, mirroring RT64 `depthFbTypeChanged`, and clears it with the scissor off. A/B on one build: `white=18797, colourful=0` with the invalidation off against `white=17489, colourful=1309` with it on, and the clean rebuild presents the reference frame. `tools/intro_capture.py --interval-ms` sampled both renderers at 10 Hz: the reference frame holds for 1.9 s native and 1.6 s in the browser, and the browser's frame is `0.317` mean absolute difference from native's. Session 181's batch-boundary explanation is withdrawn. See `docs/HANDOFF-2026-10-19-session183.md`.
+
 ## Goal
 
 Developer request: *"using the capture tool from the previous session, continue

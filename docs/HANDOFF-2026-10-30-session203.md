@@ -1,5 +1,7 @@
 # Session 203 handoff — the browser's New Game cathedral backdrop
 
+> **Summary.** Session 203 handoff — **the browser's New Game cathedral backdrop renders.** Two faults in `app/src/web_renderer.cpp`. `tmem_load_yuv` indexed the njpeg macroblock word with RT64's native byte order through `LoadSource::byte()`, which already applies the guest `^ 3` permutation, so luma and chroma were exchanged and the backdrop drew as green/magenta stripes; it now reads the logical `[U, Y(even), V, Y(odd)]` order and the TMEM planes match the values session 51 verified. The writeback recorded its row band from NDC scaled by the colour image's own height, so a 320x240 image drawn into the 320x476 target the title grew marked 476 rows as drawn and copied 236 rows over the next framebuffer; the band now follows the viewport the draws render through, and the RDRAM reference is taken when a draw era starts and re-tested once per batch (RT64 `hashTracking` / `checkRAM(updateHashes = true)`). Result: `docs/proofs/web-newgame-cathedral-session203.png` against `-black-` and `-green-`. New `OGRE_YUV_TRACE` browser output, a `scene.cjs --route cathedral` route with a `waitLog` step, and richer `[GFX-S2D]`/`[GFX-FBSYNC]` lines. Title, tutorial field, mission briefing and the tutorial battle still render.
+
 ## Goal
 
 Continue the web renderer from session 202's open item 4: the New Game cathedral

@@ -1,5 +1,7 @@
 # Handoff — 2026-09-16, session 61: the map's sprite *sizes* — the party marker and the cursor draw the wrong sprite-table entry
 
+> **Summary.** Session 61 handoff: **the map's sprite *sizes*** — the party marker (Magnus) and the cursor draw the **wrong sprite-table entry**. Corrects session 60 §7's "a descriptor the map never finished filling": the `7x10`-texel `SETTILESIZE` **is** in the game's own display list, the sprite table (`0x801A6FE0 + a2*8`) is static and byte-identical to unit M's ROM data half, and the builder `func_ovlM_8019F83C` is faithful — an emitted rect always equals the entry's `(W,H)`. The party draw (`func_ovlM_801A2A7C`, ROM `0x81B50`) asks for slot **11** (`144x23`, a HUD-width entry) while the knight's four frames are slots **12-15** (`16x24`); the developer measured retail's marker at ~10% of screen height / 5% of width = **16x24 px**. Proof by A/B: a global `base+8` made the party exactly `16x24` (but shifted every other sprite, so it is not the fix); a targeted `0xB→0xC` shrank the bar to a compact sprite. Open: the emitted window stays `7x10` even for a `(16,24)` entry, so the window's writer is still unidentified.
+
 ## Goal and result
 
 **Goal (developer):** fix the map screen's sprites — the party marker (Magnus), the

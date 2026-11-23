@@ -1,5 +1,7 @@
 # Handoff — 2026-09-20, session 92: a CONTROLS tab, and an in-game Esc overlay
 
+> **Summary.** Session 92 handoff — **the start screen is tabbed (START GAME / ROM / MODS / CONTROLS) and `ESC` opens the same panel over the running game.** `app/src/input_map.{hpp,cpp}` holds one row per N64 button (a keyboard scancode plus `None`, a gamepad button or a right-stick direction), persisted at `<config>/controls.cfg` and read on every input poll; the defaults match the old hardcoded map. `app/src/ui.{hpp,cpp}` holds the shared panel and bitmap font, so the launcher and the overlay cannot drift. The overlay is a borderless always-on-top SDL window (opacity 0.90) drawn from `update_gfx`; `get_input` returns an idle pad while it is up. The game does not pause behind it (developer's choice).
+
 **Goal (developer):** the start screen loads the ROM and manages mods; add a tab
 for controller input. Pressing `ESC` while playing should bring up an overlay
 with the same content as the launcher, with the ROM and MODS settings disabled

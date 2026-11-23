@@ -1,5 +1,7 @@
 # Handoff — 2026-09-20, session 94: no console window, and `error.log` on a crash
 
+> **Summary.** Session 94 handoff — **the distributed build opens no console window and writes `error.log` on a crash; the Windows `0xC0000005` is RT64's renderer setup on an old GPU; closing the window no longer freezes.** macOS ships `Ogre Battle 64.app` and `SDL_FILESYSTEM_BASE_DIR_TYPE=parent` keeps the ROM, saves, mods, `controls.cfg`, `settings.cfg` and `error.log` in the package folder; Windows links a GUI-subsystem `.exe`, and `app/src/crash_log.cpp` tees stdout/stderr into 128 KiB rings and writes `<config dir>/error.log` with the fault, the host pc and the last log lines. The v0.2.0 Windows build died silently because `setvbuf(stdout, nullptr, _IOLBF, 0)` is an invalid-parameter fast-fail in the MSVC CRT, and the package shipped none of the four CRT DLLs its DXC binaries import. `tools/smoke-dist.sh` now fails a package whose crash report lacks the captured boot line. The access violation is open: the console build printed RT64's Vulkan-workaround line, so `OGRE_GRAPHICS_API` pins the backend and the next report names the faulting module.
+
 **Goal (developer):** *"when we launch this game dist, a terminal window show up
 (with the logs) and the actual game window shows up later. instead, let's remove
 that first terminal window, only the actual game window should show up. also, if

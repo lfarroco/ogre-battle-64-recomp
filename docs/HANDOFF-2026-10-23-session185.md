@@ -1,5 +1,7 @@
 # Session 185 handoff — the browser's `G_GEOMETRYMODE` mask was inverted, and that alone hid `G_LIGHTING` and `G_TEXTURE_GEN` at the QUEST q's
 
+> **Summary.** Session 185 handoff — **the QUEST q's were flat because `G_GEOMETRYMODE`'s keep mask was inverted.** `OP_GEOMETRYMODE` read `w0`'s low 24 bits as the bits to clear; RT64 reads them as the bits to keep (`gbi/rt64_gbi_f3dex2.cpp:104-108`, `hle/rt64_rsp.cpp:886-890`), so every `gSPSetGeometryMode` wiped the state. The ROM's reset idiom `D9000000 00000000` (41 sites, and `D9FFFFFF 00000000` never appears) is a reset under the keep rule and a no-op under the inverted one. A native full-RDRAM dump reads the q state block at `0x801B85B8` (`D9FFFFFF 00200405`, `D9FFFFFF 00020000`) and the sub-list's `G_TEXTURE_GEN`: keep rule `0x260405`, inverted rule `0x040000`, and RT64's `usesTextureGen` needs both bits. The decoder now keeps, and `G_TEXTURE_GEN`/`_LINEAR` and the `MV_LIGHT` lookat slots 0/1 are ported from RT64's `computeTextureGen`; the lookat vectors are the per-frame `(1,0,0)`/`(0,1,0)`. A channel above 200 appears in native 24 of 24 spin frames, the browser 26 of 27 after the fix against 6 of 28 before; the fixed pose pair has mask IoU `0.791` and mean absolute difference `2.31`. Session 184's `G_TEXTURE_GEN` implementation found no pixel change because the mask kept `G_LIGHTING` out of its condition. See `docs/HANDOFF-2026-10-23-session185.md`.
+
 ## Goal
 
 Developer request: *"continue the work on fixing the untextured q's in the game's

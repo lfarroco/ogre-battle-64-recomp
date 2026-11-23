@@ -1,5 +1,7 @@
 # Session 209 handoff — the public browser page: an experimental notice and battery export
 
+> **Summary.** Session 209 handoff — **the public browser page gets an experimental notice and battery export.** The launcher card states that rendering, audio and saving are incomplete, that scenes can crash, and that the build is unofficial; the Options MAIN tab repeats it. The topbar "Export save" button and the Options MAIN row read the runtime's `/ogre/saves/ogrebattle64-us-rev1.bin` out of the wasm FS and download it as `ogrebattle64-us-rev1.bin`, the raw 32 KiB logical image the native build reads from `<config>/saves/`. A read that fails the 32 KiB/`QuestOG3` check is retried once because the runtime writes through a `.temp` file. On the static package (the Pages layout, COOP/COEP via the service worker) `debug/probes/save.cjs` round-trips `assets/escort_suspend.bin` byte-for-byte, and `tools/sramsave.py check` validates both slots and the map record; a blank boot also logs `[save] wrote ... (32768 bytes)`, so the export reads the bytes the game last committed. See `docs/HANDOFF-2026-11-01-session209.md`.
+
 ## Goal
 
 The browser renderer is being published on GitHub Pages while it is still

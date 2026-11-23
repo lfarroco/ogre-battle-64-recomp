@@ -46,6 +46,44 @@ backgrounds (`docs/guides/njpeg-backgrounds.md`). The New Game opening is alread
 an example of this: `title (0x04) → 0x02 → 0x0D → 0x02 → 0x0D → …`, one step per
 visit, with the step index in `D_8018F1C0`.
 
+## Scene descriptors
+
+`tools/scenemap.py` prints all 25 from the ROM. Twenty resolve statically; ids 2,
+3, 6, 8 and 23 branch and are listed as indirect. These are the descriptors the
+tool resolves, plus the alternate descriptors the game selects at runtime:
+
+<!-- BEGIN GENERATED: addresses:descriptors -->
+| address | name | note | kind | evidence | session | conf |
+|---|---|---|---|---|---|---|
+| `0x8018FB40` | `g_scene_desc_0x04` | scene 0x04, mask 0x8000 | descriptor | Title. The `[scene]` line prints this descriptor with mask 0x8000 (session 216). | 216 | high |
+| `0x8018FB70` | `g_scene_desc_0x09` | scene 0x09, mask 0x8000 | descriptor | Boot intro. The `[scene]` line prints this descriptor with mask 0x8000 (session 216). | 216 | high |
+| `0x8018FBAC` | `g_scene_desc_0x11` | scene 0x11, mask 0x00008000 | descriptor | Credits. Overlay C holds the staff-roll text at ROM 0x1F0117..0x1F08F4. | 86 | high |
+| `0x8018FBD4` | `g_scene_desc_0x13` | scene 0x13, mask 0x8000 | descriptor | Chaos Frame total after the credits. The update func_801B5128 reads 0x801936C9. | 86 | high |
+| `0x8018FBE8` | `g_scene_desc_0x14` | scene 0x14, mask 0x00013C14 | descriptor | Witch Den. Enter func_80178130. Records 2, 4, 10, 11, 12, 13, 16, 17, 18, 19, 20. | 73 | high |
+| `0x8018FC00` | `g_scene_desc_0x16` | scene 0x16, mask 0x400 | descriptor | Closing movie. Chunk-DMAs ROM 0x244770 (0x7500) to RAM 0x801D0860, bank unit I. | 58 | high |
+| `0x8018FC3C` | `g_scene_desc_0x0D` | scene 0x0D, mask 0x40007C14 | descriptor | Enter func_80178568, update func_80178954, hook func_80178B40, leave func_80178B7C. | 42 | high |
+| `0x8018FC50` | `g_scene_desc_0x02` | scene 0x02 | descriptor | Enter func_80178920, a one-frame loader that sets next = 0x0D. | 42 | high |
+| `0x8018F350` | `g_scene_desc_0x03` | scene 0x03 mission, mask 0x38C | descriptor | Enter func_80173724, update func_801737CC, hook func_801737D4. Records 2, 3, 7, 8, 9. | 67 | high |
+| `0x8018F364` | `g_scene_desc_0x03_tutorial` | scene 0x03 tutorial, records 2, 3, 7, 8, 9, 18 | descriptor | Selected by func_80173700 when D_80193700 is non-zero. The practice stage. | 71 | high |
+| `0x8018FB2C` | `g_scene_desc_0x0E` | scene 0x0E battle, mask 0x00003C00 | descriptor | Enter func_80177754. Streams the 0xE80 participant-table fragment to RAM 0x801D0860. | 73 | high |
+| `0x8018FD70` | `g_scene_desc_0x05` | scene 0x05 map, mask 0x2 | descriptor | Enter func_8017B60C. Module unit M at ROM 0x79750 (0xDAD0) to RAM 0x8019A7C0. | 60 | high |
+| `0x8018FD84` | `g_scene_desc_0x06` | scene 0x06 Organize, mask 0x2 | descriptor | Enter func_8017B6D0, update func_8017B858, hook func_8017B9C8. | 69 | high |
+| `0x8018FD98` | `g_scene_desc_0x06_alt` | scene 0x06 Organize, mask 0x40002 | descriptor | Same hooks as 0x8018FD84, selected when D_80193700 is non-zero. | 69 | high |
+| `0x8018FDAC` | `g_scene_desc_0x07` | scene 0x07 name form, mask 0x2 | descriptor | Accessor func_8017B600; enter func_8017B794, update func_8017B858, hook func_8017B9C8. | 55 | high |
+| `0x8018FDC0` | `g_scene_desc_0x18` | scene 0x18 Controller Pak menu, mask 0x2 | descriptor | Enter func_8017BA60, update func_8017BB28, hook func_8017BB54. | 88 | high |
+| `0x8018FE50` | `g_scene_desc_0x17` | scene 0x17 tutorial, mask 0x00060000 | descriptor | Enter 0x8019B2C0. Records 17 and 18. Selected when D_80196B0C bit 3 is clear. | 71 | high |
+| `0x8018FE64` | `g_scene_desc_0x17_alt` | scene 0x17 tutorial, mask 0x00020000 | descriptor | Enter 0x8019B540. Record 17 only. Selected when D_80196B0C bit 3 is set. | 71 | high |
+| `0x800A872C` | `g_scene_desc_0x00` | scene 0x00, mask 0x0000000C | descriptor | tools/scenemap.py; enter 0x800761A4, no update, hook or leave. | - | high |
+| `0x8018FB04` | `g_scene_desc_0x01` | scene 0x01, mask 0x00000001 | descriptor | tools/scenemap.py; enter 0x801776EC, no update, hook or leave. | - | high |
+| `0x8018FB84` | `g_scene_desc_0x0A` | scene 0x0A publisher stills, mask 0x00008000 | descriptor | tools/scenemap.py; enter 0x80177E78, update 0x80177E94, hook 0x80177EC0, leave 0x80177EDC. | - | high |
+| `0x8018F380` | `g_scene_desc_0x0B` | scene 0x0B attract story, mask 0x0000004C | descriptor | tools/scenemap.py; enter 0x8017385C, update 0x801738CC, hook 0x801738D4, leave 0x801738DC. | - | high |
+| `0x8018FB58` | `g_scene_desc_0x0C` | scene 0x0C attract unit-info, mask 0x00003C00 | descriptor | tools/scenemap.py; enter 0x80177BA4, update 0x80177CE0, hook 0x80177D24, leave 0x80177D40. | - | high |
+| `0x8018F3A0` | `g_scene_desc_0x0F` | scene 0x0F, mask 0x0000000C | descriptor | tools/scenemap.py; enter 0x8017394C, update 0x80173A38, hook 0x80173AE4, leave 0x80173AEC. | - | high |
+| `0x8018FB98` | `g_scene_desc_0x10` | scene 0x10, mask 0x00008000 | descriptor | tools/scenemap.py; enter 0x80177F04, update 0x80177F20, hook 0x80177F3C, leave 0x80177F58. Session 54 misread this as scene 0x07. | 54 | high |
+| `0x8018FBC0` | `g_scene_desc_0x12` | scene 0x12 Load Game, mask 0x00008000 | descriptor | tools/scenemap.py; enter 0x80178034, update 0x80178430, hook 0x80178058, leave 0x80178464. | - | high |
+| `0x8018FB18` | `g_scene_desc_0x15` | scene 0x15, mask 0x00000001 | descriptor | tools/scenemap.py; enter 0x80177720, no update, hook or leave. | - | high |
+<!-- END GENERATED: addresses:descriptors -->
+
 ## Boot and attract
 
 | what | scene | source | status |
@@ -264,154 +302,11 @@ See `docs/HANDOFF-2026-09-17-session68.md`.
 label, e.g. `Tenne Plains`, is shown), and a `START` press opens a **tooltip**
 that blocks everything until it is dismissed.
 
-### Every streamed arena the game can load (session 73)
+### Every streamed arena the game can load
 
-**`tools/arenamap.py` prints this table from the ELFs.** Every streamed module in
-OB64 is DMA'd by one generated loader block whose own instructions carry the
-game's boundaries, so the map is mechanical and no address here was read by
-hand:
-
-```
-lui a0,%hi(rom_start); addiu a0,a0,%lo(rom_start)
-lui a1,%hi(ram_base);  addiu a1,a1,%lo(ram_base)
-lui a2,%hi(rom_end);   addiu a2,a2,%lo(rom_end)
-jal func_8009DA50
-subu a2,a2,a0                     ; size = rom_end - rom_start (the DMA's size)
-```
-
-bracketed by `func_800900C0(ram_base, code_size)` (icache), `func_80090010(
-code_end, data_size)` (dcache) and `func_80093380(data_end, bss_size)` (bss).
-**A bank's size is its `subu`, never a chunk count** (session 59's rule, session
-72's unit V), and the code/data split is the cache bracket's — not a guess.
-
-| arena (RAM) | ROM start | size | code | data | BSS | unit | what |
-|---|---|---|---|---|---|---|---|
-| `0x800E9C20` | `0x0003F1B0` | `0x1CD0` | `0x1490` | `0x840` | shared | main (streamedA) | boot overlay (ROM-only) |
-| `0x8016AF80` | `0x00040E80` | `0x25FB0` | `0x1B3B0` | `0xAC00` | shared | main (streamedB) | boot overlay: scene registry, dialogue text (ROM-only) |
-| `0x8019A7C0` | `0x000712A0` | `0x84B0` | `0x7120` | `0x1390` | - | H | scene `0x07` name/birthday form |
-| | `0x00079750` | `0xDAD0` | `0xC0F0` | `0x19E0` | - | M | **scene `0x05`, the map** |
-| | `0x00087220` | `0x56D60` | `0x53920` | `0x3440` | - | S | **scene `0x06`, the Organize Screen** |
-| `0x801D0860` | `0x00213AE0` | `0x16770` | `0x15260` | `0x1510` | - | J | record 10's arena, non-`0x16` scenes |
-| | `0x0023A370` | `0xE80` | `0xE70` | `0x10` | - | AH | **the battle/neutral-encounter setup fragment** (scene `0x0E`'s enter streams it; `none` until session 82) |
-| | `0x00244770` | `0x7500` | `0x6C70` | `0x890` | - | I | **scene `0x16`, the closing movie** |
-| `0x801E6FD0` | `0x0022A250` | `0x10120` | `0xF920` | `0x800` | - | X | **combat / battle** |
-| | `0x0023B1F0` | `0x9580` | `0x8D00` | `0x880` | - | C | record 10's main bank |
-| `0x80214FA0` | `0x00165FE0` | `0xBEE0` | `0x9BD0` | `0x2310` | - | Q | mission bank (suspend route) |
-| | `0x00171EC0` | `0x6030` | `0x4090` | `0x1FA0` | - | P | mission bank |
-| | `0x00177EF0` | `0x7AF0` | `0x3E00` | `0x3CF0` | - | Y | not yet identified |
-| | `0x0017F9E0` | `0x91A0` | `0x2930` | `0x6870` | - | W | **combat** |
-| | `0x00188B80` | `0x65A0` | `0x64F0` | `0xB0` | - | Z | not yet identified |
-| | `0x0018F120` | `0x6310` | `0x61F0` | `0x120` | - | AA | not yet identified |
-| | `0x00195430` | `0x2380` | `0x22F0` | `0x90` | `0x20` | R | enemy/unit constructor (natural route) |
-| | `0x001977B0` | `0x4F80` | `0x4810` | `0x770` | - | AB | **shop** |
-| | `0x0019C730` | `0x64C0` | `0x6410` | `0xB0` | - | AC | not yet identified |
-| | `0x001A2BF0` | `0x1FF0` | `0x1860` | `0x790` | `0x40` | AD | not yet identified |
-| | `0x001A4BE0` | `0x4680` | `0x4320` | `0x360` | - | V | **settings** |
-| | `0x001A9260` | `0x93E0` | `0x8FE0` | `0x400` | - | AE | not yet identified |
-| | `0x001B2640` | `0x79E0` | `0x72B0` | `0x730` | `0x20` | AF | not yet identified |
-| `0x802210E0` | `0x00275820` | `0x47D0` | - | - | - | C (bankRec13) | scene `0x14`'s arena, low half |
-| | `0x00279FF0` | `0x7840` | - | - | - | **AG (bankRec16)** | **scene `0x14`'s own module — not in the segment table** (see below) |
-| `0x8022ACB0` | `0x00286BA0` | `0x138F0` | `0x13180` | `0x770` | - | K | chapter animation (the "Prologue" card) |
-| | `0x0029A490` | `0xE860` | `0xDE00` | `0xA60` | - | L | the same arena's other bank |
-| `0x802395E0` | `0x002A8CF0` | `0x56A0` | `0x5620` | `0x80` | - | G | step ≥ 2's dialogue engine bank |
-| | `0x002AE390` | `0xA7E0` | `0xA600` | `0x1E0` | - | F | the same arena's other bank |
-
-Record 13 and record 16 are listed without a split because **neither has a loader
-`subu`**: the game loads them from a descriptor table, so their sizes come from
-the segment table's `ram_end` (and, for record 16, the port's own
-`UNCOMPILED` log line, which printed exactly `0x7840`).
-
-"shared" = the boot loader zeroes the boot overlays' BSS with its own
-`func_80093380` calls, which span more than one record and start at the *end of
-the last one's data*, so no single record owns that range. The game's own
-per-record BSS (as `tools/gen_bank_funcs.py`'s `RAM_END` records it) is what the
-port reproduces; the BSS column above is the size the loader states for the
-record it belongs to.
-
-**There is no uncompiled bank on a reachable path any more.** `arenamap.py`
-finds **28** bank loads across the ELFs; 27 are compiled and the 28th is a
-`0xE80` fragment with no loader of its own (below). The tool also proves the
-negative: `--coverage` lists the ROM the scanned ELFs disassemble as code, and
-its one remaining uncovered gap (`0x0DDF80..0x0E4910`, a display-list/texture
-blob) contains **0** `jal 0x8009DA50` — so no *loader-pattern* bank can be
-hiding. One did hide anyway: record 16's load is table-driven and its ROM
-(`0x279FF0..0x281830`) was the tool's *other* uncovered gap until unit AG closed
-it, and only booting the scene it belongs to revealed it (below).
-
-#### Record 16 — the bank that hid behind a loader-less load (unit AG, session 73)
-
-Booting into scene `0x14` produced the answer `arenamap.py` had missed:
-
-```
-[bank] UNCOMPILED streamed record 16: rom=0x279FF0 ram=0x802258B0 size=0x7840
-[overlays] streamed function stub called @ 0x80226B7C (not yet loaded)   ... x3
-```
-
-**Record 16 is not a segment-table record.** Entry 13 declares
-`rom 0x275820..0x279FF0 → ram 0x802210E0`, which is what the port compiled (unit
-C); the game then loads a *second* module over the same arena from `0x279FF0`.
-The size `0x7840` is not a loader `subu` either — it is the segment table's
-`ram_end` for entry 13 (`0x8022D0F0`) minus `0x802258B0`, which is exactly the
-size the port's own log printed.
-
-It needed the session-45 treatment, and it matters far more than the three stubs
-suggested: **125 distinct call targets across eight units reach into its window**
-(banks B, C, F, G, K, L, N, T and the main ELF), because three *other* arenas
-overlap it — record 18's tutorial module (`0x8022A860`, unit T), record 14d's
-chapter animation (`0x8022ACB0`, unit K) and record 14a (unit L). Unit C's
-record 13 has compiled bodies at the low half of the same RAM, so every call
-from unit C's code into the high half was bound at build time to record 13's
-layout — the session-45/67/72 mis-binding class. It is now **bank unit AG**
-(`bankRec16b`, ROM `0x279FF0`, size `0x7840`, RAM `0x802258B0`).
-
-With unit AG in, scene `0x14` renders with **0 stubs**, and the fix is directly
-responsible: the three stubbed addresses (`0x80226B7C`, `0x8022859C`,
-`0x80226CE0`) are record 16 entries, each preceded by `jr $ra`, and they are
-declared in `config/symbols/symbol_addrs-bankAG.txt`.
-
-#### The `0xE80` setup fragment — the one bank-shaped load with no unit
-
-**Scene `0x0D`'s enter `func_80178568` and scene `0x0E`'s enter
-`func_80177754`** (descriptor `0x8018FB2C`, mask `0x00003C00` — the **battle**)
-both stream the same fragment **`rom 0x0023A370` (`0xE80`) → RAM `0x801D0860`**,
-with the game's own boundaries (code `0xE70` / data `0x10`, no BSS). Scene
-`0x0E`'s enter calls `0x801D0AAC` on one arm and `0x801D1508` on the other; the
-neutral-encounter battle takes the `0x801D1508` arm.
-
-Session 73 read the fragment as "a *data* copy of record 10b's code" and left it
-uncompiled; **session 82 corrects that**: it is its own module (unit J's
-`bankRec10a` ends at `0x23A250`, unit X's battle bank at `0x23A370`, unit C's
-`bankRec10b` starts at `0x23B1F0`), and it is the code that **builds the battle's
-participant table** — `func_801D1508` scans the 30 unit slots at `0x801F0CD0` and
-tags a free one, `func_801D0AAC` reads the 16-byte table at `0x801D16D0`. It is
-now **bank unit AH** (see the arena table above). Without it the calls hit the
-runtime's streamed stub: normal battles still work (their units already exist on
-the field), but a **neutral encounter**'s wild unit is created here, so the
-battle started with an **empty enemy side and an instant victory** — the
-developer's report, fixed in session 82
-(`docs/proofs/native-neutral-encounter-message.png`, `-battle.png`,
-`docs/HANDOFF-2026-09-18-session82.md`).
-
-Scene `0x14`'s enter (`func_80178130`, descriptor `0x8018FBE8`, mask
-`0x00013C14`) does **not** stream the fragment: it DMAs unit J into the same RAM
-and calls `0x801D0860` (J's own code), which is why the Witch's Den renders even
-before session 82.
-
-#### The loader `arenamap.py` cannot see: a table-driven loop
-
-Record 18's bank (unit **T**, the tutorial's practice stage) and record 16 are
-both loaded without a literal loader block. `func_ovlB_80221D50` indexes a
-`0x28`-byte descriptor table at RAM `0x80229DDC` by `D_80193700` and reads `ram`,
-`rom_start`, `rom_end`, `bss` and `entry` out of the entry, so the addresses are
-data, not immediates. The tool reports those as `jal 0x8009DA50` sites without a
-cache bracket — which is the correct answer, and the reason to read that list
-rather than trust a silent zero. The tutorial's other table at `0x80229E88`
-selects mode 2 (unit U).
-
-**When a screen freezes or draws nothing and the log shows no stub, check for an
-`UNKNOWN module` and remember the silent case:** an unknown record is never
-*evicted*, so the previous bank's body keeps running at those addresses. See
-`docs/HANDOFF-2026-09-17-session72.md`.
+The arena table, the loader pattern, the record-16 and `0xE80` cases and the
+unit-assignment rule are in [`reference/banks.md`](reference/banks.md). The
+table is derived from the ELFs by `tools/arenamap.py`.
 
 ### The mission's `R` menu, and the **Organize Screen** (scene `0x06`)
 

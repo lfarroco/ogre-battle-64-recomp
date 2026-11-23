@@ -1,5 +1,7 @@
 # Handoff — 2026-09-22, session 97: repo root reorganised, configs under `config/`
 
+> **Summary.** Session 97 handoff — **the repo root is reorganised: every config the build reads is under `config/` (`config.{yaml,toml}`, `config/banks/config-bank<U>.{yaml,toml}`, `config/symbols/**`, `config/rsp-*.toml`) and the upstream patches under `patches/`; the root dropped from 181 entries to 64.** splat, N64Recomp and RSPRecomp resolve a config's paths against that config's own directory, so the configs carry `../` entry points and each bank yaml sets `base_path: ../..`. Removed: the 10 `.ogre-prefs-*` sandboxes (400 MB), `.repro/`, `.DS_Store`, the tracked `ogrebattle64.d` (now gitignored) and the unreferenced `ogrebattle64.yaml`. Verified: `make regenerate` exits 0 and leaves `asm/`/`ogrebattle64.ld` byte-identical, the main `RecompiledFuncs/` unchanged, `check-banks` OK, and each of the 11 bank units whose output changed (B..L) re-links byte-identically from its `HEAD` config. The move also exposed that the tree's `build/bank{B..L}.elf` were stale; the relink is why `Bank{B..L}Funcs/` now match a fresh regeneration. `docs/HANDOFF-*.md` keep the old paths.
+
 Goal: tidy the repository root. No game code changed.
 
 ## 1. Result

@@ -1,5 +1,7 @@
 # Handoff — 2026-09-20, session 90: the "Use Item" unit-command screen runs at full speed
 
+> **Summary.** Session 90 handoff — **the "Use Item" unit-command screen runs at full speed.** The screen's per-frame lookup `func_ovlN_801DA248` (bank unit N, record 7) is a pure 10×5 table scan whose outer loop `is_yield_poll_loop` classified as a poll because the body loads `lw $v0, 0($a0)` from the never-written argument base `$a0` (`0x801DA268`); the injected blocking `yield_self` at branch `0x801DA2C0` ran on every iteration but the last, and the frame-pump thread `t4` sat there 99 % of every slow second with display-list periods of 237–275 ms. Fixed by appending `0x801DA2C0` to `config/banks/config-bankN.toml`'s `yield_work_loop_branches` (session 80's mechanism): one generated file changes, 51 → 50 yield sites, `check-banks` OK, boot unchanged. Fixed build: scene-`0x03` intervals p50 8 / p90 14 / p99 34 ms (was p99 209 / max 275), `0x801DA248` in no profiler sample, present in the coverage census so the screen was reached, developer-confirmed normal. Named but not landed: `func_ovlN_80204C08` (branch `0x80204C48`), the same shape.
+
 **Goal (developer):** the game is *"extremely slow"* in the **Use Item** section
 under **Unit Commands**. It reproduces in the tutorial, and the developer can
 drive it at `OGRE_SPEED=4`.

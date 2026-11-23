@@ -1,5 +1,7 @@
 # Session 187 handoff — the browser page is a game shell, not a debug dump
 
+> **Summary.** Session 187 handoff — **the browser page is a game shell instead of a debug dump.** `app/web/index.html` now has a slim top bar, a bezel around the canvas, a launcher overlay, one curated status line, a controls dialog, fullscreen, and a `?log` drawer; the title/controls/log/stats paragraphs and the visible `#gfx-status` line are gone. The probe contract is preserved: `#rom-input`, `#save-input`, `#game-canvas`, `#status`, `#gfxstats` and `#gfx-status` keep their ids, `#gfxstats`/`#gfx-status` are hidden but still updated, and `#status` stays one line by default and becomes the log mirror with `?log`. `#game-canvas` is `box-sizing: content-box` so `emscripten_set_element_css_size()` keeps the 1:1 buffer-to-CSS box; with the page's global border-box the 1 px border would have scaled a 640x476 buffer into a 638x474 content box. `web.js` gained `ogreUI` phase/status hooks, launcher dismissal, drag-and-drop, a dialog keyboard guard, fullscreen scaling, and a Close log button. `logmode.cjs` `PASS`; `boot.cjs` `RENDERED` (`w=640 h=481 nonBlack=307840 colorful=6947`); `make web` clean; no page errors; responsive at 390x844, 768x1024 and 1280x720. Proofs `docs/proofs/web-ui-launcher-session187.png` and `-web-ui-game-session187.png`. See `docs/HANDOFF-2026-10-23-session187.md`.
+
 ## Goal
 
 Developer request: opening `http://127.0.0.1:8931/app/web/index.html` showed

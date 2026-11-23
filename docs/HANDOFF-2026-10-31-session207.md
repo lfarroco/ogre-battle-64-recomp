@@ -1,5 +1,7 @@
 # Session 207 handoff — the browser cathedral backdrop's first njpeg pass lost its rows
 
+> **Summary.** Session 207 handoff — **the browser cathedral backdrop's top-left quadrant was a dropped writeback row band; the guard is now per row.** The njpeg assembly's pass 0 draws 320x240 into the 320x476 colour image at `0x025C00`; the writeback guard hashed the image's whole range, which contains the next framebuffer at `0x04B400` (row 240), so that framebuffer's writeback changed the hash and dropped pass 0. The pending band also mixed the previous screen's rows with the pass's, and the reference kept the previous screen's reference for a row the pass redrew. `GlFramebuffer::era_row_hash` now holds one reference per guest row, refreshed before every draw into that row; `readback_framebuffer` compares and skips row by row. The second visit (date of birth) renders the complete backdrop (`web-newgame-cathedral-birth-session207.png`); `cathedral-skip` on the `0x025C00` target reads `69915` at the first sync against `14875` before, then `76800`. The probe now waits on `_ogre_web_active_scene`, adds `cathedral-birth`/`cathedral-skip`/`name-entry` routes and `--log-cap`.
+
 ## Goal
 
 The developer reports that in the browser renderer the cathedral backdrop loses

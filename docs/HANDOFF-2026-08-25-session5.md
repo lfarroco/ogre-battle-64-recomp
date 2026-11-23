@@ -1,5 +1,7 @@
 # Handoff — 2026-08-25 (session 5): RT64 renderer integrated; game stalls after its first RSP task
 
+> **Summary.** Session 5 handoff: RT64 renderer integrated; game stalls after its first RSP task; F3DEX 2.08 short-format GBI mismatch.
+
 ## TL;DR
 
 - **The null renderer is replaced by a real RT64 renderer** (`app/src/renderer.cpp`):

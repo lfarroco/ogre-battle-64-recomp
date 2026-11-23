@@ -1,5 +1,7 @@
 # Handoff — 2026-09-21, session 96: the defeat crash localised, and the title sprite's green border localised
 
+> **Summary.** Session 96 handoff — **the defeat crash localised, and the title sprite's green border localised. No fix landed for either; every probe reverted.** (1) The SIGBUS after a lost battle is `func_800862C0+0x59A`, the `lw $s6, 4($a1)` at guest `0x80086328`; `$a1` is `+0x7C` of an effect object, the value looks like a misread record field (`0xFFF50000` = -11.0 as 16.16), and the crash lands on a scene/mode transition. The effect subsystem has no cross-bank call site, so the writer is another resident function; two developer reproductions did not crash. (2) The title sprite's green border is the blend factor, not the texture: the I8 mask and the combiner are byte-exact, but the draw composites at alpha 1 (`resultAlpha.a = combinerColor.a;` in `RasterPS.hlsl` removes it). The defect is present in every source state buildable here, including RT64 at the 2026-09-17 pin, so it is in the renderer or presenter path.
+
 No fix landed for either item. Two diagnostics are in place and every probe is
 reverted.
 

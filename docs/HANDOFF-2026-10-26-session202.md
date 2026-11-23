@@ -1,5 +1,7 @@
 # Session 202 handoff — the tutorial combat's green background and freeze: a stale framebuffer writeback over the njpeg buffers
 
+> **Summary.** Session 202 handoff — **the tutorial combat's green/magenta background and freeze were one stale framebuffer writeback.** The browser defers writebacks to `ogre_sync_framebuffers()` and keeps each `GlFramebuffer`'s drawn rows until then. The 640x481 image at `0x1BA780` spans `0x1BA780..0x1E05C0`; by the Field Map → Combat transition the allocator had reused that range for the scene-0x02 njpeg buffers at `0x801CDA00`/`0x801CE3A0`, so the sync wrote the old image over the njpeg input and destination, the S2DEX2 draw sampled non-YUV bytes, and the next `free()` trapped in `func_80071950`. `readback_framebuffer` now skips a writeback whose RDRAM differs from the hash at the last upload/writeback (RT64's `checkRAM` rule) and logs `[GFX-FBWRITE-STALE]`. The final build passes `0x0002 → 0x000D → 0x0003` with no page error and the tutorial battle renders (`docs/proofs/web-tutorial-combat-session202.png`); the developer's before frame is `-green-session202.png`. New web debug exports `ogre_guest_rdram`/`ogre_debug_threads`. The njpeg backdrop's green/magenta raw display is a separate pre-existing defect (unmodified `HEAD` shows the same cathedral frame). Open: the exact `3. Combat` lesson, a per-row hash, `testdraw`'s scratch above the 8 MiB RDRAM, and the backdrop colour. See `docs/HANDOFF-2026-10-26-session202.md`.
+
 ## Goal
 
 Fix the browser's combat screen. The developer's report: entering combat (tutorial

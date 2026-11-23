@@ -1,5 +1,7 @@
 # Handoff — 2026-09-16, session 63: the party's two draws and the **empty texture buffer** — nothing landed
 
+> **Summary.** Session 63 handoff — **negative, nothing landed**, but the party's two draws are identified: the developer corrected sessions 61/62 — the **second** builder call (`a2=0xA`, rect `(a0-16, a1-24)`, i.e. the rect *above*) is the **knight (Magnus)** and must be `16x24`; the **first** (`a2=0xB`, rect `(a0-8, a1)`) is the **shadow** and must be `16x11`. The two calls therefore name each other's entries (live: slot 12 = `(16,24)`, slot 10 = `(16,11)`, slot 11 = `(144,23)`), which is why the shadow drew as the row of ellipses and the knight as a dark blob. The window mechanism is settled (the caller's `jal` delay-slot store lands on the builder's own `dl+0x3C` word and wins on **hardware** too — no port artifact, no second writer). **The wall:** with rects and per-entry windows consistent, both sprites are clean dark blocks because the texture buffer the knight samples — `0x8021AC88`, pointer faithful to the emitted list — is **all zero** in RDRAM (`[probe70] call1 tex=8021AC88 w0=00000000`), and a zero RGBA32 texture under the map's alpha combiner renders flat. Next: find which pass fills that buffer, or which field of `0x801F1570` names a populated one. *(Its "delay-slot store wins on hardware too", its `0x801F1570` field addresses and its shadow `+0x10E0` are corrected by session 64.)*
+
 ## Goal and result
 
 **Goal (developer):** continue sessions 61/62 and make the map screen (scene

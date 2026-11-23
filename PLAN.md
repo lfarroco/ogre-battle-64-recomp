@@ -1148,6 +1148,17 @@ The game runs end to end. A build boots the publisher stills, the title, the New
 Game opening, the map, missions and battles, the tutorial, the shop, the
 Organize Screen, the credits, the ending and the attract loop.
 
+- **Documentation reference layer (session 217)** — `docs/reference/` holds the
+  canonical memory map, the streamed-bank table, the GBI hash table and the
+  scene-script description. `docs/reference/addresses.tsv` is the address
+  registry (170 rows). `docs/symbols.md` and `docs/scenes.md` render their
+  address tables from it, and `docs/README.md` is generated from those tables
+  and each handoff's summary. `make docs-index` regenerates the tables; `make
+  docs-check` verifies links, registry rows, handoff summaries, citations and
+  generated blocks. `make docs-find Q=0x...` searches the registry and the docs;
+  `make docs-stats` reports coverage. See
+  `docs/HANDOFF-2026-11-23-session217.md`.
+
 - **Issue #27 (session 214)** — a cutscene no longer shows bands of unrelated
   content at the sides in widescreen. RT64's Expand is used for the mission
   scene `0x03` only: an expanded frame is a 428x240 target whose game picture is

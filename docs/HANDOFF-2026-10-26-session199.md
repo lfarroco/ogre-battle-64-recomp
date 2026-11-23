@@ -1,5 +1,7 @@
 # Session 199 handoff — the mission's frame cost is outside the flush loop, and the practice field's ground is a fill
 
+> **Summary.** Session 199 handoff — **the mission's frame cost is outside the browser's flush loop, and the practice field's visible ground is a flat `G_FILLRECT`.** A merge of consecutive same-state draws cut the mission from 1 410 777 draw calls to 164 198 (8.6 per call) and changed the rate from 29.39 to 29.83 fps; a CDP profile then spent 87.1% of the main thread idle, so the merge was reverted and the remaining 2x against RT64 is the recompiled game/RSP threads or the GPU. On the practice stage (scene `0x0003`) a pixel probe at N64 `(12,160)` finds five full-screen fills and no textured draw, the last fill `prim=(0.13,0.16,0.00)`, which is the sampled `(34,42,2)`; the 32x64 CI8 ground tiles cover the cliffs and roads only, and the green ground family (`0x358F00`, `shifts=13`) draws at the top-left and off-screen. `OGRE_DEPTH=0`, culling off and valid shared matrices change no pixel. Session 198's uniform cache stays in the tree. Proofs `docs/proofs/web-tutorial-grass-flat-session199.png`, `-texel0-session199.png` and `web-mission-fps-session199.png`. See `docs/HANDOFF-2026-10-26-session199.md`.
+
 ## Goal
 
 Fix the two defects the developer sees on the mission/tutorial screens: the flat

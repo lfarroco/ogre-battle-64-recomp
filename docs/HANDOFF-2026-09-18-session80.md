@@ -1,5 +1,7 @@
 # Handoff — 2026-09-18, session 80: the mission's post-battle lag is fixed with a one-site, declarative recompiler override
 
+> **Summary.** Session 80 handoff — **the mission's post-battle lag is fixed, and with a one-site change.** Session 79's diagnosis is accepted: N64Recomp's poll-loop heuristic injects a blocking `yield_self()` into `func_ovlN_801B2F4C`'s nearest-target scan (branch `0x801B3008`), once per entity, and a `yield_self` blocks until an external message arrives (≈ one VI retrace). Because all three *broad* repairs of session 79 deadlocked the boot, the repair is **declarative and scoped**: a new N64Recomp option, `yield_work_loop_branches` in `config/banks/config-bankN.toml`, lists `0x801B3008` and the recompiler emits **no** yield at a listed backward branch. Regenerating changes **exactly one file** (`BankNFuncs/funcs_3.c`, one line removed; 52 → 51 sites; the other 144 generated files byte-identical by SHA-256), and the boot's scene timeline is unchanged. **Developer-confirmed fixed**: driven to a battle at `OGRE_SPEED=8` the mission runs normally (0 slow seconds, `0x801B2F4C` never hot, p50 6 ms / p99 31 ms display-list intervals). Reusable rule: for a misclassified loop, list the branch — do not weaken the heuristic.
+
 > **Read §1 and §3.** Session 79 diagnosed the developer's *"after a battle …
 > it lags badly"* as one recompiler artifact: N64Recomp's poll-loop heuristic
 > injects a **blocking** `yield_self()` into the mission's nearest-target search

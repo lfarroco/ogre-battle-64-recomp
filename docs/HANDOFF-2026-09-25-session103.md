@@ -1,5 +1,7 @@
 # Handoff — 2026-09-25, session 103: the EXP Overflow mod
 
+> **Summary.** Session 103 handoff — **the `EXP Overflow` mod is `mods/exp-overflow/`, and it carries a level-up's leftover EXP over.** The game levels a character at 100 EXP and the result loop `func_ovlJ_801D61C0` (state 4 at 0x801D634C) zeroes the participant's EXP (`sb zero,50(s0)` in the delay slot of `jal func_ovlJ_801D8E90`) before calling the base level-up routine `func_8016EBC4`. Neither can be hooked: the result loop is in a streamed bank (the port's `get_vrom_to_section_map()` covers only the base sections), and `func_8016EBC4` faults during boot when hooked (`Failed to find function at 0x46220003`), while its neighbours hook cleanly. The mod therefore hooks the base frame function `func_80072944` (verified once per frame: 3072 entries / 3203 frames), remembers `participant+0x32 - 100` against the roster index `participant+0xF6`, and once the record shows `level+1` writes the remainder into `record+0x35` **and** the live `participant+0x32` (a record-only write is undone by the next sync). Confirmed on the developer's suspend save: four front-row soldiers at 89 EXP reached level +1 at **20 EXP**, and 20 survived the next battle; without the mod they end at 0.
+
 **Goal.** Implement the developer's requested "exp overflow" mod: when a
 character's EXP crosses 100 in a battle result they level up, and the leftover
 EXP (`total - 100`) should carry over instead of being zeroed.

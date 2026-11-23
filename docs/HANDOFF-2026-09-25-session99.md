@@ -1,5 +1,7 @@
 # Handoff — 2026-09-25, session 99: the C-button bits were rotated
 
+> **Summary.** Session 99 handoff — **the C buttons produced the wrong directions because their N64 bit masks were rotated one position.** The developer's `I → right, J → top, K → left, L → down` is `app/src/input_map.hpp`'s four C values, which must be libultra's `CONT_C_UP/DOWN/LEFT/RIGHT` = `0x0008/0x0004/0x0002/0x0001` because `osContGetReadData` writes the callback word straight into `osContPad.button`; the key table already assigned `I/J/K/L` to the right rows, so only the values changed, and `app/web/web.js` carried its own copy of the same rotation.
+
 **Goal (developer):** *"it seems that the c buttons are mapped wrongly"*, with the
 observed mapping `I → right, J → top, K → left, L → down` and the expected
 mapping `I → top, K → down, J → left, L → right`. *"compare with the zelda

@@ -1,5 +1,7 @@
 # Session 180 handoff — the QUEST still's q draws are recorded in list order and do rasterize; the frame they land in has a black plate
 
+> **Summary.** Session 180 handoff — **the QUEST still's q draws are in list order and are rasterized; the frames that present them have a black plate.** Session 179 named the web walk order for the segmented q sub-lists as the next measurement; the ring of recorded draws and a walk trace show the native order and the native state, and a colour-image readback shows the triangles reaching the framebuffer. What differs is the frame: the 16-band plate copy of the q lists carries PRIM black (its combiner is PRIM-only), so the q's land on a black plate, while the white-plate presents carry no triangles. Two session-179 claims are corrected: the q textures are hue ramps with alpha 0, and two triangle combiners appear. No code landed; the next experiment is the ordered PRIM/CIMG/combine walk trace of one black-plate frame. See `docs/HANDOFF-2026-10-19-session180.md`.
+
 ## Goal
 
 Continue the browser fix of the QUEST publisher logo in scene `0x0A`

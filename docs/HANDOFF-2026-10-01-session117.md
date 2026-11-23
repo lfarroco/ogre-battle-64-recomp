@@ -1,5 +1,7 @@
 # Session 117 — prod-build debug audit, and the stale-patch release gap
 
+> **Summary.** Session 117 handoff — **prod-build debug audit, and the stale-patch release gap.** The hosted release runner builds the third-party trees by *applying* `patches/` to pristine checkouts; a developer builds from the dirty trees. `patches/rt64-ob64.patch` was 29 lines stale and `patches/rt64-plume-ob64.patch` had no `plume_d3d12.cpp` hunk, so session 107's capture fix and D3D12 null-texture guard are in **no** release: in v0.5.0 and v0.5.1 `snap`'s frame capture is a no-op. v0.5.1 was also built from `c7bd999` (session 112), and the private bundle records that commit with 34 `yield_self` sites against the tree's 33, so session 115's fix is unreleased too. Both patches are regenerated, `make patch-check` fails when a patch stops describing its tree, and `tools/release-build.sh` runs it before packaging. The audit also lists the debug behaviour that ships ungated: a fixed-path console channel that writes guest RAM, ~1000 `fopen`/s, 116 `[rsp]` lines/s, per-display-list `[renderer]` lines, and trace hooks on every recompiled function entry and return. **The console is fixed here**: it is off unless `OGRE_LIVE_CONSOLE=1` (or the trigger's own variable) is set, so a stock run opens no path, reads no keyboard and prints nothing.
+
 Date: 2026-10-01. Follows session 116 (the periodic `[snap]` snapshot stutter).
 
 ## Goal

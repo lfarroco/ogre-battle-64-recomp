@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 45: the step-2 wall was a **missing streamed module** (rec14c), not the PI manager
 
+> **Summary.** Session 45 handoff: step 2's wall was a **missing streamed module** — scene `0x0D` streams `bankRec14c` (ROM `0x2A8CF0`) over `bankRec14b` at RAM `0x802395E0` for steps ≥ 2, and the port had only rec14b, so unit C's 95 calls into that arena ran rec14b's prologue-less bodies (frame leak `+0x238`, `s3`/`s6` = 0, the interpreter walks guest `0`, RT64's ~2.5 GB DMA and `do_send` SIGBUS). **Fix: new units F (rec14b) and G (rec14c)** so those calls compile as `LOOKUP_FUNC` and the DMA selects the resident bank. Result: the **cathedral dialogue with Archbishop Odiron renders** on both renderers (`native-newgame-cathedral.png`). Session 44's KUSEG-mirror justification is superseded.
+
 ## Goal and result
 
 Session 44 left two things open: (1) the RT64-only `do_send` SIGBUS at the step-2

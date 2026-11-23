@@ -1,5 +1,7 @@
 # Handoff — 2026-08-25 (session 9): title-screen DL-build crash fixed (N64Recomp fall-through tail calls); boot now reaches real rendering (next wall: RT64/Vulkan render thread)
 
+> **Summary.** Session 9 handoff: the `func_8019FC68` crash was a KMC shared-epilogue recompilation bug; N64Recomp now emits fall-through tail calls (with a static-function fixpoint); boot reaches real RT64 rendering (next crash in the RT64/Vulkan render thread).
+
 ## TL;DR
 
 - **The session-8 wall (`func_8019FC68` SIGSEGV) is fixed.** Root cause was NOT a

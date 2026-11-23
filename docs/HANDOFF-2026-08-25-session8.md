@@ -1,5 +1,7 @@
 # Handoff — 2026-08-25 (session 8): post-boot spin found & fixed (yield_self for poll loops); boot now reaches the title-screen display-list build
 
+> **Summary.** Session 8 handoff: the post-boot spin was a cooperative-scheduler deadlock; N64Recomp now emits `yield_self` for poll loops; boot reaches the title-screen display-list build (next crash in `func_8019FC68`).
+
 ## TL;DR
 
 - **The session-7 "N64 threads 1+3 spin" is diagnosed and fixed.** Thread 3

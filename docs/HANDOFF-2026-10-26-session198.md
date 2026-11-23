@@ -1,5 +1,7 @@
 # Session 198 handoff — the per-draw uniform lookup, and the tutorial field's flat grass
 
+> **Summary.** Session 198 handoff — **the browser's per-draw uniform lookup was the mission/tutorial frame-rate drop, and caching it raises the mission from 16.78 to 26.10/28.94 fps; the tutorial field's flat grass is reproduced and bounded, not fixed.** The flush loop called `glGetUniformLocation` about 60 times per draw; a CPU profile spent 27% of the main thread there and in its UTF-8 conversion, and 12% in the once-per-flush `glGetError` sync. `uniform_cache_` + `uloc()` resolve each name once after the program links; `OGRE_GL_CHECK=1` restores the error guard. The practice stage is scene `0x0003` after `0x17 -> 0x02 -> 0x0D`; TEXEL0 raw turns its grass pure white while the cliffs and roads stay textured, no visible draw is dropped for want of a texture, and fog, culling and the depth clip each change no pixel. The large draw at the field is the top-left UI panel (a `64x64` CI4 parchment tile whose decode matches its source); the grass layer is not among the logged large draws, so small textured rectangles are the next check. Proof `docs/proofs/web-mission-fps-session198.png`. See `docs/HANDOFF-2026-10-26-session198.md`.
+
 ## Goal
 
 Fix the two defects the developer reported on the tutorial practice stage

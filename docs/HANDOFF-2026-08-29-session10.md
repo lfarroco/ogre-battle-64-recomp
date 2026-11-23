@@ -1,5 +1,7 @@
 # Handoff — 2026-08-29 (session 10): VI-thread crash fixed (runtime osViSetMode pointer validation); GBI question resolved (auto-detected F3DEX2 is correct — the session-9 "F3DEX override" was wrong); remaining crash is the machine-specific hasvk driver issue
 
+> **Summary.** Session 10 handoff: VI-thread crash fixed; GBI question resolved (F3DEX2 auto-detection is correct); stable under Lavapipe.
+
 ## TL;DR
 
 - **The flaky VI-thread segfault (`vi_thread_func` → `update_vi()` with a garbage

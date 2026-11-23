@@ -1,5 +1,7 @@
 # Handoff — 2026-09-12 — session 25: self-driving native runs, and the idle trajectory localised on native
 
+> **Summary.** Session 25 handoff: native runs drive themselves (`OGRE_TAP_MS`/`OGRE_EXIT_AFTER_MS`); the idle trajectory reproduced on native and localised to the RSP/frame worker queues.
+
 ## Outcome
 
 Session 24 ended with the title sprites correct in the browser and the native

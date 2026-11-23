@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 43: bank unit B (records 17/18) makes scene 0x17 the **Tutorial**, and the movie step the script never asks for
 
+> **Summary.** Session 43 handoff: bank unit B compiles records 17/18 and scene `0x17` renders as the **Tutorial** (the title menu is captured: New Game / Tutorial / Stereo); the **first `0x0D` visit is the New Game movie and already renders** (sepia courtyard cutscene, "I promise I'll make you proud."), so the wall is **step 2** — the cathedral dialogue with `Archbishop Odiron` the developer identified; the movie-path word is `0x80197794`, not `0x8019F794`; dialogue text is LZ-compressed (`tools/ogrelz.py`).
+
 ## Goal and result
 
 Continue session 42's "what's next" list. This session finished item 3 (compile

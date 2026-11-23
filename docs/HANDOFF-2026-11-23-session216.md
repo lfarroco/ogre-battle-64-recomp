@@ -1,5 +1,7 @@
 # Session 216 handoff — bundled code mods in the browser build
 
+> **Summary.** Session 216 handoff — **the browser build runs the four bundled code mods.** A wasm build cannot load a code mod: `LiveRecomp` needs sljit and the native hook path overwrites a function prologue, which WebAssembly does not allow. `tools/gen_web_mods.py` recompiles each `build/mods/*.nrm` ahead of time with `OfflineModRecomp`, links it into the app, and embeds the archive; `app/src/web_mods.cpp` installs each archive with `register_embedded_mod`, so the manifest, config, `mods.json` and the MODS tab are the runtime's. `librecomp` gains a wasm-only `StaticModCodeHandle`, and `tools/web_mod_hooks.py` inserts the entry hook/replacement calls into the generated game code. `OfflineModRecomp` gained the normal driver's static-function pass and a no-fall-through-tail mode for mods. Verified: `[boot] 4 bundled mod(s)`, all four load, `ogre_skip_boot_logos` takes the boot `0x09 -> 0x04` (vanilla is `0x09 -> 0x0A -> 0x04`), the MODS tab toggles and writes `/ogre/mods.json`, `make web` and `make app` clean. The data bundle was regenerated with `app/src/web_mods/` and the change was pushed as `264bca3`; the WebAssembly and Pages runs are green and the live site lists the four mods (`ogre_skip_boot_logos` boots `0x09 -> 0x04`). Open: the permanent-suspend replacement is not played through, and third-party code mods stay unsupported.
+
 ## Goal
 
 Enable mods for the WebAssembly build. The developer chose the option that keeps

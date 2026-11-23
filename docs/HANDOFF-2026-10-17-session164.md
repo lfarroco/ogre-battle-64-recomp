@@ -1,5 +1,7 @@
 # Session 164 handoff — the browser samples tiles with RT64's sampler, and the fog is point-sampled
 
+> **Summary.** Session 164 handoff — **the browser samples RDP tiles with a port of RT64's texture sampler, and the title's fog band is point-sampled.** `OGRE_TEXF` selects `rt64` (default: `clampWrapMirrorSample` clamp/wrap/mirror, point/bilerp/average from OTHERMODE_H, RT64's three-point filter, `round(uv*128)/128`), `bilinear`, or the old `gl` sampler. The filter is now draw state instead of a property of the uploaded texture, `masks`/`maskt` wrap and mirror exist, `AVERAGE` exists, and each draw carries its tile window, mask and origin per unit. The new `[GFX-SAMPLER]` census measured the screens: title 591 textured draws all point (456 masked), world map 99 all point (1 masked), publisher still 56 all point (0 masked), tutorial `0x17` 8 draws with 6 bilinear and 6 masked. `[GFX-FOG-DRAW]` shows the repaired fog groups are `filt=0` point-sampled 320x1 strips and 64x64 blocks, so session 163's next step (compare the sampled fog intensity) is answered and excluded: the band cannot be filtering. The tutorial is the reached bilinear screen, and its dialogue box is broken under both samplers (new open item 8(r), with proofs). No probe added, no recompiled code touched.
+
 ## Goal
 
 Continue the browser (WebAssembly) renderer from session 163, taking RT64's

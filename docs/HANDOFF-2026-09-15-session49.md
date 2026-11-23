@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 49: the cathedral background is still black (a wrong YUV16 decode was tried and reverted)
 
+> **Summary.** Session 49 handoff (latest): **the cathedral background is still black.** A YUV16 decoder was written for RT64's `TextureDecoder.hlsli` (its `G_IM_FMT_YUV` arm does return black) and **reverted** — measured against the pristine shader it turns the frame into a corrupt magenta/green blob, not the backdrop. The real measurement: the game's CPU readback (`0x80199884`) runs 4×, all in scene `0x02`, and **every copy reads a zero framebuffer**, which is upstream of any decode. Next lead: check GLideN64 (which upstream fixed [issue #102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102) with) before writing another decoder. Includes the `OGRE_DUMP_RDRAM` A/B recipe (`OGRE_CAPTURE_PRESENT` is too sparse for this) and a refreshed `patches/rt64-ob64.patch`.
+
 > **Superseded (session 52):** the background renders. The session-50/51
 > sampler/geometry work plus session 52's `G_SETCONVERT` conversion fix made
 > `docs/proofs/native-newgame-cathedral-background.png` a correct cathedral

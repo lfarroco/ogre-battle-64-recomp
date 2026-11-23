@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 44: step 2 unblocked by restoring the N64's low-RDRAM (KUSEG) alias
 
+> **Summary.** Session 44 handoff: the New Game **step table** is decoded (steps 1..19 → asset id, ROM, command; every step ≥ 2 selects selector 2); step 2's crash was two stores to guest `0`/`8` (the `0x80239874` shared tail's `*(sp+0x1EC)`, and the descriptor interpreter's emitter with `a3 = 0`), and every value feeding them comes from game code — so retail must tolerate them. **Fix: the N64's low-window (KUSEG) RDRAM alias restored in `recomp_mem_addr`** (`a < 0x80000000` → `a & 0x003FFFFF`, recorded in `patches/n64modernruntime-n64recomp.patch`) — the step-2 enter now completes; the next wall is RT64-only (`do_sendP + 0xC4`, guest `0xFE6E2C89`). `tools/ogrelz.py` gained `--asset` and the rule that an asset's LZ block starts at `rom+4`.
+
 ## Goal and result
 
 Session 43 left one goal: fix command-mode step 2 (the cathedral dialogue with

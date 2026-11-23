@@ -1,5 +1,7 @@
 # Session 206 handoff — the logo-to-title noise is a present of a blanked VI
 
+> **Summary.** Session 206 handoff — **the logo-to-title noise is a present of a blanked VI; a blank or sizeless VI now presents black.** The recording shows the QUEST still fade to black, then a noise band at rows 240..320 of a 639x475 canvas for ~0.7 s. At title entry the VI is blanked (`hStart = 0`) with its origin already on the title's `0x000400` buffer, and the presenter paired that address with the last visible mode's 639x475 area; it resolved the address to the title's new 320x476 image and sampled rows 240..320, which the title never draws and which `upload_framebuffer` had seeded from RDRAM. The present now carries the visible flag and `fbSize` from the same `ViRegs`, resizes from them, and clears the canvas black for a blank or sizeless VI, which is RT64's `colorTarget == nullptr` present. The transition reads `nonBlack=0`, then the 319x239 title fades in; proofs `web-title-transition-{noise-before,black-after,title-after}-session206.png`. Open in the same pipeline: depth-to-colour present, present-time CPU upload, clear-on-create.
+
 ## Goal
 
 The developer reported that when the publisher logos end, a few frames of noise

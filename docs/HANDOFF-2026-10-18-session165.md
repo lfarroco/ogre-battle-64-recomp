@@ -1,5 +1,7 @@
 # Session 165 handoff — the browser samples TMEM, and the RDP's coverage path fixes the tutorial's dialogue box
 
+> **Summary.** Session 165 handoff — **the browser samples TMEM, and the RDP's alpha-compare/coverage path fixes the tutorial `0x17` dialogue box.** A persistent 4 KiB TMEM receives every LOADTILE/LOADBLOCK/LOADTLUT (and YUV) with RT64's `loadWord`/`loadToTMEMCommon` layout, and the tile decode reads it at `tmem << 3` with `line << 3` over RT64's sample window (`min(tile rect, 1 << mask)`), including the odd-row word swap, the palette at `0x800`, and mode-0 CI as I. The fragment shader now runs `G_AC_THRESHOLD`/`G_AC_DITHER`, the `CVG_X_ALPHA` coverage discard and the `CVG_DST` target alpha, so the strip and glyph draws (`OTHERMODE_L=0x000A7008`) discard their zero-alpha palette entries instead of painting green and black. The tutorial box's border rows and portrait are pixel-exact against RT64's target (`docs/proofs/web-tutorial-fixed-side-by-side.png`); the remaining 5.4 mean over the box is the upper parchment band, a triangle draw sampling the 64x64 image at about two texels per pixel on a different sub-texel phase than the native's. The framebuffer-as-texture check moved to the load with the load's own rect, `testdraw --flags 96` is `fbtex hits=1`, `boot.cjs` is `RENDERED`, and the title frame is 1.56 mean abs against the native at its phase. No probe kept.
+
 ## Goal
 
 Continue the browser (WebAssembly) renderer from session 164, using RT64's

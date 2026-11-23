@@ -1,5 +1,7 @@
 # Session 192 handoff — the mission intro's ucode is F3DEX2.NoN, and its frame art is a framebuffer tile copy
 
+> **Summary.** Session 192 handoff — **the mission intro's ucode is `F3DEX2.NoN`, and its frame art is a framebuffer tile copy.** Every display list at scene `0x03` carries `ucode=0x800A08D0`; its first `0x1390` text bytes hash to `0x4C12DAE0534D7135`, RT64's `F3DEX2_NON_FIFO_2_08`. RT64 maps it to `GBIUCode::F3DEX2` with `flags.NoN`, which only disables the F3D near-depth clip, and the browser's fallback had kept the clip. The hash is now `GbiKind::F3DEX2_NON_FIFO`, a draw from it carries `no_near_clip`, and `u_zclip` stays 0. The framed illustration's strips are `G_TEXRECT`s sourced inside colour image `0x228080` (24 `[GFX-FBTEX]` loads), and the session read them as stale RDRAM; a whole-image writeback was tried and crashed, so it was reverted. **Corrected by session 193** for the loads' authority. Proofs `docs/proofs/web-mission-intro-nonn-session192.png`, `-rdram-session192.png` and the native pair. See `docs/HANDOFF-2026-10-25-session192.md`.
+
 ## Goal
 
 Continue the browser renderer. On the mission start screen the developer sees two

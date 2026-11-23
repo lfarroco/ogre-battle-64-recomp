@@ -1,5 +1,7 @@
 # Session 179 handoff — the QUEST still's background was a dropped PRIM-only rectangle
 
+> **Summary.** Session 179 handoff — **the QUEST publisher still's white plate was a dropped PRIM-only rectangle.** Scene `0x0A`'s final list draws its 640x480 background as 16 `G_TEXRECT` bands with a PRIM-only combiner through the preamble's unconfigured tile (`line=0`), and the browser's `draw_texrect` dropped every rectangle with no decoded image, so the frame kept the black clear and only the CI8 wordmark appeared. RT64's `RDP::drawTexRect` has no image test; a rectangle now needs an image only when the evaluated mux reads TEXEL0/TEXEL1 (new `combiner_uses_texture`, mirroring RT64 `ColorCombiner::usesTexture`). The plate and wordmark now draw (`docs/proofs/web-publisher-quest-white-background.png`); the three q meshes still do not, and the logged draw order for them (fade bands before the q triangles, with the fade's PRIM) is the next measurement. See `docs/HANDOFF-2026-10-19-session179.md`.
+
 ## Goal
 
 The developer reported that the QUEST publisher logo in the browser build is

@@ -1,5 +1,7 @@
 # Session 211 handoff — the left stick's Y is no longer inverted
 
+> **Summary.** Session 211 handoff — **the left stick's Y was inverted on both builds.** Issue #21 reports that pushing up moves the world-map cursor down. SDL's `LEFTY` is negative up and the Gamepad API's axis 1 is negative up, while the N64 pad's `stick_y` is positive up, so physical up arrived as `stick_y = -82`. The game's world-map mover `func_ovlM_8019AF0C` reads the pad at `0x8019B438` and computes `screen_y - stick_y / 8` at `0x8019B48C`/`0x8019B490`, so that moved the cursor down. Native `get_input` and the browser's `gamepadState` now negate the axis; the right-stick C layer already matched SDL. `make app` and `make web` are clean; no controller was attached, so the verification is the instruction-level read plus the two builds.
+
 ## Goal
 
 Developer request: investigate issue #21 ("Left stick on Xbox controller

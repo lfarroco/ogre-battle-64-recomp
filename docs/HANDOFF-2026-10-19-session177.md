@@ -1,5 +1,7 @@
 # Session 177 handoff — the mission stipple was the G_AC enum mapping, and the alpha compare now matches RT64
 
+> **Summary.** Session 177 handoff — **the mission stipple was the `G_AC` enum mapping.** RT64 uses `G_AC_NONE 0`, `G_AC_THRESHOLD 1`, `G_AC_DITHER 3` (`tools/RT64/src/shared/rt64_f3d_defines.h:8-10`), while the browser shader treated `u_ac == 2` as threshold and `u_ac == 1` as dither. The mission's 33 770 `G_AC_THRESHOLD` draws therefore ran the dither arm against a random hash, and with a combiner alpha around 0.2 only about a fifth of their texels survived: the portrait frame and the `MISSION` band stipple session 176 measured. `u_ac == 1` is now the threshold compare against the blend alpha and `u_ac == 3` is RT64's `initRand`/`nextRand` dither with the frame, instance and pixel seeds and the NOISE pre-consumption. The synthetic control proves it without the game: `testdraw.cjs --flags 512 --expect-alpha` reads 1406/1406, 0/1406 and 277/1369 for threshold/blend-0, threshold/blend-1 and dither, exit 0, and its readback was corrected for the RGBA16F attachment. The frame-locked mission re-capture is **pending**: the browser boot stalled at scene `0x0000` with `tasks=0` on every attempt after about 01:40, so whether the party sprites and the two overlay elements are now solid is the next measurement. `make web` clean; `--flags 96/128/384` all pass. See `docs/HANDOFF-2026-10-19-session177.md`.
+
 ## Goal
 
 Session 176's frame-locked mission pair exposed a per-texel stipple on the

@@ -1,5 +1,7 @@
 # Handoff — 2026-08-25 (session 6): boot stall diagnosed & fixed; the game now reaches its main loop
 
+> **Summary.** Session 6 handoff: the stall was a scheduler busy-spin deadlock; 3 fixes (spin, PI DMA, byte order) unblock boot into the main loop; Phase 4 (streamed overlays) starts.
+
 ## TL;DR
 
 - **The session-5 "stalls waiting for a second RSP task" was a red herring.** There is no

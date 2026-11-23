@@ -1,5 +1,7 @@
 # Session 184 handoff — the QUEST spin's q texture bytes are identical in both renderers; the decode diagnostic and the sampler are ruled out, and three candidate fixes were built, measured and reverted
 
+> **Summary.** Session 184 handoff — **the QUEST spin's q texture bytes are identical in both renderers, and three candidate fixes were built, measured and reverted.** Same-moment whole-RDRAM dumps of the forced `publishers` still give byte-identical `0x400`/`0x1400`/`0x2400` (4096/4096 at the spin) with the same 4 KB environment map (max `(248,240,224)`), and the browser decodes it correctly (`probe187`: `32x32 line=8 mean=91,75,35 max=248,240,224`); session 183's brown gradient is the same decoder at an earlier phase. The spin's sub-list sets `G_TEXTURE_GEN` but clears `G_LIGHTING`, so RT64's `usesTextureGen` does not fire; implementing `G_TEXTURE_GEN` and the lookat slots changed no pixel and was reverted. RT64's per-workload framebuffer writeback, ported to the browser, made the frames darker and was reverted. Native has a near-white texel in 24 of 24 spin frames, the browser in 3 of 14. The decode and the sampler are ruled out too: RT64's extended `[dec]` diagnostic shows the q tiles going through the deferred path (`addr=0x000400 nz=0/3072`, no 32-bit `line=1` decode), and all three `OGRE_TEXF` modes give the same pose-dependent highlight. No rendering code landed; RT64's `[dec]` line gained `addr`/`timgw`. See `docs/HANDOFF-2026-10-23-session184.md`.
+
 ## Goal
 
 Developer request: *"continue the work on fixing the untextured q's in the game's

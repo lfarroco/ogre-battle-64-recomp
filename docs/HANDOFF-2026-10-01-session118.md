@@ -1,5 +1,7 @@
 # Handoff — 2026-10-01 (session 118): the gamepad was never wired to N64 controller 1
 
+> **Summary.** Session 118 handoff — **issue #13: the gamepad worked in the overlay and not in game, because a pad filled `Platform::controllers[1..3]` while the game reads N64 controller 1 from `controllers[0]`.** `osContGetReadData` writes `get_input(controller, ...)` into `data[controller]`, and the ROM reads pad 0 only (`func_8008A47C` passes `D_800C4BF0` to the pad read; `func_8008A600` copies one `OSContPad` from it; `func_8007297C` is the per-frame poll). The keyboard was OR'd into `controllers[0]`, which is why it worked. Both assignment sites now start at slot 0, the `SDL_CONTROLLERDEVICEADDED` branch skips a device already in a slot (SDL queues an ADDED event for pads connected at init, so the old code reported one pad as two controllers), and the enumeration logs one line per filled slot. Zelda64Recomp does the same thing from the other side: `get_n64_input` serves only `controller_num == 0` and ORs the keyboard and controller mappings. Verified with an SDL virtual game controller and the live console: slots 1..3 give `OSContPad[0].button = 0000`, slots 0..3 give `8000` while N64 A is held. The browser build assigns pads to slots 1..3 as well and is not fixed here.
+
 ## Goal
 
 GitHub issue #13, "0.5.1 — Windows — Xbox Controller is not recognized in game":

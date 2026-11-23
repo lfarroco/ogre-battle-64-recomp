@@ -1,5 +1,7 @@
 # Session 201 handoff — the practice field's ground: near-plane clipping, then perspective-correct UVs
 
+> **Summary.** Session 201 handoff — **the tutorial practice field's ground: a triangle crossing the eye plane was dropped whole, and the texture coordinate was interpolated in screen space.** `transform_vertex` failed on a vertex with clip `w <= 0` and `draw_tri` dropped the triangle; scene `0x0003`'s ground is one 76x76-unit quad whose near corner is at `w = -1.67`, so both halves were never drawn and the ground was the frame's fill. `emit_clipped_tri` cuts the triangle against `w > 1e-3`. The ground then drew but its tile was stretched into straight bands, because the shader wrote `w = 1` (session 172) while RT64 interpolates the coordinate perspective-correctly (`hle/rt64_rsp.cpp:748-755`, `RasterVS.hlsl`); the shader now writes `vec4(a_pos * a_w, a_z * a_w, a_w)` by default with `OGRE_PERSP=0` as the A/B, and the grass is the noisy texture native shows. The mission and title measure within 1.4 mean absolute difference of their screen-space frames. New toolkit diagnostics: `OGRE_DRAW_PROBE` (+`_SCENE`/`_AFTER_TASK`), the `[GFX-FAMILY]` census, `OGRE_ONLY_COMB` and a `1<<17` alpha view. Proofs `docs/proofs/web-tutorial-field-{flat,bands,}-session201.png`. See `docs/HANDOFF-2026-10-26-session201.md`.
+
 ## Goal
 
 Fix the tutorial practice field's flat grass (sessions 198-199: the ground sampled

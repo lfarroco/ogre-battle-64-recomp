@@ -1,5 +1,7 @@
 # Handoff — 2026-09-20, session 93: a SETTINGS tab with GAME SPEED, changeable while playing
 
+> **Summary.** Session 93 handoff — **a SETTINGS tab carries GAME SPEED, changeable while playing.** The shared `ui::Panel` gained a fifth tab whose only row is a radio group over **1, 2 and 4** (6 and 8 were dropped: the developer reports cursor aiming cannot keep up). The value is the runtime's emulated-clock multiplier, persisted at `<config>/settings.cfg` (`app/src/settings.{hpp,cpp}`), and `OGRE_SPEED` overrides the file for one run without writing it. `ultramodern::set_speed_multiplier()` publishes the clock's segment anchors under a seqlock, so `osGetCount`/`osGetTime` and pending `OSTimer` deadlines stay continuous across a change; a mutex on that read path cost the boot visible time.
+
 **Goal (developer):** add a SETTINGS tab to the start screen with a single
 setting, `GAME SPEED [x] 1 [ ] 2 [ ] 4 [ ] 6 [ ] 8`. If it is easy, let the
 player open the in-game `ESC` overlay and change the speed while playing.

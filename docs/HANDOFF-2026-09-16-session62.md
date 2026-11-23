@@ -1,5 +1,7 @@
 # Handoff — 2026-09-16, session 62: the map's sprite tile window — **the window bug is *diagnosed*, not fixed** (the fix was reverted)
 
+> **Summary.** Session 62 handoff — **negative result, nothing landed.** *(Its table printout and its "N64Recomp lets the caller's window win" framing are corrected by session 63; the mechanism it identified is right.)* The map's `G_SETTILESIZE` window question from session 61 is answered at instruction level: the window is the **caller's `jal` delay-slot store** (`func_ovlM_801A2A7C`, ROM `0x81B44` `sw $t5, 0x44($v0)`, `$t5 = 0x1C028` = a `28x40`-texel window), written to a different display-list slot than the builder's own window; N64Recomp emits a delay-slot store **before** the call as well as after it (the `goto after_N` shape), so the caller's constant wins and the callee's window is discarded — hence a `144x23`-px rect wrapping the atlas, i.e. the row of ~18 ellipses. The fix derived from this (window from the entry's `(W,H)`, body entry `0xB`->`0xC`) **regressed a better mid-session probe frame and was reverted**; the developer's oracle is that the party is **two sprites** — a `16x24` knight and a **static soft oval shadow below it**. §0 has the honest status.
+
 ## Goal and result
 
 **Goal (developer):** continue from session 61 and make the map screen (scene

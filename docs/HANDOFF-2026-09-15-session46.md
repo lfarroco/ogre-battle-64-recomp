@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 46: the cathedral background is an **RSP-decoded image** (M_NJPEGTASK), and the port stubs the microcode
 
+> **Summary.** Session 46 handoff: the cathedral scene's **missing background**. The background is a 320x240 pre-rendered image at guest `0x80243E28` (the first 48 `G_TRI2` quads of the step-2 display list); `func_ovlE_80199D30` assembles it from a resource the game decodes through **four RSP `M_NJPEGTASK` (type 4) tasks**, which the port stubs. The microcode is recompiled (`make rsp-recomp` → `RspFuncs/njpeg_ucode.cpp`; ucode `0x8009ED80`, boot `0x8009ECB0`, tables `0x800AC050`) and dispatchable behind `OGRE_NJPEG=1`, but it stops after one `0x300`-byte block, the scene then stops drawing, and the null build dies in the runtime's message queue (null queue `0x80000010`) — so the **stub is still the default and the background is still missing**. *Superseded by session 47 on the decoder bug, on the task input (`func_8008B250`) and on the `0x80243E28` assembly.*
+
 ## Goal and result
 
 **Goal:** the cathedral scene (scene `0x0D` step 2) renders with no background

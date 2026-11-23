@@ -1,5 +1,7 @@
 # Session 188 handoff — the browser's tile-image cache allocated a GL texture per image per display list
 
+> **Summary.** Session 188 handoff — **the browser froze after 2–3 minutes with no input because the WebGL renderer's tile-image cache never deleted a texture.** `tmem_generation_` increments on every `G_LOADTILE`/`G_LOADBLOCK`/`G_LOADTLUT` and seeds the cache key, so each display list produced new keys, `flush_commands` called `glGenTextures` for each, and `shutdown()` was the only code that deleted one. The cache is now swept at the end of every flush and keeps only the images the batch's draws name. A 150 s no-input run went from 5,063 live textures / 20.3 MB to 4 live / 0.9 MB (5,871 created, 5,867 deleted), and a 232 s run held 7 live / 4.4 MB; display lists kept advancing. `ogre_gfx_stats()` gained `tex: cache=N uploads=N released=N`; `shots.cjs` rendered the scene-`0x09` opening; `make web` clean; testdraw 96/128/384 pass. The session also records that `boot.cjs`'s canvas PNG includes the session-187 launcher overlay, so its `RENDERED` counts are the overlay, not a game frame. See `docs/HANDOFF-2026-10-23-session188.md`.
+
 ## Goal
 
 The developer reported that `http://127.0.0.1:8931/app/web/index.html`

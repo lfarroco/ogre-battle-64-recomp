@@ -1,5 +1,7 @@
 # Session 182 handoff — one screenshot per second of the opening, native and in the browser
 
+> **Summary.** Session 182 handoff — **the opening is captured as a 1 fps series in both renderers, and the browser's QUEST hold presents the reference frame at that sampling.** Developer request: a tool that takes one screenshot per second for the first 30 s at 1x, because ten sessions had lost time to captures that were black, stretched or taken at the wrong moment. New `tools/intro_capture.py` (native + browser) and `debug/probes/intro-capture.cjs`, plus RT64's `OGRE_CAPTURE_EVERY_MS` wall-clock interval: a present count ran at 1 Hz in 320x240 and 2 Hz in 320x476. `t=0` is the game's first scene, not the runtime's blank first present. Native 30/30 frames, largest gap 1.04-1.27 s, QUEST at 23-24 s; GPU browser 30/30, largest gap 1.03 s, QUEST at 24-25 s (`white=17489, colourful=1309`); the software rasterizer's boot is about 30 s of game time, so that window is black. The per-capture flush is not what makes the q colour present (A/B). `make patch-check` PASS. See `docs/HANDOFF-2026-10-19-session182.md`.
+
 ## Goal
 
 Developer request: *"build a tool that capture 1 screenshot every 1s, in the

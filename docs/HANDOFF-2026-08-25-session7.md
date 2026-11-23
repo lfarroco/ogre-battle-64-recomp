@@ -1,5 +1,7 @@
 # Handoff — 2026-08-25 (session 7): Phase 4 begins — streamed overlays A+B+C recompiled; boot passes the old crash and reaches the next overlay's data load
 
+> **Summary.** Session 7 handoff: Phase 4 begins — overlays are plain linked code (no relocation); streamed overlays A+B+C recompiled and registered; boot passes the old crash and reaches the next overlay's data load, then spins on N64 threads 1+3.
+
 ## TL;DR
 
 - **The overlay format is now understood**: OB64's "streamed" overlays are **plain

@@ -8,6 +8,10 @@ Companion docs:
 
 - `PLAN.md` — status and roadmap.
 - `docs/README.md` — doc index.
+- `docs/reference/README.md` — canonical facts and the address registry: memory
+  map, streamed banks, GBI microcodes, the scene script and dispatch, save,
+  assets, runtime and the glossary. `make docs-index` renders it; `make
+  docs-check` verifies the tree; `make docs-find Q=0x…` searches it.
 - `docs/DECISIONS.md` — decision log.
 - `docs/HANDOFF-*.md` — per-session record; the newest number wins.
 - `docs/guides/app-build.md` — build, run, and every `OGRE_*` knob.
@@ -326,6 +330,11 @@ it means stop chasing the path as a port bug.
   session-by-session log is `docs/STATUS-LOG.md`, and the per-session detail goes
   in the handoff), write `docs/HANDOFF-YYYY-MM-DD-sessionN.md`, and add the
   decision to `docs/DECISIONS.md` when a choice was made.
+- A durable fact gets a home in the reference layer, not only a paragraph in the
+  handoff. Add the address to `docs/reference/addresses.tsv`, put the mechanism
+  on the page that owns it (`docs/reference/`, `docs/scenes.md`,
+  `docs/symbols.md`), then run `make docs-index && make docs-check`. A fact that
+  lives only in a handoff is invisible to the next session.
 - The handoff must state the goal, the result, the instruction-level evidence,
   what was run for verification, the files changed, and which probes were used and
   reverted.
@@ -451,322 +460,51 @@ for `console::`.
 
 ## Verified facts
 
-These were wrong or missing in earlier sessions. Re-verify if in doubt; otherwise
-start from here.
+The detail is in `docs/reference/`; read [`docs/reference/README.md`](docs/reference/README.md)
+before relying on memory. This list is the subset that changes how a session
+works.
 
-- **Uninitialised guest state holds the game's own leftovers, not noise.** The
-  recompiled code is the ROM's instructions, so a register or stack slot that
-  nothing wrote holds the value it holds on retail. The one systemic difference is
-  that the port zero-fills RDRAM at boot. When the port has `0` where retail
-  clearly does not, check the address map (`recomp_mem_addr`: KSEG0, KSSEG/KSEG3,
-  the KUSEG low window) and the runtime bridges (they translate guest pointers
-  themselves and must agree with the macros) before suspecting a game-logic bug.
-  Session 44 concluded from this that retail must tolerate the guest-`0` stores.
-  Session 45 found that those stores came from a call bound to the wrong bank.
-  Check the bank map before concluding that a zero is retail behaviour.
-- **Vocabulary and intent live in two docs.** `docs/symbols.md` maps address →
-  proposed name → evidence → confidence; read it before naming anything, and
-  before calling a function "the X function". `docs/scenes.md` records what each
-  screen should show, from the developer (the AGENTS §1 oracle data).
-- **Scene dispatch.** `func_80075BC0` looks up `D_800AF028[scene_id]()`; ids
-  ≥ 0x1F map to index 0. The accessor returns the scene descriptor, whose words
-  are `+0x00` enter (once), `+0x04`/`+0x08` per-frame hooks, `+0x0C` leave and
-  `+0x10` bank-record mask. `D_800C4C26` is the current/pending scene word
-  (`0x8000|id`, plus the `0xFFFC`/`0xFFFE` control values).
-- **There are exactly 25 scene types, and `tools/scenemap.py` extracts the whole
-  scene graph from the ROM in ~3 s.** Do not hunt a scene's address by hand. The
-  structure has three layers, and only the first two are code.
-  1. **The registry.** `func_80075BC0` writes 25 accessor pointers into
-     `D_800AF028[0..24]` from an immediate list. Each accessor is a 1-3
-     instruction stub that returns a descriptor address. The descriptor table is
-     static ROM data (`streamedB`, ROM `0x40E80` + (vram - `0x8016AF80`)). The
-     tool prints id → accessor → descriptor → enter/update/hook/leave/mask for all
-     25: 20 resolve statically, and ids 2, 3, 6, 8 and 23 branch and are listed as
-     `(indirect accessor)`. It reproduces every address this project found by
-     hand: id 5 (map) → `0x8018FD70`, enter `0x8017B60C`, mask `0x2`; id 7 (form)
-     → `0x8018FDAC`, enter `0x8017B794`; id 13 (`0x0D`) → `0x8018FC3C`, mask
-     `0x40007C14`.
-  2. **The transitions.** Every store into `D_800C4C26` in the game is 39 sites
-     in 30 functions. 21 carry a statically-known value; the rest are
-     script-driven, because the scene-script VM writes `D_8018F1C2` and the
-     handler copies it. These 39 sites are the whole scene-to-scene code.
-  3. **The content.** The scripted step table is asset `0x19A8804` (ROM
-     `0x1F3CA54`): a `u32` payload size `0x1A74`, then 1693 `u32` per-step asset
-     ids (1499 distinct), indexed by `D_8018F1C0 & 0xFFF`. The 200+ dialogues are
-     entries in this table, and not scene types, so decoding the step-descriptor
-     opcode format once covers all of them. There is no per-dialogue linking to
-     author. The 75 njpeg assets have the same shape: decode the format once, and
-     everything works.
-  `tools/scenemap.py` also has `scenes`, `transitions` and `steps` subcommands and
-  `--dump <rdram>` to read descriptors from a live image instead of the ROM.
-- **`0x0D`** (`D_8018FC3C`): enter `func_80178568`, update `func_80178954`, hook
-  `func_80178B40`, leave `func_80178B7C`, mask `0x40007C14`. Its enter has two
-  modes selected by `D_8018F1C0`. `0` or bit15 selects movie mode: it DMAs records
-  10a/10b and installs the cutscene vtable `&D_801E5AC0`. Non-zero selects the
-  cutscene engine that the New Game opening uses: it DMAs 14a/14b and calls
-  `func_80226FA8` → `func_8022683C(-5, F1C0 & 0xFFF)`. Session 42 called the
-  second mode "command mode". Session 43's render shows it drawing the New Game
-  movie, so that label is a misnomer.
-- **`0x02`** (`D_8018FC50`): enter `func_80178920`, a one-frame loader that sets
-  next = `0x0D`.
-- **New Game** is `title (0x04) → 0x02 → 0x0D → 0x02 → 0x0D → …`, a scripted
-  sequence. The VM `func_80170974` writes the step word `D_8018F1C0` and the next
-  scene `D_8018F1C2`, 16 script opcodes per visit. The attract loop is a different
-  flow (`title ↔ story 0x0B / unit-info 0x0C`) and never enters `0x02` or `0x0D`.
-- **Known open walls**, as of session 45, with the later corrections below. The
-  New Game opening runs. Step 1 (the movie, sepia courtyard) renders. Step 2
-  renders the cathedral dialogue (`Archbishop Odiron` / "He who has learned the
-  way of the sword and god's teachings,") on both renderers
-  (`docs/proofs/native-newgame-cathedral.png`), and then waits for input. The wall
-  that looked like step 2 was a missing streamed module: scene `0x0D` streams
-  `bankRec14c` (ROM `0x2A8CF0`, 0x56A0) over `bankRec14b` at RAM `0x802395E0` for
-  steps ≥ 2, and the port had only rec14b, so unit C's 95 calls into that arena ran
-  rec14b's prologue-less body interiors (session 45; the records are now in units
-  F and G, and the calls compile as `LOOKUP_FUNC`). Steps 1..19 are decoded
-  (`docs/HANDOFF-2026-09-15-session44.md` §1), and every step ≥ 2 sets
-  `D_8018FC39 = 2`. Session 44's readings of the same wall (`jal 0x802399AC` as a
-  "shared tail", the guest-`0`/`8` stores, the KUSEG mirror fix in
-  `recomp_mem_addr`) were symptoms of that mis-binding and are corrected. The
-  low-window stores no longer happen, so the mirror is unexercised and should be
-  A/B'd.
-  Session 54 corrects the rest of this wall: the cathedral does hand off. `A`
-  advances its dialogue; the engine exit `func_80178CB0` resets `D_8018F1C0` to 0
-  and sets the next scene to `0x07`, which the dispatcher runs at `t≈17.9 s` (4×)
-  of a title-driven New Game. Session 53's "never advances / 1 GiB `memset`" is a
-  property of the `OGRE_STEP` shortcut: seeding step 2 skips step 1, so the exit
-  takes its `otherwise` arm, re-enters `0x0D` at step 0 and selects the movie-mode
-  branch. Drive the opening from the title
-  (`OGRE_TAP_BUTTON="start,a,start,a,…"`) instead of seeding a step.
-  Session 55 corrects session 54's reading of scene `0x07`: its descriptor is
-  `D_8018FDAC` (the accessor table maps id 7 → `func_8017B600`; enter
-  `func_8017B794`, mask `0x00000002`), and not `D_8018FB98`. The module it streams
-  is real: ROM `0x712A0`, size `0x84B0` (the enter's own `subu`; session 55
-  recorded `0x8600`, the 67-chunk rounded figure) → RAM `0x8019A7C0`, chunk-DMA'd
-  by the enter. That RAM overlaps record 3 (unit A) and overlay C (the main ELF),
-  so the port's build-time bindings ran overlay C's bodies at the module's
-  addresses; none of the module's 24 internal `jal` targets were main-ELF entries.
-  It is now bank unit H, and the six calls into it are dispatched. The name-entry
-  form renders (`docs/proofs/native-newgame-name-entry.png`). The general rule: a
-  streamed module that is not in the segment table still owns a swappable RAM
-  range, and needs the session-45 treatment. `tools/cross_bank.py`'s overlap model
-  had to be fixed to see it.
-  Also open: the movie-engine branch (`F1C0 == 0`, gated by the word `0x80197794`,
-  and not `0x8019F794`; see session 43); menu `0x18` natural entry; scene `0x12` =
-  Load Game (needs save pre-state); the `OGRE_NO_AUDIO=1` early-boot crash;
-  `osViFade`. Scene `0x17` = the Tutorial and runs (bank unit B, records 17/18).
-  Dialogue text is LZ-compressed (`func_8007A110`, `tools/ogrelz.py --asset`).
-  Current status and details are in the newest `docs/HANDOFF-*.md` and `PLAN.md`.
-- **Do not compile a swappable RAM range into the unit whose code calls into it.**
-  If two records occupy the same RAM (banks of one arena), put both in other
-  units. N64Recomp then emits `LOOKUP_FUNC(addr)` for the call sites, and the
-  runtime's DMA-driven bank map picks the resident module. If a caller's unit also
-  defines the range, the call binds at build time to one bank's bodies, and the
-  other bank's callers run them with the wrong frame and register contract
-  (session 45's step-2 wall). Find unknown modules by logging every PI DMA
-  destination in a run and diffing against `bank_funcs.inc`'s record table.
-- **The njpeg display list is an S2DEX2 list, and its `0xDA` command is the draw**
-  (session 51; session 52 fixed the colours). The ucode at `0x800A5110` is
-  `S2DEX 2.08` (`GBIUCode::S2DEX2`). XXH3-64 of the game's own ucode text
-  (0x18C0) and data (0x390) reproduces RT64's DB entries `S2DEX2_FIFO_2_08`
-  (`0x9300F34F3B438634` / `0x50EF0DFBD3A8CD0F`) exactly. In an S2DEX2 list the
-  per-macroblock `0xDC`/`0xDA` are `G_OBJ_MOVEMEM` (`gSPObjSubMatrix`; the matrix
-  selector is `cmd0 & 0xFFFF`, `2` = sub matrix) and `G_OBJ_RECTANGLE_R`
-  (`gSPObjRectangleR`, the 24-byte `uObjSprite`). They are not F3DEX2
-  `G_MOVEMEM`/`G_MTX`. RT64's `GBI_S2DEX2` mapped neither, so the geometry was
-  silently skipped and only the texture loads ran. Session 50 §9's "the list
-  carries no geometry" is therefore wrong; the app's own `OGRE_DL_ANALYZE` and
-  `OGRE_DL_DECODE` still report that, because they decode every list as F3DEX2.
-  Both commands are now in the tree, and a live `OGRE_S2D_TRACE=1` shows 300
-  rectangles tiling the 320x240 `G_SETCIMG` target exactly, one per macroblock.
-  A YUV tile is the RDP's two-plane format: one luma byte per texel at
-  `offset + stride*t + s` in the upper TMEM half, and one U/V pair per two texels
-  in the lower, both at `stride = line << 3`. A YUV `LOADTILE` therefore
-  de-interleaves (`RDP::loadYUVTileToTMEM`); the sampler follows parallel-rdp's
-  `sample_texel_yuv16`; YUV16 tiles need raw-TMEM sampling; and the decoder's
-  source word is `[U, Y(even), V, Y(odd)]` (mupen64plus-rsp-hle `jpeg.c`
-  `GetUYVY` / `jpeg_decode_OB`, verified against a live macroblock dump), which
-  corrects session 50 §2's `[Y, V, U, Y]`.
-  The textures are converted with the matrix that the game itself programs via
-  `G_SETCONVERT`. `OGRE_CONVERT_TRACE=1` shows the raw 9-bit fields
-  `k0=175 k1=469 k2=423 k3=222`. The conversion must sign-extend each 9-bit field
-  and scale it `2*K+1` (GLideN64 `gDPSetConvert`: `SIGN(k,9)<<1 + 1`;
-  parallel-rdp `set_convert`: `2*sext<9>(k)+1`), which gives the coefficients
-  351/−85/−177/445.
-  The rows are `R = Y + K0*V'`, `G = Y + K1*U' + K2*V'` and `B = Y + K3*U'` (with
-  `U'=U-128`, `V'=V-128`); `K1` pairs with U, and `K2` with V. Session 51 fed the
-  raw unsigned fields in and paired `K1` with V, so the green row exploded positive
-  and the backdrop drew as blue banding. Session 52 fixed both, and the backdrop is
-  now the cathedral. `docs/proofs/native-newgame-cathedral.png` and
-  `-cathedral-background.png` were replaced; the old files were the black/blue-band
-  broken renders, mistaken for correct because the top of the real scene is dark.
-  The geometry, the de-interleaved TMEM planes and the UYVY source are all verified
-  correct, so session 51 §7's "the defect is in sampling/upload" is wrong. `K4` and
-  `K5` as combiner inputs stay the raw fields over 255 (GLideN64
-  `_FIXED2FLOATCOLOR(k,8)`), which is what RT64 already did.
-  The port completes the emulated RSP task as soon as the display list reaches
-  RT64, but the game then waits for the DP completion, which the runtime posts only
-  after `send_dl` (`events.cpp:432`). The CPU copy therefore does not race the
-  render, and it calls `ogre_sync_framebuffers()` first, which forces the RDP's
-  pixels back to RDRAM. Session 50 added
-  `Application::waitForGameFramebuffers` (RSP worker, `OGRE_NJ_WAIT_MS`) for that
-  race. It never did anything useful: session 57 measured it as a no-op in the
-  njpeg path (`spins=1 found=1 ms=0`), and session 77 found its real cost. It polls
-  three fixed addresses (`0x400`/`0x25C00`/`0x4B400`), so every scene that rendered
-  elsewhere burned the whole 500 ms timeout on every display list. The boot's
-  publisher stills (scene `0x0A`, the Nintendo/ATLUS/QUEST logos) ran at 2 display
-  lists/s instead of 30. The call was deleted; a per-frame wait for a condition
-  that cannot become true is not a slow frame, it is a 16× slow scene.
-  The njpeg readback's source is the game's own `state[0x64]`, and not RT64's
-  scratch word. `0x807FFC08` is never cleared, so it is stale at the first pass of
-  every assembly, and preferring it unconditionally produced the intermittent
-  stale-backdrop rectangle (`tools/njpeg_readback.py`,
-  `docs/HANDOFF-2026-09-16-session57.md` §1).
-  The readback that matters runs in scene `0x02`: the four stage-3 copies in
-  `func_ovlE_8019976C`, whose sole caller is bankE `0x80199D80` inside
-  `func_ovlE_80199D30`'s drive loop. The four passes copy `state[0x78]` x
-  `state[0x7A]` = 240x320 / 240x176 / 144x320 / 144x176 into `0x801AAE90` /
-  `0x801D06B0` / `0x801E50D0` / `0x801FB8F0`, the four chunks of the scene's 2x2
-  background. The framebuffer's own chunk order is not the scene order, so do not
-  infer an on-screen position from a render of it. See
-  `docs/guides/njpeg-backgrounds.md`.
-  The assembled image at `0x80243E28` renders as the cathedral. The opening then
-  runs to scene `0x16` (the closing movie), which chunk-DMAs ROM `0x244770`
-  (0x7500) → RAM `0x801D0860`, record 10's arena, which `bankRec10a` (unit J) also
-  owns. That module is bank unit I (session 58; 43 functions), so the movie plays
-  and the sequence advances.
-  The step after it is step 1073, a valid step and not an overrun. The step table
-  at ROM `0x1F3CA54` (asset `0x19A8804`) is a raw `u32` array of 1693 entries (its
-  header word is `0x1A74`), and 1073 is the "Prologue" chapter animation the
-  developer describes. Session 59 fixed the crash it used to produce. The step's
-  command is `-8`, and not `6`: `func_ovlC_80227E64` maps the descriptor's
-  last-word low byte 6 through the table at `0x8022ABE0`, and session 58's "command
-  6" was the raw byte. `func_ovlC_8022683C`'s `-8` arm at `0x802269DC` streams a
-  third bank of the record-14 arena: ROM `0x286BA0` (0x138F0) → RAM `0x8022ACB0`,
-  code to `0x8023DE30`, i.e. RAM `0x8022ACB0..0x8023E5A0`, bss to `0x8023E630`.
-  The port had no code for it, while `bankRec14a` (the other bank of that RAM, ROM
-  `0x29A490`) was compiled into unit C, so unit C's calls into `0x8022ACB0+` ran
-  rec14a's bodies with the chapter module resident. Those calls are the interpreter
-  `func_ovlC_802282D8`'s `jal 0x8022C270`/`0x8022C6E4` and the callback
-  `func_ovlC_80225F60`'s `jal 0x8022E3F0`. They are now units K and L, and compile
-  as `LOOKUP_FUNC`.
-  The engine/interpreter state that the interpreter reads is at `0x8022A970` (pc),
-  `0x8022A978` (descriptor base) and `0x8022A994` (engine struct), and not at
-  `0x8023A9xx`. The code addresses them with `lui at,0x8023` plus a negative
-  immediate, and the addition wraps (`0x80230000 + 0xFFFFA994 = 0x8022A994`), so
-  reading `0x8023A9xx` reads the DMA'd arena image. Session 58's probe58 conclusion
-  ("the engine init does not run on the faulting visit") and its `0x8023A994`
-  readings describe the same crash from the wrong address.
-  Result: the Prologue card renders
-  (`docs/proofs/native-newgame-prologue-card.png`); the opening plays on into the
-  post-movie story (General Godeslas `-received-for-duty.png`; Magnus
-  `-magnus-old-man.png`) and reaches scene `0x05` (descriptor `0x8018FD70`, mask
-  `0x2`), whose module is unit M (ROM `0x79750`, 0xDAD0 → RAM `0x8019A7C0`). The
-  other bank of that RAM is unit H, whose real size is `0x84B0`, and not the
-  `0x8600` that session 55 recorded. A bank's size is its DMA's, and "do we know
-  this module?" must compare the chunk's rom→ram delta rather than the ROM range
-  alone; that range test is what hid unit M behind unit H's over-claimed size.
-  Scene `0x05` is the map scene (developer, session 60), and it renders
-  (`docs/proofs/native-newgame-map-scene.png`). It stayed on the prologue's black
-  fade because no frames were produced. The scene update's `jal 0x8019AF0C`
-  (`func_8017B858` @0x8017B8A0) and the scene hook's `jal 0x801A103C`
-  (`func_8017B9C8` @0x8017BA10) are calls into the RAM the module occupies, and
-  N64Recomp compiled each as a call to the containing body followed by an early
-  `return` (its emission for a `jal` into a size-overridden body interior). The
-  early return abandons the caller's frame, so the frame-pump thread (t4,
-  `func_8008AFE0`) read its saved `$s0`/`$s1` from the wrong stack slots. `$s1` is
-  the message-type comparator `1`, so the type-1 dispatch stopped matching and the
-  pump died after two frames. The signature is `D_800AEFA4` (frame counter) frozen
-  while `D_800C4BCC` (VI retrace) keeps counting, with only 2 display lists
-  submitted. Both targets are now in `make recomp`'s
-  `cross_bank.py dispatch --only` list, which also runs the tool's tail-call
-  repair (call-and-continue).
-  `0x8019AF0C` resolves to unit M's state-1 handler; scene `0x05`'s enter sets
-  `0x801977E8 = 1`, and scene `0x07`'s sets `3` and takes the already-dispatched
-  `0x8019B340`. To find a leaking call, log the guest `$sp` (`ctx->r29`) before and
-  after each call in the chain; a leak shows as a lower `sp` after return. The
-  no-`--only` full dispatch also fixes it (89 sites, 7 extra targets) and is the
-  way to clear the remaining backlog. See
-  `docs/HANDOFF-2026-09-16-session60.md` §1-§3, then
-  `docs/HANDOFF-2026-09-16-session59.md` §1-§4, then `-session58.md`,
-  `-session57.md`, `-session52.md`, `-session51.md` §1-§7 and `-session50.md`
-  §5/§9.
-  Other large backgrounds use the same machinery, and the dominant one is the same
-  size. All 75 njpeg assets are enumerated (42 are 320x240), with the asset format,
-  the tile geometry and the check recipe in `docs/guides/njpeg-backgrounds.md`. The
-  stale-source fix is global to that path, and not cathedral-specific.
-- **The map screen's sprites (scene `0x05`): session 64 corrects sessions 60–63,
-  and landed no code.** Four independent checks say the port is faithful here. The
-  LZ decoder is exact (13/13 map assets end on their declared payload boundary).
-  The live RDRAM at `state[+0x04]` is 21128/21128 bytes identical to an offline
-  decode of asset `0x01DD210A`. The map's gfx ucode `0x8009F540` hashes (XXH3-64
-  over the raw bytes, length `0x1390`) to RT64's `F3DEX2.fifo 2.08` database entry,
-  so the GBI choice is right. Every constant was re-read from the raw ROM, and not
-  only from the ELF.
-  Two session 61/62 mechanisms are therefore withdrawn. N64Recomp does not run a
-  `jal` delay slot twice; the duplicate after `goto after_N` is dead code. The
-  builder `func_ovlM_8019F83C` emits no `G_SETTILESIZE` at all: the word at
-  `0x8019F990` that sessions 61/62 read as "the builder's own window" is the
-  TEXRECT's s,t half (`u<<21 | v<<5`), so there was never a second window writer to
-  find.
-  The knight is not a decoded asset. The map's enter `func_ovlM_8019A7C0`
-  `malloc(0x18000)`s `state[+0x34]` (`0x8019A9E4`) and composites an RGB555 LUT over
-  an 8-bit index image into it: a 32-texel-wide RGBA32 sheet of 24 frames (`0x1000`
-  bytes each, that is 8 directions × 3 animation frames, selected by
-  `3*state[0x1DC] + f`). `state[+0x04]` is asset `0x01DD210A`. The shadow draw's
-  `+0x1068` really is all zero, and the only translucent-black shadow art in any
-  map asset is at `+0x10AC` of that same asset. `state` is a heap pointer; read it
-  from `*(0x80197B18)` in each image. The `0x801F1570` of sessions 60/63 is
-  run-specific.
-  The two party draws are `func_ovlM_801A2A7C`'s calls at ROM `0x81B50` (`a2=0xB` =
-  entry 11 `(144,23)`, texture `state[+0x04]+0x1068`, static, `line=2`,
-  `cms=WRAP masks=3`) and `0x81BFC` (`a2=0xA` = entry 10 `(16,11)`, texture
-  `state[+0x34] + frame*0x1000`, `line=8`, `SETTILESIZE` 31×31).
-  The open lead is renderer-side. The sheet's row stride is 128 B (`line` 16) while
-  the draw's render tile declares `line=8`. That is the game's own command, so it
-  is a question about `G_LOADBLOCK`/tile-line semantics, and not about game data.
-  Call 1's `line=2` with `masks=3` and a 7-texel window is only self-consistent read
-  as 16-bit, which is the same question.
-  Do not "fix" the entry indices or the `0x1068` offset by editing generated C;
-  that is a rule 7 violation. See `docs/guides/emulator-first.md` and
-  `docs/HANDOFF-2026-09-17-session64.md`.
-- **The njpeg decoder is correct** (session 47). CPU Huffman decode
-  (`func_8008B250`) → four `M_NJPEGTASK` (type 4) RSP tasks that decode in place to
-  16-bit YUV (`ucode=0x8009ED80`, boot `0x8009ECB0`, tables `0x800AC050`;
-  `data_size` = macroblocks, `yield_data_size` = quantization scale; asset
-  `0x00183352` = ROM `0x7175A2`, magic `'HU'` + `'HUFF'`) → a second gfx ucode
-  `0x800A5110`, which session 51 identified as S2DEX2 and whose per-macroblock
-  `0xDA` command is the draw (see the cathedral fact above; session 50's "loads and
-  emits no geometry" is wrong) → a CPU framebuffer readback → assembly of a
-  `'B5'`-headed image at `0x80243E10` whose pixels at `0x80243E28` the blit reads.
-  The microcode is recompiled (`make rsp-recomp` → `RspFuncs/njpeg_ucode.cpp`) and
-  runs by default (`OGRE_NJPEG=0` forces the stub). All `mbs` blocks decode in 0–1
-  ms. See `docs/HANDOFF-2026-09-15-session47.md` and `-session46.md` (superseded).
-  The renderer half is implemented in RT64 (sessions 50/51): the YUV16 tile is
-  loaded as the RDP's two-plane format and converted with the game's own
-  `G_SETCONVERT` matrix (see the cathedral fact above).
-  [mupen64plus-user-issues#102](https://github.com/mupen64plus/mupen64plus-user-issues/issues/102)
-  ("Missing backgrounds in Ogre Battle 64 battles and also some cutscenes") was
-  fixed upstream by the RSP-side `jpeg_decode_OB`, which this port already has. See
-  `docs/HANDOFF-2026-09-15-session50.md`.
-- **RSPRecomp's `text_address` is a label base, not an address.** It must equal the
-  RSP IMEM DMA address that the microcode was assembled for, masked `0x1FFF`. For a
-  ucode that the game's boot loader loads at IMEM `0x080`, that value is `0x1080`
-  (`addi $7,$0,0x1080` / `mtc0 $7,SP_MEM_ADDR` at ROM `0x2F0C0`), and not the
-  text's RDRAM address. The bytes come from `text_offset`. A wrong value rotates
-  every `j` target by the difference, and the recompiled microcode silently walks
-  the wrong blocks (session 47: `0x8009ED80` → one `0x300`-byte block per task
-  instead of `mbs`; the same applies to any future ucode recompilation).
-- **The VI's scanout address is not the RDP's colour-image address.** An
-  `OSViMode`'s `fldRegs[].origin` is `0x280` for the standard NTSC modes, and
-  `events.cpp` `update_vi()` sets `VI_ORIGIN_REG = osVirtualToPhysical(framebuffer)
-  + origin`, so the VI scans out from `framebuffer + 0x280` (one 640-byte row of a
-  320x240 16-bit image) while the RDP renders at `framebuffer`. Resolve a scanout
-  buffer by containment, not by equality; RT64 does it with
-  `FramebufferManager::findMostRecentContaining` and the browser renderer with
-  `GlFramebuffer`'s guest range. The game's own framebuffers are `0x000400`,
-  `0x025C00` and `0x04B400` (320x240 RGBA5551, pitch 640), and the world map adds
-  three 640-wide targets in the heap (`0x1BA780`, `0x250800`, `0x2E6840`, VI
-  `fbSizeX=640 fbSizeY=476 fbSiz=2`). The row pitch is RT64's `imageRowBytes`,
-  `width << siz >> 1`. A rendered 16-bit framebuffer written back to RDRAM puts
-  the value `V` at `off ^ 2` (low byte) and `off ^ 2 + 1` (high byte), because
-  `MEM_H` reads the halfword at logical `off` as `rd16(p + (off ^ 2))`.
+- **The port zero-fills RDRAM at boot; retail does not.** A register or stack
+  slot that nothing wrote still holds the game's own leftover value. A zero where
+  retail has a value is a lead to the address map and the runtime bridges, and to
+  the bank map before it is a game-logic bug. See
+  [`docs/reference/memory.md`](docs/reference/memory.md).
+- **Vocabulary is `docs/symbols.md`; intent is `docs/scenes.md`; mechanism is
+  `docs/reference/`.** Read the first before naming a function, the second before
+  deciding what a screen should show, and the third before deriving how a
+  subsystem works.
+- **A swappable RAM range is never compiled into the unit whose code calls into
+  it.** Both banks of an arena go to other units, so the call compiles as
+  `LOOKUP_FUNC` and the runtime's DMA-driven bank map picks the resident module.
+  A streamed module that is not in the segment table still owns such a range and
+  needs the same treatment. See [`docs/reference/banks.md`](docs/reference/banks.md).
+- **A display list's GBI comes from the ucode hash, not from
+  `OGRE_DL_DECODE` or `OGRE_DL_ANALYZE`.** Those decode every list as F3DEX2. See
+  [`docs/reference/gbi.md`](docs/reference/gbi.md).
+- **A `jal` delay slot runs exactly once, before the callee.** The duplicate
+  N64Recomp emits after `goto after_N` is dead code.
+- **A call that abandons the caller's frame stops the frame pump.** The signature
+  is `D_800AEFA4` frozen while `D_800C4BCC` keeps counting, with two display
+  lists submitted. See [`docs/reference/runtime.md`](docs/reference/runtime.md).
+- **RSPRecomp's `text_address` is a label base, not an address.** For the boot
+  loader's IMEM `0x080` it is `0x1080`. See
+  [`docs/reference/runtime.md`](docs/reference/runtime.md).
+- **The VI scans out from `framebuffer + 0x280`, not from the RDP's colour
+  address.** Resolve a scanout buffer by containment. See
+  [`docs/reference/memory.md`](docs/reference/memory.md).
+- **Scene forcing enters without the pre-state a natural path builds.**
+  `OGRE_SCENE` stores the game's own request at the next scene change. See
+  [`docs/reference/scene-dispatch.md`](docs/reference/scene-dispatch.md).
+- **The scene descriptor table, the 39 transition sites and the step table are
+  enumerable from the ROM.** `tools/scenemap.py` prints them in about 3 s; do not
+  hunt a scene address by hand.
+- **Current walls** are `PLAN.md`'s Status and Open work lists. Each screen's
+  status is `docs/scenes.md`. A claim that a wall is retail behaviour needs the
+  rule 8 evidence.
+
+Three corrections that cost sessions and are easy to repeat:
+
+- `0x802399AC` is an ordinary function entry in `bankRec14c` and a body interior
+  of `func_ovlC_80239874` in `bankRec14b`. Check the resident bank first.
+- Scene `0x07`'s descriptor is `0x8018FDAC`. `0x8018FB98` is scene `0x10`.
+- Step 1073 is a valid table entry, and its command is `-8`, not `6`.

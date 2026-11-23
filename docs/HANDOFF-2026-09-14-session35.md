@@ -1,5 +1,7 @@
 # Session 35 — the title screen's fog: a zero-area texture tile
 
+> **Summary.** Session 35 handoff: the title screen's white band — six `G_TEXRECT`s drawn with a zero-texel tile, and the guard that skips them; the `OGRE_NOP_RECT` bisect tool; the RT64 patch regenerated.
+
 Goal: fix the reported visual regression on the title screen — a solid **white
 band across the middle of the scene** where the retail game shows scrolling
 clouds behind the "Ogre Battle 64" logo, and then restore the **very faint white

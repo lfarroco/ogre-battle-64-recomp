@@ -1,5 +1,7 @@
 # Session 163 handoff — the browser colour image is a high-precision attachment, and the fog band is not blend rounding
 
+> **Summary.** Session 163 handoff — **the browser colour image is a high-precision attachment, and the title/story fog band is not blend rounding.** RT64's Automatic `internalColorFormat` resolves to High on this machine (`preferHDR`; the native capture is `R16G16B16A16_UNORM`), so the browser now creates `GL_RGBA16F` colour images when `EXT_color_buffer_float` exists (`GL_RGBA8` otherwise, or with `OGRE_HPFB=0`). The float path needs `type=GL_HALF_FLOAT`, float staging in `upload_framebuffer`, a `GL_FLOAT` readback through `float4_to_rgba16` (RT64 `Float4ToRGBA16`, dither 0, `usesHDR` coverage) and an RGBA8 fallback; the fragment shader asks for `highp`. Measured at the same native instant (`t.177`): RGBA16F `meanAbs=0.098` (bands 0.014/0.271/0.060) against RGBA8 `0.099`; the two canvases differ by 0.0091 mean (0.906% of channel samples, exactly one level). So the 0.27 fog band is not per-blend quantization: against the native target's own 8-bit rounding the band is still 0.241, localized to rows 81..119, and the new `[GFX-FOG-SUMMARY]` fields show the repaired layer is a 64x64 I8 image (`siz=1 fmt=4`, layer 2). Publisher `[0.0,0.0,0.0]/100%`, `testdraw --flags 96` `fbtex hits=1`, `boot.cjs` `RENDERED` (`nonBlack=25424`); no probe added, `grep -rn probe163 app/ debug/` empty.
+
 ## Goal
 
 Continue the browser (WebAssembly) renderer from session 162. Verify its

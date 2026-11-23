@@ -1,5 +1,7 @@
 # Session 33 — Phase 4: the ~95s bank swap is fixed; the 170s run completes
 
+> **Summary.** Session 33 handoff: the streamed-overlay segment table and bank descriptors decoded; banks are recompiled as a second unit and swapped on the game's DMA; the 170s run completes.
+
 Goal (from session 32 §6): **Phase 4 — overlay sections.** Recompile the
 streamed overlays, teach the port to swap a bank on the game's DMA, and get past
 the t≈95s abort.

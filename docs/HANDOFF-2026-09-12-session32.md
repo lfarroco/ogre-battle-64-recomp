@@ -1,5 +1,7 @@
 # Session 32 — the publisher screens render: a mis-named `osViSetMode`; the late crash is an overlay bank swap
 
+> **Summary.** Session 32 handoff: the "Licensed by Nintendo"/ATLUS/QUEST stills render full-frame (a mis-named `osViSetMode` kept the game's 640x480 VI mode from the runtime); the ~95s crash is confirmed to be a streamed-overlay **bank swap**. Sessions 12–31 are in `docs/` (session 31: the intro renders — 205 display lists, ~28fps).
+
 Goal (from session 31 §7): the "Licensed by Nintendo" / ATLUS / QUEST stills
 must render full-frame, and the ~95s crash must be understood.
 

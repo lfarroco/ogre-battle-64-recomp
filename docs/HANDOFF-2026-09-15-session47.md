@@ -1,5 +1,7 @@
 # Handoff — 2026-09-15, session 47: the njpeg decoder was mis-labelled by RSPRecomp (and now decodes the whole image)
 
+> **Summary.** Session 47 handoff: **the njpeg decoder was mis-labelled by RSPRecomp**. `text_address` is a *label base* — it must be the RSP IMEM DMA address the microcode was assembled for (`0x1080`; the boot loader loads the text at IMEM `0x080`), not the text's RDRAM address. With `0x8009ED80` every `j` target resolved `0x300` bytes late, so the decoder wrote one `0x300` block per task; with `0x1080` all `mbs` blocks decode (all four cathedral images, `Broke`, 0–1 ms) and it is **on by default** (`OGRE_NJPEG=0` forces the stub). The pipeline is documented end to end (CPU Huffman decode `func_8008B250` → this microcode → a *second* gfx ucode `0x800A5110` drawing 16x16 YUV16 macroblocks → CPU framebuffer readback → a `'B5'`-headed image at `0x80243E10` with pixels at `0x80243E28`). **The background is still black** (see session 49), because the readback copies a zero framebuffer.
+
 ## Goal and result
 
 **Goal (session 46's open wall):** the cathedral scene (scene `0x0D` step 2) has no

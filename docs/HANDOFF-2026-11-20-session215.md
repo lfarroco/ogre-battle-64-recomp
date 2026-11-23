@@ -1,5 +1,7 @@
 # Session 215 handoff — the wasm job's emsdk 7.0.0 failure
 
+> **Summary.** Session 215 handoff — **the wasm job's emsdk 7.0.0 failure.** `emsdk install latest` moved from `eb13275…` to Emscripten 7.0.0 (`6afbd83…`), whose libc++ stopped declaring `malloc`/`free` through `<stdexcept>`; rabbitizer's `InstructionBase.cpp` calls them with only that header, so the workflow failed there. `app/CMakeLists.txt` now pre-includes `<cstdlib>` for the `rabbitizer` target's C++ sources only, because the same target compiles C sources and the whole-target form failed on them. Verified against Emscripten 7.0.0 installed locally: the file reproduces the CI's two errors without the flag and compiles with it, and the full browser target reaches `[100%] Built target ogrebattle64`; `make app` and `make web` are unaffected on the local 6.0.8-git.
+
 ## Goal
 
 The push that closed issue #27 (session 214) passes every check except the
